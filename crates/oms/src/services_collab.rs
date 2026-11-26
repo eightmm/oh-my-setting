@@ -81,7 +81,154 @@ pub(crate) struct CollabServices<'a> {
     /// repository swept through this instance creates it; the file is removed
     /// when the instance drops, so each tick run starts clean.
     wake_once: PathBuf,
-    controller: std::sync::OnceLock<oms_reference::controller::Controller>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FileIdentity {
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
+    pub(crate) nlink: u64,
+    pub(crate) size: u64,
+    pub(crate) mtime: i64,
+    pub(crate) mtime_nsec: i64,
+    pub(crate) ctime: i64,
+    pub(crate) ctime_nsec: i64,
+}
+
+impl FileIdentity {
+    #[cfg(any(not(target_os = "linux"), test))]
+    pub(crate) fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            nlink: meta.nlink(),
+            size: meta.size(),
+            mtime: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+            ctime: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::unnecessary_cast)]
+    fn from_stat(stat: &rustix::fs::Stat) -> Self {
+        Self {
+            dev: stat.st_dev as u64,
+            ino: stat.st_ino as u64,
+            nlink: stat.st_nlink as u64,
+            size: stat.st_size as u64,
+            mtime: stat.st_mtime as i64,
+            mtime_nsec: stat.st_mtime_nsec as i64,
+            ctime: stat.st_ctime as i64,
+            ctime_nsec: stat.st_ctime_nsec as i64,
+        }
+    }
+}
+
+pub(crate) fn current_executable_identity() -> Result<FileIdentity, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{
+            AtFlags, Mode, OFlags, PROC_SUPER_MAGIC, fstatfs, open, readlinkat, statat,
+        };
+        let proc_root = open(
+            "/proc",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| e.to_string())?;
+        if fstatfs(&proc_root).map_err(|e| e.to_string())?.f_type != PROC_SUPER_MAGIC {
+            return Err("native executing-artifact procfs proof unavailable".into());
+        }
+        let pid = std::process::id();
+        let named = readlinkat(&proc_root, "self", Vec::new()).map_err(|e| e.to_string())?;
+        if named.to_bytes() != pid.to_string().as_bytes() {
+            return Err("native executing-artifact PID namespace is unproven".into());
+        }
+        let stat = statat(&proc_root, format!("{pid}/exe"), AtFlags::empty())
+            .map_err(|e| e.to_string())?;
+        Ok(FileIdentity::from_stat(&stat))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let exe = std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .map_err(|e| e.to_string())?;
+        let meta = std::fs::symlink_metadata(exe).map_err(|e| e.to_string())?;
+        Ok(FileIdentity::from_metadata(&meta))
+    }
+}
+
+pub(crate) struct IdentityCache<T> {
+    entry: std::sync::Mutex<Option<(u32, FileIdentity, T)>>,
+}
+
+impl<T: Clone> IdentityCache<T> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            entry: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn get_or_compute(
+        &self,
+        observe_identity: impl Fn() -> Result<FileIdentity, String>,
+        recheck: impl Fn(&T) -> Result<(), String>,
+        compute: impl FnOnce() -> Result<T, String>,
+    ) -> Result<(FileIdentity, T), String> {
+        let pid = std::process::id();
+        let current = observe_identity()?;
+        let cached = self
+            .entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|(cached_pid, cached_id, _)| *cached_pid == pid && *cached_id == current)
+            .map(|(_, _, value)| value.clone());
+        if let Some(value) = cached
+            && recheck(&value).is_ok()
+            && observe_identity()? == current
+        {
+            return Ok((current, value));
+        }
+        let computed = compute()?;
+        recheck(&computed)?;
+        let after = observe_identity()?;
+        if after != current {
+            return Err("controller executable identity changed during capture".into());
+        }
+        *self
+            .entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((pid, after, computed.clone()));
+        Ok((after, computed))
+    }
+}
+
+static CONTROLLER_CACHE: IdentityCache<oms_reference::controller::Controller> =
+    IdentityCache::new();
+
+#[derive(Clone)]
+pub(super) struct CheckedController {
+    controller: oms_reference::controller::Controller,
+    identity: FileIdentity,
+    observe: fn() -> Result<FileIdentity, String>,
+}
+
+impl CheckedController {
+    pub(super) fn check(&self) -> Result<(), String> {
+        if (self.observe)()? != self.identity {
+            return Err("native executing-artifact generation changed".into());
+        }
+        self.controller.check().map_err(|e| e.to_string())
+    }
+
+    pub(super) fn digest(&self) -> Result<&str, String> {
+        self.check()?;
+        self.controller.digest().map_err(|e| e.to_string())
+    }
 }
 
 impl Drop for CollabServices<'_> {
@@ -164,20 +311,22 @@ impl<'a> CollabServices<'a> {
             protected_stage: None,
             detach_worker,
             wake_once,
-            controller: std::sync::OnceLock::new(),
         })
     }
 
-    pub(super) fn controller(&self) -> Result<oms_reference::controller::Controller, String> {
-        if let Some(controller) = self.controller.get() {
-            controller.check().map_err(|e| e.to_string())?;
-            return Ok(controller.clone());
-        }
-        let captured =
-            oms_reference::controller::Controller::capture_current().map_err(|e| e.to_string())?;
-        let _ = self.controller.set(captured.clone());
-        captured.check().map_err(|e| e.to_string())?;
-        Ok(captured)
+    pub(super) fn controller(&self) -> Result<CheckedController, String> {
+        let (identity, controller) = CONTROLLER_CACHE.get_or_compute(
+            current_executable_identity,
+            |cached| cached.check().map_err(|e| e.to_string()),
+            || oms_reference::controller::Controller::capture_current().map_err(|e| e.to_string()),
+        )?;
+        let checked = CheckedController {
+            controller,
+            identity,
+            observe: current_executable_identity,
+        };
+        checked.check()?;
+        Ok(checked)
     }
 
     #[cfg(target_os = "linux")]
@@ -1032,6 +1181,7 @@ struct RoomOperations<'a> {
     repo: PathBuf,
     attempts: Vec<oms_command_room::Attempt>,
     fingerprint: String,
+    deadline: Option<Instant>,
     stop: &'a AtomicBool,
     _guard: Box<dyn oms_command_plan::services::LifecycleGuard + 'a>,
 }
@@ -1061,8 +1211,11 @@ impl oms_command_room::OperationsRead for RoomOperations<'_> {
         &self.attempts
     }
     fn check(&self) -> oms_command_room::Result<()> {
-        if self.stop.load(Ordering::Acquire) {
-            return Err(oms_command_room::Error::new("room operation interrupted"));
+        if self.stop.load(Ordering::Acquire) || self.deadline.is_some_and(|at| Instant::now() >= at)
+        {
+            return Err(oms_command_room::Error::new(
+                "room operation interrupted or deadline expired",
+            ));
         }
         self._guard.check().map_err(room_error)?;
         if room_operations_projection(&self.repo)?.0 != self.fingerprint {
@@ -1094,6 +1247,7 @@ pub(super) fn room_operations_before<'a, S: oms_command_plan::Services>(
         repo: repo.to_owned(),
         attempts,
         fingerprint,
+        deadline: Some(deadline),
         stop,
         _guard: guard,
     }))
@@ -1169,6 +1323,7 @@ impl oms_command_room::Services for CollabServices<'_> {
             repo: repo.to_owned(),
             attempts,
             fingerprint,
+            deadline: None,
             stop: self.interrupted,
             _guard: guard,
         }))
@@ -4744,5 +4899,69 @@ esac"#,
             rejected.2,
             b"error: incoming staged binary failed list check\n"
         );
+    }
+
+    #[test]
+    fn controller_identity_cache_rechecks_and_rehashes_replaced_binary() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let host = CollabServices::new(&stop, source()).expect("source is available");
+        let first = host.controller().expect("current controller");
+        let digest = first.digest().expect("checked digest").to_owned();
+        let second = host.controller().expect("cached current controller");
+        assert_eq!(second.digest().expect("rechecked digest"), digest);
+
+        let fixture = Fixture::new();
+        let target = fixture.path().join("controller-bin");
+        std::fs::write(&target, b"binary-v1").unwrap();
+        let observe = || {
+            std::fs::symlink_metadata(&target)
+                .map(|meta| FileIdentity::from_metadata(&meta))
+                .map_err(|e| e.to_string())
+        };
+        let cache = IdentityCache::<String>::new();
+        let hashes = std::cell::Cell::new(0usize);
+        let compute = |path: &Path| {
+            hashes.set(hashes.get() + 1);
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            Ok(format!("{:x}", Sha256::digest(bytes)))
+        };
+
+        let (id_v1, d1) = cache
+            .get_or_compute(observe, |_| Ok(()), || compute(&target))
+            .unwrap();
+        assert_eq!(hashes.get(), 1);
+        let (id_cached, d1_cached) = cache
+            .get_or_compute(observe, |_| Ok(()), || compute(&target))
+            .unwrap();
+        assert_eq!(hashes.get(), 1, "unchanged identity must reuse digest");
+        assert_eq!((id_cached, d1_cached.as_str()), (id_v1, d1.as_str()));
+
+        // Atomic replacement (same 9-byte length, new inode) must invalidate and re-hash.
+        let replacement = fixture.path().join("controller-bin.next");
+        std::fs::write(&replacement, b"binary-v2").unwrap();
+        std::fs::rename(&replacement, &target).unwrap();
+        assert_ne!(
+            observe().unwrap(),
+            id_v1,
+            "inode/timestamp change must change FileIdentity"
+        );
+        let (id_v2, d2) = cache
+            .get_or_compute(observe, |_| Ok(()), || compute(&target))
+            .unwrap();
+        assert_eq!(hashes.get(), 2, "replaced binary must be re-hashed");
+        assert_ne!(d2, d1);
+        assert_ne!(id_v2, id_v1);
+
+        // In-place overwrite (same dev+ino, new size/mtime_nsec/ctime_nsec) must also re-hash.
+        std::fs::write(&target, b"binary-v3-extended").unwrap();
+        let (_, d3) = cache
+            .get_or_compute(observe, |_| Ok(()), || compute(&target))
+            .unwrap();
+        assert_eq!(
+            hashes.get(),
+            3,
+            "in-place modified binary must be re-hashed"
+        );
+        assert_ne!(d3, d2);
     }
 }

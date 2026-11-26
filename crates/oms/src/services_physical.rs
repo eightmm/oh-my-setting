@@ -186,15 +186,8 @@ impl super::CollabServices<'_> {
             persistent_session: attempt.persistent_session,
             cleanup_scopes: vec![Scope::ProcessGroup, Scope::WholeTree],
         };
-        let same_execution_repo = std::fs::canonicalize(attempt.execution_repo)
-            .ok()
-            .zip(std::fs::canonicalize(attempt.contract_repo).ok())
-            .is_some_and(|(execution, contract)| execution == contract);
         let check_execution = || -> Result<()> {
             before(stop, deadline)?;
-            if same_execution_repo {
-                return Ok(());
-            }
             let git = Git {
                 repo: attempt.execution_repo,
                 interrupted: stop,
@@ -219,7 +212,8 @@ impl super::CollabServices<'_> {
             resource: Some(&binding),
             expires_at: guard.expires_at_unix().map_err(plan_error)?,
         })?;
-        guard.check_pinned().map_err(plan_error)?;
+        guard.check().map_err(plan_error)?;
+        check_execution()?;
         if crate::services_runtime::observed_host_generation_before(deadline, stop)
             .map_err(plan_error)?
             != *host
@@ -231,7 +225,6 @@ impl super::CollabServices<'_> {
         // Git, boot and resource checks may wait after registration. Recheck
         // the owner, policy and expiry after those last fallible fences.
         guard.check().map_err(plan_error)?;
-        check_execution()?;
         before(stop, deadline)
     }
 }

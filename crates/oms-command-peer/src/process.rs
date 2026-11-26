@@ -468,9 +468,6 @@ impl TeamLaunchBinding<'_> {
     pub fn identity(&self) -> &oms_command_telemetry::store::usage::Identity {
         &self.pending.receipt.identity
     }
-    pub fn check_protocol(&self) -> Result<()> {
-        self.protocol.check()
-    }
     pub fn check(&self, executor: &dyn Executor, stop: &AtomicBool) -> Result<()> {
         self.protocol.check()?;
         self.pending.qualify(self.attempt, executor, stop)

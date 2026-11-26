@@ -413,6 +413,8 @@ pub enum Progress {
 struct Job {
     _child: Child,
     pid: Pid,
+    #[cfg(target_os = "linux")]
+    pidfd: Option<OwnedFd>,
     request: Request,
     out: Option<OwnedFd>,
     err: Option<OwnedFd>,
@@ -611,6 +613,8 @@ impl Reactor {
         let child = command.spawn().map_err(StartError::Launch)?;
         // Child IDs returned by std::process are positive platform pid_t values.
         let pid = Pid::from_raw(child.id() as i32).expect("spawn returned invalid PID");
+        #[cfg(target_os = "linux")]
+        let pidfd = os::pidfd_open(pid, os::PidfdFlags::NONBLOCK).ok();
         let stderr = err_read.as_ref().filter(|_| !detached).map(|_| {
             let policy = request.stderr_capture.clone().unwrap_or_else(|| {
                 let mut policy = request.capture.clone();
@@ -624,6 +628,8 @@ impl Reactor {
         let job = Job {
             _child: child,
             pid,
+            #[cfg(target_os = "linux")]
+            pidfd,
             stdout,
             stderr,
             out: if detached { None } else { Some(out_read) },
@@ -764,6 +770,15 @@ impl Reactor {
                 && let Some(fd) = &job.input
             {
                 fds.push(PollFd::new(fd, PollFlags::OUT));
+            }
+            #[cfg(target_os = "linux")]
+            if job.exit.is_none()
+                && let Some(fd) = &job.pidfd
+            {
+                fds.push(PollFd::new(fd, PollFlags::IN));
+            }
+            if fds.is_empty() {
+                wait = wait.min(Duration::from_millis(2));
             }
             let timeout = Timespec {
                 tv_sec: wait.as_secs() as _,
@@ -1040,6 +1055,9 @@ impl Job {
         } else {
             self.drain_output(OutputStream::Stdout);
             self.drain_output(OutputStream::Stderr);
+        }
+        if self.exit.is_none() && self.stdout.eof && self.stderr.as_ref().is_none_or(|s| s.eof) {
+            self.observe_exit();
         }
         self.write_input();
         // Preserve an already-observed child outcome and actual EOF even when

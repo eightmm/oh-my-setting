@@ -76,13 +76,31 @@ fn admission_time() -> Result<String> {
             .to_string(),
     )
 }
+#[derive(Clone, Copy, Debug)]
+pub struct AdmissionBounds {
+    pub lock_wait: Duration,
+    pub lock_hold: Duration,
+}
+
 impl<'s> Plan<'s> {
     pub fn team_admission_before<'p>(
         &'p self,
         request: AdmissionRequest,
         deadline: Instant,
     ) -> Result<AdmissionGuard<'p, 's>> {
-        self.admission_inner(Some(request), deadline)
+        self.admission_inner(Some(request), deadline, None)
+            .map_err(|error| admission_before(self, deadline).err().unwrap_or(error))
+    }
+    /// Separates the lock-acquisition wait budget from the lock-hold budget,
+    /// both still capped by `deadline`, so interactive supervision loops keep a
+    /// short bound on writer contention and lock hold duration.
+    pub fn team_admission_bounded<'p>(
+        &'p self,
+        request: AdmissionRequest,
+        deadline: Instant,
+        bounds: AdmissionBounds,
+    ) -> Result<AdmissionGuard<'p, 's>> {
+        self.admission_inner(Some(request), deadline, Some(bounds))
             .map_err(|error| admission_before(self, deadline).err().unwrap_or(error))
     }
     /// Pins an actual current Main creation and Room for legacy calls sharing
@@ -91,13 +109,14 @@ impl<'s> Plan<'s> {
         &'p self,
         deadline: Instant,
     ) -> Result<AdmissionGuard<'p, 's>> {
-        self.admission_inner(None, deadline)
+        self.admission_inner(None, deadline, None)
             .map_err(|error| admission_before(self, deadline).err().unwrap_or(error))
     }
     fn admission_inner<'p>(
         &'p self,
         request: Option<AdmissionRequest>,
         deadline: Instant,
+        bounds: Option<AdmissionBounds>,
     ) -> Result<AdmissionGuard<'p, 's>> {
         self.context.parent()?;
         require(
@@ -109,6 +128,7 @@ impl<'s> Plan<'s> {
             "team admission requires an enrolled room",
         )?;
         admission_before(self, deadline)?;
+        let wait_deadline = bounds.map_or(deadline, |b| deadline.min(Instant::now() + b.lock_wait));
         let mut locks = Vec::new();
         // Same writer order as Plan::locked; physical/campaign locks come later.
         for relative in [
@@ -117,11 +137,16 @@ impl<'s> Plan<'s> {
             ".oms/delegations/.marker-set-lock-target".into(),
             crate::storage::ACTIVE.into(),
         ] {
-            let mut settings = self.context.lock_settings.clone();
-            settings.timeout = settings
-                .timeout
-                .min(deadline.saturating_duration_since(Instant::now()));
             admission_before(self, deadline)?;
+            let remaining = wait_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(crate::Error {
+                    code: 75,
+                    message: "team admission writer is busy".into(),
+                });
+            }
+            let mut settings = self.context.lock_settings.clone();
+            settings.timeout = settings.timeout.min(remaining);
             let lock_deadline = Instant::now() + settings.timeout;
             let authority =
                 oms_lock::Lock::for_file(&self.context.state_repo.join(relative), settings)
@@ -131,18 +156,20 @@ impl<'s> Plan<'s> {
                     })?;
             let guard = loop {
                 admission_before(self, deadline)?;
-                if Instant::now() >= lock_deadline {
-                    return Err(crate::Error {
-                        code: 75,
-                        message: "team admission writer is busy".into(),
-                    });
-                }
                 match authority.try_acquire() {
                     Ok(guard) => break guard,
-                    Err(oms_lock::Error::Busy) => std::thread::sleep(
-                        Duration::from_millis(20)
-                            .min(lock_deadline.saturating_duration_since(Instant::now())),
-                    ),
+                    Err(oms_lock::Error::Busy) => {
+                        if Instant::now() >= lock_deadline {
+                            return Err(crate::Error {
+                                code: 75,
+                                message: "team admission writer is busy".into(),
+                            });
+                        }
+                        std::thread::sleep(
+                            Duration::from_millis(20)
+                                .min(lock_deadline.saturating_duration_since(Instant::now())),
+                        );
+                    }
                     Err(error) => {
                         return Err(crate::Error {
                             code: error.exit_code(),
@@ -155,30 +182,30 @@ impl<'s> Plan<'s> {
         }
         let lifecycle = self
             .services
-            .lifecycle_writer_before(&self.context.state_repo, deadline)
+            .lifecycle_writer_before(&self.context.state_repo, wait_deadline)
             .map_err(|error| admission_before(self, deadline).err().unwrap_or(error))?;
+        let hold_deadline = bounds.map_or(deadline, |b| deadline.min(Instant::now() + b.lock_hold));
         let mut guard = AdmissionGuard {
             plan: self,
             request,
-            deadline,
+            deadline: hold_deadline,
             binding: Value::Null,
             lifecycle,
             locks,
         };
-        guard.binding = guard.current()?;
-        if guard.request.is_some() {
-            require(
-                parse_ts(guard.binding.text("expires_at")) > parse_ts(&admission_time()?),
-                "team contract expired",
-            )?;
-        }
-        guard.check_pinned()?;
+        let check_hold =
+            |error: crate::Error| admission_before(self, hold_deadline).err().unwrap_or(error);
+        guard.binding = guard.current().map_err(check_hold)?;
+        guard.check().map_err(check_hold)?;
         Ok(guard)
     }
 }
 impl AdmissionGuard<'_, '_> {
     pub fn binding(&self) -> &Value {
         &self.binding
+    }
+    pub(crate) fn deadline(&self) -> Instant {
+        self.deadline
     }
     pub fn expires_at_unix(&self) -> Result<Option<i64>> {
         if self.request.is_none() {

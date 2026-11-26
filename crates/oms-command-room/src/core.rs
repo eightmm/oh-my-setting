@@ -578,7 +578,7 @@ impl<'a> Room<'a> {
         let stat = store
             .threads
             .append(&Store::name(id), &snapshot.stat, &bytes)?;
-        crate::checkpoint(self.stop).map_err(|e| {
+        self.checkpoint().map_err(|e| {
             Error::new(format!(
                 "Room append may already be published; reconcile: {}",
                 e.message

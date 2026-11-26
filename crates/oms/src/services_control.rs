@@ -4748,9 +4748,41 @@ mod tests {
                     )
                     .unwrap()
             });
-            let output = oms_command_peer::run_with_executor(
-                "peer-ask", &args, &repo, source, &stop, &collab,
-            );
+            let output = if mode == "protocol-prespawn-requalify" {
+                let policy_path = repo.join("team-policy.json");
+                let saved_policy = std::fs::read(&policy_path).unwrap();
+                let staged_bad = repo.join("team-policy.json.invalid");
+                std::fs::write(&staged_bad, b"{}\n").unwrap();
+                let thread_path = repo.join(".oms/threads/room-team.jsonl");
+                let before_len = std::fs::metadata(&thread_path).unwrap().len();
+                let finished = AtomicBool::new(false);
+                let out = std::thread::scope(|scope| {
+                    scope.spawn(|| {
+                        while !finished.load(Ordering::Acquire) {
+                            if std::fs::metadata(&thread_path)
+                                .map(|m| m.len() > before_len)
+                                .unwrap_or(false)
+                            {
+                                let _ = std::fs::rename(&staged_bad, &policy_path);
+                                break;
+                            }
+                            std::thread::yield_now();
+                        }
+                    });
+                    let res = oms_command_peer::run_with_executor(
+                        "peer-ask", &args, &repo, source, &stop, &collab,
+                    );
+                    finished.store(true, Ordering::Release);
+                    res
+                });
+                let _ = std::fs::remove_file(&staged_bad);
+                std::fs::write(&policy_path, saved_policy).unwrap();
+                out
+            } else {
+                oms_command_peer::run_with_executor(
+                    "peer-ask", &args, &repo, source, &stop, &collab,
+                )
+            };
             drop(issuance_lock);
             if let Some(handler) = handler {
                 signal_hook::low_level::unregister(handler);
@@ -4823,6 +4855,7 @@ mod tests {
                     ],
                     &[],
                 ),
+                "protocol-prespawn-requalify" => (&["policy"], &[]),
                 _ => (&[], &[]),
             };
             if !required.is_empty() {
@@ -5648,6 +5681,39 @@ mod tests {
             .unwrap_err();
         assert!(policy_error.message.contains("policy"), "{policy_error:?}");
         std::fs::write(repo.join("team-policy.json"), &policy_bytes).unwrap();
+        {
+            // Even when execution_repo initially resolves to contract_repo,
+            // post-registration check_execution() must re-verify Git HEAD before
+            // the resource fence and final guard.check().
+            let linked = Tmp::new();
+            let exec_link = linked.path().join("exec-repo");
+            std::os::unix::fs::symlink(repo.as_path(), &exec_link).unwrap();
+            let linked_attempt = PhysicalAttempt {
+                execution_repo: &exec_link,
+                ..attempt
+            };
+            let exec_error = collab
+                .with_physical_contract(
+                    &linked_attempt,
+                    Instant::now() + Duration::from_secs(10),
+                    &stop,
+                    Box::new(|_| {
+                        std::fs::remove_file(&exec_link).unwrap();
+                        std::os::unix::fs::symlink(wrong_base.path(), &exec_link).unwrap();
+                        Ok(
+                            oms_supervisor::process::PhysicalCall::new("unregistered-exec-probe")
+                                .unwrap(),
+                        )
+                    }),
+                )
+                .unwrap_err();
+            assert!(
+                exec_error
+                    .message
+                    .contains("physical execution base differs"),
+                "{exec_error:?}"
+            );
+        }
         let assert_retained = |expected: usize, open: u64| {
             assert_eq!(
                 physical::load(repo.as_path(), &stop).unwrap().len(),
@@ -6240,6 +6306,50 @@ done
         let status=Command::new(std::env::current_exe().unwrap()).args(["--exact","services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs","--nocapture"])
             .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_REGISTER","1").env("OMS_TEAM_REQUEST_PREVIOUS",&head).env("OMS_PANEL_MAIN_ATTEMPT",&owner).env("OMS_ROOM_ID","room-team").env("OMS_ROOM_PARTICIPANT",&owner).env("OMS_PROVIDER_ADAPTER_DIR",&adapters).status().unwrap();
         assert!(status.success());
+        let gen5_plan =
+            json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap()).unwrap();
+        assert_eq!(
+            gen5_plan.get("teams").get("team-a").get("requests"),
+            &before_generation,
+            "generation changes preserve dedup history"
+        );
+        let gen5_head = gen5_plan
+            .get("teams")
+            .get("team-a")
+            .get("versions")
+            .array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .text("sha256")
+            .to_owned();
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "services_control::tests::team_contract_enrollment_uses_native_lifecycle_and_room_proofs", "--nocapture"])
+            .current_dir(repo.join("caller")).env("OMS_TEAM_REQUEST_RUN", "protocol-prespawn-requalify")
+            .env_remove("OMS_TEAM_REQUEST_EXPIRY").env("OMS_TEAM_REQUEST_SPEC", &gen5_head)
+            .env("OMS_PANEL_MAIN_ATTEMPT", &owner).env("OMS_ROOM_ID", "room-team")
+            .env("OMS_ROOM_PARTICIPANT", &owner).env("OMS_PROVIDER_ADAPTER_DIR", &adapters)
+            .status().unwrap();
+        assert!(
+            status.success(),
+            "pre-spawn Team requalification refusal failed"
+        );
+        let prespawn_projection =
+            oms_command_room::project(&room.records("room-team").unwrap()).unwrap();
+        assert!(
+            !prespawn_projection
+                .list("participants")
+                .iter()
+                .rfind(|p| p.text("participant").starts_with("team-call_"))
+                .unwrap()
+                .flag("joined"),
+            "pre-spawn requalification failure must settle Room enrollment"
+        );
+        assert_eq!(
+            physical::load(repo.as_path(), &stop).unwrap().len(),
+            physical_before + 22,
+            "failed pre-spawn requalification must not resend the provider"
+        );
         assert_eq!(
             json::parse(&std::fs::read(repo.join(".oms/plan/tasks.json")).unwrap())
                 .unwrap()
@@ -6247,7 +6357,7 @@ done
                 .get("team-a")
                 .get("requests"),
             &before_generation,
-            "generation changes preserve dedup history"
+            "failed pre-spawn requalification cannot publish a Team request"
         );
         let cancel = new_event(
             &owner,
