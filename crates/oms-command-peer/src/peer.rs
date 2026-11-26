@@ -1099,10 +1099,9 @@ fn call_routed(
     }
     let answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
     let findings = if tool == "peer-review" {
-        Some(crate::review::redacted_findings(
-            &String::from_utf8_lossy(&result.stdout),
-            &answer,
-        )?)
+        Some(crate::review::seat_findings(&String::from_utf8_lossy(
+            &result.stdout,
+        )))
     } else {
         None
     };
