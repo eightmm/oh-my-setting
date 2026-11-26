@@ -215,13 +215,14 @@ fn plan_issue_links(raw: &[u8], origin: &Slug) -> Result<(Vec<(String, IssueRef)
     Ok((
         links
             .into_iter()
-            .map(|(id, issue, _)| (id, issue))
+            .map(|(id, _, issue, _)| (id, issue))
             .collect(),
         complete,
     ))
 }
 
-type StatefulIssueLinks = Vec<(String, IssueRef, Option<String>)>;
+/// (display id, verbatim selectable id, issue, state).
+type StatefulIssueLinks = Vec<(String, Option<String>, IssueRef, Option<String>)>;
 
 fn candidate_plan_issue_evidence(root: &Path, origin: &Slug) -> Result<(StatefulIssueLinks, bool)> {
     let Some(raw) = read_optional(root, PLAN_REL, PLAN_MAX)? else {
@@ -239,8 +240,8 @@ fn plan_issue_links_with_state(raw: &[u8], origin: &Slug) -> Result<(StatefulIss
     let V::Obj(tasks) = plan.get("tasks") else {
         return Ok((vec![], false));
     };
-    // Task IDs are selectable, so they keep Plan's own grammar verbatim; any
-    // other key is a plan Plan itself would refuse to load.
+    // A selectable task id must match Plan's grammar verbatim; any other key
+    // is a plan Plan itself refuses to load, so the read is incomplete.
     let task_id = |id: &[u8]| {
         (!id.is_empty()
             && id
@@ -256,9 +257,8 @@ fn plan_issue_links_with_state(raw: &[u8], origin: &Slug) -> Result<(StatefulIss
         if !task.has("issue") {
             continue;
         }
-        let Some(id) = task_id(id) else {
-            continue;
-        };
+        let selectable = task_id(id);
+        let id = freshness::sanitize(&String::from_utf8_lossy(id), 100);
         let issue = task
             .get("issue")
             .text()
@@ -269,7 +269,12 @@ fn plan_issue_links_with_state(raw: &[u8], origin: &Slug) -> Result<(StatefulIss
                     format!("plan task {id} carries an invalid issue reference"),
                 )
             })?;
-        out.push((id, issue, task.get("state").text().map(str::to_owned)));
+        out.push((
+            id,
+            selectable,
+            issue,
+            task.get("state").text().map(str::to_owned),
+        ));
     }
     Ok((out, complete))
 }

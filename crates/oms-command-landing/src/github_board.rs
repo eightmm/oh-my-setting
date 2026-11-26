@@ -489,15 +489,15 @@ fn candidate_planned_issues(
     let mut ready = BTreeMap::new();
     let planned = c.state(root).ok().filter(|p| p == root).and_then(|state| {
         let (mut links, complete) = candidate_plan_issue_evidence(&state, slug).ok()?;
-        links.sort_by(|a, b| a.0.cmp(&b.0));
+        links.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         let mut linked = BTreeSet::new();
-        for (id, issue, state) in links {
+        for (_, selectable, issue, state) in links {
             let number = issue.number.to_string();
-            match state.as_deref() {
-                Some("ready") => {
+            match (state.as_deref(), selectable) {
+                (Some("ready"), Some(id)) => {
                     ready.entry(number).or_insert(id);
                 }
-                Some("done" | "cancelled" | "failed") => {}
+                (Some("done" | "cancelled" | "failed"), _) => {}
                 _ => {
                     linked.insert(number);
                 }
