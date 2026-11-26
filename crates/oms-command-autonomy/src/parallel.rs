@@ -98,7 +98,8 @@ fn pick(
                     let id = value::text(t, "id");
                     let paths = strings(&t["allowed"]);
                     let resources = strings(&t["resources"]);
-                    !attempted.contains(id)
+                    !value::text(t, "brief").trim().is_empty()
+                        && !attempted.contains(id)
                         && !flights.contains_key(id)
                         && !flights.values().any(|f| {
                             overlaps(&f.paths, &paths)
@@ -316,7 +317,10 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     } else if failed > 0 {
         1
     } else if started == 0 {
-        return Err(Error::new(2, "no actionable task"));
+        return Err(Error::new(
+            2,
+            "no actionable task (ready tasks without a work brief are skipped; agent-plan next counts them)",
+        ));
     } else {
         0
     };

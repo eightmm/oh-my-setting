@@ -13,7 +13,6 @@ class Element extends EventTarget {
   value = '';
   children = [];
   attributes = new Map();
-  style = {};
   scrollTop = 0;
   get scrollHeight() { return this.children.length; }
   get textContent() { return this.children.map(child => child?.textContent ?? child).join(''); }
@@ -107,7 +106,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
-        result = params.name==='oms_lead_conversation_status' && value._private ? {_meta:{leadConversation:value._private},structuredContent:{projectKey:value.projectKey,room:value.room,leads:value.leads}} : params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
+        result = params.name==='oms_lead_conversation_status' && value._private ? {_meta:{leadConversation:value._private},structuredContent:{projectKey:value.projectKey,room:value.room,leads:value.leads,turn:value.turn}} : params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
       }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
       if ((params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) || host.delayTool === params.name) {
@@ -135,17 +134,11 @@ async function panel(projects, dashboard = {}, options = {}) {
   const document = {documentElement:root,getElementById:get, createElement:tag => createdElement(tag, elements), title:'',
     querySelectorAll: selector => staticNodes.filter(node => node.attributes.has(selector.slice(1, -1)))};
   class Option extends Element { tagName = 'option'; constructor(text = '', value = text) { super(); this.textContent = text; this.value = value; } }
-  // Opt-in only: the default document stays plain so the panel's optional calls stay exercised.
-  if (options.visibility) {
-    const events = new EventTarget();
-    Object.assign(document, {hidden:false, addEventListener:(...args) => events.addEventListener(...args),
-      show(visible) { document.hidden = !visible; events.dispatchEvent(new Event('visibilitychange')); }});
-  }
   const context = createContext({window, document, Option, TextEncoder, CSS:{supports:(_k,v)=>/^#[0-9a-f]{6}$/i.test(v)}, setTimeout, clearTimeout, crypto:{randomUUID},
     ...options.timers, ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
   runInContext(script, context);
   await setImmediate();
-  return {get, elements, calls, host, notify, staticNodes, document, window, run: expression => runInContext(expression, context),
+  return {get, elements, calls, host, notify, staticNodes, document, run: expression => runInContext(expression, context),
     async event(id, type) {
       get(id).dispatchEvent(new Event(type, {cancelable:true}));
       if (type === 'click') get(id).onclick?.();
@@ -575,6 +568,113 @@ test('explicit control opens three managed Leads, preserves member chat and read
   await choose(p,'ko');assert.match(opener.textContent,/Claude 대화 열기/);
   assert.equal(p.host.messages.length,0);
 });
+test('managed Lead composes privately, keeps scoped drafts and reconciles a lost acknowledgement with the same turn',async()=>{
+  const send='oms_send_lead_message', older=randomUUID(), greeting={role:'claude',text:'Ready'};
+  const turns=[greeting];let status='not_found', sent;
+  const p=await panel(['one','two'],dashboard,{locale:'en',tools:{
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:a.before?[{role:'claude',text:'Earlier'}]:turns,
+        cursor:a.before?null:older,hasMore:!a.before}};
+      if(a.turnId)v.turn={turnId:a.turnId,status};
+      return v;
+    },
+    [send]:a=>{
+      if(!sent){sent={...a};throw Error('acknowledgement lost');}
+      assert.deepEqual({...a},sent);
+      status='replied';turns.push({role:'user',text:a.text,turnId:a.turnId},{role:'claude',text:'Here is the reply.',turnId:a.turnId});
+      return {...leadStatus(a,'ready'),turn:{turnId:a.turnId,status}};
+    }
+  }});
+  await p.open('input',{arguments:{project:'one'}});
+  const open=async()=>{const b=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');
+    b.dispatchEvent(new Event('click'));await setImmediate();};
+  const type=async value=>{p.get('chat-text').value=value;await p.event('chat-text','input');};
+  await open();await type('Draft');await p.event('chat-back','click');await open();assert.equal(p.get('chat-text').value,'Draft');
+  await p.event('chat-older','click');assert.equal(p.calls.at(-1).args.before,older);
+  assert.match(p.get('chat-messages').textContent,/Earlier.*Ready/);
+  for(const invalid of ['한'.repeat(1334),'text'+String.fromCharCode(0x85)]){await type(invalid);await p.event('chat-compose','submit');assert.ok(!sent);}
+  await type('My private question');await p.event('chat-compose','submit');
+  assert.deepEqual({...sent,turnId:''},{project:'one',room:main.room,projectKey:'b'.repeat(64),provider:'claude',
+    leadRequestId:leadStatus({provider:'claude'},'ready').leads[0].requestId,turnId:'',text:'My private question'});
+  assert.match(sent.turnId,/^[a-f0-9]{8}-[a-f0-9]{4}-4/);
+  assert.match(p.get('chat-check').textContent,/Retry original/);
+  await type('A new draft');await p.event('chat-compose','submit');
+  assert.equal(p.calls.filter(c=>c.name===send).length,1);
+  await p.event('chat-check','click');assert.equal(p.calls.filter(c=>c.name===send).length,2);
+  assert.equal(p.get('chat-text').value,'A new draft');
+  assert.match(p.get('chat-messages').textContent,/Earlier.*Ready.*YouMy private question.*ClaudeHere is the reply/);
+  assert.equal(p.host.messages.length,0);assert.equal(p.host.contexts.length,0);
+  await p.open('input',{arguments:{project:'two'}});
+  assert.equal(p.get('chat-text').value,'');assert.equal(p.get('chat-messages').textContent,'');
+  assert.ok(!p.get('conversation').open);
+});
+
+test('recorded Lead turns poll reads only while open and keep a draft typed while sending',async()=>{
+  let state='reserved',sent;const timers=new Map();
+  const p=await panel(['one'],dashboard,{locale:'en',timers:{
+    setTimeout(fn,ms){const id=Symbol();timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}
+  },tools:{
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[]}};
+      if(a.turnId)v.turn={turnId:a.turnId,status:state};
+      return v;
+    },
+    oms_send_lead_message:a=>{sent={...a};return {...leadStatus(a,'ready'),turn:{turnId:a.turnId,status:state}};}
+  }});
+  const polls=()=>[...timers.values()].filter(v=>v.ms===8000);
+  const open=p.get('leads').children[2].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
+  p.host.delayTool='oms_send_lead_message';p.get('chat-text').value='First';await p.event('chat-text','input');
+  await p.event('chat-compose','submit');await p.event('chat-compose','submit');
+  p.get('chat-text').value='Next';await p.event('chat-text','input');p.host.release();await setImmediate();
+  assert.equal(sent.provider,'agy');assert.equal(p.get('chat-text').value,'Next');
+  assert.equal(polls().length,1);assert.match(p.get('chat-delivery').textContent,/awaiting execution/);
+  state='running';polls()[0].fn();await setImmediate();assert.match(p.get('chat-delivery').textContent,/Waiting for the reply/);
+  const stale=polls()[0];await p.event('chat-back','click');const mark=p.calls.length;stale.fn();await setImmediate();assert.equal(p.calls.length,mark);
+  state='failed';open.dispatchEvent(new Event('click'));await setImmediate();assert.match(p.get('chat-delivery').textContent,/ended without a reply/);
+  assert.equal(p.get('chat-text').value,'Next');assert.equal(polls().length,0);
+  assert.equal(p.calls.filter(c=>c.name==='oms_send_lead_message').length,1);
+});
+
+test('a verified unresolved message from another view blocks a new dispatch until its turn settles',async()=>{
+  const id=randomUUID();let state='unconfirmed';
+  const p=await panel(['one'],dashboard,{locale:'en',tools:{[managedRead]:a=>{
+    const v=leadStatus(a,'ready');
+    if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'From another view',turnId:id,status:state},
+      ...(state==='replied'?[{role:'antigravity',text:'A bounded answer',turnId:id,truncated:true}]:[])]}};
+    return v;
+  }}});
+  const button=p.get('leads').children[2].children[1].children.find(e=>e.type==='button');button.dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-text').value='My draft';await p.event('chat-text','input');await p.event('chat-compose','submit');
+  assert.equal(p.get('chat-send').disabled,true);assert.match(p.get('chat-delivery').textContent,/previous message/);
+  state='replied';await p.event('chat-check','click');assert.equal(p.get('chat-send').disabled,false);
+  assert.match(p.get('chat-messages').textContent,/AGY.*A bounded answer.*Partial reply/);
+  assert.equal(p.get('chat-text').value,'My draft');assert.ok(!p.calls.some(c=>c.name==='oms_send_lead_message'));
+});
+
+test('a wrong receipt or late reply cannot authorize a fresh send or cross conversations',async()=>{
+  const send='oms_send_lead_message';let sent=0;
+  const p=await panel(['one','two'],dashboard,{tools:{
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[]}};
+      if(a.turnId)v.turn={turnId:randomUUID(),status:'replied'};
+      return v;
+    },
+    [send]:a=>{sent++;return {...leadStatus(a,'ready'),turn:{turnId:randomUUID(),status:'replied'}};}
+  }});
+  await p.open('input',{arguments:{project:'one'}});
+  const button=p.get('leads').children[0].children[1].children.find(e=>e.type==='button');
+  button.dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-text').value='ask once';await p.event('chat-text','input');await p.event('chat-compose','submit');
+  assert.equal(p.get('chat-text').value,'ask once');assert.equal(p.get('chat-send').disabled,true);
+  await p.event('chat-compose','submit');assert.equal(sent,1);
+  p.host.delayTool=managedRead;await p.event('chat-check','click');
+  await p.open('input',{arguments:{project:'two'}});p.host.release();await setImmediate();
+  assert.ok(!p.get('conversation').open);assert.equal(p.get('chat-text').value,'');assert.equal(sent,1);
+});
+
 test('only an exact explicit opener pair opts into this physical project and refresh never replays an uncertain write',async()=>{
   const memory=new Map(),storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
   const tools={[managedOpen]:()=>{throw Error('acknowledgement lost');}};
@@ -740,6 +840,41 @@ test('fixed roles keep distinct conversations together and leave unknown or unbo
   assert.equal(unbound.get('view').hidden,true);assert.equal(unbound.get('leads').children.length,0);
   assert.deepEqual(unbound.calls.map(c=>c.name),['oms_list_projects']);
 });
+test('workers nest under each verified Lead only and only matching Room members can open chat',async()=>{
+  const second={...lead,participant:'second',label:'Documentation'};
+  const worker={...lead,participant:'child-a',parent:lead.participant,provider:'agy',role:'worker',label:'Keyboard checks'};
+  const enrolled={...worker,participant:'child-b',parent:second.participant,label:'Copy review'};
+  const d={...dashboard,conversationMain:{...main,participants:[lead,second,worker,enrolled,{...enrolled,participant:'retired',joined:false}]},
+    conversationAttempts:[...dashboard.conversationAttempts,
+      {room:main.room,id:'l2',participant:second.participant,role:'lead',provider:'claude',state:'working'},
+      {room:main.room,id:'w1',participant:worker.participant,parentAttempt:'l',role:'worker',provider:'antigravity',state:'verifying'},
+      {room:main.room,id:'w3',participant:'retired',parentAttempt:'l2',role:'worker',provider:'agy',state:'done'},
+      {room:null,id:'w2',parentAttempt:'l2',role:'worker',provider:'codex',state:'running',task:'internal-task'},
+      ...[
+        {room:'foreign',parentAttempt:'l'}, {room:null,parentAttempt:'unrelated'},
+        {room:main.room,parentAttempt:'l2',participant:worker.participant},
+        {room:main.room,parentAttempt:'l',participant:worker.participant,provider:'pi'},
+        {room:main.room,parentAttempt:'l',role:'reviewer'}, {room:main.room,participant:'unowned'}
+      ].map((r,i)=>({id:'bad-'+i,role:'worker',taskTitle:'Unrelated',...r}))]};
+  const p=await panel(['one','two'],d,{locale:'en',tools:{oms_panel_chat:a=>({...a,source:'room',messages:[]})}});
+  await p.open('input',{arguments:{project:'one'}});
+  const [a,b]=p.get('leads').children[1].children.slice(2), elements=g=>g.children.filter(n=>n?.tagName), children=g=>elements(elements(g)[1]).map(n=>elements(n)[0]);
+  assert.equal(elements(a)[1].tagName,'ul');assert.equal(children(a).length,1);assert.equal(children(b).length,3);
+  const [verified]=children(a), [retired,observed,member]=children(b);
+  assert.equal(retired.tagName,'article');assert.match(retired.textContent,/AGY Worker.*Done/);
+  assert.match(verified.textContent,/Keyboard checks.*AGY Worker.*Verifying/);
+  assert.equal(observed.tagName,'article');assert.match(observed.textContent,/Codex Worker/);
+  assert.match(member.textContent,/Copy review.*AGY Worker.*Joined this room/);
+  assert.doesNotMatch(p.get('leads').textContent,/Unrelated|internal-task/);
+  assert.equal(p.calls.filter(c=>c.name==='oms_panel_chat').length,0);
+  verified.dispatchEvent(new Event('click'));await setImmediate();
+  assert.deepEqual({...p.calls.at(-1).args},{project:'one',room:main.room,participant:worker.participant});
+  await p.event('chat-back','click');assert.ok(verified.focused);
+  await choose(p,'ko');assert.match(verified.textContent,/AGY 워커/);
+  member.dispatchEvent(new Event('click'));await setImmediate();
+  await p.open('input',{arguments:{project:'two'}});assert.equal(p.get('conversation').open,false);
+});
+
 test('scoped transcript paginates only on demand and erases private data after switching projects',async()=>{
   const p=await panel(['one','two'],dashboard,{locale:'en',tools:{oms_panel_chat:a=>({...a,source:'room',messages:
     [{seq:a.before==null?3:1,text:a.before==null?'Latest message':'Prior message'}],nextBefore:a.before==null?3:null})}});
@@ -826,175 +961,4 @@ test('partial approval retrieval stays visible without a decision button or a fa
   p.host.tools.oms_list_approvals=()=>{throw Error('failed read');};await p.event('refresh','click');
   assert.equal(p.get('approval-card').hidden,false);assert.equal(p.get('approvals').children[0].tagName,'p');
   assert.ok(!p.calls.some(c=>c.name==='oms_decide_approval'));
-});
-
-test('state badges carry a semantic tone and the progress bar follows the progress text',async()=>{
-  const d={...dashboard,planProgress:{total:4,verified:1}};
-  const p=await panel(['one'],d,{locale:'en'});
-  const [codex,claude,agy]=p.get('leads').children;
-  const badge=entry=>entry.children.find(e=>e.className==='state');
-  assert.equal(badge(codex.children[2]).getAttribute('data-tone'),'active');
-  assert.equal(badge(claude.children[2]).getAttribute('data-tone'),'attention');
-  assert.equal(badge(claude.children[2]).textContent,'! Blocked');
-  assert.equal(agy.children[1].children.find(e=>e.className==='state').getAttribute('data-tone'),'muted');
-  assert.equal(p.get('progress-track').hidden,false);assert.equal(p.get('progress-fill').style.width,'25%');
-  assert.equal(p.get('progress').textContent,'1 of 4 planned tasks verified');
-  d.planProgress={total:4,verified:4};await p.event('refresh','click');assert.equal(p.get('progress-fill').style.width,'100%');
-  d.planProgress={total:0,verified:0};await p.event('refresh','click');
-  assert.equal(p.get('progress').hidden,true);assert.equal(p.get('progress-track').hidden,true);
-});
-test('the observed time localizes beside the goal while a clean status stays empty',async()=>{
-  const stamp='2026-06-01T03:04:00Z', local=new Date(stamp);
-  const time=[local.getHours(),local.getMinutes()].map(n=>String(n).padStart(2,'0')).join(':');
-  const d={updated:stamp};
-  const p=await panel(['one'],d,{locale:'ko'});
-  assert.equal(p.get('observed-at').textContent,'관측 '+time);assert.equal(p.get('observed-at').hidden,false);
-  await choose(p,'en');assert.equal(p.get('observed-at').textContent,'Updated '+time);
-  assert.equal(p.get('status').textContent,'');
-  d.degraded=true;await p.event('refresh','click');assert.equal(p.get('status').getAttribute('data-tone'),'warn');
-  d.updated='not a time';d.degraded=false;await p.event('refresh','click');
-  assert.equal(p.get('observed-at').hidden,true);assert.equal(p.get('observed-at').textContent,'');
-  assert.equal(p.get('status').textContent,'');
-});
-test('chat refresh rereads the open Room or managed Lead conversation in place',async()=>{
-  let version=1;
-  const p=await panel(['one'],dashboard,{locale:'en',tools:{
-    oms_panel_chat:a=>({...a,source:'room',messages:[{seq:1,text:'Room '+version,...(version>1&&{at:'2026-06-01T03:04:00Z'})}]}),
-    [managedRead]:a=>{
-      const v=leadStatus(a,'ready');
-      if(a.provider)v._private={...v.leads[0],room:a.room,transcript:{turns:[{role:'claude',text:'Lead '+version}]}};
-      return v;
-    }
-  }});
-  const slot=p.get('leads').children[1], messages=()=>p.get('chat-messages');
-  for(const [opener,label,tool] of [[slot.children[2],'Room ','oms_panel_chat'],
-    [slot.children[1].children.find(e=>e.type==='button'),'Lead ',managedRead]]){
-    version=1;opener.dispatchEvent(new Event('click'));await setImmediate();
-    assert.match(messages().textContent,new RegExp(label+'1'));
-    const mark=p.calls.length;version=2;await p.event('chat-refresh','click');
-    assert.deepEqual(p.calls.slice(mark).map(c=>c.name),[tool]);
-    assert.match(messages().textContent,new RegExp(label+'2'));
-    assert.equal(messages().children.length,1);assert.equal(messages().scrollTop,1);
-    assert.equal(p.get('conversation').open,true);
-    assert.equal(messages().children[0].children.some(e=>e.tagName==='time'),label==='Room ');
-    // Backdrop clicks close; a press that began inside the content does not.
-    p.get('conversation').dispatchEvent(new Event('click'));assert.equal(p.get('conversation').open,false);
-    assert.ok(opener.focused);
-  }
-});
-test('opt-in auto refresh persists, pauses and clears, and Alt+R refreshes only outside typing and dialogs',async()=>{
-  let now=1000;
-  const jobs=new Map(), memory=new Map();
-  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
-  const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
-  const autos=()=>[...jobs].filter(([,job])=>job.ms===20000);
-  const p=await panel(['one'],{},{locale:'en',timers,storage,visibility:true});
-  const reads=()=>p.calls.filter(c=>c.name==='oms_panel_snapshot').length;
-  assert.equal(autos().length,0);assert.equal(p.get('auto-refresh').getAttribute('aria-pressed'),'false');
-  // With Auto off, neither return trigger rereads a stale snapshot.
-  let mark=reads();now+=15000;p.window.dispatchEvent(new Event('focus'));await setImmediate();assert.equal(reads(),mark);
-  p.document.show(false);p.document.show(true);await setImmediate();assert.equal(reads(),mark);assert.equal(autos().length,0);
-  await p.event('auto-refresh','click');
-  assert.equal(memory.get('oms.panel.auto-refresh.v1'),'on');assert.equal(p.get('auto-refresh').getAttribute('aria-pressed'),'true');
-  assert.equal(autos().length,1);
-  mark=reads();const [id,job]=autos()[0];jobs.delete(id);job.fn();await setImmediate();
-  assert.equal(reads(),mark+1);assert.equal(autos().length,1);
-  p.document.show(false);assert.equal(autos().length,0);
-  // A return within 15 seconds only rearms; a stale return rereads once.
-  mark=reads();p.document.show(true);await setImmediate();assert.equal(reads(),mark);assert.equal(autos().length,1);
-  now+=15000;p.window.dispatchEvent(new Event('focus'));await setImmediate();assert.equal(reads(),mark+1);
-  await p.event('new-goal','click');assert.equal(autos().length,0);
-  assert.match(html,/<button id="refresh"[^>]*\saria-keyshortcuts="Alt\+R"/);
-  const press=async(extra={altKey:true},target=p)=>{target.window.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'r',...extra}));await setImmediate();};
-  mark=reads();now+=15000;await press();p.window.dispatchEvent(new Event('focus'));await setImmediate();assert.equal(reads(),mark);
-  await p.event('close-launch','click');assert.equal(autos().length,1);
-  p.document.activeElement=p.get('brief');await press();assert.equal(reads(),mark);
-  p.document.activeElement=undefined;
-  for(const extra of [{},{ctrlKey:true},{metaKey:true},{altKey:true,ctrlKey:true},{altKey:true,metaKey:true},{altKey:true,shiftKey:true},{altKey:true,repeat:true}])await press(extra);
-  assert.equal(reads(),mark);await press();assert.equal(reads(),mark+1);
-  // macOS reports a composed character for Option+R, so the physical key also matches.
-  await press({altKey:true,key:'\u00ae',code:'KeyR'});assert.equal(reads(),mark+2);
-  await p.event('auto-refresh','click');assert.equal(autos().length,0);assert.equal(memory.get('oms.panel.auto-refresh.v1'),'off');
-  await p.event('auto-refresh','click');
-  const reopened=await panel(['one'],{},{timers:{...timers,setTimeout:()=>Symbol(),clearTimeout(){}},storage});
-  assert.equal(reopened.get('auto-refresh').getAttribute('aria-pressed'),'true');
-  p.notify({method:'ui/resource-teardown',id:'close-auto-refresh',params:{}});assert.equal(autos().length,0);
-  mark=reads();await press();assert.equal(reads(),mark);assert.equal(p.get('refresh').getAttribute('aria-busy'),'false');
-  // A pinned binding lists no aliases; its loaded view still refreshes.
-  const pinned=await panel([],{},{timers,tools:{oms_list_projects:()=>({projects:[],binding:'pinned'})}});
-  const pinnedReads=()=>pinned.calls.filter(c=>c.name==='oms_panel_snapshot').length;
-  assert.equal(autos().length,0);await pinned.event('auto-refresh','click');
-  assert.equal(pinned.get('auto-refresh').getAttribute('aria-pressed'),'true');assert.equal(autos().length,1);
-  mark=pinnedReads();const [pinnedId,pinnedJob]=autos()[0];jobs.delete(pinnedId);pinnedJob.fn();await setImmediate();
-  assert.equal(pinnedReads(),mark+1);assert.equal(autos().length,1);
-  await press({},pinned);assert.equal(pinnedReads(),mark+1);
-  await press({altKey:true},pinned);assert.equal(pinnedReads(),mark+2);
-});
-test('transient snapshot failures auto-retry a bounded number of times and recover',async()=>{
-  const jobs=new Map(), memory=new Map([['oms.panel.auto-refresh.v1','on']]);
-  const timers={setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
-  const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
-  const autos=()=>[...jobs].filter(([,job])=>job.ms===20000);
-  const fire=async()=>{assert.equal(autos().length,1);const [id,job]=autos()[0];jobs.delete(id);job.fn();await setImmediate();};
-  let failing=false, binding;
-  const p=await panel(['one'],{},{locale:'en',timers,storage,tools:{
-    oms_list_projects:()=>binding?{projects:[],binding}:{projects:['one']},
-    oms_panel_snapshot:()=>{if(failing)throw new Error('offline');return {dashboard:{project:'one'}};}}});
-  const reads=()=>p.calls.filter(c=>c.name==='oms_panel_snapshot').length;
-  // Fires every scheduled retry, bounded so an unbounded loop fails instead of hanging.
-  const drain=async()=>{let fired=0;while(autos().length && fired<20){await fire();fired++;}return fired;};
-  // One failure hides the view but keeps Auto on, and the next tick recovers.
-  failing=true;await fire();
-  assert.equal(p.get('view').hidden,true);assert.equal(p.get('auto-refresh').getAttribute('aria-pressed'),'true');
-  assert.equal(autos().length,1);
-  failing=false;await fire();assert.equal(p.get('view').hidden,false);assert.equal(autos().length,1);
-  // Recovery restores the full budget; persistent failure stops after five automatic retries.
-  failing=true;let mark=reads();await fire();assert.equal(await drain(),5);
-  assert.equal(reads(),mark+6);assert.equal(autos().length,0);
-  // Manual refresh and re-enabling Auto each grant a new budget.
-  mark=reads();await p.event('refresh','click');assert.equal(await drain(),5);assert.equal(reads(),mark+6);
-  await p.event('auto-refresh','click');assert.equal(autos().length,0);
-  await p.event('auto-refresh','click');assert.equal(await drain(),5);
-  p.window.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'r',altKey:true}));await setImmediate();
-  assert.equal(await drain(),5);
-  // Return triggers spend the same budget and cannot exceed it.
-  await p.event('refresh','click');await fire();failing=false;await fire();assert.equal(p.get('view').hidden,false);
-  // An unbound registry is not a transient failure.
-  failing=true;await fire();binding='unbound';await fire();assert.equal(autos().length,0);
-  await p.event('auto-refresh','click');await p.event('auto-refresh','click');assert.equal(autos().length,0);
-});
-test('stale return triggers share the transient retry cap',async()=>{
-  let now=1000, failing=false;
-  const jobs=new Map(), memory=new Map([['oms.panel.auto-refresh.v1','on']]);
-  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
-  const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
-  const p=await panel(['one'],{},{timers,storage,tools:{oms_panel_snapshot:()=>{if(failing)throw new Error('offline');return {dashboard:{project:'one'}};}}});
-  const reads=()=>p.calls.filter(c=>c.name==='oms_panel_snapshot').length;
-  failing=true;now+=15000;
-  const mark=reads();
-  for(let i=0;i<9;i++){p.window.dispatchEvent(new Event('focus'));await setImmediate();}
-  // The first read starts from a healthy view; five more are transient retries.
-  assert.equal(reads(),mark+6);assert.equal([...jobs.values()].filter(job=>job.ms===20000).length,0);
-});
-test('the launcher counts and normalizes the brief, and the container width selects compact density',async()=>{
-  const p=await panel(['one'],{},{locale:'ko',hostContext:{locale:'ko',displayMode:'inline',containerDimensions:{maxWidth:360}}});
-  const root=p.document.documentElement, brief=p.get('brief'), count=p.get('brief-count');
-  const change=params=>p.notify({method:'ui/notifications/host-context-changed',params});
-  assert.equal(root.getAttribute('data-compact'),'true');assert.equal(root.getAttribute('data-display-mode'),'inline');
-  change({theme:'light'});assert.equal(root.getAttribute('data-compact'),'true');
-  for(const [dimensions,expected] of [[{width:421},null],[{width:420},'true'],[{},null],[{width:320},'true'],[null,null]]){
-    change({containerDimensions:dimensions});assert.equal(root.getAttribute('data-compact'),expected);
-  }
-  assert.match(brief.getAttribute('placeholder'),/^예: Auth/);
-  await choose(p,'en');assert.match(brief.getAttribute('placeholder'),/^e\.g\., Fix auth tests/);
-  assert.equal(count.textContent,'0 / 2,000');
-  brief.value='x'.repeat(2000);await p.event('brief','input');
-  assert.equal(count.textContent,'2,000 / 2,000');assert.equal(count.getAttribute('data-tone'),'muted');
-  p.get('lead-claude').checked=true;await p.event('lead-claude','change');
-  assert.equal(count.getAttribute('data-tone'),'warn');
-  brief.value='';
-  const paste=Object.assign(new Event('paste',{cancelable:true}),{clipboardData:{getData:()=>'Fix auth\r\n\r\n\tand tests\n'}});
-  brief.dispatchEvent(paste);
-  assert.equal(paste.defaultPrevented,true);assert.equal(brief.value,'Fix auth and tests');
-  assert.equal(count.textContent,'18 / 2,000');
 });

@@ -554,7 +554,14 @@ pub(crate) fn execute_bound(
             claimed = true;
         }
         let out = ctx.action(&request)?;
-        require(out.code == 0, "no actionable task")?;
+        require(
+            out.code == 0,
+            format!(
+                "no actionable task\n{}",
+                String::from_utf8_lossy(&out.stderr).trim_end()
+            )
+            .trim_end(),
+        )?;
         value::parse(&out.stdout)?
     } else {
         show(ctx, args.required("id")?)?
@@ -582,6 +589,14 @@ pub(crate) fn run_task(
             "Plan selection base moved before preflight",
         )?;
         let review = value::text(&task, "state") == "review" && args.flag("land");
+        // A legacy review task without a brief may still land, but never reach a provider repair.
+        require(
+            review && repair == 0 && !args.flag("auto-repair")
+                || !value::text(&task, "brief").trim().is_empty(),
+            format!(
+                "task {id} has no work brief; use agent-plan amend --id {id} --brief-file PATH"
+            ),
+        )?;
         let initial_review = (review && !args.flag("dry-run"))
             .then(|| review_fence(ctx, &task, base))
             .transpose()?;
