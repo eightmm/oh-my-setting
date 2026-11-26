@@ -22,6 +22,7 @@ class Element extends EventTarget {
   prepend(...children) { this.children.unshift(...children); }
   setAttribute(name,value) { this.attributes.set(name,value); }
   getAttribute(name) { return this.attributes.get(name) ?? null; }
+  removeAttribute(name) { this.attributes.delete(name); }
   focus() { this.focused = (this.focused ?? 0) + 1; }
   select() { this.selected = true; }
   replaceChildren(...children) { this.children = children; }
@@ -86,7 +87,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     let result = {};
     if (method === 'ui/initialize') {
       host.initialize = params;
-      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:{displayMode:options.mode,availableDisplayModes:options.modes,locale:options.locale},hostCapabilities:{openLinks:options.openLinks ? {} : undefined,message:options.message ? {text:{}} : undefined,experimental:options.compose ? {"openai/message":{}} : {},updateModelContext:options.context ? {text:{},structuredContent:{}} : undefined}};
+      result = {hostInfo:{name:options.host || 'Codex',version:options.version},hostContext:options.hostContext??{displayMode:options.mode,availableDisplayModes:options.modes,locale:options.locale},hostCapabilities:{openLinks:options.openLinks ? {} : undefined,message:options.message ? {text:{}} : undefined,experimental:options.compose ? {"openai/message":{}} : {},updateModelContext:options.context ? {text:{},structuredContent:{}} : undefined}};
     }
     if (method === 'ui/request-display-mode') {
       host.modes.push(params.mode);
@@ -128,10 +129,12 @@ async function panel(projects, dashboard = {}, options = {}) {
     node.initialText = inner;
     return node;
   });
-  const document = {getElementById:get, createElement:tag => createdElement(tag, elements), title:'',
+  const root=new Element(), colors=new Map();
+  root.style={setProperty:(k,v)=>colors.set(k,v),removeProperty:k=>colors.delete(k),getPropertyValue:k=>colors.get(k)??''};
+  const document = {documentElement:root,getElementById:get, createElement:tag => createdElement(tag, elements), title:'',
     querySelectorAll: selector => staticNodes.filter(node => node.attributes.has(selector.slice(1, -1)))};
   class Option extends Element { tagName = 'option'; constructor(text = '', value = text) { super(); this.textContent = text; this.value = value; } }
-  const context = createContext({window, document, Option, TextEncoder, setTimeout, clearTimeout, crypto:{randomUUID},
+  const context = createContext({window, document, Option, TextEncoder, CSS:{supports:(_k,v)=>/^#[0-9a-f]{6}$/i.test(v)}, setTimeout, clearTimeout, crypto:{randomUUID},
     ...options.timers, ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
   runInContext(script, context);
   await setImmediate();
@@ -456,6 +459,22 @@ function leadStatus(args,status='not_started',projectKey='b'.repeat(64)){
   return {projectKey,room:args.room,leads:leads.filter(r=>!args.provider || r.provider===args.provider)};
 }
 const startup=['oms_list_projects','oms_panel_snapshot','oms_list_approvals',managedRead];
+test('host appearance follows initialization and partial updates without reloading the project',async()=>{
+  const primary='--color-background-primary', ink='--color-text-primary';
+  const p=await panel(['one'],dashboard,{hostContext:{theme:'dark',styles:{variables:{[primary]:'#272727',[ink]:'#ffffff','--other':'#123456'}}}});
+  const root=p.document.documentElement, color=k=>root.style.getPropertyValue(k), calls=p.calls.length;
+  assert.equal(root.getAttribute('data-theme'),'dark');assert.equal(color(primary),'#272727');assert.equal(color('--other'),'');
+  await p.event('new-goal','click');const brief=p.get('brief');brief.value='Keep keyboard focus';p.document.activeElement=brief;
+  const change=params=>p.notify({method:'ui/notifications/host-context-changed',params});
+  change({theme:'light'});assert.equal(root.getAttribute('data-theme'),'light');assert.equal(color(ink),'#ffffff');
+  change({styles:{variables:{[primary]:'url(https://invalid.example)',[ink]:'#222222'}}});
+  assert.equal(color(primary),'');assert.equal(color(ink),'#222222');
+  change({theme:null,styles:null});assert.equal(root.getAttribute('data-theme'),null);assert.equal(color(ink),'');
+  assert.equal(p.calls.length,calls);assert.equal(brief.value,'Keep keyboard focus');assert.equal(p.document.activeElement,brief);
+  const malformed=await panel(['one'],dashboard,{hostContext:'unrecognized'});
+  assert.equal(malformed.document.documentElement.getAttribute('data-theme'),null);
+  assert.deepEqual(malformed.calls.map(c=>c.name),startup);
+});
 test('the first screen shows proven participants and only requests registry, snapshot and actionable approvals',async()=>{
   const p=await panel(['one'],dashboard,{locale:'en'});
   assert.deepEqual(p.calls.map(c=>c.name),startup);
