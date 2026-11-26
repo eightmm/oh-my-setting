@@ -385,27 +385,17 @@ fn collect_snapshot(
         collector(journal, ctx.repo.join(".oms/work-journal").exists()),
     )?;
     let (runs, bad) = storage::rows(&ctx.repo, &spine::index(ctx))?;
-    let mut by_id: Vec<Value> = Vec::new();
-    for row in runs {
-        let id = row.text("run_id");
-        if id.is_empty() {
-            continue;
-        }
-        let i = by_id
-            .iter()
-            .position(|r| r.text("run_id") == id)
-            .unwrap_or_else(|| {
-                by_id.push(object([
-                    ("run_id", string(id)),
-                    ("closed", Value::Bool(false)),
-                ]));
-                by_id.len() - 1
-            });
-        by_id[i].set("last", row.get("ts").clone())?;
-        if row.text("tool") == "oms-run" && row.text("event") == "close" {
-            by_id[i].set("closed", Value::Bool(true))?;
-        }
-    }
+    let by_id = spine::group_runs(
+        runs,
+        |id, _| object([("run_id", string(id)), ("closed", Value::Bool(false))]),
+        |run, row| {
+            run.set("last", row.get("ts").clone())?;
+            if row.text("tool") == "oms-run" && row.text("event") == "close" {
+                run.set("closed", Value::Bool(true))?;
+            }
+            Ok(())
+        },
+    )?;
     state.set(
         "runs",
         object([
