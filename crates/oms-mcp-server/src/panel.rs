@@ -473,6 +473,29 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     for t in [&mut settings, &mut update] {
         t["_meta"]["ui"]["visibility"] = json!(["app"]);
     }
+    let mut prepare = make(
+        PREPARE_LEAD_CONTEXT,
+        "Prepare a context pack from an explicitly reviewed Lead answer excerpt for one exact ready Plan task. Supply the observed answer page, answer digest, UTF-8 byte range and excerpt digest, plus the reviewed task digest and execution provider. Rechecks source ownership and task state. Returns the exact excerpt, provenance and separate managed Plan preview/run commands; never claims, starts, accepts or lands a task.",
+        json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"},"turnId":turn_id,"answerPage":{"type":"string","maxLength":100},"answerSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"offset":{"type":"integer","minimum":0,"maximum":8388608},"bytes":{"type":"integer","minimum":1,"maximum":4096},"excerptSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"excerpt":{"type":"string","minLength":1,"maxLength":4096,"description":"The exact text already selected and reviewed; metadata alone cannot export private text."},"taskId":ident,"taskSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"executionProvider":{"type":"string","enum":["claude","antigravity"]}}),
+        &[
+            "projectKey",
+            "room",
+            "provider",
+            "leadRequestId",
+            "turnId",
+            "answerPage",
+            "answerSha256",
+            "offset",
+            "bytes",
+            "excerptSha256",
+            "excerpt",
+            "taskId",
+            "taskSha256",
+            "executionProvider",
+        ],
+        true,
+    );
+    prepare["_meta"]["ui"]["visibility"] = json!(["app"]);
     let all = json!([
         opener,
         chat,
@@ -483,28 +506,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         send,
         settings,
         update,
-        make(
-            PREPARE_LEAD_CONTEXT,
-            "Prepare a context pack from an explicitly reviewed Lead answer excerpt for one exact ready Plan task. Supply the observed answer page, answer digest, UTF-8 byte range and excerpt digest, plus the reviewed task digest and execution provider. Rechecks source ownership and task state. Returns the exact excerpt, provenance and separate managed Plan preview/run commands; never claims, starts, accepts or lands a task.",
-            json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"},"turnId":turn_id,"answerPage":{"type":"string","maxLength":100},"answerSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"offset":{"type":"integer","minimum":0,"maximum":8388608},"bytes":{"type":"integer","minimum":1,"maximum":4096},"excerptSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"excerpt":{"type":"string","minLength":1,"maxLength":4096,"description":"The exact text already selected and reviewed; metadata alone cannot export private text."},"taskId":ident,"taskSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"executionProvider":{"type":"string","enum":["claude","antigravity"]}}),
-            &[
-                "projectKey",
-                "room",
-                "provider",
-                "leadRequestId",
-                "turnId",
-                "answerPage",
-                "answerSha256",
-                "offset",
-                "bytes",
-                "excerptSha256",
-                "excerpt",
-                "taskId",
-                "taskSha256",
-                "executionProvider"
-            ],
-            true
-        ),
+        prepare,
         make(
             LEAD_STATUS,
             "Read provider readiness in the current Main’s Room. A selected provider’s answer is visible only in the panel.",

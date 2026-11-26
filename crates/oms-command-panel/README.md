@@ -281,7 +281,7 @@ checked Plan recovery. Do not use `panel --continue` for this route or resubmit
 the task blindly; `--continue` belongs to role-dispatch workers.
 
 The Main can attach a reviewed context pack with `--context-pack FILE
---expected-context-pack-sha256 SHA`. The desktop
+--expected-context-pack-sha256 SHA`. The app-only desktop
 `oms_prepare_lead_plan_context` tool prepares one explicitly selected Lead
 answer excerpt (at most 4096 UTF-8 bytes) for the exact ready task and managed
 provider. It reuses the owned answer-page reader and returns separate preview
@@ -289,10 +289,10 @@ and execution commands. Use the returned `--dry-run --json` command to inspect
 the route, task, assignment and source provenance, then its execution command
 under the current Main. Preparation never claims a task or calls a provider.
 The pack remains reference data: execution uses the managed Plan worker, with
-`native_lead_input: false`. Pack changes, another physical project/Room, or
-changes to the reviewed task, scope, verifier or frozen model refuse dispatch.
-Existing graph packs and managed calls without a context pack retain their
-behavior. See the [explicit selection mapping](../oms-mcp-server/README.md#reviewed-lead-findings-for-a-plan-task).
+`native_lead_input: false`. Pack changes, Lead source answer changes, another
+physical state repository/Room, or changes to the reviewed task, scope, verifier
+or frozen model refuse dispatch. Existing graph packs and managed calls without a
+context pack retain their behavior. See the [explicit selection mapping](../oms-mcp-server/README.md#reviewed-lead-findings-for-a-plan-task).
 
 The alternate Codex Lead remains outside the native task binding. Direct
 `--dispatch ROLE --task-id TASK` labels managed work but is not an issued Plan

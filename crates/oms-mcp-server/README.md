@@ -37,21 +37,23 @@ frozen migration evidence. The Rust files above own current production behavior.
 
 ## Reviewed Lead findings for a Plan task
 
-The desktop `chatgpt-panel` profile exposes `oms_prepare_lead_plan_context` to
-the app and its host Main. The generic project-read `mcp-app` profile and
+The desktop `chatgpt-panel` profile exposes `oms_prepare_lead_plan_context`
+only to the panel app (`_meta.ui.visibility: ["app"]`), never in the
+model-visible tool list. The generic project-read `mcp-app` profile and
 delegated callers cannot use it. This preparation action runs through the
 bounded runtime queue. It performs owned reads and publishes one bounded
 context-pack snapshot in the existing Lead operation directory; it never
 claims a task, starts a provider, changes Lead settings, accepts evidence, or
 lands a patch.
 
-The explicit workflow is: review a displayed Lead answer, share the selected
-finding with Main, select a ready canonical Plan task, prepare its context,
-then inspect and run the returned managed execution command. Preparation
+The explicit workflow is: review a displayed Lead answer, select the finding in
+the panel, select a ready canonical Plan task, prepare its context in the panel
+UI, then inspect and run the returned managed execution command. Preparation
 requires the selected text itself, not just metadata. The existing
 `Conversation::answer_page` reader must return exactly those bytes at the
 selected UTF-8 range, with the observed whole-answer digest and page cursor.
-Mismatches return a fixed error without actual source text. The maximum excerpt
+Every wrong guess, wrong range (including mid-UTF-8-character ranges) or wrong
+hash returns the same fixed error without actual source text. The maximum excerpt
 is 4096 bytes; empty, whitespace-only, partial-character, oversized, changed or
 out-of-page selections are refused.
 
@@ -79,12 +81,14 @@ as bounded command text are refused. `runCommand` uses the existing
 Main-owned `panel --repo REPO --room ROOM --orchestrator PROVIDER --task-id TASK` route with
 `--context-pack FILE --expected-context-pack-sha256 SHA`. Run these from the
 selected project under its current Main. The path is a bounded snapshot, not a
-new transcript store. Identical preparation reuses the same bytes and path.
+new transcript store. Identical preparation reuses the same bytes and path, and
+each Lead answer operation is bounded to at most 16 prepared context packs.
 
-Panel and PlanRun recheck the pack and ready task before claim; peer dispatch
-rechecks the exact pack bytes and frozen task fields against the independently
-verified issued lease. The physical project and original Room must still
-match. Execution is a managed Plan worker (`native_lead_input: false`) with
+Panel and PlanRun recheck the pack, ready task and recorded Lead answer digest
+against the state repository before claim; peer dispatch rechecks the exact pack
+bytes, recorded Lead answer digest and frozen task fields against the
+independently verified issued lease. The physical state repository and original
+Room must still match. Execution is a managed Plan worker (`native_lead_input: false`) with
 the original model, scope, verifier and review gates. The excerpt is quoted
 reference data and does not establish native Lead execution parity. Plain
 managed calls and graph-only context packs continue to work.

@@ -184,6 +184,7 @@ fn owns_help_and_parse_errors_for_every_command() {
 
 struct FeedbackMock {
     mode: &'static str,
+    state_override: Option<PathBuf>,
     reads: std::sync::atomic::AtomicUsize,
     rechecks: std::sync::atomic::AtomicUsize,
     sends: std::sync::atomic::AtomicUsize,
@@ -193,6 +194,7 @@ impl FeedbackMock {
     fn new(mode: &'static str) -> Self {
         Self {
             mode,
+            state_override: None,
             reads: 0.into(),
             rechecks: 0.into(),
             sends: 0.into(),
@@ -359,6 +361,12 @@ impl Services for FeedbackMock {
             changed.push(b'\n');
             fs::write(path, changed).unwrap();
         }
+        if self.mode == "lead-context-answer-dispatch" && n == 1 {
+            write_private(
+                &repo.join(".oms/artifacts/mcp/ask-fixture/answers/fixture.md"),
+                b"## Output\nchanged answer after claim\n## Exit\n0\n",
+            );
+        }
         Ok(value)
     }
     fn state_repository(
@@ -366,7 +374,10 @@ impl Services for FeedbackMock {
         work: &Path,
         _: &AtomicBool,
     ) -> oms_command_autonomy::Result<PathBuf> {
-        Ok(work.to_owned())
+        Ok(self
+            .state_override
+            .clone()
+            .unwrap_or_else(|| work.to_owned()))
     }
     fn resolve_route(
         &self,
@@ -507,15 +518,14 @@ impl Services for FeedbackMock {
                     assert_eq!(arg("--to"), "claude");
                     let raw = fs::read(arg("--context-pack")).unwrap();
                     assert_eq!(value::hash(&raw), arg("--expected-context-pack-sha256"));
-                    let issued = self.plan(
-                        &call.cwd,
-                        &["evidence-snapshot", "--id", &arg("--plan-task")],
-                    );
+                    let state = self.state_override.as_deref().unwrap_or(&call.cwd);
+                    let issued =
+                        self.plan(state, &["evidence-snapshot", "--id", &arg("--plan-task")]);
                     assert_eq!(binding["task_sha256"], issued["task_sha256"]);
                     oms_command_plan::reviewed_context::from_pack(&raw)
                         .unwrap()
                         .unwrap()
-                        .check_task(&value::plan(&issued).unwrap(), "claude", false)
+                        .check_task(state, &value::plan(&issued).unwrap(), "claude", false)
                         .unwrap();
                     return Err(oms_command_autonomy::Error::new(
                         2,
@@ -644,6 +654,56 @@ impl Services for FeedbackMock {
     }
 }
 
+fn write_lead_answer_fixture(state: &Path, provider: &str, answer: &str) {
+    let canonical = if provider == "agy" {
+        "antigravity"
+    } else {
+        provider
+    };
+    let scope = "1".repeat(64);
+    let binding = "2".repeat(64);
+    let prompt_sha = "3".repeat(64);
+    let thread = "ask-thread-fixture";
+    let op = "ask-fixture";
+    write_private(
+        &state.join(format!(".oms/artifacts/mcp/{thread}/status")),
+        b"0\n",
+    );
+    write_private(
+        &state.join(format!(".oms/artifacts/mcp/{thread}/meta.json")),
+        json!({"operation":thread,"thread":thread,"kind":"ask","answer_storage":"operation","targets":[canonical],"panel_assignment":scope})
+            .to_string()
+            .as_bytes(),
+    );
+    write_private(
+        &state.join(format!(
+            ".oms/artifacts/mcp/{thread}/lead-turn-turn-fixture.json"
+        )),
+        json!({"id":"turn-fixture","scope":scope,"binding":binding,"digest":prompt_sha})
+            .to_string()
+            .as_bytes(),
+    );
+    write_private(
+        &state.join(format!(".oms/artifacts/mcp/{op}/status")),
+        b"0\n",
+    );
+    write_private(
+        &state.join(format!(".oms/artifacts/mcp/{op}/meta.json")),
+        json!({"operation":op,"thread":thread,"kind":"ask","answer_storage":"operation","lead_followup":true,"targets":[canonical],"panel_assignment":binding,"prompt_sha256":prompt_sha})
+            .to_string()
+            .as_bytes(),
+    );
+    let rel = format!(".oms/artifacts/mcp/{op}/answers/fixture.md");
+    write_private(
+        &state.join(format!(".oms/artifacts/mcp/{op}/run.log")),
+        format!("{rel}\n").as_bytes(),
+    );
+    write_private(
+        &state.join(&rel),
+        format!("## Output\n{answer}\n## Exit\n0\n").as_bytes(),
+    );
+}
+
 #[test]
 fn reviewed_lead_context_is_pinned_before_claim_and_again_before_dispatch() {
     const NAME: &str = "reviewed_lead_context_is_pinned_before_claim_and_again_before_dispatch";
@@ -670,11 +730,21 @@ fn reviewed_lead_context_is_pinned_before_claim_and_again_before_dispatch() {
         "lead-context",
         "lead-context-preclaim",
         "lead-context-dispatch",
+        "lead-context-answer-preclaim",
+        "lead-context-answer-dispatch",
+        "lead-context-split-state",
     ] {
-        let mock = FeedbackMock::new(mode);
-        let repo = mock.fixture();
+        let mut mock = FeedbackMock::new(mode);
+        let work = mock.fixture();
+        let separate_state = (mode == "lead-context-split-state").then(|| mock.fixture());
+        let state_root = separate_state
+            .as_ref()
+            .map_or_else(|| work.0.clone(), |s| s.0.clone());
+        if separate_state.is_some() {
+            mock.state_override = Some(state_root.clone());
+        }
         mock.plan(
-            &repo.0,
+            &state_root,
             &[
                 "add",
                 "--id",
@@ -689,18 +759,22 @@ fn reviewed_lead_context_is_pinned_before_claim_and_again_before_dispatch() {
                 r#"{"provider":"claude","model":"fixture-model"}"#,
             ],
         );
-        let ready = mock.plan(&repo.0, &["evidence-snapshot", "--id", "fresh"]);
+        let ready = mock.plan(&state_root, &["evidence-snapshot", "--id", "fresh"]);
         let body = "A selected Lead finding about src.";
+        write_lead_answer_fixture(&state_root, "claude", body);
         let findings = json!({"schema":1,"kind":"reviewed-lead-answer","authority":"context-only",
-            "source":{"project_key":oms_command_plan::reviewed_context::project_key(&repo.0).unwrap(),"room":"lead-room","participant":"ask-fixture","provider":"claude","lead_request_id":"lead-fixture","turn_id":"turn-fixture","operation":"ask-fixture","answer_sha256":"a".repeat(64),"page_offset":0,"page_bytes":body.len(),"page_cursor_sha256":value::hash(""),"answer_bytes":body.len()},
+            "source":{"project_key":oms_command_plan::reviewed_context::project_key(&state_root).unwrap(),"room":"lead-room","participant":"ask-lead-fixture","provider":"claude","lead_request_id":"lead-fixture","turn_id":"turn-fixture","operation":"ask-fixture","answer_sha256":value::hash(body),"page_offset":0,"page_bytes":body.len(),"page_cursor_sha256":value::hash(""),"answer_bytes":body.len()},
             "selection":{"text":body,"offset":0,"bytes":body.len(),"sha256":value::hash(body)},
             "target":{"task_id":"fresh","task_sha256":ready["task_sha256"],"contract_sha256":oms_command_plan::reviewed_context::task_contract(&value::plan(&ready).unwrap()).unwrap(),"provider":"claude"}});
         let digest = oms_command_plan::json::hash(&value::plan(&findings).unwrap()).unwrap();
         let pack =
             serde_json::to_vec(&json!({"pack_digest":digest,"files":[],"lead_findings":findings}))
                 .unwrap();
-        repo.write(".oms/reviewed-context.json", &pack);
-        let prior = fs::read(repo.0.join(".oms/plan/tasks.json")).unwrap();
+        work.write(".oms/reviewed-context.json", &pack);
+        if mode == "lead-context-answer-preclaim" {
+            write_lead_answer_fixture(&state_root, "claude", "Lead answer changed after prepare.");
+        }
+        let prior = fs::read(state_root.join(".oms/plan/tasks.json")).unwrap();
         let args = [
             "--to",
             "claude",
@@ -716,18 +790,31 @@ fn reviewed_lead_context_is_pinned_before_claim_and_again_before_dispatch() {
         .iter()
         .map(OsString::from)
         .collect::<Vec<_>>();
-        let result = run_with_services("plan-run", &args, &repo.0, &AtomicBool::new(false), &mock);
+        let result = run_with_services("plan-run", &args, &work.0, &AtomicBool::new(false), &mock);
         assert_ne!(result.0, 0, "{mode}");
         assert_eq!(
             FeedbackMock::count(&mock.sends),
-            usize::from(mode == "lead-context"),
+            usize::from(matches!(mode, "lead-context" | "lead-context-split-state")),
             "{mode}: {result:?}"
         );
-        let current = mock.plan(&repo.0, &["evidence-snapshot", "--id", "fresh"]);
+        if matches!(
+            mode,
+            "lead-context-answer-preclaim" | "lead-context-answer-dispatch"
+        ) {
+            assert!(
+                String::from_utf8_lossy(&result.2).contains("unavailable or changed"),
+                "{mode}: {}",
+                String::from_utf8_lossy(&result.2)
+            );
+        }
+        let current = mock.plan(&state_root, &["evidence-snapshot", "--id", "fresh"]);
         assert_eq!(current["state"], "ready", "{mode}: {result:?}");
-        if mode == "lead-context-preclaim" {
+        if matches!(
+            mode,
+            "lead-context-preclaim" | "lead-context-answer-preclaim"
+        ) {
             assert_eq!(
-                fs::read(repo.0.join(".oms/plan/tasks.json")).unwrap(),
+                fs::read(state_root.join(".oms/plan/tasks.json")).unwrap(),
                 prior
             );
         } else {

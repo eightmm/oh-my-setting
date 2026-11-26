@@ -6074,6 +6074,7 @@ pub(crate) fn run_managed_plan(
             excerpt.check_room(&room).map_err(Error::new)?;
             excerpt
                 .check_task(
+                    repo,
                     &oms_command_plan::json::parse(
                         &serde_json::to_vec(&selected).map_err(Error::new)?,
                     )
@@ -14360,8 +14361,68 @@ pub(crate) mod tests {
                     )
                     .unwrap();
                     let body = "Lead reviewed a bounded implementation detail.";
+                    let write_lead_file = |rel: &str, content: &[u8]| {
+                        use std::os::unix::fs::PermissionsExt;
+                        let path = repo.join(rel);
+                        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                        std::fs::write(&path, content).unwrap();
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                            .unwrap();
+                    };
+                    for dir_rel in [
+                        ".oms/artifacts/mcp/ask-thread-fixture",
+                        ".oms/artifacts/mcp/ask-fixture/answers",
+                    ] {
+                        use std::os::unix::fs::PermissionsExt;
+                        let p = repo.join(dir_rel);
+                        std::fs::create_dir_all(&p).unwrap();
+                        for anc in [
+                            repo.join(".oms/artifacts/mcp/ask-thread-fixture"),
+                            repo.join(".oms/artifacts/mcp/ask-fixture"),
+                        ] {
+                            if anc.exists() {
+                                std::fs::set_permissions(
+                                    &anc,
+                                    std::fs::Permissions::from_mode(0o700),
+                                )
+                                .unwrap();
+                            }
+                        }
+                    }
+                    let scope = "1".repeat(64);
+                    let lead_binding = "2".repeat(64);
+                    let prompt_sha = "3".repeat(64);
+                    write_lead_file(".oms/artifacts/mcp/ask-thread-fixture/status", b"0\n");
+                    write_lead_file(
+                        ".oms/artifacts/mcp/ask-thread-fixture/meta.json",
+                        json!({"operation":"ask-thread-fixture","thread":"ask-thread-fixture","kind":"ask","answer_storage":"operation","targets":["codex"],"panel_assignment":scope})
+                            .to_string()
+                            .as_bytes(),
+                    );
+                    write_lead_file(
+                        ".oms/artifacts/mcp/ask-thread-fixture/lead-turn-turn-fixture.json",
+                        json!({"id":"turn-fixture","scope":scope,"binding":lead_binding,"digest":prompt_sha})
+                            .to_string()
+                            .as_bytes(),
+                    );
+                    write_lead_file(".oms/artifacts/mcp/ask-fixture/status", b"0\n");
+                    write_lead_file(
+                        ".oms/artifacts/mcp/ask-fixture/meta.json",
+                        json!({"operation":"ask-fixture","thread":"ask-thread-fixture","kind":"ask","answer_storage":"operation","lead_followup":true,"targets":["codex"],"panel_assignment":lead_binding,"prompt_sha256":prompt_sha})
+                            .to_string()
+                            .as_bytes(),
+                    );
+                    let lead_answer_rel = ".oms/artifacts/mcp/ask-fixture/answers/fixture.md";
+                    write_lead_file(
+                        ".oms/artifacts/mcp/ask-fixture/run.log",
+                        format!("{lead_answer_rel}\n").as_bytes(),
+                    );
+                    write_lead_file(
+                        lead_answer_rel,
+                        format!("## Output\n{body}\n## Exit\n0\n").as_bytes(),
+                    );
                     let findings = json!({"schema":1,"kind":"reviewed-lead-answer","authority":"context-only",
-                        "source":{"project_key":oms_command_plan::reviewed_context::project_key(&repo).unwrap(),"room":ROOM,"participant":"ask-fixture","provider":"codex","lead_request_id":"lead-fixture","turn_id":"turn-fixture","operation":"ask-fixture","answer_sha256":"a".repeat(64),"page_offset":0,"page_bytes":body.len(),"page_cursor_sha256":oms_command_plan::json::sha(""),"answer_bytes":body.len()},
+                        "source":{"project_key":oms_command_plan::reviewed_context::project_key(&repo).unwrap(),"room":ROOM,"participant":"ask-lead-fixture","provider":"codex","lead_request_id":"lead-fixture","turn_id":"turn-fixture","operation":"ask-fixture","answer_sha256":oms_command_plan::json::sha(body),"page_offset":0,"page_bytes":body.len(),"page_cursor_sha256":oms_command_plan::json::sha(""),"answer_bytes":body.len()},
                         "selection":{"text":body,"offset":0,"bytes":body.len(),"sha256":oms_command_plan::json::sha(body)},
                         "target":{"task_id":"managed-frozen","task_sha256":selected["task_sha256"],"contract_sha256":contract,"provider":"claude"}});
                     let pack_path = repo.join(".oms/reviewed-context.json");
@@ -14419,6 +14480,16 @@ pub(crate) mod tests {
                     std::fs::write(&pack_path, b"changed pack").unwrap();
                     assert_ne!(with_context(&sha, true).0, 0);
                     write_pack(&findings);
+                    write_lead_file(
+                        lead_answer_rel,
+                        b"## Output\nchanged recorded answer\n## Exit\n0\n",
+                    );
+                    assert_ne!(with_context(&sha, true).0, 0);
+                    assert_ne!(with_context(&sha, false).0, 0);
+                    write_lead_file(
+                        lead_answer_rel,
+                        format!("## Output\n{body}\n## Exit\n0\n").as_bytes(),
+                    );
                     for field in ["task_sha256", "verify", "allowed_paths", "assignment"] {
                         let mut changed = selected.clone();
                         changed[field] = match field {

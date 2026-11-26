@@ -2146,6 +2146,7 @@ exec "$real_git" "$@"
                     "context-pack-changed",
                     "context-task-changed",
                     "context-room-changed",
+                    "context-answer-changed",
                 ]
             } else {
                 match std::env::var("OMS_RESUME_SESSION").as_deref() {
@@ -2285,8 +2286,65 @@ exec "$real_git" "$@"
                 ];
                 if let Some(ready) = &ready {
                     let body = "Lead reviewed the tracked.txt boundary.";
+                    let write_lead_file = |rel: &str, content: &[u8]| {
+                        let path = repo.0.join(rel);
+                        use std::os::unix::fs::DirBuilderExt;
+                        fs::DirBuilder::new()
+                            .recursive(true)
+                            .mode(0o700)
+                            .create(path.parent().unwrap())
+                            .unwrap();
+                        fs::write(&path, content).unwrap();
+                        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                    };
+                    let scope = "1".repeat(64);
+                    let lead_binding = "2".repeat(64);
+                    let prompt_sha = "3".repeat(64);
+                    let thread = "ask-thread-fixture";
+                    let op = "ask-fixture";
+                    for dir_rel in [
+                        ".oms",
+                        ".oms/artifacts",
+                        ".oms/artifacts/mcp",
+                        ".oms/artifacts/mcp/ask-thread-fixture",
+                        ".oms/artifacts/mcp/ask-fixture",
+                        ".oms/artifacts/mcp/ask-fixture/answers",
+                    ] {
+                        let p = repo.0.join(dir_rel);
+                        fs::create_dir_all(&p).unwrap();
+                        fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
+                    }
+                    write_lead_file(&format!(".oms/artifacts/mcp/{thread}/status"), b"0\n");
+                    write_lead_file(
+                        &format!(".oms/artifacts/mcp/{thread}/meta.json"),
+                        serde_json::json!({"operation":thread,"thread":thread,"kind":"ask","answer_storage":"operation","targets":["claude"],"panel_assignment":scope})
+                            .to_string()
+                            .as_bytes(),
+                    );
+                    write_lead_file(
+                        &format!(".oms/artifacts/mcp/{thread}/lead-turn-turn-fixture.json"),
+                        serde_json::json!({"id":"turn-fixture","scope":scope,"binding":lead_binding,"digest":prompt_sha})
+                            .to_string()
+                            .as_bytes(),
+                    );
+                    write_lead_file(&format!(".oms/artifacts/mcp/{op}/status"), b"0\n");
+                    write_lead_file(
+                        &format!(".oms/artifacts/mcp/{op}/meta.json"),
+                        serde_json::json!({"operation":op,"thread":thread,"kind":"ask","answer_storage":"operation","lead_followup":true,"targets":["claude"],"panel_assignment":lead_binding,"prompt_sha256":prompt_sha})
+                            .to_string()
+                            .as_bytes(),
+                    );
+                    let answer_rel = format!(".oms/artifacts/mcp/{op}/answers/fixture.md");
+                    write_lead_file(
+                        &format!(".oms/artifacts/mcp/{op}/run.log"),
+                        format!("{answer_rel}\n").as_bytes(),
+                    );
+                    write_lead_file(
+                        &answer_rel,
+                        format!("## Output\n{body}\n## Exit\n0\n").as_bytes(),
+                    );
                     let mut findings = serde_json::json!({"schema":1,"kind":"reviewed-lead-answer","authority":"context-only",
-                        "source":{"project_key":oms_command_plan::reviewed_context::project_key(&repo.0).unwrap(),"room":"lead-room","participant":"ask-fixture","provider":"claude","lead_request_id":"lead-fixture","turn_id":"turn-fixture","operation":"ask-fixture","answer_sha256":"a".repeat(64),"page_offset":0,"page_bytes":body.len(),"page_cursor_sha256":json::sha(""),"answer_bytes":body.len()},
+                        "source":{"project_key":oms_command_plan::reviewed_context::project_key(&repo.0).unwrap(),"room":"lead-room","participant":"ask-lead-fixture","provider":"claude","lead_request_id":"lead-fixture","turn_id":"turn-fixture","operation":"ask-fixture","answer_sha256":json::sha(body),"page_offset":0,"page_bytes":body.len(),"page_cursor_sha256":json::sha(""),"answer_bytes":body.len()},
                         "selection":{"text":body,"offset":0,"bytes":body.len(),"sha256":json::sha(body)},
                         "target":{"task_id":"t1","task_sha256":ready.text("task_sha256"),"contract_sha256":oms_command_plan::reviewed_context::task_contract(ready).unwrap(),"provider":"claude"}});
                     if mode == "context-task-changed" {
@@ -2304,6 +2362,12 @@ exec "$real_git" "$@"
                         bytes.push(b'\n');
                     }
                     repo.write(".oms/reviewed-context.json", bytes);
+                    if mode == "context-answer-changed" {
+                        write_lead_file(
+                            &answer_rel,
+                            b"## Output\nLead answer changed after preparation.\n## Exit\n0\n",
+                        );
+                    }
                     call.extend([
                         "--context-pack".into(),
                         repo.0
@@ -2374,6 +2438,8 @@ exec "$real_git" "$@"
                         "differs from the frozen Plan task"
                     } else if mode == "context-room-changed" {
                         "another Room"
+                    } else if mode == "context-answer-changed" {
+                        "unavailable or changed"
                     } else if mode == "missing-brief" {
                         "agent-plan amend --id t1 --brief-file PATH"
                     } else if mode == "ambient-resume" {

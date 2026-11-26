@@ -323,7 +323,12 @@ fn delegate(
     wall: Duration,
 ) -> Result<(Output, Option<Value>)> {
     if let Some(excerpt) = context_pack(ctx, args)? {
-        excerpt.check_task(&value::plan(task)?, value::text(route, "provider"), false)?;
+        excerpt.check_task(
+            &ctx.state,
+            &value::plan(task)?,
+            value::text(route, "provider"),
+            false,
+        )?;
     }
     let id = value::text(task, "id");
     require(
@@ -493,7 +498,7 @@ fn context_pack(
         return Ok(None);
     }
     let pack = ctx.services.validate_context_pack(
-        &ctx.repo,
+        &ctx.state,
         &args.path("context-pack", &ctx.repo),
         ctx.interrupted,
     )?;
@@ -516,7 +521,7 @@ fn context_pack(
     )?;
     let excerpt =
         oms_command_plan::reviewed_context::LeadExcerpt::parse(&value::canonical(findings)?)?;
-    excerpt.check_project(&ctx.repo)?;
+    excerpt.check_project(&ctx.state)?;
     excerpt.check_room(&std::env::var("OMS_ROOM_ID").unwrap_or_default())?;
     require(
         excerpt.target().text("task_id") == args.required("id")?
@@ -670,7 +675,7 @@ pub(crate) fn run_task(
         route["fallback_effort"] = resolved.fallback_effort.clone().into();
         let provider = value::text(&route, "provider");
         if let Some(excerpt) = context_pack(ctx, args)? {
-            excerpt.check_task(&value::plan(&task)?, provider, true)?;
+            excerpt.check_task(&ctx.state, &value::plan(&task)?, provider, true)?;
         }
         let state = value::text(&task, "state");
         let resume = state == "claimed"

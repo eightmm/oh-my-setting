@@ -5,9 +5,41 @@ use crate::storage::{Directory, hash};
 use crate::value::Value;
 use crate::{RUN_ROOT, Server};
 use oms_command_plan::{json as plan_json, reviewed_context};
+use rustix::fs::{self, Dir, Mode, OFlags};
 use std::path::Path;
 
 const INVALID: &str = "The reviewed Lead excerpt or Plan task changed. Review them again.";
+const MAX_CONTEXT_PACKS: usize = 16;
+const MAX_OPERATION_ENTRIES: usize = 4096;
+const PACK_PREFIX: &str = "lead-plan-context-";
+const PACK_LIMIT_REACHED: &str = "This Lead answer already has the maximum 16 prepared context packs. Reuse an existing selection or start a new Lead turn.";
+
+fn count_context_packs(directory: &Directory) -> PanelResult<usize> {
+    let scan_fd = fs::openat(
+        &directory.fd,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| INVALID)?;
+    let mut packs = 0usize;
+    let mut seen = 0usize;
+    for entry in Dir::read_from(&scan_fd).map_err(|_| INVALID)? {
+        let entry = entry.map_err(|_| INVALID)?;
+        seen = seen.saturating_add(1);
+        if seen > MAX_OPERATION_ENTRIES {
+            return Err(INVALID.into());
+        }
+        let name = entry.file_name().to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        if name.starts_with(PACK_PREFIX.as_bytes()) && name.ends_with(b".json") {
+            packs += 1;
+        }
+    }
+    Ok(packs)
+}
 
 fn command_repo(repo: &Path) -> PanelResult<&str> {
     repo.to_str()
@@ -78,7 +110,8 @@ impl Server<'_> {
         let text = page["text"]
             .as_str()
             .and_then(|s| s.get(start..start.checked_add(bytes)?))
-            .ok_or("Select a complete UTF-8 excerpt within the reviewed answer page.")?;
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(INVALID)?;
         if hash(text) != expected_excerpt || args["excerpt"].as_str() != Some(text) {
             return Err(INVALID.into());
         }
@@ -126,7 +159,7 @@ impl Server<'_> {
             .map_err(|_| "The selected excerpt is not safe bounded context.")?;
         excerpt.check_project(repo).map_err(|_| INVALID)?;
         excerpt
-            .check_task(&selected, provider, true)
+            .check_task(repo, &selected, provider, true)
             .map_err(|_| INVALID)?;
         let pack_digest = plan_json::hash(excerpt.value()).map_err(|_| INVALID)?;
         let pack = json!({"schema":1,"pack_digest":pack_digest,"files":[],"tests":[],"lead_findings":findings});
@@ -136,23 +169,39 @@ impl Server<'_> {
         let sha = hash(&raw);
         let operation = handoff["operation"].as_str().ok_or(INVALID)?;
         let directory = Directory::run(repo, operation, true).map_err(|_| INVALID)?;
+        let _guard = directory.lock().map_err(
+            |_| "Another context pack is being prepared for this Lead answer. Try again.",
+        )?;
         // Recheck both owners after collection, before publishing a bounded
         // snapshot into the already-owned operation. No transcript mirror.
         if read_answer()? != page {
             return Err(INVALID.into());
         }
         task()?;
-        let name = format!("lead-plan-context-{sha}.json");
+        let name = format!("{PACK_PREFIX}{sha}.json");
         let path = format!("{RUN_ROOT}/{operation}/{name}");
-        directory
-            .publish_new(&name, raw.as_bytes())
-            .map_err(|_| INVALID)?;
-        let stored = oms_safe_fs::Root::open(repo)
-            .map_err(|_| INVALID)?
-            .read(&path, 262144, oms_safe_fs::Policy::manifest())
-            .map_err(|_| INVALID)?;
-        if stored != raw.as_bytes() {
-            return Err(INVALID.into());
+        let root = oms_safe_fs::Root::open(repo).map_err(|_| INVALID)?;
+        match root.read(&path, 262144, oms_safe_fs::Policy::manifest()) {
+            Ok(stored) => {
+                if stored != raw.as_bytes() {
+                    return Err(INVALID.into());
+                }
+            }
+            Err(oms_safe_fs::Error::Missing) => {
+                if count_context_packs(&directory)? >= MAX_CONTEXT_PACKS {
+                    return Err(PACK_LIMIT_REACHED.into());
+                }
+                directory
+                    .publish_new(&name, raw.as_bytes())
+                    .map_err(|_| INVALID)?;
+                let stored = root
+                    .read(&path, 262144, oms_safe_fs::Policy::manifest())
+                    .map_err(|_| INVALID)?;
+                if stored != raw.as_bytes() {
+                    return Err(INVALID.into());
+                }
+            }
+            Err(_) => return Err(INVALID.into()),
         }
         let argv = json!([
             "panel",

@@ -91,7 +91,7 @@ impl BoundDelegate {
             .check_room(&std::env::var("OMS_ROOM_ID").unwrap_or_default())
             .map_err(domain)?;
         excerpt
-            .check_task(&self.task, self.task.text("provider"), false)
+            .check_task(&self.state, &self.task, self.task.text("provider"), false)
             .map_err(domain)
     }
 

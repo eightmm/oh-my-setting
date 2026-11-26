@@ -1493,13 +1493,43 @@ fn desktop_lead_conversations() {
         .iter()
         .find(|s| s["name"] == prepare)
         .unwrap();
-    assert_eq!(schema["_meta"]["ui"]["visibility"], json!(["app", "model"]));
+    assert_eq!(schema["_meta"]["ui"]["visibility"], json!(["app"]));
     assert!(
         schema["inputSchema"]["required"]
             .as_array()
             .unwrap()
             .contains(&json!("excerpt"))
     );
+    assert!(
+        tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| {
+                t["_meta"]["ui"]["visibility"]
+                    .as_array()
+                    .is_some_and(|v| v.contains(&json!("model")))
+            })
+            .all(|t| {
+                t["name"] != prepare
+                    && t["inputSchema"]["properties"].get("excerpt").is_none()
+                    && t["inputSchema"]["properties"]
+                        .get("excerptSha256")
+                        .is_none()
+            }),
+        "no model-visible tool may accept or verify a guessed Lead excerpt"
+    );
+    for full in [false, true] {
+        let mut regular = Client::new(&source, &repo, full, false, false);
+        assert!(
+            !regular.call("tools/list", json!({}))["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == prepare)
+        );
+        assert_eq!(regular.tool(prepare, json!({}))["error"]["code"], -32602);
+    }
     let message = |seat: usize, n: usize| {
         json!({"room":"lead-room","projectKey":key,"provider":initial["leads"][seat]["provider"],
             "leadRequestId":initial["leads"][seat]["requestId"],"turnId":format!("10000000-0000-4000-8000-{n:012x}"),
@@ -1841,7 +1871,7 @@ fn desktop_lead_conversations() {
             let share = json!({"kind":"oms-selected-finding","authority":"context-only","source":{"kind":"lead-answer","projectKey":key,"room":m["room"],"provider":m["provider"],"participant":selected["handoff"]["participant"],"leadRequestId":m["leadRequestId"],"turnId":m["turnId"],"operation":selected["handoff"]["operation"],"digest":selected["digest"],"pageCursor":""},"selection":{"text":excerpt,"offset":0,"bytes":excerpt.len(),"totalBytes":selected["totalBytes"],"digest":selected["digest"],"excerptSha256":digest(excerpt),"truncated":true,"displayedBytes":selected["bytes"]}});
             let src = &share["source"];
             let selection = &share["selection"];
-            let mut prepare_args = json!({"room":src["room"],"projectKey":src["projectKey"],"provider":src["provider"],"leadRequestId":src["leadRequestId"],"turnId":src["turnId"],"answerPage":src["pageCursor"],"answerSha256":src["digest"],"offset":selection["offset"],"bytes":selection["bytes"],"excerpt":selection["text"],"excerptSha256":selection["excerptSha256"],"taskId":task["id"],"taskSha256":task["task_sha256"],"executionProvider":"claude"});
+            let prepare_args = json!({"room":src["room"],"projectKey":src["projectKey"],"provider":src["provider"],"leadRequestId":src["leadRequestId"],"turnId":src["turnId"],"answerPage":src["pageCursor"],"answerSha256":src["digest"],"offset":selection["offset"],"bytes":selection["bytes"],"excerpt":selection["text"],"excerptSha256":selection["excerptSha256"],"taskId":task["id"],"taskSha256":task["task_sha256"],"executionProvider":"claude"});
             let result = call(&mut c, prepare, &prepare_args, owner);
             good(&result);
             let result = payload(&result);
@@ -1884,19 +1914,23 @@ fn desktop_lead_conversations() {
                 4,
                 "preparing context never dispatches or creates a transcript store"
             );
-            for (field, value) in [
-                ("excerpt", Value::Null),
-                ("excerpt", json!("different caller text")),
-                ("excerpt", json!(" ")),
-                ("offset", json!(1)),
-                ("bytes", json!(4097)),
-                ("offset", json!(8192)),
-                ("projectKey", json!("b".repeat(64))),
-                ("room", json!("another-room")),
-                ("taskSha256", json!("b".repeat(64))),
-                ("executionProvider", json!("antigravity")),
-                ("answerSha256", json!("b".repeat(64))),
-                ("excerptSha256", json!("b".repeat(64))),
+            let fixed_mismatch =
+                "The reviewed Lead excerpt or Plan task changed. Review them again.";
+            for (field, value, expect_fixed) in [
+                ("excerpt", Value::Null, true),
+                ("excerpt", json!("different caller text"), true),
+                ("excerpt", json!(" "), true),
+                ("offset", json!(1), true),
+                ("offset", json!(2), true),
+                ("offset", json!("긴문장".len() + 1), true),
+                ("bytes", json!(4097), true),
+                ("offset", json!(8192), true),
+                ("projectKey", json!("b".repeat(64)), false),
+                ("room", json!("another-room"), false),
+                ("taskSha256", json!("b".repeat(64)), true),
+                ("executionProvider", json!("antigravity"), true),
+                ("answerSha256", json!("b".repeat(64)), true),
+                ("excerptSha256", json!("b".repeat(64)), true),
             ] {
                 let mut bad_args = prepare_args.clone();
                 bad_args[field] = value;
@@ -1906,7 +1940,41 @@ fn desktop_lead_conversations() {
                     !refused.to_string().contains("긴문장"),
                     "errors must not disclose actual source text"
                 );
+                if expect_fixed {
+                    assert_eq!(
+                        refused["result"]["content"][0]["text"], fixed_mismatch,
+                        "mismatch on {field} must return the fixed error without leaking boundaries"
+                    );
+                }
             }
+            for count in 2..=16 {
+                let chunk = "긴문장🙂".repeat(count);
+                let mut more = prepare_args.clone();
+                more["bytes"] = json!(chunk.len());
+                more["excerpt"] = json!(chunk);
+                more["excerptSha256"] = json!(digest(&chunk));
+                good(&call(&mut c, prepare, &more, owner));
+            }
+            assert_eq!(
+                payload(&call(&mut c, prepare, &prepare_args, owner)),
+                result,
+                "existing pack with same digest is reused even at the per-operation cap"
+            );
+            let overflow = "긴문장🙂".repeat(17);
+            let mut over_args = prepare_args.clone();
+            over_args["bytes"] = json!(overflow.len());
+            over_args["excerpt"] = json!(overflow);
+            over_args["excerptSha256"] = json!(digest(&overflow));
+            bad(
+                &call(&mut c, prepare, &over_args, owner),
+                "maximum 16 prepared context packs",
+            );
+            let pack_files = std::fs::read_dir(&child)
+                .unwrap()
+                .filter_map(|e| e.ok().and_then(|d| d.file_name().into_string().ok()))
+                .filter(|name| name.starts_with("lead-plan-context-") && name.ends_with(".json"))
+                .count();
+            assert_eq!(pack_files, 16);
             let mut changed_task = task.clone();
             changed_task["state"] = json!("claimed");
             fixture_settings(
@@ -1918,13 +1986,14 @@ fn desktop_lead_conversations() {
             std::fs::write(&artifact, "## Output\nchanged source\n## Exit\n0\n").unwrap();
             let refused = call(&mut c, prepare, &prepare_args, owner);
             assert_eq!(refused["result"]["isError"], true);
+            assert_eq!(refused["result"]["content"][0]["text"], fixed_mismatch);
             assert!(!refused.to_string().contains("changed source"));
             std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
-            prepare_args["bytes"] = json!(0);
-            assert_eq!(
-                call(&mut c, prepare, &prepare_args, owner)["result"]["isError"],
-                true
-            );
+            let mut bad_zero = prepare_args.clone();
+            bad_zero["bytes"] = json!(0);
+            let refused_zero = call(&mut c, prepare, &bad_zero, owner);
+            assert_eq!(refused_zero["result"]["isError"], true);
+            assert_eq!(refused_zero["result"]["content"][0]["text"], fixed_mismatch);
             setup(false);
             full["answerPage"] = first_cursor;
             let mut wrong = full.clone();
