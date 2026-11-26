@@ -100,6 +100,117 @@ fn artifact_rows(ctx: &Context<'_>) -> Result<(Vec<Value>, BTreeSet<String>, usi
         .collect();
     Ok((rows, resolved, bad))
 }
+pub(super) struct DashboardArtifacts {
+    operations: Value,
+    reviews: Value,
+}
+
+fn dashboard_artifacts(
+    rows: &[Value],
+    outcomes_total: usize,
+    bad: usize,
+) -> Result<DashboardArtifacts> {
+    let mut reviews = object([
+        ("outcomes", number(0)),
+        ("passed", number(0)),
+        ("failed", number(0)),
+        ("unknown", number(0)),
+        ("seat_answers", number(0)),
+    ]);
+    for row in rows {
+        let key = if row.text("kind") == "review" {
+            "seat_answers"
+        } else if row.text("kind") == "review-outcome" {
+            "outcomes"
+        } else {
+            continue;
+        };
+        reviews.set(key, number(reviews.get(key).int()? + 1))?;
+        if key == "outcomes" {
+            let key = match row.get("exit").int() {
+                Ok(0) => "passed",
+                Ok(n) if n > 0 => "failed",
+                _ => "unknown",
+            };
+            reviews.set(key, number(reviews.get(key).int()? + 1))?;
+        }
+    }
+    let operations = object([
+        ("available", Value::Bool(bad == 0)),
+        (
+            "recent",
+            Value::Array(
+                rows.iter()
+                    .rev()
+                    .filter(|r| r.text("kind") != "artifact-resolution")
+                    .take(8)
+                    .cloned()
+                    .collect(),
+            ),
+        ),
+        ("omitted", number(outcomes_total.saturating_sub(8))),
+    ]);
+    Ok(DashboardArtifacts {
+        operations,
+        reviews,
+    })
+}
+
+fn project_artifacts(
+    ctx: &Context<'_>,
+    state: &mut Value,
+    include_dashboard: bool,
+) -> Result<Option<DashboardArtifacts>> {
+    let (rows, resolved, bad) = artifact_rows(ctx)?;
+    let outcomes = rows
+        .iter()
+        .filter(|r| r.text("kind") != "artifact-resolution");
+    let status = |row: &Value| {
+        if row.get("exit").is_int(0) {
+            "success"
+        } else if resolved.contains(row.text("event_id")) {
+            "resolved"
+        } else {
+            "unresolved"
+        }
+    };
+    let mut counts = object([
+        ("success", number(0)),
+        ("resolved", number(0)),
+        ("unresolved", number(0)),
+    ]);
+    let mut outcomes_total = 0usize;
+    for row in outcomes.clone() {
+        let key = status(row);
+        counts.set(key, number(counts.get(key).int()? + 1))?;
+        outcomes_total += 1;
+    }
+    let latest = outcomes
+        .rev()
+        .take(5)
+        .map(|row| {
+            let mut projected = row.clone();
+            projected.set("status", string(status(row)))?;
+            Ok(projected)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    state.set(
+        "artifacts",
+        object([
+            ("healthy", Value::Bool(bad == 0)),
+            ("invalid_rows", number(bad)),
+            ("total", number(rows.len())),
+            ("outcomes_total", number(outcomes_total)),
+            ("resolution_events", number(resolved.len())),
+            ("counts", counts),
+            ("latest", Value::Array(latest)),
+        ]),
+    )?;
+    include_dashboard
+        .then(|| dashboard_artifacts(&rows, outcomes_total, bad))
+        .transpose()
+}
+
 const STATE_ACTIONABLE_MAX: usize = 5;
 
 fn format_actionable(ids: &[&str]) -> String {
@@ -279,7 +390,12 @@ fn conversation_task_titles(state: &Value, raw: &[u8], plan: &Value) -> Option<V
         .then_some(titles)
 }
 
-pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Value) -> Result<()> {
+pub(super) fn enrich(
+    ctx: &Context<'_>,
+    host: &dyn HostServices,
+    state: &mut Value,
+    include_dashboard: bool,
+) -> Result<Option<DashboardArtifacts>> {
     let task_text = storage::read(
         &ctx.repo,
         Path::new(".oms/task/current.md"),
@@ -413,44 +529,7 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
     ]);
     state.set("board", board.clone())?;
     state.set("experiments", board)?;
-    let (arts, resolved, bad) = artifact_rows(ctx)?;
-    let mut counts = object([
-        ("success", number(0)),
-        ("resolved", number(0)),
-        ("unresolved", number(0)),
-    ]);
-    let mut outcomes = Vec::new();
-    for mut row in arts
-        .iter()
-        .filter(|r| r.text("kind") != "artifact-resolution")
-        .cloned()
-    {
-        let status = if row.get("exit").is_int(0) {
-            "success"
-        } else if resolved.contains(row.text("event_id")) {
-            "resolved"
-        } else {
-            "unresolved"
-        };
-        counts.set(status, number(counts.get(status).int()? + 1))?;
-        row.set("status", string(status))?;
-        outcomes.push(row);
-    }
-    state.set(
-        "artifacts",
-        object([
-            ("healthy", Value::Bool(bad == 0)),
-            ("invalid_rows", number(bad)),
-            ("total", number(arts.len())),
-            ("outcomes_total", number(outcomes.len())),
-            ("resolution_events", number(resolved.len())),
-            ("counts", counts),
-            (
-                "latest",
-                Value::Array(outcomes.into_iter().rev().take(5).collect()),
-            ),
-        ]),
-    )?;
+    let dashboard_artifacts = project_artifacts(ctx, state, include_dashboard)?;
     let mut command = vec![
         "git",
         "--no-optional-locks",
@@ -807,7 +886,7 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
             ("auto_update_detail", string("")),
         ]),
     )?;
-    Ok(())
+    Ok(dashboard_artifacts)
 }
 pub(super) fn extra_attention(state: &Value, repo: &Path, items: &mut Vec<Value>) -> Result<()> {
     let anchor = quote(&repo.to_string_lossy());
@@ -1289,7 +1368,11 @@ pub(super) fn render(report: &Value, tool: &str) -> Result<String> {
     state_text(report)
 }
 
-pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
+pub(super) fn dashboard(
+    ctx: &Context<'_>,
+    state: &Value,
+    artifacts: DashboardArtifacts,
+) -> Result<Value> {
     let ok = [
         "task",
         "plan",
@@ -1355,44 +1438,10 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
         "note",
         string("a done attempt ended its work; acceptance is judged by evidence"),
     )?;
-    let (artifacts, _, bad) = artifact_rows(ctx)?;
-    let outcomes = artifacts
-        .into_iter()
-        .filter(|r| r.text("kind") != "artifact-resolution")
-        .collect::<Vec<_>>();
-    let mut reviews = object([
-        ("outcomes", number(0)),
-        ("passed", number(0)),
-        ("failed", number(0)),
-        ("unknown", number(0)),
-        ("seat_answers", number(0)),
-    ]);
-    for row in &outcomes {
-        let key = if row.text("kind") == "review" {
-            "seat_answers"
-        } else if row.text("kind") == "review-outcome" {
-            "outcomes"
-        } else {
-            continue;
-        };
-        reviews.set(key, number(reviews.get(key).int()? + 1))?;
-        if key == "outcomes" {
-            let key = match row.get("exit").int() {
-                Ok(0) => "passed",
-                Ok(n) if n > 0 => "failed",
-                _ => "unknown",
-            };
-            reviews.set(key, number(reviews.get(key).int()? + 1))?;
-        }
-    }
-    let operations = object([
-        ("available", Value::Bool(bad == 0)),
-        (
-            "recent",
-            Value::Array(outcomes.iter().rev().take(8).cloned().collect()),
-        ),
-        ("omitted", number(outcomes.len().saturating_sub(8))),
-    ]);
+    let DashboardArtifacts {
+        operations,
+        reviews,
+    } = artifacts;
     let criteria = runtime.get("criteria").array().unwrap_or(&[]);
     let acceptance = object([
         ("available", runtime.get("healthy").clone()),
@@ -1474,7 +1523,7 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
                         ),
                         (
                             "artifacts",
-                            string(if bad == 0 {
+                            string(if operations.get("available").truth() {
                                 "ok"
                             } else {
                                 "invalid artifact contract"
