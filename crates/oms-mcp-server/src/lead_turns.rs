@@ -8,6 +8,9 @@ use crate::{RUN_ROOT, Server};
 use rustix::fs::{self, AtFlags, FileType};
 use std::path::Path;
 
+#[path = "lead_settings.rs"]
+mod settings;
+
 const INVALID: &str = "The Lead conversation receipt is unavailable or changed.";
 const HEAD: &str = "lead-turn-head.json";
 const PAGE: usize = 4;
@@ -136,7 +139,21 @@ impl<'a> Conversation<'a> {
             })
             .transpose()
     }
-    fn binding(&self, id: &str, digest: &str) -> String {
+    fn binding(&self, id: &str, digest: &str, route: &Value) -> String {
+        if !route["model"].is_null() {
+            return hash(
+                json!([
+                    "lead-message-route-v1",
+                    self.scope,
+                    self.lead["request"],
+                    id,
+                    digest,
+                    route["model"],
+                    route["effort"]
+                ])
+                .to_string(),
+            );
+        }
         hash(
             json!([
                 "lead-message-v1",
@@ -160,7 +177,9 @@ impl<'a> Conversation<'a> {
         if v["id"] != id
             || v["scope"] != self.scope
             || v["digest"] != digest
-            || v["binding"] != self.binding(id, &digest)
+            || v.get("route")
+                .is_some_and(|r| settings::selection(self.provider, r).is_err())
+            || v["binding"] != self.binding(id, &digest, &v["route"])
             || !v["at"].is_string()
             || !(v["previous"].is_null()
                 || v["previous"]
@@ -202,7 +221,7 @@ impl<'a> Conversation<'a> {
             self.thread,
             binding,
             true,
-            record["digest"].as_str(),
+            Some((record["digest"].as_str().ok_or(INVALID)?, &record["route"])),
         )?
         else {
             let absent = self.absent(&op)?;
@@ -282,9 +301,14 @@ impl<'a> Conversation<'a> {
             }
         }
         let digest = hash(text);
-        let binding = self.binding(id, &digest);
+        let route = self.current_settings()?["selection"].clone();
+        let settings = settings::selection(self.provider, &route)?;
+        if settings.is_some() {
+            self.check_selection(server, &route)?;
+        }
+        let binding = self.binding(id, &digest, &route);
         let op = assignment_address(self.lead, &binding).ok_or(INVALID)?;
-        let record = json!({"id":id,"scope":self.scope,"binding":binding,"digest":digest,"text":text,"previous":previous,"at":crate::storage::now()});
+        let record = json!({"id":id,"route":route,"scope":self.scope,"binding":binding,"digest":digest,"text":text,"previous":previous,"at":crate::storage::now()});
         self.bound()?;
         self.dir
             .publish_new(
@@ -308,8 +332,15 @@ impl<'a> Conversation<'a> {
         // Once reserved, an uncertain return can only be observed. Reusing this
         // UUID must never dispatch again, including across a crash/response loss.
         let initially_absent = self.absent(&op)?;
-        let launch =
-            server.start_lead_followup(self.repo, self.provider, text, &op, self.thread, &binding);
+        let launch = server.start_lead_followup(
+            self.repo,
+            self.provider,
+            text,
+            &op,
+            self.thread,
+            &binding,
+            settings,
+        );
         // A physical launch requires mkdir of this operation before spawn; that
         // helper never removes it. Only the original writer may attest a synchronous
         // refusal before that boundary. Absence on any later read is inconclusive.
