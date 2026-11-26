@@ -262,15 +262,23 @@ fn references(
     caller_cwd: &Path,
     owned_answers: Option<&Path>,
 ) -> (Vec<String>, String) {
+    let (paths, thread, _) = scan_log(dir, caller_cwd, owned_answers);
+    (paths, thread)
+}
+fn scan_log(
+    dir: &Path,
+    caller_cwd: &Path,
+    owned_answers: Option<&Path>,
+) -> (Vec<String>, String, bool) {
     // Scan the entire log but bound each retained line; history is not tail-capped.
-    let result = (|| -> io::Result<(Vec<String>, String)> {
+    let result = (|| -> io::Result<(Vec<String>, String, bool)> {
         let repo = dir
             .ancestors()
             .nth(4)
             .ok_or_else(|| io::Error::other("operation root"))?;
         let opened = Directory::run(repo, dir.file_name().unwrap().to_str().unwrap(), false)
             .map_err(io::Error::other)?;
-        let fd = rustix::fs::openat(
+        let fd = match rustix::fs::openat(
             &opened.fd,
             "run.log",
             rustix::fs::OFlags::RDONLY
@@ -278,7 +286,11 @@ fn references(
                 | rustix::fs::OFlags::NONBLOCK
                 | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::empty(),
-        )?;
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => return Ok((Vec::new(), String::new(), false)),
+            Err(e) => return Err(e.into()),
+        };
         let info = rustix::fs::fstat(&fd)?;
         if rustix::fs::FileType::from_raw_mode(info.st_mode) != rustix::fs::FileType::RegularFile {
             return Err(io::Error::other("unsafe log"));
@@ -286,13 +298,23 @@ fn references(
         let mut reader = BufReader::new(File::from(fd).take(info.st_size.max(0) as u64));
         let mut paths = Vec::new();
         let mut thread = String::new();
+        let mut aborted = false;
         let mut line = Vec::new();
         let mut over = false;
+        let mut inspect = |raw: &[u8]| {
+            let text = String::from_utf8_lossy(raw);
+            if text.contains("error: native peer owner:")
+                || text.contains("cancellation handled but ")
+            {
+                aborted = true;
+            }
+            reference_line(raw, &mut paths, &mut thread, caller_cwd, owned_answers);
+        };
         loop {
             let buf = reader.fill_buf()?;
             if buf.is_empty() {
                 if !line.is_empty() && !over {
-                    reference_line(&line, &mut paths, &mut thread, caller_cwd, owned_answers);
+                    inspect(&line);
                 }
                 break;
             }
@@ -310,15 +332,15 @@ fn references(
             reader.consume(n);
             if ended {
                 if !over {
-                    reference_line(&line, &mut paths, &mut thread, caller_cwd, owned_answers);
+                    inspect(&line);
                 }
                 line.clear();
                 over = false;
             }
         }
-        Ok((paths, thread))
+        Ok((paths, thread, aborted))
     })();
-    result.unwrap_or_default()
+    result.unwrap_or_else(|_| (Vec::new(), String::new(), true))
 }
 fn reference_line(
     line: &[u8],
@@ -903,7 +925,7 @@ impl Server<'_> {
             let (kind, started) = storage::started(name);
             let (status, code) = status(&dir);
             let mut row = json!({"operation":name,"kind":if truthy(&meta["kind"]) {meta["kind"].clone()} else {json!(kind)},"status":status,"started_at":if truthy(&meta["started_at"]) {meta["started_at"].clone()} else {json!(started)}});
-            cancellation(&dir, status, &mut row);
+            self.cancellation(&dir, &meta, status, &mut row);
             if let Some(n) = age(&dir) {
                 row["age_seconds"] = json!(n);
             }
@@ -1048,7 +1070,7 @@ impl Server<'_> {
         if let Some((_, _, _, view)) = captured {
             apply_cancellation(view, state, &mut payload);
         } else {
-            cancellation(&dir, state, &mut payload);
+            self.cancellation(&dir, &meta, state, &mut payload);
         }
         if let Some(n) = age(&dir).filter(|_| {
             std::fs::symlink_metadata(dir.join("prompt.txt")).is_ok_and(|m| m.file_type().is_file())
@@ -1198,7 +1220,7 @@ impl Server<'_> {
         let updated = crate::value::Text::from(updated_stamp(dir, created.as_str().unwrap_or("")));
         let mut value = json!({"resultType":"complete","taskId":id,"createdAt":created,"lastUpdatedAt":updated,"ttlMs":null,"pollIntervalMs":5000});
         let (state, code) = status(dir);
-        let cancel = cancellation_view(dir, state);
+        let cancel = self.cancellation_view(dir, &meta, state);
         value["cancellation"] = cancel.to_json();
         if state == "done" && cancel.observed {
             value["status"] = json!("cancelled");
@@ -1243,10 +1265,15 @@ impl Server<'_> {
                     "Peer consultation completed with exit {} before cancellation took effect.",
                     code.unwrap_or(1)
                 ),
-                "unknown" => {
-                    "Cancellation was requested, but the peer ended without a durable exit or observation."
-                        .into()
-                }
+                "unknown" => match cancel.durable_exit {
+                    Some(exit) => format!(
+                        "Cancellation was requested, but the peer ended with exit {exit} without a cancellation observation."
+                    ),
+                    None => {
+                        "Cancellation was requested, but the peer ended without a durable exit or observation."
+                            .into()
+                    }
+                },
                 _ => format!(
                     "Peer consultation completed with exit {}.",
                     code.unwrap_or(1)
@@ -1280,11 +1307,86 @@ impl Server<'_> {
             .map_err(|e| (-32603, format!("could not record cancellation: {e}")))?;
         Ok(json!({"resultType":"complete"}))
     }
+    fn completed_own_work(&self, dir: &Path, meta: &Value, exit: i64) -> bool {
+        if !(0..124).contains(&exit) {
+            return false;
+        }
+        let owned = meta["answer_storage"] == "operation";
+        let answers = owned.then(|| dir.join("answers"));
+        let (artifacts, _, aborted) = scan_log(dir, &self.caller_cwd, answers.as_deref());
+        if aborted {
+            return false;
+        }
+        if artifacts.is_empty() {
+            return exit == 0;
+        }
+        let repo = dir.ancestors().nth(4);
+        let op = dir.file_name().and_then(|s| s.to_str());
+        artifacts.iter().all(|path| {
+            let name = Path::new(path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let bytes = if owned {
+                if Path::new(path).parent() != Some(dir.join("answers").as_path())
+                    || !crate::answer_name(name)
+                {
+                    return false;
+                }
+                let (Some(repo), Some(op)) = (repo, op) else {
+                    return false;
+                };
+                storage::read(repo, &format!("{RUN_ROOT}/{op}/answers/{name}"), MAX_ANSWER).ok()
+            } else {
+                self.caller_cwd
+                    .join(path)
+                    .parent()
+                    .and_then(|p| storage::read(p, name, MAX_ANSWER).ok())
+            };
+            bytes
+                .as_deref()
+                .and_then(completed_artifact_exit)
+                .is_some_and(|code| (0..124).contains(&code))
+        })
+    }
+    fn cancellation_view(&self, dir: &Path, meta: &Value, state: &str) -> CancellationView {
+        let requested_at = storage::cancel_request(dir);
+        let requested = requested_at.is_some();
+        let observed = storage::valid_receipt(dir, "cancel-observed");
+        let durable_exit = (!observed && requested && state == "done")
+            .then(|| durable_status_exit(dir))
+            .flatten();
+        let cancel_state = if observed {
+            "confirmed"
+        } else if !requested {
+            "none"
+        } else if state == "running" {
+            "requested"
+        } else if state == "done"
+            && durable_exit.is_some_and(|exit| self.completed_own_work(dir, meta, exit))
+        {
+            "completed_first"
+        } else {
+            "unknown"
+        };
+        CancellationView {
+            requested,
+            observed,
+            requested_at,
+            durable_exit,
+            state: cancel_state,
+        }
+    }
+    fn cancellation(&self, dir: &Path, meta: &Value, state: &str, payload: &mut Value) {
+        let view = self.cancellation_view(dir, meta, state);
+        apply_cancellation(&view, state, payload);
+    }
 }
 struct CancellationView {
     requested: bool,
     observed: bool,
     requested_at: Option<String>,
+    durable_exit: Option<i64>,
     state: &'static str,
 }
 impl CancellationView {
@@ -1295,7 +1397,7 @@ impl CancellationView {
         })
     }
 }
-fn durable_own_exit(dir: &Path) -> bool {
+fn durable_status_exit(dir: &Path) -> Option<i64> {
     storage::read_run(dir, "status", 4096)
         .ok()
         .and_then(|bytes| {
@@ -1305,30 +1407,37 @@ fn durable_own_exit(dir: &Path) -> bool {
                 .parse::<i64>()
                 .ok()
         })
-        .is_some_and(|code| code >= 0 && code != 124)
 }
-fn cancellation_view(dir: &Path, state: &str) -> CancellationView {
-    let request = storage::cancel_request(dir);
-    let requested = request.is_some();
-    let requested_at = request.flatten();
-    let observed = storage::valid_receipt(dir, "cancel-observed");
-    let cancel_state = if observed {
-        "confirmed"
-    } else if !requested {
-        "none"
-    } else if state == "running" {
-        "requested"
-    } else if state == "done" && durable_own_exit(dir) {
-        "completed_first"
-    } else {
-        "unknown"
-    };
-    CancellationView {
-        requested,
-        observed,
-        requested_at,
-        state: cancel_state,
+fn completed_artifact_exit(data: &[u8]) -> Option<i64> {
+    let mut output_open = false;
+    let mut completed = false;
+    let mut exit_seen = false;
+    let mut code = String::new();
+    for raw in data.split_inclusive(|b| *b == b'\n') {
+        let end = raw
+            .iter()
+            .rposition(|b| !matches!(*b, b'\r' | b'\n'))
+            .map_or(0, |i| i + 1);
+        let line = &raw[..end];
+        if line == b"## Output" {
+            output_open = true;
+            completed = false;
+            exit_seen = false;
+            code.clear();
+        } else if line == b"## Exit" {
+            completed = output_open;
+            exit_seen = output_open;
+            code.clear();
+        } else if exit_seen && code.is_empty() {
+            let trimmed = String::from_utf8_lossy(line)
+                .trim_matches(crate::whitespace)
+                .to_owned();
+            if !trimmed.is_empty() {
+                code = trimmed;
+            }
+        }
     }
+    completed.then(|| code.parse::<i64>().ok()).flatten()
 }
 fn apply_cancellation(view: &CancellationView, state: &str, payload: &mut Value) {
     if view.requested {
@@ -1338,10 +1447,6 @@ fn apply_cancellation(view: &CancellationView, state: &str, payload: &mut Value)
         payload["termination_reason"] = json!("cancelled");
     }
     payload["cancellation"] = view.to_json();
-}
-fn cancellation(dir: &Path, state: &str, payload: &mut Value) {
-    let view = cancellation_view(dir, state);
-    apply_cancellation(&view, state, payload);
 }
 fn truthy(v: &Value) -> bool {
     match v {

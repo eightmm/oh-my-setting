@@ -133,6 +133,11 @@ pub(crate) fn meta(dir: &Path) -> Value {
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}))
 }
+fn rfc3339_utc(s: &str) -> bool {
+    (s.ends_with('Z') || s.ends_with("+00:00"))
+        && s.as_bytes().get(10) == Some(&b'T')
+        && DateTime::parse_from_rfc3339(s).is_ok_and(|dt| dt.offset().local_minus_utc() == 0)
+}
 pub(crate) fn receipt(dir: &Path, name: &str) -> Option<Value> {
     read_run(dir, &format!("{name}.json"), 4096)
         .ok()
@@ -142,16 +147,19 @@ pub(crate) fn receipt(dir: &Path, name: &str) -> Option<Value> {
                 && v["schema"] == 1
                 && v["task_id"].as_str() == dir.file_name().and_then(|s| s.to_str())
                 && v["kind"] == format!("mcp-task-{name}")
+                && (name != "cancel-request"
+                    || v.get("requested_at")
+                        .and_then(Value::as_str)
+                        .is_some_and(rfc3339_utc))
         })
 }
 pub(crate) fn valid_receipt(dir: &Path, name: &str) -> bool {
     receipt(dir, name).is_some()
 }
-pub(crate) fn cancel_request(dir: &Path) -> Option<Option<String>> {
-    receipt(dir, "cancel-request").map(|v| {
+pub(crate) fn cancel_request(dir: &Path) -> Option<String> {
+    receipt(dir, "cancel-request").and_then(|v| {
         v.get("requested_at")
             .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
             .map(str::to_owned)
     })
 }
@@ -336,6 +344,7 @@ impl Directory {
     }
     pub fn record_cancel_request(&self, data: &[u8]) -> Result<(), String> {
         if cancel_request(&self.path).is_some() {
+            fs::fsync(&self.fd).map_err(err)?;
             return Ok(());
         }
         static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -360,15 +369,28 @@ impl Directory {
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let first = fs::linkat(&self.fd, temp.as_str(), &self.fd, name, AtFlags::empty());
             match first {
-                Ok(()) => (),
+                Ok(()) => {
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    let _ = fs::unlinkat(&self.fd, temp.as_str(), AtFlags::empty());
+                    fs::fsync(&self.fd).map_err(err)?;
+                }
                 Err(e) if e == rustix::io::Errno::EXIST => {
                     if cancel_request(&self.path).is_none() {
-                        fs::renameat(&self.fd, temp.as_str(), &self.fd, name).map_err(err)?;
+                        let _guard = self
+                            .lock_named("cancel-request.lock", fs::FlockOperation::LockExclusive)?;
+                        if cancel_request(&self.path).is_none() {
+                            fs::renameat(&self.fd, temp.as_str(), &self.fd, name).map_err(err)?;
+                        } else {
+                            let _ = fs::unlinkat(&self.fd, temp.as_str(), AtFlags::empty());
+                        }
+                        fs::fsync(&self.fd).map_err(err)?;
+                    } else {
+                        let _ = fs::unlinkat(&self.fd, temp.as_str(), AtFlags::empty());
+                        fs::fsync(&self.fd).map_err(err)?;
                     }
                 }
                 Err(e) => return Err(err(e)),
             }
-            fs::fsync(&self.fd).map_err(err)?;
             Ok(())
         })();
         let _ = fs::unlinkat(&self.fd, temp.as_str(), AtFlags::empty());
@@ -404,9 +426,12 @@ impl Directory {
         result
     }
     pub fn lock(&self) -> Result<OwnedFd, String> {
+        self.lock_named("owner.lock", fs::FlockOperation::NonBlockingLockExclusive)
+    }
+    fn lock_named(&self, name: &str, mode: fs::FlockOperation) -> Result<OwnedFd, String> {
         let fd = fs::openat(
             &self.fd,
-            "owner.lock",
+            name,
             OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )
@@ -419,8 +444,13 @@ impl Directory {
         {
             return Err("error: unsafe operation lock".into());
         }
-        fs::flock(&fd, fs::FlockOperation::NonBlockingLockExclusive).map_err(err)?;
-        Ok(fd)
+        loop {
+            match fs::flock(&fd, mode) {
+                Ok(()) => return Ok(fd),
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(e) => return Err(err(e)),
+            }
+        }
     }
 }
 
@@ -461,5 +491,124 @@ mod tests {
         assert_eq!(bounded("exact", 5), "exact");
         assert!(!crate::answer_name("a\u{301}.md"));
         assert!(crate::answer_name("근거.md"));
+    }
+
+    #[test]
+    fn cancel_request_validation_fsync_and_first_wins_replacement() {
+        use std::os::unix::fs::DirBuilderExt;
+        use std::sync::{Arc, Barrier};
+
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("oms-storage-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+
+        let op = "consult-20261126T000000Z-aabbccdd";
+        let dir = Directory::open(&root, &format!("{RUN_ROOT}/{op}"), true, true).unwrap();
+        dir.atomic("meta.json", b"{}\n").unwrap();
+
+        for valid in [
+            "2020-01-01T00:00:05Z",
+            "2020-01-01T00:00:05.123456Z",
+            "2020-01-01T00:00:05+00:00",
+        ] {
+            let body = format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"{valid}\"}}\n"
+            );
+            std::fs::write(dir.path.join("cancel-request.json"), &body).unwrap();
+            assert_eq!(cancel_request(&dir.path).as_deref(), Some(valid));
+            assert!(valid_receipt(&dir.path, "cancel-request"));
+            dir.record_cancel_request(
+                format!(
+                    "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"2020-01-01T00:00:59Z\"}}\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path.join("cancel-request.json")).unwrap(),
+                body
+            );
+        }
+
+        for invalid in [
+            "not json".to_owned(),
+            format!("{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\"}}"),
+            format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":null}}"
+            ),
+            format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":123}}"
+            ),
+            format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"\"}}"
+            ),
+            format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"not-a-timestamp\"}}"
+            ),
+            format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"2020-01-01 00:00:05Z\"}}"
+            ),
+            format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"2020-01-01T09:00:05+09:00\"}}"
+            ),
+            format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"2020-01-01T00:00:05-00:00\"}}"
+            ),
+            "{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"foreign\",\"requested_at\":\"2020-01-01T00:00:05Z\"}".to_owned(),
+        ] {
+            std::fs::write(dir.path.join("cancel-request.json"), &invalid).unwrap();
+            assert_eq!(cancel_request(&dir.path), None, "{invalid}");
+            assert!(!valid_receipt(&dir.path, "cancel-request"), "{invalid}");
+
+            let barrier = Arc::new(Barrier::new(8));
+            let mut handles = Vec::new();
+            for idx in 0..8 {
+                let repo = root.clone();
+                let gate = Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    let handle = Directory::run(&repo, op, true).unwrap();
+                    let row = format!(
+                        "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"2020-01-01T00:00:0{idx}Z\"}}\n"
+                    );
+                    gate.wait();
+                    handle.record_cancel_request(row.as_bytes()).unwrap();
+                    std::fs::read(handle.path.join("cancel-request.json")).unwrap()
+                }));
+            }
+            let observed: Vec<Vec<u8>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let winner = &observed[0];
+            for seen in &observed[1..] {
+                assert_eq!(
+                    seen, winner,
+                    "concurrent invalid replacement must be first-wins"
+                );
+            }
+            assert_eq!(
+                &std::fs::read(dir.path.join("cancel-request.json")).unwrap(),
+                winner
+            );
+            assert!(cancel_request(&dir.path).is_some());
+            assert_eq!(
+                std::fs::read_dir(&dir.path)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
+                    .count(),
+                0
+            );
+        }
     }
 }
