@@ -5200,8 +5200,11 @@ fn landing_cleanup_removes_only_dead_owned_clean_residue() {
     let symlink_digest = residue(&managed_root, "scratch", "symdigest", &dead_s, &l.repo);
     let sym_digests = symlink_digest.join("wt-symdigest").join(capture_dir);
     std::fs::create_dir_all(&sym_digests).unwrap();
+    let sym_target = l.f.0.join("old-digest-target.log");
+    std::fs::write(&sym_target, b"ok\n").unwrap();
+    set_mtime(&sym_target, old_mtime);
     let sym_entry = sym_digests.join("20261124T000000Z-300000000000000000000.log");
-    symlink(l.repo.join("a.txt"), &sym_entry).unwrap();
+    symlink(&sym_target, &sym_entry).unwrap();
     set_mtime(&sym_entry, old_mtime);
     set_mtime(&sym_digests, old_mtime);
     let unmerged_digest = residue(

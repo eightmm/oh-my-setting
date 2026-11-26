@@ -1422,7 +1422,7 @@ fn keep_reason(
         if std::fs::metadata(&index).is_ok_and(|m| m.len() > 0) {
             let idle = plain_dir(&oms.join("artifacts")).is_some()
                 && std::fs::symlink_metadata(&index)
-                    .is_ok_and(|m| !m.file_type().is_symlink() && !recently_modified(&m, now));
+                    .is_ok_and(|m| m.is_file() && !recently_modified(&m, now));
             if !idle || !*integrated.get_or_insert_with(|| head_integrated(worktree, interrupted)) {
                 return Some("holds .oms/artifacts/index.jsonl".into());
             }
