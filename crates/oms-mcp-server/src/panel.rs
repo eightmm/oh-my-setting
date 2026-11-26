@@ -15,7 +15,8 @@ use std::{
 #[path = "lead_turns.rs"]
 mod lead_turns;
 
-const URI: &str = "ui://oms/conversation-panel/v24.html";
+const URI: &str = "ui://oms/conversation-panel/v25.html";
+const V24: &str = "ui://oms/conversation-panel/v24.html";
 const V23: &str = "ui://oms/conversation-panel/v23.html";
 const V22: &str = "ui://oms/conversation-panel/v22.html";
 const V21: &str = "ui://oms/conversation-panel/v21.html";
@@ -45,6 +46,7 @@ const SNAPSHOT: &str = "oms_panel_snapshot";
 const WORK_ITEMS: &str = "oms_panel_work_items";
 const USAGE: &str = "oms_panel_usage";
 const CHAT: &str = "oms_panel_chat";
+const WORKER_OUTPUT: &str = "oms_worker_output";
 const GIT: &str = "oms_panel_git_status";
 const GRAPH: &str = "oms_panel_project_graph";
 const VIEW: &str = "oms_panel_tui_view";
@@ -207,6 +209,7 @@ pub(super) fn runtime_request(request: &Value) -> bool {
                     | WORK_ITEMS
                     | USAGE
                     | CHAT
+                    | WORKER_OUTPUT
                     | GIT
                     | GRAPH
                     | VIEW
@@ -273,6 +276,14 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         false,
     );
     chat["_meta"]["ui"]["visibility"] = json!(["app"]);
+    let mut worker_output = make(
+        WORKER_OUTPUT,
+        "Read the recorded output for an exact worker under its Lead in the current Main’s Room.",
+        json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"leadAttempt":ident,"workerAttempt":ident}),
+        &["projectKey", "room", "leadAttempt", "workerAttempt"],
+        false,
+    );
+    worker_output["_meta"]["ui"]["visibility"] = json!(["app"]);
     let mut issue_address = json!({"project":project,"room":ident,"owner":ident,"requestId":{"type":"string","format":"uuid"}});
     issue_address["issue"] = json!({"type":"string","maxLength":151,"description":"Canonical owner/repo#N from the reviewed same-project issue."});
     issue_address["sha256"] = json!({"type":"string","pattern":"^[0-9a-f]{64}$"});
@@ -324,6 +335,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     let all = json!([
         opener,
         chat,
+        worker_output,
         record_issue,
         issue_status,
         open_leads,
@@ -1155,6 +1167,7 @@ impl Server<'_> {
                             | V21
                             | V22
                             | V23
+                            | V24
                     )
                 ) =>
             {
@@ -1195,6 +1208,13 @@ impl Server<'_> {
                         "candidates",
                     ],
                     GRAPH => &["project", "node", "query", "limit", "depth", "includeTests"],
+                    WORKER_OUTPUT => &[
+                        "project",
+                        "projectKey",
+                        "room",
+                        "leadAttempt",
+                        "workerAttempt",
+                    ],
                     CHAT => &[
                         "project",
                         "room",
@@ -1283,6 +1303,17 @@ impl Server<'_> {
                             "OMS withheld this assignment during its outbound scan.".into(),
                         )),
                         Err(e) => response(Err(e)),
+                    }
+                } else if name == WORKER_OUTPUT {
+                    match result {
+                        Ok(data) => {
+                            let public = json!({"room":data["room"],"projectKey":data["projectKey"],
+                                "leadAttempt":data["leadAttempt"],"workerAttempt":data["workerAttempt"],"status":data["status"]});
+                            let mut result = response(Ok(public));
+                            result["_meta"]["workerOutput"] = data;
+                            result
+                        }
+                        Err(err) => response(Err(err)),
                     }
                 } else if name == CHAT {
                     match result {
@@ -1596,6 +1627,9 @@ impl Server<'_> {
             || std::env::var_os("OMS_ROOM_PARTICIPANT").is_some_and(|v| !v.is_empty())
         {
             return Err("This desktop control requires the parent app connection.".into());
+        }
+        if name == WORKER_OUTPUT {
+            return self.worker_output(&repo, args, meta);
         }
         if name == CAPABILITIES {
             return self.panel_capabilities(&repo, args);
@@ -2216,6 +2250,104 @@ impl Server<'_> {
         argv
     }
 
+    fn project_key(&self, repo: &Path, args: &Value) -> PanelResult<String> {
+        if self.panel_repo(args)? != repo {
+            return Err(BINDING.into());
+        }
+        let stat = fs::symlink_metadata(repo).map_err(|_| BINDING.to_owned())?;
+        if !stat.is_dir() {
+            return Err(BINDING.into());
+        }
+        let mut identity = b"oms-lead-project-v1\0".to_vec();
+        identity.extend_from_slice(repo.as_os_str().as_encoded_bytes());
+        identity.extend_from_slice(&stat.dev().to_be_bytes());
+        identity.extend_from_slice(&stat.ino().to_be_bytes());
+        Ok(crate::storage::hash(identity))
+    }
+
+    fn worker_output(&self, repo: &Path, args: &Value, meta: &Value) -> PanelResult<Value> {
+        let thread = meta["threadId"]
+            .as_str()
+            .filter(|v| uuid(v))
+            .ok_or("Open this reader from the Room owner's bound conversation.")?;
+        let id = |field: &str| {
+            args[field]
+                .as_str()
+                .filter(|s| crate::matches("[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}", s))
+                .ok_or("Invalid Room or attempt.")
+        };
+        let (room, lead, worker) = (id("room")?, id("leadAttempt")?, id("workerAttempt")?);
+        if lead == worker {
+            return Err("Select a worker under its Lead.".into());
+        }
+        crate::output::outbound(format!("{room}\n{lead}\n{worker}").as_bytes(), &Value::Null)
+            .map_err(|_| "OMS withheld this worker identity during its outbound scan.")?;
+        let key = self.project_key(repo, args)?;
+        if args["projectKey"] != key {
+            return Err("The selected project changed. Reopen the panel for that project.".into());
+        }
+        let digest = crate::storage::hash(thread);
+        let argv = vec![
+            "panel".into(),
+            "--repo".into(),
+            repo.as_os_str().into(),
+            "--desktop-worker-output".into(),
+            "--json".into(),
+            "--room".into(),
+            room.into(),
+            "--lead-attempt".into(),
+            lead.into(),
+            "--worker-attempt".into(),
+            worker.into(),
+            "--conversation-digest".into(),
+            digest[..32].into(),
+        ];
+        let (raw, _) = self.panel_output(repo, argv, false)?;
+        let err = "The recorded worker output could not be verified.";
+        oms_context::parse_json_bounded(raw.as_bytes(), 64 * 1024).map_err(|_| err)?;
+        let data: Value = crate::value::from_str(&raw).map_err(|_| err)?;
+        if self.project_key(repo, args)? != key {
+            return Err(BINDING.into());
+        }
+        if data["room"] != room
+            || data["leadAttempt"] != lead
+            || data["workerAttempt"] != worker
+            || !data["truncated"].is_boolean()
+        {
+            return Err(err.into());
+        }
+        match data["status"].as_str() {
+            Some("complete")
+                if matches!(
+                    data["source"].as_str(),
+                    Some("native-report" | "indexed-answer")
+                ) =>
+            {
+                let text = data["text"]
+                    .as_str()
+                    .filter(|v| {
+                        !v.trim().is_empty()
+                            && v.len() <= 16 * 1024
+                            && !v
+                                .chars()
+                                .any(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'))
+                    })
+                    .ok_or(err)?;
+                crate::output::outbound(text.as_bytes(), &Value::Null)
+                    .map_err(|_| "OMS withheld this worker output during its outbound scan.")?;
+            }
+            Some("running" | "not_recorded" | "unavailable")
+                if data.get("text").is_some_and(Value::is_null)
+                    && data.get("source").is_some_and(Value::is_null)
+                    && data["truncated"] == false => {}
+            _ => return Err(err.into()),
+        }
+        Ok(
+            json!({"projectKey":key,"room":room,"leadAttempt":lead,"workerAttempt":worker,"status":data["status"],
+                "source":data["source"],"text":data["text"],"truncated":data["truncated"]}),
+        )
+    }
+
     fn lead_conversations(
         &self,
         repo: &Path,
@@ -2241,20 +2373,7 @@ impl Server<'_> {
             .transpose()?;
         lead_turns::validate(name, args, selected)?;
         let digest = crate::storage::hash(thread);
-        let project_key = || -> PanelResult<String> {
-            if self.panel_repo(args)? != repo {
-                return Err(BINDING.into());
-            }
-            let stat = fs::symlink_metadata(repo).map_err(|_| BINDING.to_owned())?;
-            if !stat.is_dir() {
-                return Err(BINDING.into());
-            }
-            let mut identity = b"oms-lead-project-v1\0".to_vec();
-            identity.extend_from_slice(repo.as_os_str().as_encoded_bytes());
-            identity.extend_from_slice(&stat.dev().to_be_bytes());
-            identity.extend_from_slice(&stat.ino().to_be_bytes());
-            Ok(crate::storage::hash(identity))
-        };
+        let project_key = || self.project_key(repo, args);
         let key = project_key()?;
         if args
             .get("projectKey")

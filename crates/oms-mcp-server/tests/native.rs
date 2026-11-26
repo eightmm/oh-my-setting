@@ -325,7 +325,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v24.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v25.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -334,7 +334,7 @@ fn cross_host_project_reads() {
             html.as_bytes(),
             include_bytes!("../src/conversation-panel.html")
         );
-        let legacy_uri = "ui://oms/conversation-panel/v23.html";
+        let legacy_uri = "ui://oms/conversation-panel/v24.html";
         let legacy = c.call("resources/read", json!({"uri":legacy_uri}));
         let legacy = &legacy["result"]["contents"][0];
         assert_eq!(legacy["uri"], legacy_uri);
@@ -1057,6 +1057,98 @@ fn desktop_reviewed_issue() {
     bad(&c.read(), "OMS_PANEL_REPO");
 }
 
+fn worker_output_reader(c: &mut Client, source: &Path, key: &str, thread: &str) {
+    let name = "oms_worker_output";
+    let args = json!({"projectKey":key,"room":"lead-room","leadAttempt":"lead-fixture","workerAttempt":"worker-fixture"});
+    let request = |c: &mut Client, a: &Value| {
+        c.call(
+            "tools/call",
+            json!({"name":name,"arguments":a,"_meta":{"threadId":thread}}),
+        )
+    };
+    let tools = c.call("tools/list", json!({}));
+    let tool = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == name)
+        .unwrap();
+    assert_eq!(tool["_meta"]["ui"]["visibility"], json!(["app"]));
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
+    bad(&c.tool(name, args.clone()), "bound conversation");
+    for (field, value, want) in [
+        ("projectKey", "obsolete", "project"),
+        ("workerAttempt", "../other", "Invalid"),
+        ("leadAttempt", "worker-fixture", "under its Lead"),
+    ] {
+        let mut invalid = args.clone();
+        invalid[field] = value.into();
+        bad(&request(c, &invalid), want);
+    }
+    let mut extra = args.clone();
+    extra["path"] = "private-local-path".into();
+    assert_eq!(request(c, &extra)["error"]["code"], -32602);
+    let base = json!({"room":args["room"],"leadAttempt":args["leadAttempt"],"workerAttempt":args["workerAttempt"],"status":"complete",
+        "source":"native-report","text":"verification finished in private worker","truncated":false,
+        "untrusted":"fixture-source-hidden"});
+    let configure = |v: &Value| fixture_settings(source, json!({"stdout":v.to_string()}));
+    configure(&base);
+    let r = request(c, &args);
+    good(&r);
+    let meta = &r["result"]["_meta"]["workerOutput"];
+    assert_eq!(meta["text"], base["text"]);
+    assert_eq!(meta["projectKey"], key);
+    assert_eq!(meta["source"], "native-report");
+    assert!(!r.to_string().contains("fixture-source-hidden"));
+    for k in ["content", "structuredContent"] {
+        assert!(!r["result"][k].to_string().contains("verification finished"));
+    }
+    let argv = record(source)["argv"].clone();
+    assert_eq!(argv[3], "--desktop-worker-output");
+    assert_eq!(argv[8], args["leadAttempt"]);
+    assert_eq!(argv[10], args["workerAttempt"]);
+    assert_eq!(argv[11], "--conversation-digest");
+    assert_eq!(argv[12].as_str().unwrap().len(), 32);
+    assert!(!argv.to_string().contains(thread));
+    for status in ["running", "not_recorded", "unavailable"] {
+        let mut r = base.clone();
+        r["status"] = status.into();
+        r["text"] = Value::Null;
+        r["source"] = Value::Null;
+        configure(&r);
+        let answer = request(c, &args);
+        good(&answer);
+        assert_eq!(payload(&answer)["status"], status);
+        assert!(answer["result"]["_meta"]["workerOutput"]["text"].is_null());
+    }
+    for (k, v) in [
+        ("workerAttempt", json!("other")),
+        ("room", json!("other")),
+        ("leadAttempt", json!("other")),
+        ("text", Value::Null),
+        ("text", json!("z".repeat(16 * 1024 + 1))),
+        ("source", json!("arbitrary-path")),
+        ("status", json!("running")),
+    ] {
+        let mut r = base.clone();
+        r[k] = v;
+        configure(&r);
+        let refused = request(c, &args);
+        bad(&refused, "could not be verified");
+        assert!(refused["result"]["_meta"]["workerOutput"].is_null());
+    }
+    let mut secret = base.clone();
+    secret["text"] = json!(concat!("ghp_", "0123456789abcdef0123456789abcdef0123"));
+    configure(&secret);
+    let refused = request(c, &args);
+    bad(&refused, "withheld");
+    assert!(
+        !refused
+            .to_string()
+            .contains(secret["text"].as_str().unwrap())
+    );
+}
+
 fn desktop_lead_conversations() {
     let t = Temp::new();
     let source = t.source();
@@ -1103,7 +1195,7 @@ fn desktop_lead_conversations() {
             child,
             if child { "1" } else { "0" }.as_ref(),
         );
-        for name in [open, read, "oms_send_lead_message"] {
+        for name in [open, read, "oms_send_lead_message", "oms_worker_output"] {
             let denied = call(&mut blocked, name, &args, owner);
             if child {
                 bad(&denied, "parent app");
@@ -1133,6 +1225,10 @@ fn desktop_lead_conversations() {
     );
     let key = initial["projectKey"].as_str().unwrap();
     assert_eq!(key.len(), 64);
+    // The worker reader and Lead chat must agree on the current physical checkout.
+    worker_output_reader(&mut c, &source, key, owner);
+    setup(true);
+
     bad(
         &call(
             &mut c,
@@ -1865,7 +1961,7 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 21);
+    assert_eq!(tools.as_array().unwrap().len(), 22);
     assert_eq!(tools[0]["name"], "oms_open_panel");
     assert_eq!(
         tools[0]["description"],
@@ -1876,7 +1972,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v24.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v25.html");
     // Codex uses the stdio transport configuration to decide whether to reuse a running server.
     for package in [
         include_str!("../../../plugins/oms/mcp.json"),
@@ -1937,6 +2033,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v21.html"),
         json!("ui://oms/conversation-panel/v22.html"),
         json!("ui://oms/conversation-panel/v23.html"),
+        json!("ui://oms/conversation-panel/v24.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);

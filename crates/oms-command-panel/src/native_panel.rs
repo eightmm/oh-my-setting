@@ -4001,7 +4001,8 @@ fn run_native(
     if let Some(model) = &resolution.model {
         join_args.extend(["--model", model]);
     }
-    let label_arg = format!("--label={label}");
+    let member_label = main_member_label(harness, options.get("task").map(|_| label.as_str()));
+    let label_arg = format!("--label={member_label}");
     join_args.push(&label_arg);
     if let Some(sid) = &native_session {
         join_args.extend(["--native-session", sid]);
@@ -6042,6 +6043,18 @@ fn is_exec(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|m| m.is_file() && (m.permissions().mode() & 0o111 != 0))
         .unwrap_or(false)
+}
+
+fn main_member_label(harness: &str, sanitized_task: Option<&str>) -> String {
+    if let Some(task) = sanitized_task {
+        return task.to_owned();
+    }
+    let name = if harness == "agy" {
+        "AGY".to_owned()
+    } else {
+        capitalize(harness)
+    };
+    format!("OMS Main · {name}")
 }
 
 fn safe_label(raw: Option<&str>) -> String {
@@ -9647,6 +9660,18 @@ exec /bin/sleep 30
         }
         let repo = TempRepo::new();
         let stop = AtomicBool::new(false);
+        for (harness, expected) in [
+            ("codex", "OMS Main · Codex"),
+            ("claude", "OMS Main · Claude"),
+            ("agy", "OMS Main · AGY"),
+            ("pi", "OMS Main · Pi"),
+        ] {
+            assert_eq!(super::main_member_label(harness, None), expected);
+            assert_eq!(
+                super::main_member_label(harness, Some("사용자 목표")),
+                "사용자 목표"
+            );
+        }
         let svc = RealCliParsers;
         let room_id = super::ensure_room(&repo.0, None, &svc, &stop).unwrap();
         assert!(room_id.starts_with("room-"), "{room_id}");
@@ -9714,6 +9739,159 @@ exec /bin/sleep 30
         .unwrap();
         assert_eq!(shown["state"], Value::from("done"));
         assert_eq!(shown["terminal"], Value::from(true));
+        check_room_worker_output(&repo.0, &svc, &stop);
+    }
+
+    fn check_room_worker_output(repo: &Path, svc: &RealCliParsers, stop: &AtomicBool) {
+        use crate::commands::{query, strings};
+        let room = "room-worker-fixture";
+        let sid = "22222222-2222-4222-8222-222222222222";
+        let hash = oms_panel_core::digest(sid.as_bytes());
+        query(
+            svc,
+            NativeCommand::Room,
+            repo,
+            &["new", "--id", room, "--json"],
+            stop,
+        )
+        .unwrap();
+        query(
+            svc,
+            NativeCommand::Room,
+            repo,
+            &[
+                "join",
+                "--id",
+                room,
+                "--participant",
+                "desktop-main",
+                "--provider",
+                "codex",
+                "--role",
+                "main",
+                "--native-session",
+                sid,
+                "--json",
+            ],
+            stop,
+        )
+        .unwrap();
+        query(
+            svc,
+            NativeCommand::Room,
+            repo,
+            &[
+                "join",
+                "--id",
+                room,
+                "--participant",
+                "lead-member",
+                "--provider",
+                "claude",
+                "--role",
+                "worker",
+                "--parent",
+                "desktop-main",
+                "--json",
+            ],
+            stop,
+        )
+        .unwrap();
+        let start = |provider, tool, fields: &[&str]| {
+            let mut v = vec![
+                "start",
+                "--provider",
+                provider,
+                "--tool",
+                tool,
+                "--then",
+                "starting",
+                "--then",
+                "working",
+            ];
+            v.extend(fields);
+            event_id(
+                repo,
+                &v.iter().map(|v| v.to_string()).collect::<Vec<_>>(),
+                svc,
+                stop,
+            )
+            .unwrap()
+        };
+        let lead = start(
+            "claude",
+            "peer-ask",
+            &[
+                "--ref",
+                "panel_role=lead",
+                "--ref",
+                "panel_room_id=room-worker-fixture",
+                "--ref",
+                "panel_room_participant=lead-member",
+            ],
+        );
+        let worker = start(
+            "codex",
+            "peer-ask",
+            &["--ref", "panel_role=worker", "--parent-attempt-id", &lead],
+        );
+        let read = |digest: &str, l: &str, w: &str| {
+            let options = crate::cli::Options::parse(&strings(&[
+                "--desktop-worker-output",
+                "--json",
+                "--repo",
+                repo.to_str().unwrap(),
+                "--room",
+                room,
+                "--conversation-digest",
+                digest,
+                "--lead-attempt",
+                l,
+                "--worker-attempt",
+                w,
+            ]))?;
+            let (_, bytes, _) = crate::commands::run(&options, repo, repo, svc, stop)?;
+            serde_json::from_slice::<Value>(&bytes).map_err(oms_panel_core::Error::new)
+        };
+        let digest = &hash[..32];
+        assert_eq!(read(digest, &lead, &worker).unwrap()["status"], "running");
+        transition_attempt(
+            repo,
+            &worker,
+            &["verifying", "review", "done"],
+            None,
+            svc,
+            stop,
+        )
+        .unwrap();
+        assert_eq!(
+            read(digest, &lead, &worker).unwrap()["status"],
+            "not_recorded"
+        );
+        let file = ".oms/artifacts/worker-output.md";
+        let answer=b"## Output\nprivate tool noise\n## Answer\nretained completed worker output\n## Exit\n0\n";
+        fs::create_dir_all(repo.join(".oms/artifacts")).unwrap();
+        fs::write(repo.join(file), answer).unwrap();
+        let row = serde_json::json!({"kind":"ask","attempt_id":worker,"artifact":file,"artifact_sha256":oms_panel_core::digest(answer)});
+        fs::write(repo.join(".oms/artifacts/index.jsonl"), format!("{row}\n")).unwrap();
+        let view = read(digest, &lead, &worker).unwrap();
+        assert_eq!(view["status"], "complete");
+        assert_eq!(view["source"], "indexed-answer");
+        assert!(
+            view["text"]
+                .as_str()
+                .unwrap()
+                .contains("retained completed worker output")
+        );
+        assert!(!view.to_string().contains("private tool noise"));
+        assert!(read(&"0".repeat(32), &lead, &worker).is_err());
+        assert!(read(digest, &worker, &lead).is_err());
+        assert!(read(digest, &lead, "../target").is_err());
+        fs::write(repo.join(file), b"substitution").unwrap();
+        assert_eq!(
+            read(digest, &lead, &worker).unwrap()["status"],
+            "unavailable"
+        );
     }
 
     #[test]

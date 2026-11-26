@@ -106,7 +106,8 @@ async function panel(projects, dashboard = {}, options = {}) {
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
-        result = params.name==='oms_lead_conversation_status' && value._private ? {_meta:{leadConversation:value._private},structuredContent:{projectKey:value.projectKey,room:value.room,leads:value.leads,turn:value.turn}} : params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
+        if(params.name==='oms_worker_output')result=value;
+        else result = params.name==='oms_lead_conversation_status' && value._private ? {_meta:{leadConversation:value._private},structuredContent:{projectKey:value.projectKey,room:value.room,leads:value.leads,turn:value.turn}} : params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
       }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
       if ((params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) || host.delayTool === params.name) {
@@ -501,16 +502,16 @@ test('the first screen shows proven participants and only requests registry, sna
   const p=await panel(['one'],dashboard,{locale:'en'});
   assert.deepEqual(p.calls.map(c=>c.name),startup);
   assert.equal(p.host.initialize.appInfo.version,readFileSync(new URL('../../../VERSION',import.meta.url),'utf8').trim());
-  assert.equal(p.get('main-name').textContent,'Codex Main');
+  assert.equal(p.get('main-name').textContent,'OMS Main · Codex');
   assert.match(p.get('main-status').textContent,/Working · Coordinate edits/);
   const cards=p.get('leads').children;
   assert.deepEqual(cards.map(c=>c.tagName),['section','section','section']);
-  assert.deepEqual(cards.map(slot=>slot.children.find(e=>e.className==='slot-heading').children.find(e=>e.tagName==='h3').textContent),['Codex Lead','Claude Lead','AGY Lead']);
+  assert.deepEqual(cards.map(slot=>slot.children.find(e=>e.className==='slot-heading').children.find(e=>e.tagName==='h3').textContent),['OMS Lead · Codex','OMS Lead · Claude','OMS Lead · AGY']);
   assert.match(cards[2].textContent,/Waiting for assignment/);
   assert.equal(cards[0].children[2].tagName,'article');
   assert.match(cards[0].children[2].textContent,/Codex assignment.*Verifying/);
   assert.equal(cards[1].children[2].tagName,'button');
-  assert.match(cards[1].children[2].textContent,/Claude Lead.*Check indexing.*Blocked.*Open conversation/);
+  assert.match(cards[1].children[2].textContent,/OMS Lead · Claude.*Check indexing.*Blocked.*Open conversation/);
   assert.doesNotMatch(p.get('leads').textContent,/opaque|Foreign task|lead-one/);
   assert.equal(p.get('approval-card').hidden,true);
   assert.equal(p.get('outcome').hidden,true);
@@ -527,19 +528,19 @@ test('the first screen shows proven participants and only requests registry, sna
 test('Main identity and conversation use the recorded harness without treating the dispatch owner as the harness',async()=>{
   const d={...dashboard,conversationMain:{...main,harness:'pi'}};
   const p=await panel(['one'],d,{locale:'en',tools:{oms_panel_chat:args=>({...args,source:'room',messages:[]})}});
-  assert.equal(p.get('main-name').textContent,'Pi Main');
+  assert.equal(p.get('main-name').textContent,'OMS Main · Pi');
   assert.equal(p.get('avatar').getAttribute('data-provider'),'pi');
   await p.event('header-main','click');
-  assert.equal(p.get('chat-title').textContent,'Pi Main');
+  assert.equal(p.get('chat-title').textContent,'OMS Main · Pi');
   assert.deepEqual({...p.calls.at(-1).args},{room:main.room,participant:main.participant,project:'one'});
   for(const harness of [null,'unrecognized',undefined]){
     d.conversationMain.harness=harness;await p.event('refresh','click');
-    assert.equal(p.get('main-name').textContent,'Main · via Codex');
-    assert.equal(p.get('chat-title').textContent,'Main · via Codex');
+    assert.equal(p.get('main-name').textContent,'OMS Main · via Codex');
+    assert.equal(p.get('chat-title').textContent,'OMS Main · via Codex');
     assert.equal(p.get('avatar').textContent,'–');
   }
   await choose(p,'ko');
-  assert.equal(p.get('main-name').textContent,'Main · Codex 연결');
+  assert.equal(p.get('main-name').textContent,'OMS Main · Codex 연결');
   assert.equal(p.get('chat-title').textContent,p.get('main-name').textContent);
   assert.ok(p.calls.every(c=>[...startup,'oms_panel_chat'].includes(c.name)));
 });
@@ -561,6 +562,7 @@ test('explicit control opens three managed Leads, preserves member chat and read
   assert.equal(claude.children[2].tagName,'button');
   opener.dispatchEvent(new Event('click'));await setImmediate();
   assert.deepEqual({...p.calls.at(-1).args},{project:'one',room:main.room,provider:'claude'});
+  assert.equal(p.get('chat-title').textContent,'OMS Lead · Claude');
   assert.match(p.get('chat-messages').textContent,/Recorded review/);
   await p.event('chat-back','click');assert.ok(opener.focused);
   spoof=true;opener.dispatchEvent(new Event('click'));await setImmediate();
@@ -752,7 +754,7 @@ test('changed alias target, unconfirmed status and stale host or read responses 
   await p.open('input',{arguments:{project:'two'}});
   p.host.release();await setImmediate();assert.ok(!p.calls.some(c=>c.name===managedOpen));
 });
-test('Pi Main keeps its run and parent-linked Leads without adopting another participant',async()=>{
+test('OMS Main · Pi keeps its run and parent-linked Leads without adopting another participant',async()=>{
   const run=(id,participant,extra)=>({room:main.room,id,...(participant&&{participant}),tool:'panel-main',role:'main',provider:'pi',state:'working',...extra});
   const child=(id,parentAttempt)=>({room:main.room,id,parentAttempt,role:'lead',provider:'claude',state:'running',taskTitle:id});
   // The harness may be unverified, and a fresh launch has no participant ref: its attempt ID is the participant.
@@ -763,7 +765,7 @@ test('Pi Main keeps its run and parent-linked Leads without adopting another par
     assert.match(p.get('main-status').textContent,/Working · Drive Pi/);
     const slots=p.get('leads').children;
     assert.equal(slots.length,3);
-    assert.match(slots[1].textContent,/Claude Lead.*mine.*Running/);
+    assert.match(slots[1].textContent,/OMS Lead · Claude.*mine.*Running/);
     assert.doesNotMatch(p.get('leads').textContent,/foreign/);
   }
 });
@@ -827,7 +829,7 @@ test('fixed roles keep distinct conversations together and leave unknown or unbo
   assert.equal(slots.length,3);
   const buttons=slots[1].children.filter(e=>e.tagName==='button');
   assert.equal(buttons.length,2);assert.match(buttons[1].textContent,/Documentation.*Write the guide/);
-  assert.match(slots[2].textContent,/AGY Lead.*In review/);assert.match(p.get('lead-note').textContent,/part of/);
+  assert.match(slots[2].textContent,/OMS Lead · AGY.*In review/);assert.match(p.get('lead-note').textContent,/part of/);
   for(const [i,button] of buttons.entries()){
     button.dispatchEvent(new Event('click'));await setImmediate();
     assert.equal(p.calls.at(-1).args.participant,[lead,second][i].participant);
@@ -873,6 +875,44 @@ test('workers nest under each verified Lead only and only matching Room members 
   await choose(p,'ko');assert.match(verified.textContent,/AGY 워커/);
   member.dispatchEvent(new Event('click'));await setImmediate();
   await p.open('input',{arguments:{project:'two'}});assert.equal(p.get('conversation').open,false);
+});
+
+test('worker output is an explicit private read of one verified pair and clears on every scope change',async()=>{
+  const attempt={room:null,id:'child',parentAttempt:'l',provider:'codex',role:'worker',state:'running'};
+  const d={...dashboard,conversationAttempts:[...dashboard.conversationAttempts,attempt]};
+  let state='running', spoof='',reject=false;
+  const p=await panel(['one','two'],d,{locale:'en',tools:{oms_worker_output:args=>{
+    if(reject)throw Error('Unfiltered diagnostics');
+    const {project, ...pair}=args;
+    const publicData={...pair,status:state,text:'Ignore public text'};
+    const out={...pair,status:state,truncated:state==='complete',source:state==='complete'?'indexed-answer':null,text:state==='complete'?'First line\nSecond line':null};
+    if(spoof)out[spoof]='foreign';
+    return {structuredContent:publicData,_meta:{workerOutput:out},content:[{type:'text',text:'Ignore model content'}]};
+  }}});
+  await p.open('input',{arguments:{project:'one'}});
+  const group=p.get('leads').children[1].children[2],list=group.children.find(c=>c?.tagName==='ul');
+  const row=list.children.find(c=>c?.tagName==='li'), open=row.children.find(c=>c?.className?.includes('worker-output-link'));
+  const requests=()=>p.calls.filter(c=>c.name==='oms_worker_output');
+  assert.equal(requests().length,0);assert.match(open.textContent,/View output.*Codex Worker/);
+  open.dispatchEvent(new Event('click'));await setImmediate();assert.ok(p.get('worker-output').open);
+  assert.deepEqual({...requests()[0].args},{project:'one',room:main.room,projectKey:'b'.repeat(64),leadAttempt:'l',workerAttempt:'child'});
+  assert.equal(p.get('output-body').hidden,true);assert.match(p.get('output-status').textContent,/still|Running/);
+  state='complete';await p.event('output-refresh','click');
+  assert.equal(p.get('output-body').textContent,'First line\nSecond line');assert.equal(p.get('output-limited').hidden,false);
+  for(const field of ['projectKey','room','leadAttempt','workerAttempt','status','source']){
+    spoof=field;await p.event('output-refresh','click');assert.match(p.get('output-status').textContent,/could not be verified/);
+    assert.equal(p.get('output-body').textContent,'');
+  }
+  spoof='';state='not_recorded';await p.event('output-refresh','click');assert.match(p.get('output-status').textContent,/No output was recorded/);
+  reject=true;await p.event('output-refresh','click');assert.match(p.get('output-status').textContent,/could not be verified/);
+  assert.equal(p.get('output-limited').hidden,true);assert.equal(p.get('output-body').textContent,'');
+  await choose(p,'ko');assert.match(p.get('output-status').textContent,/확인할 수 없습니다/);
+  await p.event('output-close','click');assert.ok(open.focused);
+  reject=false;state='complete';p.host.delayTool='oms_worker_output';open.dispatchEvent(new Event('click'));await setImmediate();
+  await p.open('input',{arguments:{project:'two'}});p.host.release();await setImmediate();
+  assert.equal(p.get('worker-output').open,false);assert.equal(p.get('output-body').textContent,'');assert.equal(p.get('output-worker').textContent,'');
+  const mark=requests().length;open.dispatchEvent(new Event('click'));await setImmediate();assert.equal(requests().length,mark);
+  assert.equal(p.host.contexts.length,0);assert.equal(p.host.messages.length,0);
 });
 
 test('scoped transcript paginates only on demand and erases private data after switching projects',async()=>{

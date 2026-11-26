@@ -92,6 +92,15 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 .workers .person{padding:.35rem .1rem;gap:.4rem}
 .workers strong{font-size:.84rem;font-weight:620}
 .workers small,.workers .state{font-size:.77rem}
+.workers li{display:grid;align-items:center}
+.worker-output-link{justify-self:start;min-height:1.9rem;font-weight:600}
+.worker-no-attempt{color:var(--soft);font-size:.77rem;padding-inline:.1rem}
+@media(min-width:36rem){.workers li{grid-template-columns:minmax(0,1fr) auto;column-gap:.6rem}}
+#worker-output{max-width:min(44rem,calc(100% - 1.5rem))}
+#output-worker{font-weight:650;overflow-wrap:anywhere;margin-top:.65rem}
+#output-body{margin:.75rem 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
+#output-status:not(:empty),#output-limited:not([hidden]){margin-top:.4rem}
+#output-refresh{margin-top:.65rem}
 .person{width:100%;background:none;text-align:start;border:0;border-radius:0;padding:.72rem .05rem;cursor:default}
 .lead-children>.person{border-top:1px solid var(--line)}
 button.person{cursor:pointer}
@@ -163,6 +172,9 @@ label,legend{font-size:.86rem} .field{display:block;margin:.85rem 0 .25rem}
 <p id="launch-status" class="note" role="status"></p>
 <button id="issue-review" type="button" hidden data-i18n="reviewIssue">현재 Main에 전달할 이슈 확인</button><p id="issue-evidence" class="note" role="status"></p><button id="issue-record" type="button" hidden></button>
 </dialog>
+<dialog id="worker-output" aria-labelledby="output-title"><div class="section-head"><h2 id="output-title" data-i18n="out.title">워커 출력</h2><button id="output-close" type="button" data-i18n="close">닫기</button></div>
+<p id="output-worker"></p><p id="output-status" class="note" role="status"></p><pre id="output-body" hidden></pre><p id="output-limited" class="note" data-i18n="out.limited" hidden>기록된 출력의 일부입니다.</p>
+<button id="output-refresh" type="button" data-i18n="refresh">새로고침</button></dialog>
 <dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><div class="identity"><span id="chat-avatar" class="avatar" aria-hidden="true" hidden></span><h2 id="chat-title"></h2></div><button id="chat-back" type="button" data-i18n="close">닫기</button></div>
 <p id="chat-status" class="note" role="status"></p><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-result"></p></div>
 <form id="chat-compose" hidden><label for="chat-text" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000"></textarea>
@@ -216,8 +228,17 @@ const messages = {
   "connecting": ["OMS 연결 중…", "Connecting to OMS…"],
   "connectionFailed": ["OMS 프로젝트를 확인할 수 없습니다. 연결을 확인한 뒤 새로고침하세요.", "Could not read the OMS project. Check the connection and refresh."],
   "criteriaMet": ["프로젝트 완료 기준 {n}개를 모두 검증했습니다.", "All {n} project completion criteria verified."],
-  "dispatchOnly": ["Main · {provider} 연결", "Main · via {provider}"],
-  "currentMain": ["이 대화의 Main", "Conversation Main"],
+  "dispatchOnly": ["OMS Main · {provider} 연결", "OMS Main · via {provider}"],
+  "out.open": ["출력 보기", "View output"],
+  "out.title": ["워커 출력", "Worker output"],
+  "out.noAttempt": ["실행 기록 없음", "No recorded attempt"],
+  "out.loading": ["기록된 출력을 불러오는 중…", "Loading recorded output…"],
+  "out.running": ["실행 중입니다. 아직 기록된 출력이 없습니다.", "Running. No output has been recorded yet."],
+  "out.complete": ["기록된 결과", "Recorded result"],
+  "out.not_recorded": ["이 실행에 기록된 출력이 없습니다.", "No output was recorded for this run."],
+  "out.unavailable": ["이 워커의 출력을 확인할 수 없습니다.", "Output for this worker could not be verified."],
+  "out.limited": ["기록된 출력의 일부입니다.", "Showing part of the recorded output."],
+  "currentMain": ["현재 대화", "Current conversation"],
   "emptyChat": ["아직 기록된 메시지가 없습니다.", "No messages recorded yet."],
   "goalLabel": ["프로젝트 목표", "Project goal"],
   "goalNone": ["기록된 목표 없음", "No goal recorded"],
@@ -265,7 +286,7 @@ const messages = {
   "recordIssue": ["현재 Main에 이 이슈 전달", "Record this issue for the current Main"],
   "refresh": ["새로고침", "Refresh"],
   "refreshing": ["새로고침 중…", "Refreshing…"],
-  "repositoryMain": ["프로젝트에 기록된 Main", "Recorded project Main"],
+  "repositoryMain": ["프로젝트 기록", "Project record"],
   "reviewIssue": ["현재 Main에 전달할 이슈 확인", "Review issue for the current Main"],
   "selectProject": ["프로젝트 선택", "Choose a project"],
   "start.badResponse": ["시작 응답을 확인할 수 없습니다. 진행 상황을 새로고침하세요.", "Cannot confirm the start response. Refresh to check progress."],
@@ -320,7 +341,7 @@ const messages = {
   "timeout": ["응답 시간이 초과되었습니다. 새로고침으로 처리 결과를 확인하세요.", "The request timed out. Refresh to check the result."],
   "toolFail": ["OMS 도구 호출에 실패했습니다.", "The OMS tool call failed."],
   "uncertainIssue": ["전달 상태 미확인", "Handoff unconfirmed"],
-  "unknownMain": ["Main 미확인", "Main unconfirmed"],
+  "unknownMain": ["OMS Main 미확인", "OMS Main unconfirmed"],
   "unverifiedIssue": ["이 프로젝트의 열린 이슈를 확인할 수 없습니다.", "Could not verify an open issue for this project."],
 };
 const LANGS=['ko','en'], LANG_KEY='oms.panel.language';
@@ -366,6 +387,7 @@ function setLanguage(next,explicit) {
 }
 const stateLabel=state=>messages['state.'+state]?t('state.'+state):state||t('statusUnknown');
 let dashboardData, members=[], rows=[], selectedChat, chatOrigin, chatCursor, chatPage=0;
+let selectedOutput;
 let approvedScope=0, issueTicket=0, reviewedIssue;
 const approvalState=new Map();
 
@@ -703,7 +725,8 @@ function nativeMainUri(page,member) {
     page.participant===member.participant && /^codex:\/\/threads\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(page.nativeUri || '') ? page.nativeUri : '';
 }
 
-function assignmentLabel(row) { return providerName(row.provider) + (row.role === 'lead' ? ' Lead' : choice(' 배정',' assignment')); }
+function roleTitle(role,provider){return 'OMS '+role+' · '+providerName(provider);}
+function assignmentLabel(row) { return row.role==='lead'?roleTitle('Lead',row.provider):providerName(row.provider)+choice(' 배정',' assignment'); }
 function attemptMember(row) {
   // Native Codex assignments enrol the exact attempt ID as the Room participant.
   return members.find(m => m.room === row.room && (row.participant ? m.participant === row.participant :
@@ -717,6 +740,7 @@ function clearChat() {
   el('chat-older').hidden=true;
 }
 function closeDialogs() {
+  closeWorkerOutput();
   for(const id of ['conversation','launcher']) if(el(id).open) el(id).close();
   clearChat();
 }
@@ -734,7 +758,7 @@ function clearProject() {
   updateContext(null);
 }
 function conversationMainName(main) {
-  return Object.hasOwn(names,main.harness) ? providerName(main.harness)+' Main' :
+  return Object.hasOwn(names,main.harness) ? roleTitle('Main',main.harness) :
     t('dispatchOnly',{provider:providerName(main.provider)});
 }
 function joinedMain() {
@@ -801,11 +825,17 @@ function paintAvatar(element,provider) {
   element.setAttribute('data-provider',provider==='antigravity'?'agy':provider||'');
   element.textContent=provider==='pi'?'P':Object.hasOwn(names,provider)?'':'–';
 }
+function memberLabel(member){
+  return typeof member?.label==='string' && member.label.trim()!==member.participant ? member.label.trim() : '';
+}
+function workerName({attempt,member}){
+  const role=providerName(attempt.provider || member?.provider)+choice(' 워커',' Worker');
+  return memberLabel(member)?memberLabel(member)+' · '+role:role;
+}
 function personEntry({attempt,member},kind) {
   const entry=node(member?'button':'article','','person');
-  const label=typeof member?.label==='string' && member.label.trim()!==member.participant ? member.label.trim() : '';
-  const role=()=>kind==='worker'?providerName(attempt.provider || member?.provider)+choice(' 워커',' Worker'):assignmentLabel(attempt);
-  const identity=()=>label?label+' · '+role():role();
+  const label=memberLabel(member);
+  const identity=()=>kind==='worker'?workerName({attempt,member}):[assignmentLabel(attempt),label].filter(Boolean).join(' · ');
   const title=typeof attempt.taskTitle==='string'?attempt.taskTitle.trim():'';
   const body=node('span','','body');
   if(kind==='slot' && attempt.role==='lead'){
@@ -831,10 +861,69 @@ function leadEntry(entry,inSlot){
   if(!entry.workers.length)return row;
   const group=node('div','','lead-group'), list=node('ul','','workers');
   for(const worker of entry.workers){
-    const item=node('li','');item.append(personEntry(worker,'worker'));list.append(item);
+    const item=node('li','');item.append(personEntry(worker,'worker'));
+    if(entry.attempt.id && worker.attempt.id){
+      const button=node('button','','subtle worker-output-link');
+      worker.outputButton=button;button.type='button';button.setAttribute('aria-haspopup','dialog');
+      button.append(node('span',message('out.open')),node('span',()=> ' · '+workerName(worker),'sr-only'));
+      button.addEventListener('click',()=>openWorkerOutput(entry,worker,button));
+      if(selectedOutput?.leadAttempt===entry.attempt.id && selectedOutput.workerAttempt===worker.attempt.id)selectedOutput.origin=button;
+      item.append(button);
+    }else item.append(node('small',message('out.noAttempt'),'worker-no-attempt'));
+    list.append(item);
   }
   group.append(row,list);return group;
 }
+function currentWorkerOutput(s){
+  return s && s===selectedOutput && el('worker-output').open && currentLeadControl(s.ctl) &&
+    s.ctl.observed && s.ctl.projectKey===s.projectKey && rows.some(lead=>lead.attempt.id===s.leadAttempt &&
+      lead.workers.some(worker=>worker.attempt.id===s.workerAttempt));
+}
+function clearWorkerOutput(){
+  selectedOutput=undefined;
+  for(const id of ['output-worker','output-status','output-body']){const e=el(id);bindings.delete(e);e.textContent='';}
+  el('output-body').hidden=true;el('output-limited').hidden=true;
+}
+function closeWorkerOutput(){
+  if(el('worker-output').open)el('worker-output').close();
+  clearWorkerOutput();
+}
+async function readWorkerOutput(s){
+  if(!s || s!==selectedOutput || s.loading)return;
+  const args={projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt};
+  el('output-body').hidden=true;el('output-body').textContent='';el('output-limited').hidden=true;
+  if(!currentWorkerOutput(s)){put('output-status','out.unavailable');return;}
+  s.loading=true;el('output-refresh').disabled=true;put('output-status','out.loading');
+  try{
+    const result=await tool('oms_worker_output',args,s.ctl.generation);
+    if(!currentWorkerOutput(s))return;
+    const data=result.structuredContent, out=result._meta?.workerOutput;
+    if(!data || !out || Object.keys(args).some(k=>data[k]!==args[k] || out[k]!==args[k]) ||
+      !['running','complete','not_recorded','unavailable'].includes(data.status) || out.status!==data.status ||
+      typeof out.truncated!=='boolean' || (data.status==='complete'
+        ? !['native-report','indexed-answer'].includes(out.source) || typeof out.text!=='string' || !out.text.trim() ||
+          out.text.length>16384 || new TextEncoder().encode(out.text).length>16384
+        : out.text!==null || out.source!==null || out.truncated))throw uiError('out.unavailable');
+    put('output-status','out.'+out.status);
+    el('output-body').textContent=out.text||'';el('output-body').hidden=!out.text;
+    el('output-limited').hidden=!(out.text && out.truncated);
+  }catch{if(currentWorkerOutput(s))put('output-status','out.unavailable');}
+  finally{if(selectedOutput===s){s.loading=false;el('output-refresh').disabled=false;}}
+}
+function openWorkerOutput(lead,worker,origin){
+  if(!currentLeadControl(leadControl) || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
+  const s={ctl:leadControl,room:leadControl.room,projectKey:leadControl.projectKey,leadAttempt:lead.attempt.id,workerAttempt:worker.attempt.id,origin};
+  selectedOutput=s;el('output-refresh').disabled=false;
+  put('output-worker',()=>[workerName(worker),worker.attempt.taskTitle].filter(Boolean).join(' · '));
+  el('worker-output').showModal();el('output-close').focus();readWorkerOutput(s);
+}
+onClick('output-refresh',()=>readWorkerOutput(selectedOutput));
+onClick('output-close',()=>el('worker-output').close());
+on('worker-output','close',()=>{
+  if(el('worker-output').open)return;
+  const s=selectedOutput;clearWorkerOutput();
+  if(s && currentLeadControl(s.ctl) && !el('view').hidden)(s.origin?.isConnected===false?el('main-name'):s.origin)?.focus();
+});
 function renderLeadSlots(leads,complete) {
   const list=el('leads');list.replaceChildren();leadSlots.clear();
   const providerOf=record=>record.attempt.provider==='antigravity'?'agy':record.attempt.provider;
@@ -842,7 +931,7 @@ function renderLeadSlots(leads,complete) {
     const entries=leads.filter(r=>providerOf(r)===provider);
     const slot=node('section','','lead-slot'), heading=node('div','','slot-heading');
     const avatar=node('span','','avatar');paintAvatar(avatar,provider);avatar.setAttribute('aria-hidden','true');
-    heading.append(avatar,node('h3',names[provider]+' Lead'));
+    heading.append(avatar,node('h3',roleTitle('Lead',provider)));
     const status=node('span','','state'), open=node('button','','subtle');
     open.type='button';open.hidden=true;
     const ctl=leadControl;
@@ -872,6 +961,8 @@ function rememberLeads(ctl,on) {
 }
 function paintLeadControls(){
   const ctl=leadControl, known=currentLeadControl(ctl);
+  for(const lead of rows)for(const worker of lead.workers)if(worker.outputButton)worker.outputButton.disabled=!(known && ctl.observed && ctl.projectKey);
+  if(selectedOutput && !currentWorkerOutput(selectedOutput))closeWorkerOutput();
   const opener=el('open-leads');
   opener.hidden=!known;opener.disabled=!known || !ctl.observed || ctl.reading || ctl.writing;
   const auto=known && autoLeads(ctl);
@@ -1092,7 +1183,7 @@ async function openManagedChat(ctl,provider,origin){
   if(ctl.sessions.get(provider)?.requestId!==requestId)ctl.sessions.set(provider,{requestId,draft:'',pending:null});
   clearChat();
   const c={ctl,provider,requestId,session:ctl.sessions.get(provider),keys:new Map(),visited:new Set(),first:true,until:Date.now()+120000};
-  managedChat=c;chatOrigin=origin;paintAvatar(el('chat-avatar'),provider);el('chat-avatar').hidden=false;put('chat-title',()=>names[provider]+' Lead');put('chat-status','chatLoading');
+  managedChat=c;chatOrigin=origin;paintAvatar(el('chat-avatar'),provider);el('chat-avatar').hidden=false;put('chat-title',()=>roleTitle('Lead',provider));put('chat-status','chatLoading');
   el('conversation').showModal();el('chat-back').focus();el('chat-text').value=c.session.draft;paintComposer(c);
   await readManaged(c);
 }
@@ -1135,7 +1226,7 @@ function render(d) {
   const owner=main || (readOnly?d.main:null);
   put('main-scope',main?'currentMain':readOnly?'repositoryMain':'currentMain');
   paintAvatar(el('avatar'),main ? main.harness : owner?.provider);
-  put('main-name',()=>main?conversationMainName(main):owner?.provider?providerName(owner.provider)+' Main':t('unknownMain'));
+  put('main-name',()=>main?conversationMainName(main):owner?.provider?roleTitle('Main',owner.provider):t('unknownMain'));
   if(main && selectedChat?.room===main.room && selectedChat.participant===main.participant)put('chat-title',()=>conversationMainName(main));
   el('header-main').hidden=!main;
   members=main && Array.isArray(main.participants)?main.participants.filter(m=>m?.room===main.room && m.participant):[];

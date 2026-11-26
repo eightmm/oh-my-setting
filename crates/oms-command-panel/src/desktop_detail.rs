@@ -233,6 +233,221 @@ pub(super) fn chat(
     Ok(response)
 }
 
+/// Only the verified conversation owner may inspect a worker's retained output.
+/// A detached worker can outlive Room membership; its recorded parent still has to be this exact Lead.
+pub(super) fn worker_output(
+    repo: &Path,
+    options: &Options,
+    services: &dyn Services,
+    stop: &AtomicBool,
+) -> Result<Value> {
+    parent_only()?;
+    let session = room::Session::from_env();
+    if session.child || session.participant.is_some() {
+        return Err(Error::new(
+            "worker output requires a bound app conversation",
+        ));
+    }
+    let reader = room::Room::open(repo, session, &room::LocalServices, stop, false, false)
+        .map_err(|_| Error::new("Room unavailable"))?;
+    let id = options.required("room")?;
+    let lead = options.required("lead-attempt")?;
+    let worker = options.required("worker-attempt")?;
+    let digest = options.required("conversation-digest")?;
+    let select = || {
+        let events = query(
+            services,
+            NativeCommand::Events,
+            repo,
+            &["list", "--json"],
+            stop,
+        )?;
+        let events = events
+            .as_array()
+            .ok_or_else(|| Error::new("invalid lifecycle attempts"))?;
+        let projection = crate::desktop_history::bound_main_from_events(&reader, &digest, events)?;
+        let main: Value = serde_json::from_slice(
+            &room::value::encode(&projection, false, true).map_err(Error::new)?,
+        )
+        .map_err(Error::new)?;
+        let proof = worker_scope(events, &main, &id, &lead, &worker)
+            .ok_or_else(|| Error::new("worker output outside the bound hierarchy"))?;
+        Ok::<_, Error>((
+            main["participant"].clone(),
+            proof.0.clone(),
+            proof.1.clone(),
+        ))
+    };
+    let proof = select()?;
+    let attempt = &proof.2;
+    let (status, text, source, truncated) =
+        match crate::desktop_evidence::worker_answer(repo, attempt) {
+            Ok(Some((text, source, truncated))) => {
+                ("complete", Some(text), Some(source), truncated)
+            }
+            Ok(None) if attempt["terminal"] == true => ("not_recorded", None, None, false),
+            Ok(None)
+                if attempt["terminal"] == false
+                    && matches!(
+                        attempt["state"].as_str(),
+                        Some("working" | "running" | "verifying")
+                    ) =>
+            {
+                ("running", None, None, false)
+            }
+            _ => ("unavailable", None, None, false),
+        };
+    if stop.load(std::sync::atomic::Ordering::Relaxed) || select()? != proof {
+        return Err(Error::new("worker output binding changed"));
+    }
+    Ok(
+        json!({"room":id,"leadAttempt":lead,"workerAttempt":worker,"status":status,"text":text,"source":source,"truncated":truncated}),
+    )
+}
+
+fn worker_scope<'a>(
+    attempts: &'a [Value],
+    main: &Value,
+    room: &str,
+    lead_id: &str,
+    worker_id: &str,
+) -> Option<(&'a Value, &'a Value)> {
+    use crate::render::attempt_room;
+    use oms_command_room::AttemptRoom;
+    if main["room"] != room
+        || main["state"] != "joined"
+        || main["provider"] != "codex"
+        || main["participantsOmitted"] != 0
+        || lead_id == worker_id
+    {
+        return None;
+    }
+    let owner = main["participant"].as_str()?;
+    let members = main["participants"].as_array()?;
+    let unique = |id: &str| {
+        let mut xs = attempts.iter().filter(|v| v["attempt_id"] == id);
+        let row = xs.next()?;
+        xs.next().is_none().then_some(row)
+    };
+    let lead = unique(lead_id)?;
+    let worker = unique(worker_id)?;
+    // Native lifecycle encodes absent parents as empty; malformed references cannot inherit.
+    let parent = |row: &'a Value| match row.get("parent_attempt_id") {
+        None | Some(Value::Null) => Some(None),
+        Some(v) if v.as_str() == Some("") => Some(None),
+        Some(v) => v
+            .as_str()
+            .filter(|s| room::identifier(s, "parent").is_ok())
+            .map(Some),
+    };
+    let member = |id: &str| {
+        members
+            .iter()
+            .find(|m| m["participant"] == id && m["room"] == room)
+    };
+    let participant = |row: &'a Value| match row["refs"].get("panel_room_participant") {
+        None => Some(None),
+        Some(v) => v
+            .as_str()
+            .filter(|s| room::identifier(s, "participant").is_ok())
+            .map(Some),
+    };
+    // A retained Room membership cannot revive a terminal Main or choose between
+    // competing Main attempts. Recognize both producer Room spellings here.
+    let mut active_owner = None;
+    for event in attempts.iter().filter(|r| r["tool"] == "panel-main") {
+        let refs = &event["refs"];
+        if refs["panel_room_id"] != room && refs["panel_room"] != room {
+            continue;
+        }
+        let principal = participant(event)?.or_else(|| event["attempt_id"].as_str())?;
+        if principal != owner {
+            continue;
+        }
+        if attempt_room(event) != AttemptRoom::Named(room)
+            || event["terminal"] != false
+            || event["provider"] != main["provider"]
+            || refs["panel_role"] != "main"
+            || active_owner
+                .replace(event["attempt_id"].as_str()?)
+                .is_some()
+        {
+            return None;
+        }
+    }
+    let provider = lead["provider"].as_str()?;
+    let role = lead["refs"].get("panel_role");
+    let lead_member_id = if lead["tool"] == "panel-native-assignment" {
+        if provider != "codex"
+            || lead["refs"]["native_assignment_schema"] != "1"
+            || role.is_some_and(|r| r != "lead")
+            || participant(lead)?.is_some_and(|p| p != lead_id)
+        {
+            return None;
+        }
+        Some(lead_id)
+    } else {
+        if role?.as_str()? != "lead" || lead["tool"] == "panel-main" {
+            return None;
+        }
+        participant(lead)?
+    };
+    if attempt_room(lead) != AttemptRoom::Named(room) || lead_member_id == Some(owner) {
+        return None;
+    }
+    let lm = lead_member_id.and_then(member);
+    if lm.is_some_and(|m| {
+        m["joined"] != true
+            || m["parent"] != owner
+            || m["provider"] != provider
+            || !matches!(m["role"].as_str(), Some("lead" | "worker"))
+    }) {
+        return None;
+    }
+    if let Some(parent_id) = parent(lead)? {
+        if parent_id == lead_id || parent_id == worker_id || active_owner != Some(parent_id) {
+            return None;
+        }
+    } else if lm.is_none() {
+        return None;
+    }
+    let worker_room = attempt_room(worker);
+    if !matches!(worker_room, AttemptRoom::Unspecified) && worker_room != AttemptRoom::Named(room) {
+        return None;
+    }
+    let worker_member = participant(worker)?;
+    if worker_member == Some(owner)
+        || worker_member.is_some() && worker_member == lead_member_id
+        || worker["tool"] == "panel-main"
+    {
+        return None;
+    }
+    let wm = worker_member.and_then(member);
+    let explicit = parent(worker)?;
+    if let Some(p) = explicit {
+        if p != lead_id {
+            return None;
+        }
+    } else if worker_room != AttemptRoom::Named(room) || wm.is_none_or(|m| m["joined"] != true) {
+        return None;
+    }
+    let worker_role = worker["refs"].get("panel_role");
+    if worker_role.is_some_and(|r| r != "worker")
+        || worker_role.is_none() && (wm.is_none() || worker["tool"] == "panel-native-assignment")
+    {
+        return None;
+    }
+    if wm.is_some_and(|m| {
+        m["role"] != "worker"
+            || m["provider"] != worker["provider"]
+            || lead_member_id.is_none()
+            || m["parent"].as_str() != lead_member_id
+    }) {
+        return None;
+    }
+    Some((lead, worker))
+}
+
 fn attempt_belongs(row: &Value, room: &str, participant: &str) -> bool {
     let refs = &row["refs"];
     refs["panel_room_id"] == room
@@ -306,6 +521,42 @@ fn result_excerpt(attempt: Value, kind: Value, at: Value, full: &str) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_scope_requires_exact_ancestry_without_guessing_missing_room() {
+        let main = json!({"participant":"m","room":"r","provider":"codex","state":"joined","participantsOmitted":0,"participants":[
+            {"participant":"l","room":"r","parent":"m","role":"worker","joined":true,"provider":"codex"},
+            {"participant":"w","room":"r","parent":"l","role":"worker","joined":false,"provider":"claude"}]});
+        let m = json!({"attempt_id":"main","provider":"codex","tool":"panel-main","terminal":false,"refs":{"panel_role":"main","panel_room_id":"r","panel_room_participant":"m"}});
+        let lead = json!({"attempt_id":"l","provider":"codex","tool":"panel-native-assignment","parent_attempt_id":"main","refs":{"panel_room":"r","native_assignment_schema":"1"}});
+        let child = json!({"attempt_id":"worker","provider":"claude","tool":"peer-ask","parent_attempt_id":"l","terminal":true,"refs":{"panel_role":"worker","panel_room_participant":"w"}});
+        let ok = |m: Value, l: Value, c: Value| {
+            worker_scope(&[m, l, c], &main, "r", "l", "worker").is_some()
+        };
+        assert!(ok(m.clone(), lead.clone(), child.clone()));
+        for (key, value) in [
+            ("panel_room_id", json!("other")),
+            ("panel_room", json!(null)),
+            ("panel_role", json!("researcher")),
+            ("panel_room_participant", json!("l")),
+        ] {
+            let mut wrong = child.clone();
+            wrong["refs"][key] = value;
+            assert!(!ok(m.clone(), lead.clone(), wrong));
+        }
+        let mut wrong = child.clone();
+        wrong["parent_attempt_id"] = json!("elsewhere");
+        assert!(!ok(m.clone(), lead.clone(), wrong));
+        let mut wrong = lead.clone();
+        wrong["parent_attempt_id"] = json!("other-main");
+        assert!(!ok(m.clone(), wrong, child.clone()));
+        let mut wrong = m.clone();
+        wrong["terminal"] = json!(true);
+        assert!(!ok(wrong, lead.clone(), child.clone()));
+        assert!(
+            worker_scope(&[m, lead, child.clone(), child], &main, "r", "l", "worker").is_none()
+        );
+    }
 
     #[test]
     fn evidence_needs_one_consistent_room_and_member_binding() {
