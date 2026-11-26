@@ -882,7 +882,7 @@ test('chat refresh rereads the open Room or managed Lead conversation in place',
     assert.ok(opener.focused);
   }
 });
-test('opt-in auto refresh persists, pauses and clears, and r refreshes only outside typing and dialogs',async()=>{
+test('opt-in auto refresh persists, pauses and clears, and Alt+R refreshes only outside typing and dialogs',async()=>{
   let now=1000;
   const jobs=new Map(), memory=new Map();
   const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
@@ -904,13 +904,16 @@ test('opt-in auto refresh persists, pauses and clears, and r refreshes only outs
   mark=reads();p.document.show(true);await setImmediate();assert.equal(reads(),mark);assert.equal(autos().length,1);
   now+=15000;p.window.dispatchEvent(new Event('focus'));await setImmediate();assert.equal(reads(),mark+1);
   await p.event('new-goal','click');assert.equal(autos().length,0);
-  const press=async(extra={})=>{p.window.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'r',...extra}));await setImmediate();};
+  assert.match(html,/<button id="refresh"[^>]*\saria-keyshortcuts="Alt\+R"/);
+  const press=async(extra={altKey:true},target=p)=>{target.window.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'r',...extra}));await setImmediate();};
   mark=reads();now+=15000;await press();p.window.dispatchEvent(new Event('focus'));await setImmediate();assert.equal(reads(),mark);
   await p.event('close-launch','click');assert.equal(autos().length,1);
   p.document.activeElement=p.get('brief');await press();assert.equal(reads(),mark);
   p.document.activeElement=undefined;
-  for(const modifier of ['ctrlKey','metaKey','altKey'])await press({[modifier]:true});
+  for(const extra of [{},{ctrlKey:true},{metaKey:true},{altKey:true,ctrlKey:true},{altKey:true,metaKey:true},{altKey:true,shiftKey:true},{altKey:true,repeat:true}])await press(extra);
   assert.equal(reads(),mark);await press();assert.equal(reads(),mark+1);
+  // macOS reports a composed character for Option+R, so the physical key also matches.
+  await press({altKey:true,key:'\u00ae',code:'KeyR'});assert.equal(reads(),mark+2);
   await p.event('auto-refresh','click');assert.equal(autos().length,0);assert.equal(memory.get('oms.panel.auto-refresh.v1'),'off');
   await p.event('auto-refresh','click');
   const reopened=await panel(['one'],{},{timers:{...timers,setTimeout:()=>Symbol(),clearTimeout(){}},storage});
@@ -924,8 +927,54 @@ test('opt-in auto refresh persists, pauses and clears, and r refreshes only outs
   assert.equal(pinned.get('auto-refresh').getAttribute('aria-pressed'),'true');assert.equal(autos().length,1);
   mark=pinnedReads();const [pinnedId,pinnedJob]=autos()[0];jobs.delete(pinnedId);pinnedJob.fn();await setImmediate();
   assert.equal(pinnedReads(),mark+1);assert.equal(autos().length,1);
-  pinned.window.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'r'}));await setImmediate();
-  assert.equal(pinnedReads(),mark+2);
+  await press({},pinned);assert.equal(pinnedReads(),mark+1);
+  await press({altKey:true},pinned);assert.equal(pinnedReads(),mark+2);
+});
+test('transient snapshot failures auto-retry a bounded number of times and recover',async()=>{
+  const jobs=new Map(), memory=new Map([['oms.panel.auto-refresh.v1','on']]);
+  const timers={setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
+  const autos=()=>[...jobs].filter(([,job])=>job.ms===20000);
+  const fire=async()=>{assert.equal(autos().length,1);const [id,job]=autos()[0];jobs.delete(id);job.fn();await setImmediate();};
+  let failing=false, binding;
+  const p=await panel(['one'],{},{locale:'en',timers,storage,tools:{
+    oms_list_projects:()=>binding?{projects:[],binding}:{projects:['one']},
+    oms_panel_snapshot:()=>{if(failing)throw new Error('offline');return {dashboard:{project:'one'}};}}});
+  const reads=()=>p.calls.filter(c=>c.name==='oms_panel_snapshot').length;
+  // Fires every scheduled retry, bounded so an unbounded loop fails instead of hanging.
+  const drain=async()=>{let fired=0;while(autos().length && fired<20){await fire();fired++;}return fired;};
+  // One failure hides the view but keeps Auto on, and the next tick recovers.
+  failing=true;await fire();
+  assert.equal(p.get('view').hidden,true);assert.equal(p.get('auto-refresh').getAttribute('aria-pressed'),'true');
+  assert.equal(autos().length,1);
+  failing=false;await fire();assert.equal(p.get('view').hidden,false);assert.equal(autos().length,1);
+  // Recovery restores the full budget; persistent failure stops after five automatic retries.
+  failing=true;let mark=reads();await fire();assert.equal(await drain(),5);
+  assert.equal(reads(),mark+6);assert.equal(autos().length,0);
+  // Manual refresh and re-enabling Auto each grant a new budget.
+  mark=reads();await p.event('refresh','click');assert.equal(await drain(),5);assert.equal(reads(),mark+6);
+  await p.event('auto-refresh','click');assert.equal(autos().length,0);
+  await p.event('auto-refresh','click');assert.equal(await drain(),5);
+  p.window.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'r',altKey:true}));await setImmediate();
+  assert.equal(await drain(),5);
+  // Return triggers spend the same budget and cannot exceed it.
+  await p.event('refresh','click');await fire();failing=false;await fire();assert.equal(p.get('view').hidden,false);
+  // An unbound registry is not a transient failure.
+  failing=true;await fire();binding='unbound';await fire();assert.equal(autos().length,0);
+  await p.event('auto-refresh','click');await p.event('auto-refresh','click');assert.equal(autos().length,0);
+});
+test('stale return triggers share the transient retry cap',async()=>{
+  let now=1000, failing=false;
+  const jobs=new Map(), memory=new Map([['oms.panel.auto-refresh.v1','on']]);
+  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
+  const p=await panel(['one'],{},{timers,storage,tools:{oms_panel_snapshot:()=>{if(failing)throw new Error('offline');return {dashboard:{project:'one'}};}}});
+  const reads=()=>p.calls.filter(c=>c.name==='oms_panel_snapshot').length;
+  failing=true;now+=15000;
+  const mark=reads();
+  for(let i=0;i<9;i++){p.window.dispatchEvent(new Event('focus'));await setImmediate();}
+  // The first read starts from a healthy view; five more are transient retries.
+  assert.equal(reads(),mark+6);assert.equal([...jobs.values()].filter(job=>job.ms===20000).length,0);
 });
 test('the launcher counts and normalizes the brief, and the container width selects compact density',async()=>{
   const p=await panel(['one'],{},{locale:'ko',hostContext:{locale:'ko',displayMode:'inline',containerDimensions:{maxWidth:360}}});

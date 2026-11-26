@@ -187,7 +187,7 @@ header{gap:.4rem;padding-bottom:.5rem}
 <body><main>
 <header><div class="scope"><h1>OMS</h1><strong id="project"></strong><label id="scope" hidden><span class="sr-only" data-i18n="project">프로젝트</span><select id="project-choice"></select></label></div><div class="tools">
 <select id="language-choice" aria-label="언어 / Language"><option value="ko">한국어</option><option value="en">English</option></select>
-<button id="auto-refresh" type="button" aria-pressed="false" data-i18n="auto">자동</button><button id="refresh" type="button" aria-label="새로고침" disabled>↻</button><button id="display-mode" type="button" hidden></button></div></header>
+<button id="auto-refresh" type="button" aria-pressed="false" data-i18n="auto">자동</button><button id="refresh" type="button" aria-keyshortcuts="Alt+R" aria-label="새로고침" disabled>↻</button><button id="display-mode" type="button" hidden></button></div></header>
 <p id="status" class="note" role="status"></p><p id="receipt" class="note" role="status"></p>
 <noscript><p lang="ko">대화에서 OMS에 프로젝트 상태를 물어보세요.</p><p lang="en">Ask OMS for project status in the conversation.</p></noscript>
 <div id="view" hidden>
@@ -444,6 +444,9 @@ let busy = false;
 let disposed = false;
 const AUTO_KEY='oms.panel.auto-refresh.v1';
 let autoRefresh=false, autoTimer, lastLoadedAt=0;
+// A failed load hides the view; automatic triggers may retry it this many times.
+const AUTO_RETRY_LIMIT=5;
+let transientError=false, autoRetryCount=0;
 let project = '';
 let requestedProject = null;
 let generation = 0;
@@ -625,6 +628,7 @@ function switchProject(target) {
     return;
   }
   generation++;leadIntent=undefined;
+  resetAutoRetry();
   requestedProject = target;
   project = '';
   clearProject();
@@ -1240,18 +1244,22 @@ function setBusy(value,writing=false) {
   armAuto();
 }
 function panelIdle() {
-  return Boolean(!disposed && dashboardData && !el('view').hidden && !el('conversation').open && !el('launcher').open);
+  return Boolean(!disposed && !el('conversation').open && !el('launcher').open &&
+    ((dashboardData && !el('view').hidden) || (transientError && autoRetryCount<AUTO_RETRY_LIMIT)));
 }
+function resetAutoRetry(){transientError=false;autoRetryCount=0;}
+function autoReload(){if(transientError)autoRetryCount+=1;refresh();}
+function manualRefresh(){autoRetryCount=0;refresh();}
 function stopAuto(){clearTimeout(autoTimer);autoTimer=undefined;}
 function armAuto() {
   stopAuto();
   if(!autoRefresh || busy || !panelIdle() || document?.hidden)return;
   // Stays above the 8-15s Lead status poll cadence.
-  autoTimer=setTimeout(()=>{autoTimer=undefined;if(autoRefresh && panelIdle() && !document?.hidden)refresh();},20000);
+  autoTimer=setTimeout(()=>{autoTimer=undefined;if(autoRefresh && panelIdle() && !document?.hidden)autoReload();},20000);
   autoTimer?.unref?.();
 }
 function refetchStale() {
-  if(!autoRefresh || document?.hidden || lastLoadedAt<=0 || Date.now()-lastLoadedAt<15000 || busy || !panelIdle())return; refresh();
+  if(!autoRefresh || document?.hidden || lastLoadedAt<=0 || Date.now()-lastLoadedAt<15000 || busy || !panelIdle())return; autoReload();
 }
 function paintAuto(){el('auto-refresh').setAttribute('aria-pressed',String(autoRefresh));}
 function isTyping(target) {
@@ -1268,12 +1276,12 @@ async function loadStatus(expected,recover=true) {
     const {projects:aliases,binding}=registry;
     if(!Array.isArray(aliases) || (binding!==undefined && (!['catalog','pinned','cwd','unbound'].includes(binding) || (binding==='catalog')!==Boolean(aliases.length))))throw uiError('status.badList');
     readOnly=registry.readOnly===true;
-    if(binding==='unbound'){project='';clearProject();el('scope').hidden=true;setStatus('project.unbound');return;}
-    if(!chooseProject(aliases))return;
+    if(binding==='unbound'){resetAutoRetry();project='';clearProject();el('scope').hidden=true;setStatus('project.unbound');return;}
+    if(!chooseProject(aliases)){resetAutoRetry();return;}
     if(project && (!contextKey||contextKey==='null'))updateContext({project});
     const snapshot=await tool('oms_panel_snapshot',{},expected), d=snapshot.structuredContent?.dashboard||snapshot._meta?.dashboard;
     if(!d || typeof d!=='object' || Array.isArray(d))throw uiError('status.badSnapshot');
-    render(d);lastLoadedAt=Date.now();const notice=snapshotNotice(d);setStatus(()=>notice?t(notice):'',notice?'warn':'info');
+    render(d);resetAutoRetry();lastLoadedAt=Date.now();const notice=snapshotNotice(d);setStatus(()=>notice?t(notice):'',notice?'warn':'info');
     if(readOnly){retryStart=undefined;el('approval-card').hidden=true;el('approvals').replaceChildren();return;}
     try{
       const response=await tool('oms_list_approvals',{},expected);
@@ -1284,7 +1292,8 @@ async function loadStatus(expected,recover=true) {
     if(expected===generation && recover && retryStart){
       try{await recoverStart(expected);}catch{if(expected===generation)launchNotice('start.unknown');}
     }
-  }catch{if(expected===generation){
+  }catch{if(expected===generation && !disposed){
+    transientError=true;
     resetLeadControl();leadIntent=undefined;paintLeadControls();
     dashboardData=undefined;members=[];rows=[];approvedScope++;closeDialogs();resetIssue();updateContext(null);el('view').hidden=true;
     setStatus('connectionFailed','warn');
@@ -1450,10 +1459,11 @@ on('project-choice','change', () => {
   switchProject(projectArgument(el('project-choice').value || null));
 });
 onClick('display-mode',()=>{const n=nextDisplayMode();if(n)requestDisplayMode(n.mode);});
-onClick('refresh', refresh);
+onClick('refresh', manualRefresh);
 onClick('auto-refresh',()=>{
   if(disposed)return;
   autoRefresh=!autoRefresh;
+  if(autoRefresh)autoRetryCount=0;
   try{globalThis.localStorage?.setItem(AUTO_KEY,autoRefresh?'on':'off');}catch{}
   paintAuto();armAuto();
 });
@@ -1463,9 +1473,11 @@ document.addEventListener?.('visibilitychange',()=>{
 });
 window.addEventListener('focus',refetchStale);
 window.addEventListener('keydown',event=>{
-  if(event.key!=='r' || event.metaKey || event.ctrlKey || event.altKey || event.repeat || event.isComposing || event.defaultPrevented)return;
+  // WCAG 2.1.4: never a bare character key. The physical code covers layouts where Alt composes another character.
+  if(!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat || event.isComposing || event.defaultPrevented ||
+     !(event.code==='KeyR' || event.key==='r' || event.key==='R'))return;
   if(busy || disposed || el('conversation').open || el('launcher').open || isTyping(event.target) || isTyping(document.activeElement))return;
-  event.preventDefault();refresh();
+  event.preventDefault();manualRefresh();
 });
 on('language-choice','change', () => { const value = el('language-choice').value; if (LANGS.includes(value)) setLanguage(value, true); });
 
