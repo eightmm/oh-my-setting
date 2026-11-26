@@ -10977,6 +10977,8 @@ pub(crate) mod tests {
                 "--dangerously-skip-permissions".into(),
                 "--effort".into(),
                 "xhigh".into(),
+                "--name".into(),
+                "OMS Lead · Claude".into(),
                 "--append-system-prompt".into(),
                 STARTUP_PROMPT.into(),
             ]));
