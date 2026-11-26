@@ -10,6 +10,7 @@ const FLAGS: &[&str] = &[
     "desktop-usage",
     "desktop-chat",
     "desktop-worker-output",
+    "evidence-full",
     "desktop-work-items",
     "sessions",
     "next-attention",
@@ -436,11 +437,13 @@ impl Options {
                                 | "lead-attempt"
                                 | "worker-attempt"
                                 | "conversation-digest"
+                                | "page"
                         )
                     })
                     && self.has("repo"),
                 "invalid worker output selectors",
             )?;
+            self.integer("page", 1, 1, 10000)?;
             for field in ["room", "lead-attempt", "worker-attempt"] {
                 oms_command_room::identifier(&self.required(field)?, field).map_err(Error::new)?;
             }
@@ -712,11 +715,22 @@ impl Options {
             &["accept"],
         )?;
         self.needs(&["export"], &["results"])?;
-        self.needs(&["page"], &["results", "desktop-view", "desktop-chat"])?;
+        self.needs(
+            &["page"],
+            &[
+                "results",
+                "desktop-view",
+                "desktop-chat",
+                "desktop-worker-output",
+            ],
+        )?;
+        self.needs(&["evidence-full"], &["desktop-chat"])?;
         self.needs(&["evidence-section", "evidence-attempt"], &["desktop-chat"])?;
         if self.has("desktop-chat") {
             require(
                 self.has("evidence-section") == self.has("evidence-attempt")
+                    && (!self.has("evidence-full")
+                        || matches!(self.get("evidence-section"), Some("transcript" | "diff")))
                     && (!self.has("page") || self.has("evidence-section"))
                     && !(self.has("before") && self.has("evidence-section")),
                 "select an exact evidence attempt and section or a Room message page",
@@ -896,7 +910,7 @@ impl Options {
                 "page",
                 1,
                 1,
-                if self.has("desktop-chat") {
+                if self.has("desktop-chat") || self.has("desktop-worker-output") {
                     10000
                 } else {
                     1000
@@ -1112,6 +1126,59 @@ mod tests {
             .is_ok()
         );
         assert!(Options::parse(&args(&["--repo", ".", "--desktop-usage", "--json"])).is_ok());
+        let worker = [
+            "--repo",
+            ".",
+            "--desktop-worker-output",
+            "--json",
+            "--room",
+            "room-a",
+            "--lead-attempt",
+            "lead-a",
+            "--worker-attempt",
+            "worker-a",
+            "--conversation-digest",
+            "00000000000000000000000000000000",
+        ];
+        for page in ["1", "2", "10000"] {
+            assert!(
+                Options::parse(&args(&[worker.as_slice(), &["--page", page]].concat())).is_ok()
+            );
+        }
+        for page in ["0", "10001", "../answer"] {
+            assert!(
+                Options::parse(&args(&[worker.as_slice(), &["--page", page]].concat())).is_err()
+            );
+        }
+        let evidence = [
+            "--repo",
+            ".",
+            "--desktop-chat",
+            "--json",
+            "--room",
+            "room-a",
+            "--participant",
+            "main",
+            "--conversation-digest",
+            "00000000000000000000000000000000",
+            "--evidence-full",
+            "--evidence-attempt",
+            "attempt-a",
+        ];
+        for section in ["transcript", "diff"] {
+            assert!(
+                Options::parse(&args(
+                    &[evidence.as_slice(), &["--evidence-section", section]].concat()
+                ))
+                .is_ok()
+            );
+        }
+        assert!(
+            Options::parse(&args(
+                &[evidence.as_slice(), &["--evidence-section", "events"]].concat()
+            ))
+            .is_err()
+        );
         assert!(
             Options::parse(&args(&[
                 "--repo",

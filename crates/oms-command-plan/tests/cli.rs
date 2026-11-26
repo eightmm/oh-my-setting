@@ -326,6 +326,47 @@ fn brief_file_round_trip_and_bounds() {
         );
     }
     assert_eq!(go(&r, &["add", "--id", "0", "--title", "no brief"]).0, 0);
+    let before = fs::read(r.join(".oms/plan/tasks.json")).unwrap();
+    let status = go(&r, &["status", "--json"]);
+    assert_eq!(status.0, 0, "{status:?}");
+    let status = oms_command_plan::json::parse(status.1.as_bytes()).unwrap();
+    let readiness = status.get("task_readiness").array().unwrap();
+    let missing = readiness.iter().find(|row| row.text("id") == "0").unwrap();
+    assert_eq!(missing.text("reason"), "brief-required");
+    assert_eq!(
+        missing.get("selection_eligible"),
+        &oms_command_plan::json::Value::Bool(false)
+    );
+    let ready = readiness.iter().find(|row| row.text("id") == "a").unwrap();
+    assert_eq!(ready.text("reason"), "selection-ready");
+    assert_eq!(
+        ready.get("selection_eligible"),
+        &oms_command_plan::json::Value::Bool(true)
+    );
+    assert_eq!(fs::read(r.join(".oms/plan/tasks.json")).unwrap(), before);
+    // Optional readiness must not turn a previously readable legacy status
+    // into a failure, or imply eligibility from unusable selector inputs.
+    let mut legacy = oms_command_plan::json::parse(&before).unwrap();
+    let mut tasks = legacy.get("tasks").clone();
+    let mut task = tasks.get("a").clone();
+    task.set("allowed_paths", oms_command_plan::json::number(1))
+        .unwrap();
+    tasks.set("a", task).unwrap();
+    legacy.set("tasks", tasks).unwrap();
+    let legacy_raw = oms_command_plan::json::canonical(&legacy).unwrap();
+    fs::write(r.join(".oms/plan/tasks.json"), &legacy_raw).unwrap();
+    let status = go(&r, &["status", "--json"]);
+    assert_eq!(status.0, 0, "{status:?}");
+    let status = oms_command_plan::json::parse(status.1.as_bytes()).unwrap();
+    assert_eq!(
+        status.get("task_readiness"),
+        &oms_command_plan::json::Value::Null
+    );
+    assert_eq!(
+        fs::read(r.join(".oms/plan/tasks.json")).unwrap(),
+        legacy_raw
+    );
+    fs::write(r.join(".oms/plan/tasks.json"), &before).unwrap();
     let preview = go(&r, &["next", "--provider", "codex", "--json"]);
     assert_eq!(preview.0, 0, "{preview:?}");
     assert_eq!(
@@ -342,6 +383,44 @@ fn brief_file_round_trip_and_bounds() {
             .unwrap()
             .text("id"),
         "a"
+    );
+    fs::write(&file, "Implement dependent work").unwrap();
+    assert_eq!(
+        go(
+            &r,
+            &[
+                "add",
+                "--id",
+                "dependent",
+                "--title",
+                "dependent",
+                "--depends",
+                "a",
+                "--brief-file",
+                path
+            ]
+        )
+        .0,
+        0
+    );
+    let status = go(&r, &["status", "--json"]);
+    assert_eq!(status.0, 0, "{status:?}");
+    let status = oms_command_plan::json::parse(status.1.as_bytes()).unwrap();
+    let readiness = status.get("task_readiness").array().unwrap();
+    let claimed = readiness.iter().find(|row| row.text("id") == "a").unwrap();
+    assert_eq!(claimed.text("reason"), "attempt-active");
+    assert_eq!(
+        claimed.get("selection_eligible"),
+        &oms_command_plan::json::Value::Bool(false)
+    );
+    let waiting = readiness
+        .iter()
+        .find(|row| row.text("id") == "dependent")
+        .unwrap();
+    assert_eq!(waiting.text("reason"), "dependencies-unfinished");
+    assert_eq!(
+        waiting.get("selection_eligible"),
+        &oms_command_plan::json::Value::Bool(false)
     );
     // Batch rows carry a brief, and a replay with a different brief is not "already applied".
     let batch = |brief: &str| {
@@ -1940,6 +2019,8 @@ fn merged_dependencies_scheduling_and_late_results() {
     let (code, _, err) = run(&["add", "--id", "self", "--title", "bad", "--depends", "self"]);
     assert_eq!(code, 2);
     assert!(err.contains("cycle"), "{err}");
+    let brief_path = tmp.0.join("scheduler-brief.txt");
+    fs::write(&brief_path, "Perform the scoped scheduler fixture work").unwrap();
     for (id, priority) in [("a", "-1"), ("b", "+2")] {
         let (code, _, err) = run(&[
             "add",
@@ -1953,6 +2034,8 @@ fn merged_dependencies_scheduling_and_late_results() {
             priority,
             "--resources",
             "gpu,gpu",
+            "--brief-file",
+            brief_path.to_str().unwrap(),
         ]);
         assert_eq!(code, 0, "{err}");
     }
@@ -1968,6 +2051,21 @@ fn merged_dependencies_scheduling_and_late_results() {
     let (code, out, err) = run(&["ready"]);
     assert_eq!(code, 0, "{err}");
     assert!(out.is_empty(), "shared resource should block b: {out}");
+    let (code, out, err) = run(&["status", "--json"]);
+    assert_eq!(code, 0, "{err}");
+    let status = oms_command_plan::json::parse(out.as_bytes()).unwrap();
+    let blocked = status
+        .get("task_readiness")
+        .array()
+        .unwrap()
+        .iter()
+        .find(|row| row.text("id") == "b")
+        .unwrap();
+    assert_eq!(blocked.text("reason"), "scope-conflict");
+    assert_eq!(
+        blocked.get("selection_eligible"),
+        &oms_command_plan::json::Value::Bool(false)
+    );
     // `ready` reports scheduling inputs; claimed `a` still filters `b`.
     for (id, extra) in [
         ("c", &["--role", "builder", "--resources", "cpu,mem"][..]),
@@ -2303,6 +2401,12 @@ fn panel_acceptance_checks_canonical_claimed_and_running_expiry() {
         assert_eq!(status.get("stale").array().unwrap()[0].text("id"), "a");
         assert_eq!(status.get("by_state").get("stale"), &json::number(1));
         assert!(status.get("by_state").opt(state).is_none());
+        let readiness = &status.get("task_readiness").array().unwrap()[0];
+        assert_eq!(readiness.text("reason"), "claim-expired");
+        assert_eq!(
+            readiness.get("selection_eligible"),
+            &json::Value::Bool(state == "claimed")
+        );
         let brief = String::from_utf8(query(Action::Brief, &[("id", "a")]).stdout).unwrap();
         assert!(brief.contains("state: stale [claim EXPIRED"));
         assert_eq!(brief.contains("; claimable"), state == "claimed");

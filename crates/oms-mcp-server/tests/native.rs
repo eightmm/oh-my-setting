@@ -201,6 +201,34 @@ impl Drop for Client {
 fn payload(v: &Value) -> Value {
     serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
 }
+fn registry_summary(v: &Value) -> Value {
+    let mut data = payload(v);
+    let valid = |key: &Value| {
+        key.as_str().is_some_and(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    };
+    assert!(
+        data["projectKeys"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .all(
+                |(alias, key)| data["projects"].as_array().unwrap().contains(&json!(alias))
+                    && valid(key)
+            )
+    );
+    if matches!(data["binding"].as_str(), Some("cwd" | "pinned")) {
+        assert!(valid(&data["projectKey"]));
+    } else {
+        assert!(data["projectKey"].is_null());
+    }
+    data.as_object_mut().unwrap().remove("projectKeys");
+    data.as_object_mut().unwrap().remove("projectKey");
+    data
+}
 fn good(v: &Value) {
     assert_eq!(v["result"]["isError"], false, "{v}");
 }
@@ -325,7 +353,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v29.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v30.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -378,7 +406,7 @@ fn cross_host_project_reads() {
     std::fs::write(&map, json!({"fixture":repo}).to_string()).unwrap();
     std::fs::set_permissions(map, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(
-        payload(&c.tool("oms_list_projects", json!({}))),
+        registry_summary(&c.tool("oms_list_projects", json!({}))),
         json!({"binding":"catalog","projects":["fixture"],"readOnly":true})
     );
     let obs = json!({"schema":1,"kind":"multi-source-observation","atomic":false,"revision":"obs-v1:0123456789abcdef01234567","observedAt":"2026-11-24T10:00:00Z","completeness":"complete","sources":{"git":"ok","task":"ok","plan":"ok","attempts":"ok","artifacts":"ok","acceptance":"ok","conversation":"unconfirmed"},"evidence":{"scope":"repository","head":"1234567890ab","room":null,"latestArtifact":null,"omitted":0,"trimmed":0}});
@@ -668,7 +696,7 @@ fn packaged_remote_catalog(source: &Path, repo: &Path, home: &Path) {
     let mut readonly = open(generic, &[]);
     for (client, read_only) in [(&mut desktop, false), (&mut readonly, true)] {
         assert_eq!(
-            payload(&projects(client)),
+            registry_summary(&projects(client)),
             json!({"projects":["remote"],"binding":"catalog","readOnly":read_only})
         );
         good(&client.tool("oms_open_panel", json!({"project":"remote"})));
@@ -684,18 +712,18 @@ fn packaged_remote_catalog(source: &Path, repo: &Path, home: &Path) {
     std::fs::remove_file(&map).unwrap();
     bad(&projects(&mut desktop), "Invalid OMS project map");
     assert_eq!(
-        payload(&projects(&mut readonly)),
+        registry_summary(&projects(&mut readonly)),
         json!({"projects":[],"binding":"unbound","readOnly":true})
     );
     let mut pinned = open(generic, &[("OMS_PANEL_REPO", repo.to_str().unwrap())]);
     assert_eq!(
-        payload(&projects(&mut pinned)),
+        registry_summary(&projects(&mut pinned)),
         json!({"projects":[],"binding":"pinned","readOnly":true})
     );
     let inline = json!({"operator":repo}).to_string();
     let mut catalog = open(generic, &[("OMS_PANEL_PROJECTS", &inline)]);
     assert_eq!(
-        payload(&projects(&mut catalog)),
+        registry_summary(&projects(&mut catalog)),
         json!({"projects":["operator"],"binding":"catalog","readOnly":true})
     );
 }
@@ -725,6 +753,18 @@ fn mcp_app_binding_boundaries() {
         )
     };
     let mut c = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
+    bind(json!({"fixture":repo}));
+    let original_key =
+        payload(&c.tool("oms_list_projects", json!({})))["projectKeys"]["fixture"].clone();
+    assert!(original_key.is_string());
+    bind(json!({"fixture":other}));
+    let changed_key =
+        payload(&c.tool("oms_list_projects", json!({})))["projectKeys"]["fixture"].clone();
+    assert!(changed_key.is_string());
+    assert_ne!(
+        original_key, changed_key,
+        "alias remapping must invalidate physical-scope observations"
+    );
     bind(json!({"fixture":repo}));
     let foreign =
         json!({"threadId":"00000000-0000-4000-8000-000000000001","room":"r","participant":"p"});
@@ -1110,6 +1150,54 @@ fn worker_output_reader(c: &mut Client, source: &Path, key: &str, thread: &str) 
     assert_eq!(argv[11], "--conversation-digest");
     assert_eq!(argv[12].as_str().unwrap().len(), 32);
     assert!(!argv.to_string().contains(thread));
+    let mut full = args.clone();
+    full["answerPage"] = json!("");
+    let mut first = base.clone();
+    first["text"] = json!("abc");
+    first["truncated"] = json!(true);
+    first["page"] = json!({"page":1,"offset":0,"bytes":3,"totalBytes":11,"digest":"d".repeat(64),
+        "revision":"e".repeat(64),"hasMore":true,"nextPage":2});
+    configure(&first);
+    let r = request(c, &full);
+    good(&r);
+    let cursor = r["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    assert!(cursor.is_string());
+    full["answerPage"] = cursor;
+    let mut second = first.clone();
+    second["text"] = json!(" \n\t ");
+    second["page"]["page"] = json!(2);
+    second["page"]["offset"] = json!(3);
+    second["page"]["bytes"] = json!(4);
+    second["page"]["nextPage"] = json!(3);
+    configure(&second);
+    let r = request(c, &full);
+    good(&r);
+    assert_eq!(r["result"]["_meta"]["workerOutput"]["text"], " \n\t ");
+    full["answerPage"] = r["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    assert!(full["answerPage"].is_string());
+    bad(&request(c, &args), "could not be verified");
+    second["text"] = json!("defg");
+    second["truncated"] = json!(false);
+    second["page"]["page"] = json!(3);
+    second["page"]["offset"] = json!(7);
+    second["page"]["hasMore"] = json!(false);
+    second["page"]["nextPage"] = Value::Null;
+    configure(&second);
+    let r = request(c, &full);
+    good(&r);
+    assert_eq!(r["result"]["_meta"]["workerOutput"]["text"], "defg");
+    assert!(r["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].is_null());
+    let mut wrong = full.clone();
+    wrong["room"] = json!("other-room");
+    let mut foreign = second.clone();
+    foreign["room"] = wrong["room"].clone();
+    configure(&foreign);
+    bad(&request(c, &wrong), "another selection");
+    second["page"]["revision"] = json!("f".repeat(64));
+    configure(&second);
+    bad(&request(c, &full), "changed");
+    full["answerPage"] = json!("../answer");
+    bad(&request(c, &full), "cursor");
     for status in ["running", "not_recorded", "unavailable"] {
         let mut r = base.clone();
         r["status"] = status.into();
@@ -1147,6 +1235,49 @@ fn worker_output_reader(c: &mut Client, source: &Path, key: &str, thread: &str) 
             .to_string()
             .contains(withheld["text"].as_str().unwrap())
     );
+
+    // A secret straddling an 8192-byte page boundary (including beyond the 16 KiB preview)
+    // withholds every page of worker output via the shared whole-body scan.
+    let clean_worker = format!("{}{}", "w".repeat(16_382), "y".repeat(600));
+    fixture_settings(
+        source,
+        json!({"pagedWorkerBody":clean_worker,"room":args["room"],"leadAttempt":args["leadAttempt"],"workerAttempt":args["workerAttempt"]}),
+    );
+    let mut paged = args.clone();
+    paged["answerPage"] = json!("");
+    let p1 = request(c, &paged);
+    good(&p1);
+    let c2 = p1["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    paged["answerPage"] = c2.clone();
+    let p2 = request(c, &paged);
+    good(&p2);
+    let c3 = p2["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    assert!(c3.is_string());
+
+    let left = ["gh", "p_LeftHalf012345"].concat();
+    let right = "RightHalf67890abcdef01";
+    let straddling_worker = format!(
+        "{} {left}{right} {}",
+        "w".repeat(16_384 - 1 - left.len()),
+        "y".repeat(560)
+    );
+    fixture_settings(
+        source,
+        json!({"pagedWorkerBody":straddling_worker,"room":args["room"],"leadAttempt":args["leadAttempt"],"workerAttempt":args["workerAttempt"]}),
+    );
+    for cursor in [json!(""), c2, c3] {
+        let mut req = args.clone();
+        req["answerPage"] = cursor;
+        let refused = request(c, &req);
+        bad(&refused, "withheld");
+        let wire = refused.to_string();
+        assert!(
+            !wire.contains(&left)
+                && !wire.contains(right)
+                && !wire.contains(&"w".repeat(32))
+                && !wire.contains(&"y".repeat(32))
+        );
+    }
 }
 
 fn desktop_lead_conversations() {
@@ -1246,6 +1377,31 @@ fn desktop_lead_conversations() {
         "project changed",
     );
     assert_eq!(runs(), 0);
+    for providers in [
+        json!([]),
+        json!(["codex", "codex"]),
+        json!(["pi"]),
+        json!("codex"),
+    ] {
+        let invalid = call(
+            &mut c,
+            open,
+            &json!({"room":"lead-room","providers":providers}),
+            owner,
+        );
+        assert_eq!(invalid["result"]["isError"], true);
+        assert_eq!(runs(), 0);
+    }
+    let single = json!({"room":"lead-room","projectKey":key,"providers":["codex"]});
+    let first = payload(&call(&mut c, open, &single, owner));
+    assert_eq!(first["leads"].as_array().unwrap().len(), 1);
+    assert_eq!(first["leads"][0]["provider"], "codex");
+    assert_eq!(
+        first["leads"][0]["requestId"],
+        initial["leads"][0]["requestId"]
+    );
+    good(&call(&mut c, open, &single, owner));
+    assert_eq!(runs(), 1, "selective reopen must reuse its one reservation");
     let opened = payload(&call(
         &mut c,
         open,
@@ -1494,6 +1650,14 @@ fn desktop_lead_conversations() {
         let public = payload(&view);
         let settings = &view["result"]["_meta"]["leadSettings"];
         assert_eq!(settings["selection"], json!({"model":null,"effort":null}));
+        assert_eq!(
+            settings["scope"],
+            json!({"target":"lead-conversation","appliesTo":"next-message",
+            "inheritsToWorkers":false,"mode":"read-only-consultation","continuity":"oms-thread"})
+        );
+        for field in ["account", "failover", "usage"] {
+            assert!(settings[field].is_null());
+        }
         assert_eq!(public["revision"], settings["revision"]);
         assert!(settings["nativeTitle"].is_null());
         assert_eq!(
@@ -1608,6 +1772,20 @@ fn desktop_lead_conversations() {
         assert_eq!(payload(&ack)["turn"]["turnId"], m["turnId"]);
         if seat == 0 {
             until(|| payload(&lookup(&mut c, &m))["turn"]["status"] == "running");
+            let pending = payload(&call(&mut c, read, &args, owner));
+            assert_eq!(pending["leads"][0]["latestTurn"]["turnId"], m["turnId"]);
+            assert_eq!(pending["leads"][0]["latestTurn"]["status"], "running");
+            assert!(!pending.to_string().contains("Private fixture"));
+            bad(
+                &call(
+                    &mut c,
+                    read,
+                    &json!({"room":m["room"],"projectKey":key,"provider":m["provider"],
+                "leadRequestId":m["leadRequestId"],"turnId":m["turnId"],"answerPage":""}),
+                    owner,
+                ),
+                "completed answer",
+            );
             let other = message(0, 9);
             bad(&call(&mut c, send, &other, owner), "unresolved");
             assert_eq!(
@@ -1619,6 +1797,152 @@ fn desktop_lead_conversations() {
             setup(false);
         }
         await_reply(&mut c, &m);
+        let latest = payload(&call(&mut c, read, &args, owner));
+        assert_eq!(latest["leads"][seat]["latestTurn"]["turnId"], m["turnId"]);
+        assert_eq!(latest["leads"][seat]["latestTurn"]["status"], "replied");
+        assert!(latest["leads"][seat]["latestTurn"]["lastObservedAt"].is_string());
+        if seat == 0 {
+            let child = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| {
+                    std::fs::read_to_string(p.join("prompt.txt"))
+                        .ok()
+                        .as_deref()
+                        == Some("Private fixture follow-up 1\n")
+                })
+                .unwrap();
+            let artifact = child.join("answers/fixture.md");
+            let original = std::fs::read(&artifact).unwrap();
+            let long = format!("{}끝", "긴문장🙂".repeat(1500));
+            std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
+            let mut full = json!({"room":m["room"],"projectKey":key,"provider":m["provider"],
+                "leadRequestId":m["leadRequestId"],"turnId":m["turnId"],"answerPage":""});
+            let mut text = String::new();
+            let mut first_cursor = Value::Null;
+            loop {
+                let r = call(&mut c, read, &full, owner);
+                good(&r);
+                let a = &r["result"]["_meta"]["leadConversation"]["answer"];
+                assert_eq!(a["offset"], text.len());
+                assert!(a["text"].as_str().unwrap().len() <= 8192);
+                text.push_str(a["text"].as_str().unwrap());
+                assert_eq!(a["handoff"]["turnId"], m["turnId"]);
+                for field in ["content", "structuredContent"] {
+                    assert!(!r["result"][field].to_string().contains("긴문장"));
+                }
+                if first_cursor.is_null() {
+                    first_cursor = a["nextCursor"].clone();
+                }
+                if a["hasMore"] == false {
+                    break;
+                }
+                full["answerPage"] = a["nextCursor"].clone();
+            }
+            assert_eq!(text, long);
+            assert_eq!(runs(), 4, "reading complete answers must not dispatch");
+            full["answerPage"] = first_cursor.clone();
+            let mut wrong = full.clone();
+            wrong["leadRequestId"] = initial["leads"][1]["requestId"].clone();
+            bad(&call(&mut c, read, &wrong, owner), "selected Lead changed");
+            let mut wrong = full.clone();
+            wrong["room"] = json!("another-room");
+            assert_eq!(call(&mut c, read, &wrong, owner)["result"]["isError"], true);
+            std::fs::write(&artifact, "## Output\nchanged answer\n## Exit\n0\n").unwrap();
+            bad(&call(&mut c, read, &full, owner), "changed");
+            std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
+            // Even an equal answer in a replacement artifact invalidates an observed page.
+            std::fs::rename(&artifact, child.join("retired-answer")).unwrap();
+            std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+            bad(&call(&mut c, read, &full, owner), "changed");
+
+            // A secret beyond the preview that straddles an 8192-byte page boundary (5 * 8192 = 40960)
+            // withholds every page and marks latestTurn unavailable with outbound_withheld.
+            let left = ["gh", "p_LeftHalf012345"].concat();
+            let right = "RightHalf67890abcdef01";
+            let straddling = format!(
+                "{} {left}{right} {}",
+                "a".repeat(40_960 - 1 - left.len()),
+                "z".repeat(25_000)
+            );
+            std::fs::write(&artifact, format!("## Output\n{straddling}\n## Exit\n0\n")).unwrap();
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+            for cursor in [json!(""), first_cursor.clone()] {
+                let mut req = full.clone();
+                req["answerPage"] = cursor;
+                let refused = call(&mut c, read, &req, owner);
+                bad(&refused, "withheld");
+                let wire = refused.to_string();
+                assert!(
+                    !wire.contains(&left)
+                        && !wire.contains(right)
+                        && !wire.contains(&"a".repeat(32))
+                        && !wire.contains(&"z".repeat(32))
+                );
+            }
+            let status_row = payload(&call(&mut c, read, &args, owner));
+            assert_eq!(status_row["leads"][0]["latestTurn"], Value::Null);
+            assert_eq!(
+                status_row["leads"][0]["turnState"],
+                json!({"status":"unavailable","reason":"outbound_withheld"})
+            );
+
+            // An answer exceeding MAX_ANSWER fails closed with invalid_answer_range, not outbound_withheld.
+            let oversized = "b".repeat(8 * 1024 * 1024 + 64);
+            std::fs::write(&artifact, format!("## Output\n{oversized}\n## Exit\n0\n")).unwrap();
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let oversized_row = payload(&call(&mut c, read, &args, owner));
+            assert_eq!(oversized_row["leads"][0]["latestTurn"], Value::Null);
+            assert_eq!(
+                oversized_row["leads"][0]["turnState"],
+                json!({"status":"unavailable","reason":"invalid_answer_range"})
+            );
+            let mut oversized_page = full.clone();
+            oversized_page["answerPage"] = json!("");
+            bad(
+                &call(&mut c, read, &oversized_page, owner),
+                "exceeds the size limit",
+            );
+
+            std::fs::write(&artifact, original).unwrap();
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+            // A secret straddling the 4000-byte Lead kickoff cut withholds leadConversation.
+            let kickoff_receipt: Value =
+                serde_json::from_slice(&std::fs::read(source.join("lead-fixture-codex")).unwrap())
+                    .unwrap();
+            let kickoff_artifact = repo
+                .join(".oms/artifacts/mcp")
+                .join(kickoff_receipt["operation"].as_str().unwrap())
+                .join("answers/fixture.md");
+            let kickoff_original = std::fs::read(&kickoff_artifact).unwrap();
+            let kickoff_straddling = format!(
+                "{} {left}{right} {}",
+                "k".repeat(4000 - 1 - left.len()),
+                "q".repeat(300)
+            );
+            std::fs::write(
+                &kickoff_artifact,
+                format!("## Output\n{kickoff_straddling}\n## Exit\n0\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&kickoff_artifact, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let refused_kickoff = call(
+                &mut c,
+                read,
+                &json!({"room":"lead-room","provider":"codex"}),
+                owner,
+            );
+            bad(&refused_kickoff, "withheld");
+            let kickoff_wire = refused_kickoff.to_string();
+            assert!(!kickoff_wire.contains(&left) && !kickoff_wire.contains(right));
+            std::fs::write(&kickoff_artifact, kickoff_original).unwrap();
+            std::fs::set_permissions(&kickoff_artifact, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
         let reset = change_to(
             seat,
             &payload(&changed)["revision"],
@@ -1732,6 +2056,134 @@ fn desktop_lead_conversations() {
     good(&call(&mut c, send, &uncertain, owner));
     bad(&call(&mut c, send, &message(1, 14), owner), "unresolved");
     assert_eq!(runs(), 9);
+}
+
+fn lead_turn_failure_degrades_per_row() {
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    fixture_settings(&source, json!({"leadRoom":true}));
+    let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    let read = "oms_lead_conversation_status";
+    let open = "oms_open_lead_conversations";
+    let send = "oms_send_lead_message";
+    let owner = "01900000-0000-7000-8000-0000000000bb";
+    let args = json!({"room":"lead-room"});
+    let call = |c: &mut Client, name: &str, params: &Value| {
+        c.call(
+            "tools/call",
+            json!({"name":name,"arguments":params,"_meta":{"threadId":owner}}),
+        )
+    };
+    let initial = payload(&call(&mut c, open, &args));
+    let key = initial["projectKey"].as_str().unwrap().to_owned();
+    until(|| {
+        std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+            .unwrap()
+            .all(|e| e.unwrap().path().join("status").exists())
+    });
+    let ready = payload(&call(&mut c, open, &args));
+    assert!(
+        ready["leads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["status"] == "ready")
+    );
+    let send_turn = |c: &mut Client, seat: usize, n: usize| {
+        let turn_id = format!("20000000-0000-4000-8000-{n:012x}");
+        let m = json!({
+            "room":"lead-room",
+            "projectKey":key,
+            "provider":ready["leads"][seat]["provider"],
+            "leadRequestId":ready["leads"][seat]["requestId"],
+            "turnId":turn_id,
+            "text":format!("Check seat {n}"),
+        });
+        good(&call(c, send, &m));
+        until(|| {
+            let r = call(
+                c,
+                read,
+                &json!({"room":"lead-room","provider":m["provider"],"turnId":m["turnId"]}),
+            );
+            payload(&r)["turn"]["status"] == "replied"
+        });
+        turn_id
+    };
+    let codex_turn = send_turn(&mut c, 0, 1);
+    let _claude_turn = send_turn(&mut c, 1, 2);
+    let claude_child = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            std::fs::read_to_string(p.join("prompt.txt"))
+                .ok()
+                .as_deref()
+                == Some("Check seat 2\n")
+        })
+        .unwrap();
+    let leaked = ["gh", "p_", &"9".repeat(36)].concat();
+    let claude_artifact = claude_child.join("answers/fixture.md");
+    std::fs::write(
+        &claude_artifact,
+        format!("## Output\nsecret {leaked}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&claude_artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    for tool in [read, open] {
+        let res = call(&mut c, tool, &args);
+        good(&res);
+        let wire = res.to_string();
+        assert!(!wire.contains(&leaked) && !wire.contains("withheld during"));
+        let leads = payload(&res)["leads"].as_array().unwrap().clone();
+        assert_eq!(leads.len(), 3);
+        assert_eq!(leads[0]["provider"], "codex");
+        assert_eq!(leads[0]["status"], "ready");
+        assert_eq!(leads[0]["latestTurn"]["turnId"], codex_turn);
+        assert_eq!(leads[0]["latestTurn"]["status"], "replied");
+        assert!(leads[0].get("turnState").is_none());
+
+        assert_eq!(leads[1]["provider"], "claude");
+        assert_eq!(leads[1]["status"], "ready");
+        assert_eq!(leads[1]["latestTurn"], Value::Null);
+        assert_eq!(
+            leads[1]["turnState"],
+            json!({"status":"unavailable","reason":"outbound_withheld"})
+        );
+
+        assert_eq!(leads[2]["provider"], "agy");
+        assert_eq!(leads[2]["status"], "ready");
+        assert_eq!(leads[2]["latestTurn"], Value::Null);
+        assert!(leads[2].get("turnState").is_none());
+    }
+
+    // A corrupt head record on Claude also degrades only Claude's turn row.
+    let claude_receipt: Value =
+        serde_json::from_slice(&std::fs::read(source.join("lead-fixture-claude")).unwrap())
+            .unwrap();
+    let claude_kickoff = repo
+        .join(".oms/artifacts/mcp")
+        .join(claude_receipt["operation"].as_str().unwrap());
+    let head_path = claude_kickoff.join("lead-turn-head.json");
+    std::fs::write(&head_path, "{corrupt").unwrap();
+    std::fs::set_permissions(&head_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let corrupt_res = call(&mut c, read, &args);
+    good(&corrupt_res);
+    let leads = payload(&corrupt_res)["leads"].as_array().unwrap().clone();
+    assert_eq!(leads[0]["latestTurn"]["turnId"], codex_turn);
+    assert_eq!(leads[0]["latestTurn"]["status"], "replied");
+    assert_eq!(leads[1]["status"], "ready");
+    assert_eq!(leads[1]["latestTurn"], Value::Null);
+    assert_eq!(
+        leads[1]["turnState"],
+        json!({"status":"unavailable","reason":"invalid_turn_record"})
+    );
+    assert_eq!(leads[2]["status"], "ready");
+    assert_eq!(leads[2]["latestTurn"], Value::Null);
 }
 
 // Provider assignment: the Room store is proven in room_contract; here the
@@ -2086,6 +2538,180 @@ fn desktop_assignment() {
             .unwrap()
             .contains("fixture answer")
     );
+
+    // Whole-body scan before the 6000-char assignment preview cut: a secret straddling
+    // char 6000 or a machine path in bytes omitted by storage::bounded withholds the preview.
+    let assign_artifact = opdir.join("answers/fixture.md");
+    let assign_original = std::fs::read(&assign_artifact).unwrap();
+    let clean_long = format!("{}{}", "a".repeat(6000), "b".repeat(400));
+    std::fs::write(
+        &assign_artifact,
+        format!("## Output\n{clean_long}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    let long_page = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    good(&long_page);
+    assert_eq!(
+        long_page["result"]["_meta"]["chat"]["result"]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        6000
+    );
+    assert_eq!(
+        long_page["result"]["_meta"]["chat"]["result"]["truncated"],
+        true
+    );
+
+    let left = ["gh", "p_LeftHalf012345"].concat();
+    let right = "RightHalf67890abcdef01";
+    let straddling = format!(
+        "{} {left}{right} {}",
+        "a".repeat(6000 - 1 - left.chars().count()),
+        "z".repeat(400)
+    );
+    std::fs::write(
+        &assign_artifact,
+        format!("## Output\n{straddling}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    let withheld_cut = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    bad(
+        &withheld_cut,
+        "OMS withheld this conversation during its outbound scan.",
+    );
+    let cut_wire = withheld_cut.to_string();
+    assert!(
+        !cut_wire.contains(&left)
+            && !cut_wire.contains(right)
+            && !cut_wire.contains(&"a".repeat(32))
+            && !cut_wire.contains(&"z".repeat(32))
+    );
+
+    let machine = ["/", "ho", "me/fixture_account/work"].concat();
+    let omitted_middle = format!("{} {machine} {}", "m".repeat(45_000), "n".repeat(25_000));
+    std::fs::write(
+        &assign_artifact,
+        format!("## Output\n{omitted_middle}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    let withheld_omitted = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    bad(
+        &withheld_omitted,
+        "OMS withheld this conversation during its outbound scan.",
+    );
+    assert!(!withheld_omitted.to_string().contains(&machine));
+    std::fs::write(&assign_artifact, &assign_original).unwrap();
+
+    // Fallback transcript turns also scan the whole joined body before cutting 6000 chars.
+    let role_prefix = "claude: ";
+    let turn_straddling = format!(
+        "{} {left}{right} {}",
+        "t".repeat(6000 - role_prefix.chars().count() - 1 - left.chars().count()),
+        "u".repeat(200)
+    );
+    let straddling_updates = json!({
+        "schema":1,
+        "thread":operation,
+        "turns":[{"role":"answer","provider":"claude","quality":"ok","text":turn_straddling}],
+        "cursor":"c1",
+        "has_more":false
+    });
+    std::fs::write(&exitpath, "7\n").unwrap();
+    fixture_settings(
+        &source,
+        json!({"stdout":chat.to_string(),"updates":straddling_updates.to_string(),"room":{"desktop-assign-status":record_for("started",None,json!(operation))}}),
+    );
+    let withheld_turns = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    bad(
+        &withheld_turns,
+        "OMS withheld this conversation during its outbound scan.",
+    );
+    let turns_wire = withheld_turns.to_string();
+    assert!(!turns_wire.contains(&left) && !turns_wire.contains(right));
+    std::fs::write(&exitpath, "0\n").unwrap();
+    fixture_settings(
+        &source,
+        json!({"stdout":chat.to_string(),"updates":updates.to_string(),"room":{"desktop-assign-status":record_for("started",None,json!(operation))}}),
+    );
+
+    // Non-oversize answer artifact failures (missing, incomplete, hard-linked or symlinked
+    // `answer_errors`) fall back to the transcript turns instead of returning LIMIT_ERR.
+    let assert_transcript_fallback = |c: &mut Client| {
+        let fallback = call(
+            c,
+            "oms_panel_chat",
+            json!({"room":"r","participant":format!("ask-{req}")}),
+            json!({"threadId":thread}),
+        );
+        good(&fallback);
+        assert_eq!(
+            fallback["result"]["_meta"]["chat"]["result"]["text"],
+            "claude: callers found"
+        );
+    };
+    let write_private_assign = |bytes: &[u8]| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&assign_artifact, bytes).unwrap();
+        std::fs::set_permissions(&assign_artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+
+    std::fs::remove_file(&assign_artifact).unwrap();
+    assert_transcript_fallback(&mut c);
+
+    write_private_assign(b"## Output\nchanged without exit\n");
+    assert_transcript_fallback(&mut c);
+
+    write_private_assign(&assign_original);
+    let linked_copy = opdir.join("answers/changed-link.md");
+    std::fs::hard_link(&assign_artifact, &linked_copy).unwrap();
+    assert_transcript_fallback(&mut c);
+    std::fs::remove_file(&linked_copy).unwrap();
+
+    std::fs::remove_file(&assign_artifact).unwrap();
+    std::os::unix::fs::symlink(opdir.join("status"), &assign_artifact).unwrap();
+    assert_transcript_fallback(&mut c);
+    std::fs::remove_file(&assign_artifact).unwrap();
+
+    // Confirmed oversize answers still fail closed with LIMIT_ERR rather than falling back.
+    for extra in [64usize, 65 * 1024] {
+        let oversized_assign = "b".repeat(8 * 1024 * 1024 + extra);
+        write_private_assign(format!("## Output\n{oversized_assign}\n## Exit\n0\n").as_bytes());
+        let oversized_chat = call(
+            &mut c,
+            "oms_panel_chat",
+            json!({"room":"r","participant":format!("ask-{req}")}),
+            json!({"threadId":thread}),
+        );
+        bad(
+            &oversized_chat,
+            "OMS desktop detail exceeds the response limit.",
+        );
+        let wire = oversized_chat.to_string();
+        assert!(!wire.contains("callers found") && !wire.contains(&"b".repeat(32)));
+    }
+    write_private_assign(&assign_original);
     bad(
         &call(
             &mut c,
@@ -2178,7 +2804,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v29.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v30.html");
     // Codex uses the stdio transport configuration to decide whether to reuse a running server.
     for package in [
         include_str!("../../../plugins/oms/mcp.json"),
@@ -2244,6 +2870,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v25.html"),
         json!("ui://oms/conversation-panel/v27.html"),
         json!("ui://oms/conversation-panel/v28.html"),
+        json!("ui://oms/conversation-panel/v29.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -2265,13 +2892,13 @@ fn conversation_panel() {
     );
     bad(&c.tool("oms_panel_snapshot", json!({})), "OMS_PANEL_REPO");
     assert_eq!(
-        payload(&c.tool("oms_list_projects", json!({}))),
+        registry_summary(&c.tool("oms_list_projects", json!({}))),
         json!({"projects":[],"binding":"unbound","readOnly":false})
     );
     assert!(!source.join("last-call.json").exists());
     std::fs::create_dir(repo.join(".oms")).unwrap();
     assert_eq!(
-        payload(&c.tool("oms_list_projects", json!({}))),
+        registry_summary(&c.tool("oms_list_projects", json!({}))),
         json!({"projects":[],"binding":"cwd","readOnly":false})
     );
     let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","currentRoom":null,"project":"demo","goal":"Finish inspection","active":null,"activeAttempts":[],"attention":[{"summary":"Review pending","count":2}]}});
@@ -2400,6 +3027,86 @@ fn conversation_panel() {
         ]
         .map(Value::from)
     );
+    let mut response = detail.clone();
+    response["messages"] = json!([]);
+    response["evidence"] = json!({"attempt":"bound-attempt","section":"transcript","page":1,
+        "source":"indexed-answer","text":"한글","lines":["한글"],"offset":0,"bytes":6,"totalBytes":12,
+        "digest":"a".repeat(64),"revision":"b".repeat(64),"nextPage":2,"hasMore":true,"truncated":false});
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    let project_key = payload(&c.tool("oms_list_projects", json!({})))["projectKey"].clone();
+    assert_eq!(project_key.as_str().unwrap().len(), 64);
+    let mut full = json!({"room":"fixture","participant":"owner","section":"transcript","attempt":"bound-attempt","evidenceCursor":""});
+    bad(&evidence(&mut c, full.clone()), "observed project key");
+    full["projectKey"] = json!("0".repeat(64));
+    bad(&evidence(&mut c, full.clone()), "observed project key");
+    full["projectKey"] = project_key.clone();
+    let r = evidence(&mut c, full.clone());
+    good(&r);
+    assert_eq!(r["result"]["structuredContent"]["projectKey"], project_key);
+    assert_eq!(r["result"]["_meta"]["chat"]["projectKey"], project_key);
+    full["evidenceCursor"] = r["result"]["_meta"]["chat"]["evidence"]["nextCursor"].clone();
+    assert!(full["evidenceCursor"].is_string());
+    for field in ["content", "structuredContent"] {
+        assert!(!r["result"][field].to_string().contains("한글"));
+    }
+    response["evidence"]["page"] = json!(2);
+    response["evidence"]["offset"] = json!(6);
+    response["evidence"]["text"] = json!("결과");
+    response["evidence"]["hasMore"] = json!(false);
+    response["evidence"]["nextPage"] = Value::Null;
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    let r = evidence(&mut c, full.clone());
+    good(&r);
+    assert_eq!(r["result"]["_meta"]["chat"]["evidence"]["text"], "결과");
+    let mut foreign = full.clone();
+    foreign["participant"] = json!("other");
+    response["participant"] = json!("other");
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    bad(&evidence(&mut c, foreign), "another selection");
+    response["participant"] = json!("owner");
+    response["evidence"]["revision"] = json!("c".repeat(64));
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    bad(&evidence(&mut c, full.clone()), "changed");
+    full["page"] = json!(2);
+    bad(&evidence(&mut c, full), "returned cursor");
+
+    // Room transcript/diff full paging withholds every page when a secret straddles byte 8192.
+    let clean_evidence = format!("{}{}", "a".repeat(8_190), "z".repeat(400));
+    fixture_settings(
+        &source,
+        json!({"pagedChatEvidence":{"base":detail,"attempt":"bound-attempt","section":"transcript","body":clean_evidence}}),
+    );
+    let mut ev_req = json!({"room":"fixture","participant":"owner","section":"transcript","attempt":"bound-attempt","projectKey":project_key,"evidenceCursor":""});
+    let ev_p1 = evidence(&mut c, ev_req.clone());
+    good(&ev_p1);
+    let ev_c2 = ev_p1["result"]["_meta"]["chat"]["evidence"]["nextCursor"].clone();
+    assert!(ev_c2.is_string());
+
+    let left = ["gh", "p_LeftHalf012345"].concat();
+    let right = "RightHalf67890abcdef01";
+    let straddling_evidence = format!(
+        "{} {left}{right} {}",
+        "a".repeat(8_192 - 1 - left.len()),
+        "z".repeat(360)
+    );
+    fixture_settings(
+        &source,
+        json!({"pagedChatEvidence":{"base":detail,"attempt":"bound-attempt","section":"transcript","body":straddling_evidence}}),
+    );
+    for cursor in [json!(""), ev_c2] {
+        ev_req["evidenceCursor"] = cursor;
+        let refused = evidence(&mut c, ev_req.clone());
+        bad(&refused, "withheld");
+        let wire = refused.to_string();
+        assert!(
+            !wire.contains(&left)
+                && !wire.contains(right)
+                && !wire.contains(&"a".repeat(32))
+                && !wire.contains(&"z".repeat(32))
+        );
+    }
+
+    fixture_settings(&source, json!({"stdout":detail.to_string()}));
     bad(
         &evidence(
             &mut c,
@@ -6300,6 +7007,9 @@ fn fake_oms() {
                 },
             );
         std::fs::write(&artifact, format!("## Output\n{reply}\n## Exit\n0\n")).unwrap();
+        // Native peer storage publishes answer artifacts privately (storage::write).
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
         if cfg["leadRoom"] == true {
             // Normal native peer-ask stdout prints the seat path before its response.
             let provider = args.windows(2).find(|a| a[0] == "--providers").unwrap()[1]
@@ -6438,6 +7148,94 @@ fn fake_oms() {
     }
     if args.iter().any(|v| v == "updates") && cfg["updates"].is_string() {
         print!("{}", cfg["updates"].as_str().unwrap());
+        return;
+    }
+    if let Some(body) = cfg["pagedWorkerBody"].as_str()
+        && args.iter().any(|v| v == "--desktop-worker-output")
+    {
+        let page = args
+            .windows(2)
+            .find(|pair| pair[0] == "--page")
+            .and_then(|pair| pair[1].to_str()?.parse::<usize>().ok())
+            .unwrap_or(1);
+        let out = match oms_scrub::outbound_page(
+            body,
+            1024 * 1024,
+            oms_scrub::PageSelector::Number(page),
+        ) {
+            Ok(part) => json!({
+                "room":cfg["room"],
+                "leadAttempt":cfg["leadAttempt"],
+                "workerAttempt":cfg["workerAttempt"],
+                "status":"complete",
+                "source":"indexed-answer",
+                "text":part.text,
+                "truncated":part.has_more,
+                "page":{
+                    "page":page,
+                    "offset":part.offset,
+                    "bytes":part.end - part.offset,
+                    "totalBytes":part.total_bytes,
+                    "digest":"d".repeat(64),
+                    "revision":"e".repeat(64),
+                    "hasMore":part.has_more,
+                    "nextPage":part.has_more.then_some(page + 1)
+                }
+            }),
+            Err(oms_scrub::PageError::OutboundWithheld) => json!({
+                "room":cfg["room"],
+                "leadAttempt":cfg["leadAttempt"],
+                "workerAttempt":cfg["workerAttempt"],
+                "status":"outbound_withheld",
+                "text":Value::Null,
+                "source":Value::Null,
+                "truncated":false
+            }),
+            Err(oms_scrub::PageError::InvalidRange) => std::process::exit(2),
+        };
+        println!("{out}");
+        return;
+    }
+    if let Some(spec) = cfg.get("pagedChatEvidence").filter(|v| v.is_object())
+        && args.iter().any(|v| v == "--evidence-full")
+    {
+        let page = args
+            .windows(2)
+            .find(|pair| pair[0] == "--page")
+            .and_then(|pair| pair[1].to_str()?.parse::<usize>().ok())
+            .unwrap_or(1);
+        let body = spec["body"].as_str().unwrap();
+        let mut out = spec["base"].clone();
+        out["messages"] = json!([]);
+        out["evidence"] = match oms_scrub::outbound_page(
+            body,
+            16 * 1024 * 1024,
+            oms_scrub::PageSelector::Number(page),
+        ) {
+            Ok(part) => json!({
+                "attempt":spec["attempt"],
+                "section":spec["section"],
+                "page":page,
+                "source":"indexed-answer",
+                "text":part.text,
+                "lines":part.text.lines().collect::<Vec<_>>(),
+                "offset":part.offset,
+                "bytes":part.end - part.offset,
+                "totalBytes":part.total_bytes,
+                "digest":"a".repeat(64),
+                "revision":"b".repeat(64),
+                "nextPage":part.has_more.then_some(page + 1),
+                "hasMore":part.has_more,
+                "truncated":false
+            }),
+            Err(oms_scrub::PageError::OutboundWithheld) => json!({
+                "attempt":spec["attempt"],
+                "section":spec["section"],
+                "status":"outbound_withheld"
+            }),
+            Err(oms_scrub::PageError::InvalidRange) => std::process::exit(2),
+        };
+        println!("{out}");
         return;
     }
     if cfg["hold"] == true {
@@ -6903,7 +7701,7 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 37] = [
+    let cases: [(&str, fn()); 38] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
@@ -6914,6 +7712,10 @@ fn main() {
         ("mcp_app_binding_boundaries", mcp_app_binding_boundaries),
         ("conversation_panel", conversation_panel),
         ("desktop_lead_conversations", desktop_lead_conversations),
+        (
+            "lead_turn_failure_degrades_per_row",
+            lead_turn_failure_degrades_per_row,
+        ),
         ("desktop_assignment", desktop_assignment),
         ("panel_command_catalog", panel_command_catalog),
         ("environment_authority", environment_authority),

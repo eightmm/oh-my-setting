@@ -9917,6 +9917,53 @@ exec /bin/sleep 30
         assert!(read(&"0".repeat(32), &lead, &worker).is_err());
         assert!(read(digest, &worker, &lead).is_err());
         assert!(read(digest, &lead, "../target").is_err());
+        let read_page = |page: &str| {
+            let options = crate::cli::Options::parse(&strings(&[
+                "--desktop-worker-output",
+                "--json",
+                "--repo",
+                repo.to_str().unwrap(),
+                "--room",
+                room,
+                "--conversation-digest",
+                digest,
+                "--lead-attempt",
+                &lead,
+                "--worker-attempt",
+                &worker,
+                "--page",
+                page,
+            ]))?;
+            let (_, bytes, _) = crate::commands::run(&options, repo, repo, svc, stop)?;
+            serde_json::from_slice::<Value>(&bytes).map_err(oms_panel_core::Error::new)
+        };
+        let left = ["gh", "p_LeftHalf012345"].concat();
+        let right = "RightHalf67890abcdef01";
+        let answer_prefix = "## Answer\n";
+        let straddling = format!(
+            "## Output\n{answer_prefix}{} {left}{right} {}\n## Exit\n0\n",
+            "w".repeat(oms_scrub::OUTBOUND_PAGE_BYTES - answer_prefix.len() - 1 - left.len()),
+            "y".repeat(512)
+        );
+        fs::write(repo.join(file), straddling.as_bytes()).unwrap();
+        let straddling_row = serde_json::json!({"kind":"ask","attempt_id":worker,"artifact":file,"artifact_sha256":oms_panel_core::digest(straddling.as_bytes())});
+        fs::write(
+            repo.join(".oms/artifacts/index.jsonl"),
+            format!("{straddling_row}\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            read(digest, &lead, &worker).unwrap()["status"],
+            "outbound_withheld"
+        );
+        for page in ["1", "2"] {
+            let withheld = read_page(page).unwrap();
+            assert_eq!(withheld["status"], "outbound_withheld");
+            assert!(withheld["text"].is_null());
+            let wire = withheld.to_string();
+            assert!(!wire.contains(&left) && !wire.contains(right));
+        }
+        fs::write(repo.join(".oms/artifacts/index.jsonl"), format!("{row}\n")).unwrap();
         fs::write(repo.join(file), b"substitution").unwrap();
         assert_eq!(
             read(digest, &lead, &worker).unwrap()["status"],
