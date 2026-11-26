@@ -82,6 +82,7 @@ pub(crate) fn execute(c: &Context<'_>, o: &Options) -> Result<Output> {
             "cursor",
             "project-id",
             "drift",
+            "candidates",
         ],
         "refresh" => &["repo", "issue", "pull", "linked", "ttl-s"],
         "adopt-merged" => &["repo", "limit", "apply", "expected-sha256", "ttl-s"],
