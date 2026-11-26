@@ -1589,6 +1589,31 @@ fn receipt_validates_proposal_binding_and_budget_edges() {
     }
     automatic["providers"]["worker"] = "antigravity".into();
     receipt::validate(&automatic).unwrap();
+    for composition in [
+        json!({"schema":1,"providers":["claude","codex"],"rounds":0}),
+        json!({"schema":1,"providers":["antigravity"],"rounds":3}),
+    ] {
+        let mut selected = automatic.clone();
+        selected["contract"]["council"] = composition;
+        receipt::validate(&selected).unwrap();
+        assert_ne!(
+            receipt::immutable_view(&selected),
+            receipt::immutable_view(&automatic)
+        );
+    }
+    for composition in [
+        json!({"schema":2,"providers":["codex"],"rounds":1}),
+        json!({"schema":1,"providers":[],"rounds":1}),
+        json!({"schema":1,"providers":["codex","codex"],"rounds":1}),
+        json!({"schema":1,"providers":["codex:optional"],"rounds":1}),
+        json!({"schema":1,"providers":["pi"],"rounds":1}),
+        json!({"schema":1,"providers":["codex"],"rounds":4}),
+        json!({"schema":1,"providers":["codex"],"rounds":1,"optional":true}),
+    ] {
+        let mut invalid = automatic.clone();
+        invalid["contract"]["council"] = composition;
+        assert!(receipt::validate(&invalid).is_err());
+    }
     for (field, bad) in [
         ("provider", "missing"),
         ("model", ""),
@@ -1670,6 +1695,14 @@ fn receipt_validates_proposal_binding_and_budget_edges() {
 }
 
 fn council_fixture(prompt: &str) -> (Vec<u8>, std::collections::BTreeMap<String, Vec<u8>>) {
+    council_fixture_for(prompt, &["codex", "claude", "antigravity"], 1)
+}
+
+fn council_fixture_for(
+    prompt: &str,
+    providers: &[&str],
+    rounds: u64,
+) -> (Vec<u8>, std::collections::BTreeMap<String, Vec<u8>>) {
     use oms_command_plan::discussion::{
         COUNCIL_INITIAL_PRECEDENCE, COUNCIL_INITIAL_ROLE, COUNCIL_INITIAL_SECTIONS,
         COUNCIL_REBUTTAL_SECTIONS, COUNCIL_REBUTTAL_TASK, COUNCIL_ROUND_BYTES,
@@ -1677,18 +1710,17 @@ fn council_fixture(prompt: &str) -> (Vec<u8>, std::collections::BTreeMap<String,
         CouncilOutput, council_peer_answer, encode_council_synthesis,
     };
     let run = "fixture-run";
-    let providers = ["codex", "claude", "antigravity"];
     let initial = format!(
         "{COUNCIL_INITIAL_ROLE}{COUNCIL_INITIAL_PRECEDENCE}Question:\n{prompt}\n\nRepository context: omitted.\n{COUNCIL_INITIAL_SECTIONS}"
     );
-    let first_answers = providers.map(|provider| format!(
+    let first_answers = providers.iter().map(|provider| format!(
         "Alternatives: inspect or defer\nEvidence: tracked {provider} source\nCounterargument: evidence may be incomplete\nVerification: run the existing check\n"
-    ));
-    let next_answers = first_answers.clone().map(|answer| {
+    )).collect::<Vec<_>>();
+    let next_answers = first_answers.iter().map(|answer| {
         format!(
             "{answer}Changed from previous round: none\nRemaining disagreements: evidence scope\n"
         )
-    });
+    }).collect::<Vec<_>>();
     let quotes = |answers: &[String], budget| {
         providers
             .iter()
@@ -1699,12 +1731,6 @@ fn council_fixture(prompt: &str) -> (Vec<u8>, std::collections::BTreeMap<String,
             })
             .collect::<String>()
     };
-    let previous = quotes(&first_answers, COUNCIL_ROUND_BYTES / providers.len());
-    let rebuttal =
-        format!("Question:\n{prompt}{COUNCIL_REBUTTAL_TASK}{previous}{COUNCIL_REBUTTAL_SECTIONS}");
-    let final_answers = quotes(&next_answers, COUNCIL_SYNTHESIS_BYTES);
-    let synthesis_prompt =
-        format!("{COUNCIL_SYNTHESIS_PREFIX}{prompt}\n{final_answers}{COUNCIL_SYNTHESIS_SECTIONS}");
     let mut files = std::collections::BTreeMap::new();
     let mut row = |provider: &str,
                    round: u64,
@@ -1740,14 +1766,29 @@ fn council_fixture(prompt: &str) -> (Vec<u8>, std::collections::BTreeMap<String,
         observation
     };
     let mut participants = Vec::new();
-    for (round, actual_prompt, answers) in [
-        (0, initial.as_str(), &first_answers),
-        (1, rebuttal.as_str(), &next_answers),
-    ] {
+    let mut previous = &first_answers;
+    for round in 0..=rounds {
+        let actual_prompt = if round == 0 {
+            initial.clone()
+        } else {
+            let previous = quotes(previous, COUNCIL_ROUND_BYTES / providers.len());
+            format!(
+                "Question:\n{prompt}{COUNCIL_REBUTTAL_TASK}{previous}{COUNCIL_REBUTTAL_SECTIONS}"
+            )
+        };
+        let answers = if round == 0 {
+            &first_answers
+        } else {
+            &next_answers
+        };
         for (provider, answer) in providers.iter().zip(answers) {
-            participants.push(row(provider, round, false, actual_prompt, answer));
+            participants.push(row(provider, round, false, &actual_prompt, answer));
         }
+        previous = answers;
     }
+    let final_answers = quotes(previous, COUNCIL_SYNTHESIS_BYTES);
+    let synthesis_prompt =
+        format!("{COUNCIL_SYNTHESIS_PREFIX}{prompt}\n{final_answers}{COUNCIL_SYNTHESIS_SECTIONS}");
     let synthesis = row(
         "codex",
         0,
@@ -1756,7 +1797,7 @@ fn council_fixture(prompt: &str) -> (Vec<u8>, std::collections::BTreeMap<String,
         "Decision: inspect the fixture\nEvidence: tracked source\nRemaining disagreements: none claimed\nVerification: run the existing check\n",
     );
     (
-        encode_council_synthesis(prompt, run, 1, &participants, &synthesis).unwrap(),
+        encode_council_synthesis(prompt, run, rounds, &participants, &synthesis).unwrap(),
         files,
     )
 }
@@ -2231,7 +2272,9 @@ impl Services for Planner {
                 .unwrap_or("")
         };
         if call.tool == "peer-ask" {
-            let (report, files) = council_fixture(option("--prompt"));
+            let providers = option("--providers").split(',').collect::<Vec<_>>();
+            let rounds = option("--debate").parse().unwrap_or(0);
+            let (report, files) = council_fixture_for(option("--prompt"), &providers, rounds);
             let dir = Path::new(option("--artifact-dir"));
             for (name, bytes) in files {
                 write_private(&dir.join(name), &bytes);
@@ -2466,8 +2509,21 @@ fn autopilot_binds_retained_discussion_to_the_planning_inputs_and_frozen_model()
     let question_file = format!("{directory}/question.md");
     let proposal_file = ".oms/plan/fixture-proposal.json";
     let run_file = ".oms/plan/autopilot-run.json";
-    let write_proposal = |question: &str| {
-        let (report, files) = council_fixture(question);
+    let write_proposal = |question: &str, council: Option<&serde_json::Value>| {
+        let providers = council
+            .map(|council| {
+                council["providers"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec!["codex", "claude", "antigravity"]);
+        let rounds = council
+            .map(|council| council["rounds"].as_u64().unwrap())
+            .unwrap_or(1);
+        let (report, files) = council_fixture_for(question, &providers, rounds);
         repo.write(&question_file, question);
         for (name, bytes) in files {
             repo.write(&format!("{directory}/{name}"), bytes);
@@ -2476,7 +2532,7 @@ fn autopilot_binds_retained_discussion_to_the_planning_inputs_and_frozen_model()
             "schema": 1, "kind": "oms-planning-discussion", "spec_sha256": spec,
             "plan_sha256": "absent", "base_sha": head, "allowed_envelope": ["src"],
             "question": {"path": question_file, "sha256": value::hash(question)},
-            "providers": ["codex", "claude", "antigravity"], "rounds": 1,
+            "providers": providers, "rounds": rounds,
             "synthesis_route": {"provider": "codex", "requested_model": "fixture-model"},
             "report": value::parse(&report).unwrap(),
         });
@@ -2484,13 +2540,16 @@ fn autopilot_binds_retained_discussion_to_the_planning_inputs_and_frozen_model()
         let digest = value::hash(&manifest);
         let path = format!("{CATALOG}/{digest}.json");
         repo.write(&path, manifest);
-        let proposal = json!({
+        let mut proposal = json!({
             "schema": 1, "kind": "agent-plan-proposal", "spec_sha256": spec,
             "plan_sha256": "absent", "base_sha": head, "id_prefix": "",
             "allowed_envelope": ["src"], "acceptance_files": ["tests/check.sh"],
             "discussion": {"path": path, "sha256": digest},
             "tasks": value::parse(ANSWER.as_bytes()).unwrap()["tasks"],
         });
+        if let Some(council) = council {
+            proposal["council"] = council.clone();
+        }
         let proposal = value::pretty(&proposal).unwrap();
         let sha = value::hash(&proposal);
         repo.write(proposal_file, proposal);
@@ -2513,7 +2572,7 @@ fn autopilot_binds_retained_discussion_to_the_planning_inputs_and_frozen_model()
         planning_question(&["src"], "different-head", SPEC, None, ""),
         planning_question(&["docs"], head, SPEC, None, ""),
     ] {
-        let sha = write_proposal(&question);
+        let sha = write_proposal(&question, None);
         let (code, err) = run(
             "plan-from-spec",
             &["--apply", proposal_file, "--expected-proposal-sha256", &sha],
@@ -2525,7 +2584,8 @@ fn autopilot_binds_retained_discussion_to_the_planning_inputs_and_frozen_model()
         );
     }
 
-    let sha = write_proposal(&planning_question(&["src"], head, SPEC, None, ""));
+    let question = planning_question(&["src"], head, SPEC, None, "");
+    let sha = write_proposal(&question, None);
     let (code, err) = run(
         "autopilot",
         &[
@@ -2578,6 +2638,43 @@ fn autopilot_binds_retained_discussion_to_the_planning_inputs_and_frozen_model()
     );
     assert_eq!(fs::read(repo.0.join(run_file)).unwrap(), altered);
     assert!(!repo.0.join(".oms/plan/tasks.json").exists());
+
+    receipt["routing"]["planner"]["model"] = "fixture-model".into();
+    for rounds in [0, 2] {
+        let council = json!({"schema":1,"providers":["claude","codex"],"rounds":rounds});
+        let sha = write_proposal(&question, Some(&council));
+        receipt["proposal"]["sha256"] = sha.into();
+        receipt["contract"]
+            .as_object_mut()
+            .unwrap()
+            .remove("council");
+        repo.write(run_file, value::pretty(&receipt).unwrap());
+        let (code, err) = run("autopilot", &["run"]);
+        assert_eq!(code, 2, "{err}");
+        assert!(err.contains("frozen selection"), "{err}");
+        receipt["contract"]["council"] = council;
+        repo.write(run_file, value::pretty(&receipt).unwrap());
+        let (_, err) = run("autopilot", &["run"]);
+        assert!(err.contains("parent proposal review required"), "{err}");
+        for options in [
+            vec!["run", "--council-providers", "codex"],
+            vec!["run", "--council-rounds", "1"],
+        ] {
+            let (code, err) = run("autopilot", &options);
+            assert_eq!(code, 2, "{err}");
+            assert!(err.contains("frozen council selection differs"), "{err}");
+        }
+        let mut proposal = value::parse(&fs::read(repo.0.join(proposal_file)).unwrap()).unwrap();
+        proposal.as_object_mut().unwrap().remove("council");
+        let bytes = value::pretty(&proposal).unwrap();
+        repo.write(proposal_file, &bytes);
+        receipt["proposal"]["sha256"] = value::hash(&bytes).into();
+        repo.write(run_file, value::pretty(&receipt).unwrap());
+        let (code, err) = run("autopilot", &["run"]);
+        assert_eq!(code, 2, "{err}");
+        assert!(err.contains("frozen selection"), "{err}");
+        assert!(!repo.0.join(".oms/plan/tasks.json").exists());
+    }
 }
 
 #[test]

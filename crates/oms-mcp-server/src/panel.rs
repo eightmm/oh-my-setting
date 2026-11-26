@@ -16,6 +16,7 @@ use std::{
 mod lead_plan_context;
 #[path = "lead_turns.rs"]
 mod lead_turns;
+pub(crate) use lead_turns::LeadTurnCache;
 
 const URI: &str = "ui://oms/conversation-panel/v30.html";
 const V29: &str = "ui://oms/conversation-panel/v29.html";
@@ -2321,11 +2322,17 @@ impl Server<'_> {
                     {
                         return Err("The evidence selection changed. Reopen the result.".into());
                     }
+                    if data["evidence"]["status"] == "outbound_withheld" {
+                        return Err("OMS withheld this evidence during its outbound scan.".into());
+                    }
+                    if data["evidence"].get("status").is_some() {
+                        return Err("Full retained evidence is unavailable.".into());
+                    }
                     data["projectKey"] = json!(key);
                     let text = data["evidence"]["text"]
                         .as_str()
                         .ok_or("Full retained evidence is unavailable.")?;
-                    crate::output::outbound(text.as_bytes(), &Value::Null)
+                    oms_scrub::check_outbound(text.as_bytes())
                         .map_err(|_| "OMS withheld this evidence during its outbound scan.")?;
                     let page = output_page(&data["evidence"], text, cursor, position, &scope)?;
                     for field in [
@@ -2341,8 +2348,15 @@ impl Server<'_> {
                     if let Some(evidence) = data["evidence"].as_object_mut() {
                         evidence.remove("revision");
                     }
+                } else if args.get("section").is_some() {
+                    if data["evidence"]["status"] == "outbound_withheld" {
+                        return Err("OMS withheld this evidence during its outbound scan.".into());
+                    }
+                    if data["evidence"].get("status").is_some() {
+                        return Err("Full retained evidence is unavailable.".into());
+                    }
                 } else {
-                    self.attach_assignment_result(&repo, args, meta, &mut data);
+                    self.attach_assignment_result(&repo, args, meta, &mut data)?;
                 }
                 Ok(data)
             }
@@ -2642,6 +2656,14 @@ impl Server<'_> {
             return Err(err.into());
         }
         match data["status"].as_str() {
+            Some("outbound_withheld")
+                if data.get("text").is_some_and(Value::is_null)
+                    && data.get("source").is_some_and(Value::is_null)
+                    && data["truncated"] == false
+                    && data.get("page").is_none() =>
+            {
+                return Err("OMS withheld this worker output during its outbound scan.".into());
+            }
             Some("complete")
                 if matches!(
                     data["source"].as_str(),
@@ -2658,7 +2680,7 @@ impl Server<'_> {
                                 .any(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'))
                     })
                     .ok_or(err)?;
-                crate::output::outbound(text.as_bytes(), &Value::Null)
+                oms_scrub::check_outbound(text.as_bytes())
                     .map_err(|_| "OMS withheld this worker output during its outbound scan.")?;
             }
             Some("running" | "not_recorded" | "unavailable")
@@ -2837,7 +2859,7 @@ impl Server<'_> {
             }
             has_authority = true;
             row["requestId"] = json!(request);
-            let resolve = || -> PanelResult<(&'static str, Value)> {
+            let resolve = || -> PanelResult<(&'static str, Option<String>)> {
                 let write = name == OPEN_LEADS;
                 let data = if write && prior["status"] == "not_found" {
                     run("desktop-lead-open", Some(request), &provider_arg)?
@@ -2845,7 +2867,7 @@ impl Server<'_> {
                     prior.clone()
                 };
                 if !write && data["status"] == "not_found" {
-                    return Ok(("not_started", Value::Null));
+                    return Ok(("not_started", None));
                 }
                 if !valid(&data) {
                     return Err("Invalid Lead reservation.".into());
@@ -2877,12 +2899,12 @@ impl Server<'_> {
                             &binding,
                             true,
                         )? {
-                            return Ok(("unconfirmed", Value::Null));
+                            return Ok(("unconfirmed", None));
                         }
                     } else if assignment_directory(repo, &data, &operation, &binding, true)?
                         .is_none()
                     {
-                        return Ok(("unconfirmed", Value::Null));
+                        return Ok(("unconfirmed", None));
                     }
                     let receipt = run(
                         "desktop-assign-receipt",
@@ -2894,18 +2916,18 @@ impl Server<'_> {
                         && receipt["operation"] == operation;
                 }
                 if !linked {
-                    return Ok(("unconfirmed", Value::Null));
+                    return Ok(("unconfirmed", None));
                 }
                 let Some(dir) = assignment_directory(repo, &data, &operation, &binding, true)?
                 else {
-                    return Ok(("unconfirmed", Value::Null));
+                    return Ok(("unconfirmed", None));
                 };
                 let (state, exit) = crate::peer::status(&dir);
                 if state == "running" {
-                    return Ok(("starting", Value::Null));
+                    return Ok(("starting", None));
                 }
                 if state != "done" || exit != Some(0) {
-                    return Ok(("unavailable", Value::Null));
+                    return Ok(("unavailable", None));
                 }
                 // The supervisor exit alone cannot attest a provider response. Inspect
                 // its own single-seat answer, keeping every byte out of model content.
@@ -2915,24 +2937,28 @@ impl Server<'_> {
                     .and_then(|r| r.as_str().and_then(|s| crate::value::from_str(s).ok()));
                 let Some(answer) = proof
                     .as_ref()
-                    .filter(|p| {
-                        p["operation"] == operation
-                            && p["exit"] == 0
-                            && p["answer_details"]
-                                .as_array()
-                                .is_some_and(|d| d.len() == 1 && d[0]["exit"] == "0")
+                    .filter(|p| p["operation"] == operation && p["exit"] == 0)
+                    .and_then(|p| p["answer_details"].as_array())
+                    .and_then(|d| match d.as_slice() {
+                        [detail]
+                            if detail["exit"] == "0"
+                                && detail["read_arguments"]["operation"] == operation =>
+                        {
+                            detail["read_arguments"]["answer_ref"].as_str()
+                        }
+                        _ => None,
                     })
-                    .and_then(|p| p["answer"].as_str())
-                    .filter(|text| !text.trim().is_empty())
+                    .and_then(|reference| {
+                        let (name, _) = reference.rsplit_once(':')?;
+                        let (text, exit) =
+                            crate::storage::owned_answer(repo, &operation, name).ok()?;
+                        (exit == "0"
+                            && reference == crate::storage::reference(&operation, name, &text)
+                            && !text.trim().is_empty())
+                        .then_some(text)
+                    })
                 else {
-                    return Ok(("unconfirmed", Value::Null));
-                };
-                let transcript = if selected.is_some() {
-                    // This is the original kickoff answer only. Other user turns need
-                    // their own protected receipt and exact child operation proof.
-                    json!({"turns":[{"role":canonical,"text":crate::storage::byte_prefix(answer,4000),"truncated":answer.len()>4000,"at":Value::Null}],"cursor":Value::Null,"hasMore":false})
-                } else {
-                    Value::Null
+                    return Ok(("unconfirmed", None));
                 };
                 let live = run("desktop-lead-status", Some(request), &provider_arg)?;
                 if !valid(&live)
@@ -2946,11 +2972,13 @@ impl Server<'_> {
                 // created by start_bound_peer has its opening collaboration note.
                 bound()?;
                 if !self.lead_thread_open(repo, &operation)? {
-                    return Ok(("unconfirmed", Value::Null));
+                    return Ok(("unconfirmed", None));
                 }
-                Ok(("ready", transcript))
+                let kickoff_answer =
+                    (selected.is_some() && !settings && !full_answer).then_some(answer);
+                Ok(("ready", kickoff_answer))
             };
-            let (status, mut transcript) = resolve().unwrap_or(("unconfirmed", Value::Null));
+            let (status, kickoff_answer) = resolve().unwrap_or(("unconfirmed", None));
             if (settings || name == SEND_LEAD || full_answer) && args["leadRequestId"] != request {
                 return Err("The selected Lead changed. Reopen its conversation.".into());
             }
@@ -2962,37 +2990,58 @@ impl Server<'_> {
             {
                 return Err("The original Lead conversation could not be verified.".into());
             }
+            let mut transcript = if let Some(answer) = kickoff_answer {
+                oms_scrub::outbound_page(
+                    &answer,
+                    crate::MAX_ANSWER,
+                    oms_scrub::PageSelector::Offset(0),
+                )
+                .map_err(|err| match err {
+                    oms_scrub::PageError::OutboundWithheld => {
+                        "OMS withheld the Lead conversation during its outbound scan."
+                    }
+                    oms_scrub::PageError::InvalidRange => {
+                        "The original Lead conversation could not be verified."
+                    }
+                })?;
+                // This is the original kickoff answer only. Other user turns need
+                // their own protected receipt and exact child operation proof.
+                json!({"turns":[{"role":canonical,"text":crate::storage::byte_prefix(&answer,4000),"truncated":answer.len()>4000,"at":Value::Null}],"cursor":Value::Null,"hasMore":false})
+            } else {
+                Value::Null
+            };
             if status == "ready" && prior["operation"].is_string() {
                 let kickoff = prior["operation"]
                     .as_str()
                     .ok_or("The original Lead receipt is unavailable.")?;
                 let binding =
                     crate::storage::hash(json!([&digest[..32], room, request]).to_string());
-                let conversation =
-                    lead_turns::Conversation::open(repo, kickoff, &binding, &prior, provider)?;
-                let current = || {
-                    let live = run("desktop-lead-status", Some(request), &provider_arg)?;
-                    if !valid(&live)
-                        || live["operation"] != kickoff
-                        || live["assignedAt"] != prior["assignedAt"]
-                        || ((settings || full_answer) && !self.lead_thread_open(repo, kickoff)?)
-                    {
-                        return Err("The original Lead receipt changed.".into());
-                    }
-                    Ok(())
-                };
-                if settings {
-                    let mut detail =
-                        conversation.settings(self, name == UPDATE_SETTINGS, args, &current)?;
-                    let mut summary = json!({"projectKey":key,"room":room,"provider":provider,"leadRequestId":request,"revision":detail["revision"]});
-                    for key in ["projectKey", "room", "provider", "leadRequestId"] {
-                        detail[key] = summary[key].clone();
-                    }
-                    summary["leadSettings"] = detail;
-                    bound()?;
-                    return Ok(summary);
-                }
                 if selected.is_some() {
+                    let conversation =
+                        lead_turns::Conversation::open(repo, kickoff, &binding, &prior, provider)?;
+                    let current = || {
+                        let live = run("desktop-lead-status", Some(request), &provider_arg)?;
+                        if !valid(&live)
+                            || live["operation"] != kickoff
+                            || live["assignedAt"] != prior["assignedAt"]
+                            || ((settings || full_answer)
+                                && !self.lead_thread_open(repo, kickoff)?)
+                        {
+                            return Err("The original Lead receipt changed.".into());
+                        }
+                        Ok(())
+                    };
+                    if settings {
+                        let mut detail =
+                            conversation.settings(self, name == UPDATE_SETTINGS, args, &current)?;
+                        let mut summary = json!({"projectKey":key,"room":room,"provider":provider,"leadRequestId":request,"revision":detail["revision"]});
+                        for key in ["projectKey", "room", "provider", "leadRequestId"] {
+                            detail[key] = summary[key].clone();
+                        }
+                        summary["leadSettings"] = detail;
+                        bound()?;
+                        return Ok(summary);
+                    }
                     if full_answer {
                         let answer = conversation.answer_page(self, args, current)?;
                         transcript = json!({"turns":[],"cursor":Value::Null,"hasMore":false});
@@ -3003,8 +3052,25 @@ impl Server<'_> {
                     } else {
                         turn = conversation.exchange(self, name, args, &mut transcript, current)?;
                     }
+                    match conversation.latest(self, true, bound) {
+                        Ok(latest) => row["latestTurn"] = latest,
+                        Err(err) => {
+                            row["latestTurn"] = Value::Null;
+                            row["turnState"] = err.marker();
+                        }
+                    }
+                } else {
+                    match lead_turns::Conversation::open(repo, kickoff, &binding, &prior, provider)
+                        .map_err(|_| lead_turns::TurnLookupError::InvalidRecord)
+                        .and_then(|conversation| conversation.latest(self, false, bound))
+                    {
+                        Ok(latest) => row["latestTurn"] = latest,
+                        Err(err) => {
+                            row["latestTurn"] = Value::Null;
+                            row["turnState"] = err.marker();
+                        }
+                    }
                 }
-                row["latestTurn"] = conversation.latest(self, current)?;
             }
             row["status"] = json!(status);
             if selected.is_some() && private.is_none() {
@@ -3303,16 +3369,32 @@ impl Server<'_> {
 
     /// Show an assigned provider's returned turns in the reader's existing
     /// recorded-result slot; Room messages keep their own `room` source.
-    fn attach_assignment_result(&self, repo: &Path, args: &Value, meta: &Value, data: &mut Value) {
+    fn attach_assignment_result(
+        &self,
+        repo: &Path,
+        args: &Value,
+        meta: &Value,
+        data: &mut Value,
+    ) -> PanelResult<()> {
+        const WITHHELD: &str = "OMS withheld this conversation during its outbound scan.";
+        const LIMIT_ERR: &str = "OMS desktop detail exceeds the response limit.";
+        let scan_body = |body: &str| -> PanelResult<()> {
+            oms_scrub::outbound_page(body, crate::MAX_ANSWER, oms_scrub::PageSelector::Offset(0))
+                .map(|_| ())
+                .map_err(|err| match err {
+                    oms_scrub::PageError::OutboundWithheld => WITHHELD.to_owned(),
+                    oms_scrub::PageError::InvalidRange => LIMIT_ERR.to_owned(),
+                })
+        };
         let Some(request) = args["participant"]
             .as_str()
             .and_then(|p| p.strip_prefix("ask-"))
             .filter(|r| uuid(r))
         else {
-            return;
+            return Ok(());
         };
         if !data["result"].is_null() {
-            return;
+            return Ok(());
         }
         let Ok(result) = self.assignment(
             repo,
@@ -3320,7 +3402,7 @@ impl Server<'_> {
             &json!({"room":args["room"],"requestId":request}),
             meta,
         ) else {
-            return;
+            return Ok(());
         };
         data["assignment"] = json!({"state":result["status"],"execution":result["execution"],"title":result["title"]});
         if result["status"] == "recovered" {
@@ -3328,24 +3410,71 @@ impl Server<'_> {
         }
         if result["execution"]["state"] == "done"
             && result["execution"]["exit"] == 0
+            && let Some(op) = result["operation"].as_str()
             && let Some(path) = repo.to_str()
-            && let Ok(raw) = self.peer_result(&json!({"repo":path,"operation":result["operation"]}))
-            && let Some(proof) = raw.as_str().and_then(|v| crate::value::from_str(v).ok())
-            && proof["answer_details"]
-                .as_array()
-                .is_some_and(|a| a.len() == 1 && a[0]["exit"] == "0")
-            && let Some(answer) = proof["answer"].as_str().filter(|s| !s.is_empty())
         {
-            let cut: String = answer.chars().take(6000).collect();
-            data["result"] = json!({"kind":"read-only provider","attempt":result["operation"],"text":cut,"truncated":cut.len()<answer.len() || proof["answer_truncated"]==true, "at":Value::Null});
-            return;
+            match self.peer_result(&json!({"repo":path,"operation":op})) {
+                Ok(raw) => {
+                    if let Some(proof) = raw.as_str().and_then(|v| crate::value::from_str(v).ok())
+                        && proof["operation"] == op
+                        && proof["exit"] == 0
+                        && let Some([detail]) =
+                            proof["answer_details"].as_array().map(Vec::as_slice)
+                        && detail["exit"] == "0"
+                    {
+                        let full = if detail["read_arguments"]["operation"] == op
+                            && let Some(reference) = detail["read_arguments"]["answer_ref"].as_str()
+                        {
+                            reference.rsplit_once(':').and_then(|(name, _)| {
+                                let (text, exit) =
+                                    crate::storage::owned_answer(repo, op, name).ok()?;
+                                (exit == "0"
+                                    && reference == crate::storage::reference(op, name, &text))
+                                .then_some(text)
+                            })
+                        } else if detail["read_arguments"].is_null()
+                            && let Some(artifact) = detail["artifact"].as_str()
+                        {
+                            Path::new(artifact)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .and_then(|name| {
+                                    let parent = repo.join(artifact).parent()?.to_path_buf();
+                                    let bytes =
+                                        crate::storage::read(&parent, name, crate::MAX_ANSWER)
+                                            .ok()?;
+                                    let (text, exit) = crate::storage::sections(&bytes);
+                                    (exit == "0"
+                                        && text.len() <= crate::MAX_ANSWER
+                                        && detail["answer_sha256"].as_str()
+                                            == Some(crate::storage::hash(&text).as_str()))
+                                    .then_some(text)
+                                })
+                        } else {
+                            None
+                        };
+                        if let Some(full) = full.filter(|s| !s.is_empty()) {
+                            scan_body(&full)?;
+                            let cut: String = full.chars().take(6000).collect();
+                            data["result"] = json!({"kind":"read-only provider","attempt":result["operation"],"text":cut,"truncated":cut.len()<full.len(),"at":Value::Null});
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(crate::ToolError::Text(raw))
+                    if lead_turns::confirmed_oversize_answer(repo, op, &raw) =>
+                {
+                    return Err(LIMIT_ERR.into());
+                }
+                Err(_) => {}
+            }
         }
         let turns = result["transcript"]["turns"]
             .as_array()
             .cloned()
             .unwrap_or_default();
         if turns.is_empty() {
-            return;
+            return Ok(());
         }
         let text = turns
             .iter()
@@ -3358,9 +3487,11 @@ impl Server<'_> {
             })
             .collect::<Vec<_>>()
             .join("\n\n");
+        scan_body(&text)?;
         let cut: String = text.chars().take(6000).collect();
         data["result"] = json!({"kind":"read-only provider","attempt":result["operation"],
           "text":cut,"truncated":cut.len() < text.len(),"at":Value::Null});
+        Ok(())
     }
 
     pub(super) fn panel_snapshot(&self, repo: &Path, meta: &Value) -> PanelResult<Value> {

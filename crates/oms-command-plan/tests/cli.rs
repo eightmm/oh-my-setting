@@ -130,6 +130,82 @@ fn owns_only_agent_plan() {
 }
 
 #[test]
+fn status_snapshot_for_rechecks_after_projecting_expected_plan() {
+    use oms_command_plan::{Action, Context, Plan, Request, json};
+    use std::cell::Cell;
+    use std::os::unix::fs::PermissionsExt;
+
+    if isolated("status_snapshot_for_rechecks_after_projecting_expected_plan") {
+        return;
+    }
+    thread_local! {
+        static GROUP_CHECKS: Cell<usize> = const { Cell::new(0) };
+        static CHANGE_PLAN: Cell<Option<PathBuf>> = const { Cell::new(None) };
+    }
+    struct StatusHost;
+    impl Services for StatusHost {
+        fn group_membership_resolver(&self) -> Option<GroupResolver> {
+            Some(|gid| {
+                let count = GROUP_CHECKS.get() + 1;
+                GROUP_CHECKS.set(count);
+                // The first proof for the issue cache occurs inside status rendering.
+                if count == 3
+                    && let Some(path) = CHANGE_PLAN.take()
+                {
+                    fs::write(path, br#"{"schema":3,"tasks":{}}"#).unwrap();
+                }
+                Host.group_membership_resolver().unwrap()(gid)
+            })
+        }
+    }
+
+    let tmp = Tmp::new();
+    let repo = repo(&tmp);
+    let active = repo.join(".oms/plan/tasks.json");
+    let cache = repo.join(oms_github::freshness::CACHE_REL);
+    fs::create_dir_all(active.parent().unwrap()).unwrap();
+    fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    for path in [
+        &repo,
+        &repo.join(".oms"),
+        active.parent().unwrap(),
+        cache.parent().unwrap(),
+    ] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let raw = br#"{"schema":3,"tasks":{"a":{"id":"a","state":"ready","depends":[],"issue":"org/repo#1"}}}"#;
+    fs::write(&active, raw).unwrap();
+    fs::write(&cache, b"").unwrap();
+    for path in [&active, &cache] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o660)).unwrap();
+    }
+
+    let context = Context::from_environment(&Request::new(Action::Status), &repo).unwrap();
+    let stop = AtomicBool::new(false);
+    let plan = Plan::open(context, &StatusHost, &stop).unwrap();
+    let status = plan.status_snapshot_for(raw).unwrap();
+    assert_eq!(status.text("plan_sha256"), json::sha(raw));
+    assert_eq!(status.get("task_count").int().unwrap(), 1);
+    // Two proofs per Plan load plus two for the cache read.
+    assert_eq!(GROUP_CHECKS.replace(0), 6);
+    assert_eq!(status, plan.status_snapshot().unwrap());
+    assert_eq!(GROUP_CHECKS.replace(0), 4);
+
+    let stale = plan.status_snapshot_for(b"stale").unwrap_err();
+    assert_eq!(
+        (stale.code, stale.message.as_str()),
+        (2, "plan changed during projection")
+    );
+    assert_eq!(GROUP_CHECKS.replace(0), 2);
+
+    CHANGE_PLAN.set(Some(active));
+    let drift = plan.status_snapshot_for(raw).unwrap_err();
+    assert_eq!(drift, stale);
+    assert_eq!(GROUP_CHECKS.get(), 6);
+    assert!(CHANGE_PLAN.take().is_none());
+}
+
+#[test]
 fn brief_file_round_trip_and_bounds() {
     if isolated("brief_file_round_trip_and_bounds") {
         return;

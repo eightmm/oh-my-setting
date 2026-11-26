@@ -135,7 +135,7 @@ pub(crate) use linux::{
     agy_child_chat_fenced, agy_child_read_counts, agy_current_children,
     agy_current_children_with_usage, agy_locator_still_current, agy_locator_still_current_fenced,
     agy_open_selected_child_fenced, legacy_agy_read_index, reset_all_agy_counters,
-    reset_test_counters, test_counters, total_agy_child_reads,
+    reset_test_counters, test_counters, total_agy_child_reads, transcript_opens,
 };
 
 #[cfg(target_os = "linux")]
@@ -169,6 +169,8 @@ mod linux {
     #[cfg(test)]
     thread_local!(pub(super) static CUSTODY_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
     #[cfg(test)]
+    thread_local!(pub(super) static TRANSCRIPT_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+    #[cfg(test)]
     thread_local!(pub(super) static PARENT_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
     #[cfg(test)]
     thread_local!(pub(super) static PARENT_BODY_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
@@ -178,9 +180,15 @@ mod linux {
     #[cfg(test)]
     pub(crate) fn reset_test_counters() {
         CUSTODY_CHECKS.with(|n| n.set(0));
+        TRANSCRIPT_OPENS.with(|n| n.set(0));
         PARENT_SCANS.with(|n| n.set(0));
         PARENT_BODY_BYTES.with(|n| n.set(0));
         CHILD_BODY_READS.with(|n| n.set(0));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transcript_opens() -> usize {
+        TRANSCRIPT_OPENS.with(|n| n.get())
     }
 
     #[cfg(test)]
@@ -799,11 +807,16 @@ mod linux {
         stage: &'static str,
     ) -> Stage<(File, Stat)> {
         gate(is_uuid_lower_hex(uuid), stage)?;
-        brain_dir
+        let opened = brain_dir
             .dir(uuid, uid, stage)?
             .dir(".system_generated", uid, stage)?
             .dir("logs", uid, stage)?
-            .file("transcript_full.jsonl", limit, uid, stage)
+            .file("transcript_full.jsonl", limit, uid, stage);
+        #[cfg(test)]
+        if opened.is_ok() {
+            TRANSCRIPT_OPENS.with(|n| n.set(n.get() + 1));
+        }
+        opened
     }
 
     fn read_parent_tail(file: &File, stat: &Stat) -> Stage<(Vec<u8>, bool)> {

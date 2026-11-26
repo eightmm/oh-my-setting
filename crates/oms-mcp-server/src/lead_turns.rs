@@ -6,7 +6,11 @@ use crate::storage::{Directory, byte_prefix, hash};
 use crate::value::Value;
 use crate::{RUN_ROOT, Server};
 use rustix::fs::{self, AtFlags, FileType};
-use std::path::Path;
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 #[path = "lead_observation.rs"]
 mod observation;
@@ -17,6 +21,111 @@ mod settings;
 const INVALID: &str = "The Lead conversation receipt is unavailable or changed.";
 const HEAD: &str = "lead-turn-head.json";
 const PAGE: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TurnLookupError {
+    OutboundWithheld,
+    InvalidAnswerRange,
+    InvalidRecord,
+    ReceiptChanged,
+}
+
+impl TurnLookupError {
+    pub fn marker(self) -> Value {
+        let (status, reason) = match self {
+            Self::OutboundWithheld => ("unavailable", "outbound_withheld"),
+            Self::InvalidAnswerRange => ("unavailable", "invalid_answer_range"),
+            Self::InvalidRecord => ("unavailable", "invalid_turn_record"),
+            Self::ReceiptChanged => ("unconfirmed", "receipt_changed"),
+        };
+        json!({"status":status,"reason":reason})
+    }
+}
+
+const INVALID_ANSWER_RANGE: &str =
+    "The Lead answer exceeds the size limit or has an invalid byte range.";
+
+fn check_lead_answer(
+    answer: &str,
+) -> Result<oms_scrub::ClearedPage<'_>, (TurnLookupError, String)> {
+    oms_scrub::outbound_page(
+        answer,
+        crate::MAX_ANSWER,
+        oms_scrub::PageSelector::Offset(0),
+    )
+    .map_err(|err| match err {
+        oms_scrub::PageError::OutboundWithheld => (
+            TurnLookupError::OutboundWithheld,
+            "OMS withheld this Lead answer during its outbound scan.".to_owned(),
+        ),
+        oms_scrub::PageError::InvalidRange => (
+            TurnLookupError::InvalidAnswerRange,
+            INVALID_ANSWER_RANGE.to_owned(),
+        ),
+    })
+}
+
+fn oversized_lead_answer(repo: &Path, op: &str, artifact: &str) -> bool {
+    let Some(name) = Path::new(artifact)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|n| crate::answer_name(n))
+    else {
+        return false;
+    };
+    let Ok(answers) = Directory::open(repo, &format!("{RUN_ROOT}/{op}/answers"), false, true)
+    else {
+        return false;
+    };
+    if Path::new(artifact).parent() != Some(answers.path.as_path()) {
+        return false;
+    }
+    let Ok(st) = fs::statat(&answers.fd, name, AtFlags::SYMLINK_NOFOLLOW) else {
+        return false;
+    };
+    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile || st.st_mode & 0o077 != 0 {
+        return false;
+    }
+    if st.st_size < 0 {
+        return false;
+    }
+    let Ok(root) = oms_safe_fs::Root::open(repo) else {
+        return false;
+    };
+    match root.read(
+        &format!("{RUN_ROOT}/{op}/answers/{name}"),
+        crate::MAX_ANSWER + 64 * 1024,
+        oms_safe_fs::Policy::manifest(),
+    ) {
+        Ok(bytes) => {
+            let (text, exit) = crate::storage::sections(&bytes);
+            exit == "0" && text.len() > crate::MAX_ANSWER
+        }
+        Err(oms_safe_fs::Error::Oversize) => true,
+        Err(_) => false,
+    }
+}
+
+pub(super) fn confirmed_oversize_answer(repo: &Path, op: &str, raw: &crate::value::Text) -> bool {
+    if let Some(err_payload) = raw.as_str().and_then(|s| crate::value::from_str(s).ok())
+        && err_payload["operation"] == op
+        && err_payload["exit"] == 0
+        && err_payload["answer_errors"]
+            .as_array()
+            .is_some_and(|e| !e.is_empty())
+        && let Some([artifact]) = err_payload["artifacts"].as_array().map(Vec::as_slice)
+        && let Some(path) = artifact.as_str()
+    {
+        oversized_lead_answer(repo, op, path)
+    } else {
+        false
+    }
+}
+
+type CachedTurns = BTreeMap<(String, String), (String, Result<&'static str, TurnLookupError>)>;
+
+#[derive(Clone, Default)]
+pub(crate) struct LeadTurnCache(Arc<Mutex<CachedTurns>>);
 
 fn turn_id(id: &str) -> bool {
     uuid(id) && id.as_bytes()[14] == b'4' && matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b')
@@ -216,20 +325,79 @@ impl<'a> Conversation<'a> {
             Err(_) => Err(INVALID.into()),
         }
     }
-    fn observe(
+    fn completed_fingerprint(&self, op: &str) -> Option<String> {
+        let stamp = |s: &rustix::fs::Stat| {
+            json!([
+                s.st_dev,
+                s.st_ino,
+                s.st_mode,
+                s.st_size,
+                s.st_mtime,
+                s.st_mtime_nsec
+            ])
+        };
+        let op_dir = Directory::run(self.repo, op, true).ok()?;
+        let dir_stat = fs::fstat(&op_dir.fd)
+            .ok()
+            .filter(|s| s.st_mode & 0o077 == 0)?;
+        let status_stat = fs::statat(&op_dir.fd, "status", AtFlags::SYMLINK_NOFOLLOW)
+            .ok()
+            .filter(|s| FileType::from_raw_mode(s.st_mode) == FileType::RegularFile)?;
+        let meta_stat = fs::statat(&op_dir.fd, "meta.json", AtFlags::SYMLINK_NOFOLLOW)
+            .ok()
+            .filter(|s| FileType::from_raw_mode(s.st_mode) == FileType::RegularFile)?;
+        if crate::peer::status(&op_dir.path) != ("done", Some(0)) {
+            return None;
+        }
+        let answers =
+            match Directory::open(self.repo, &format!("{RUN_ROOT}/{op}/answers"), false, true) {
+                Ok(dir) => {
+                    let dstat = fs::fstat(&dir.fd).ok()?;
+                    let mut entries = Vec::new();
+                    for entry in std::fs::read_dir(&dir.path).ok()? {
+                        let entry = entry.ok()?;
+                        let name = entry.file_name();
+                        let st = fs::statat(&dir.fd, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
+                            .ok()?;
+                        entries.push((name, stamp(&st)));
+                    }
+                    entries.sort_by(|a, b| a.0.cmp(&b.0));
+                    let files: Vec<Value> = entries
+                        .into_iter()
+                        .map(|(n, st)| json!([n.to_string_lossy().into_owned(), st]))
+                        .collect();
+                    json!([stamp(&dstat), files])
+                }
+                Err(_) => Value::Null,
+            };
+        Some(hash(
+            json!([
+                op,
+                stamp(&dir_stat),
+                stamp(&status_stat),
+                stamp(&meta_stat),
+                answers
+            ])
+            .to_string(),
+        ))
+    }
+    fn observe_classified(
         &self,
         server: &Server<'_>,
         record: &Value,
-    ) -> PanelResult<(&'static str, Option<Value>)> {
-        let binding = record["binding"].as_str().ok_or(INVALID)?;
-        let op = assignment_address(self.lead, binding).ok_or(INVALID)?;
-        let rejected = self.read(&format!(
-            "lead-refused-{}.json",
-            record["id"].as_str().ok_or(INVALID)?
-        ))?;
+    ) -> Result<(&'static str, Option<Value>), (TurnLookupError, String)> {
+        let invalid = || (TurnLookupError::InvalidRecord, INVALID.to_owned());
+        let binding = record["binding"].as_str().ok_or_else(invalid)?;
+        let op = assignment_address(self.lead, binding).ok_or_else(invalid)?;
+        let rejected = self
+            .read(&format!(
+                "lead-refused-{}.json",
+                record["id"].as_str().ok_or_else(invalid)?
+            ))
+            .map_err(|_| invalid())?;
         let expected = json!({"id":record["id"],"binding":binding,"phase":"before-operation"});
         if rejected.as_ref().is_some_and(|v| v != &expected) {
-            return Err(INVALID.into());
+            return Err(invalid());
         }
         let Some(dir) = checked_peer_directory(
             self.repo,
@@ -238,10 +406,14 @@ impl<'a> Conversation<'a> {
             self.thread,
             binding,
             true,
-            Some((record["digest"].as_str().ok_or(INVALID)?, &record["route"])),
-        )?
+            Some((
+                record["digest"].as_str().ok_or_else(invalid)?,
+                &record["route"],
+            )),
+        )
+        .map_err(|_| invalid())?
         else {
-            let absent = self.absent(&op)?;
+            let absent = self.absent(&op).map_err(|_| invalid())?;
             let status = match (absent, rejected.is_some()) {
                 (true, true) => "failed",
                 (true, false) => "reserved",
@@ -256,30 +428,48 @@ impl<'a> Conversation<'a> {
         match (state, exit) {
             ("running", _) => Ok(("running", None)),
             ("done", Some(0)) => {
-                let proof = server
-                    .peer_result(&json!({"repo":self.repo,"operation":op}))
-                    .ok()
-                    .and_then(|r| r.as_str().and_then(|s| crate::value::from_str(s).ok()));
+                let raw_result = server.peer_result(&json!({"repo":self.repo,"operation":op}));
+                let proof = match &raw_result {
+                    Ok(r) => r.as_str().and_then(|s| crate::value::from_str(s).ok()),
+                    Err(crate::ToolError::Text(r)) => {
+                        if confirmed_oversize_answer(self.repo, &op, r) {
+                            return Err((
+                                TurnLookupError::InvalidAnswerRange,
+                                INVALID_ANSWER_RANGE.to_owned(),
+                            ));
+                        }
+                        None
+                    }
+                    Err(_) => None,
+                };
                 let answer = proof
                     .as_ref()
-                    .filter(|v| {
-                        v["operation"] == op
-                            && v["exit"] == 0
-                            && v["answer_details"].as_array().is_some_and(|d| {
-                                d.len() == 1
-                                    && d[0]["exit"] == "0"
-                                    && d[0]["read_arguments"]["operation"] == op
-                            })
+                    .filter(|v| v["operation"] == op && v["exit"] == 0)
+                    .and_then(|v| v["answer_details"].as_array())
+                    .and_then(|d| match d.as_slice() {
+                        [detail]
+                            if detail["exit"] == "0"
+                                && detail["read_arguments"]["operation"] == op =>
+                        {
+                            detail["read_arguments"]["answer_ref"].as_str()
+                        }
+                        _ => None,
                     })
-                    .and_then(|v| v["answer"].as_str())
-                    .filter(|s| !s.trim().is_empty());
+                    .and_then(|reference| {
+                        let (name, _) = reference.rsplit_once(':')?;
+                        let (text, exit) =
+                            crate::storage::owned_answer(self.repo, &op, name).ok()?;
+                        (exit == "0"
+                            && reference == crate::storage::reference(&op, name, &text)
+                            && !text.trim().is_empty())
+                        .then_some(text)
+                    });
                 if let Some(answer) = answer {
-                    crate::output::outbound(answer.as_bytes(), &Value::Null)
-                        .map_err(|_| "OMS withheld this Lead answer during its outbound scan.")?;
+                    check_lead_answer(&answer)?;
                     Ok((
                         "replied",
                         Some(
-                            json!({"role":self.lead["provider"],"text":byte_prefix(answer,4000),"turnId":record["id"],"at":Value::Null,"truncated":answer.len()>4000 || proof.as_ref().is_some_and(|v|v["answer_truncated"]==true)}),
+                            json!({"role":self.lead["provider"],"text":byte_prefix(&answer,4000),"turnId":record["id"],"at":Value::Null,"truncated":answer.len()>4000}),
                         ),
                     ))
                 } else {
@@ -289,6 +479,14 @@ impl<'a> Conversation<'a> {
             ("done", Some(_)) => Ok(("failed", None)),
             _ => Ok(("unconfirmed", None)),
         }
+    }
+    fn observe(
+        &self,
+        server: &Server<'_>,
+        record: &Value,
+    ) -> PanelResult<(&'static str, Option<Value>)> {
+        self.observe_classified(server, record)
+            .map_err(|(_, msg)| msg)
     }
     fn submit(
         &self,
@@ -377,19 +575,70 @@ impl<'a> Conversation<'a> {
     pub fn latest(
         &self,
         server: &Server<'_>,
+        force_refresh: bool,
         check: impl Fn() -> PanelResult<()>,
-    ) -> PanelResult<Value> {
-        let Some(id) = self.head()? else {
+    ) -> Result<Value, TurnLookupError> {
+        let Some(id) = self.head().map_err(|_| TurnLookupError::InvalidRecord)? else {
             return Ok(Value::Null);
         };
-        let record = self.record(&id)?.ok_or(INVALID)?;
-        let status = self.observe(server, &record)?.0;
-        self.bound()?;
-        check()?;
-        if self.head()?.as_deref() != Some(id.as_str())
-            || self.record(&id)?.as_ref() != Some(&record)
+        let record = self
+            .record(&id)
+            .map_err(|_| TurnLookupError::InvalidRecord)?
+            .ok_or(TurnLookupError::InvalidRecord)?;
+        let binding = record["binding"]
+            .as_str()
+            .ok_or(TurnLookupError::InvalidRecord)?;
+        let op = assignment_address(self.lead, binding).ok_or(TurnLookupError::InvalidRecord)?;
+        let cache_key = (self.scope.to_owned(), id.clone());
+        let cached = if !force_refresh {
+            let rejected = self
+                .read(&format!("lead-refused-{id}.json"))
+                .map_err(|_| TurnLookupError::InvalidRecord)?;
+            if rejected.is_none()
+                && let Some(fp) = self.completed_fingerprint(&op)
+                && let Ok(guard) = server.lead_turns.0.lock()
+                && let Some((saved_fp, outcome)) = guard.get(&cache_key)
+                && saved_fp == &fp
+            {
+                Some(*outcome)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let status = match cached {
+            Some(outcome) => outcome?,
+            None => {
+                let outcome = self
+                    .observe_classified(server, &record)
+                    .map(|(s, _)| s)
+                    .map_err(|(e, _)| e);
+                if let Some(fp) = self.completed_fingerprint(&op)
+                    && let Ok(mut guard) = server.lead_turns.0.lock()
+                {
+                    if guard.len() >= 64 && !guard.contains_key(&cache_key) {
+                        guard.clear();
+                    }
+                    guard.insert(cache_key, (fp, outcome));
+                }
+                outcome?
+            }
+        };
+        self.bound().map_err(|_| TurnLookupError::ReceiptChanged)?;
+        check().map_err(|_| TurnLookupError::ReceiptChanged)?;
+        if self
+            .head()
+            .map_err(|_| TurnLookupError::ReceiptChanged)?
+            .as_deref()
+            != Some(id.as_str())
+            || self
+                .record(&id)
+                .map_err(|_| TurnLookupError::ReceiptChanged)?
+                .as_ref()
+                != Some(&record)
         {
-            return Err(INVALID.into());
+            return Err(TurnLookupError::ReceiptChanged);
         }
         Ok(
             json!({"turnId":id,"status":status,"submittedAt":record["at"],"lastObservedAt":crate::storage::now()}),
@@ -476,28 +725,32 @@ impl<'a> Conversation<'a> {
         let cursor = args["answerPage"].as_str().ok_or(INVALID)?;
         let offset = super::output_position(cursor, crate::MAX_ANSWER)?;
         super::check_output_cursor(cursor, self.scope, &revision, offset)?;
-        let page = server.peer_result(&json!({"repo":self.repo,"operation":operation,"answer_ref":reference,"answer_offset":offset,"answer_limit":8192}))
+        if crate::peer::status(&operation_dir.path) != ("done", Some(0))
+            || crate::storage::meta(&operation_dir.path)["answer_storage"] != "operation"
+        {
+            return Err("The retained answer changed. Reopen the result.".into());
+        }
+        let (answer, artifact_exit) = crate::storage::owned_answer(self.repo, &operation, name)
             .map_err(|_| "The retained answer changed. Reopen the result.")?;
-        let page = crate::value::from_str(page.as_str().ok_or(INVALID)?).map_err(|_| INVALID)?;
-        let text = page["answer"].as_str().ok_or(INVALID)?;
-        let end = page["answer_end"].as_u64().ok_or(INVALID)? as usize;
-        let total = page["answer_bytes"].as_u64().ok_or(INVALID)? as usize;
-        if page["operation"] != operation
-            || page["exit"] != 0
-            || page["artifact_exit"] != "0"
-            || page["answer_ref"] != reference
-            || page["answer_sha256"] != detail["answer_sha256"]
-            || page["answer_offset"].as_u64() != Some(offset as u64)
-            || text.len() > 8192
-            || end != offset + text.len()
-            || end > total
-            || page["has_more"] != (end < total)
+        let digest = crate::storage::hash(&answer);
+        if artifact_exit != "0"
+            || reference != crate::storage::reference(&operation, name, &answer)
+            || detail["answer_sha256"].as_str() != Some(digest.as_str())
             || identity(&stat()?) != identity(&before)
         {
-            return Err(INVALID.into());
+            return Err("The retained answer changed. Reopen the result.".into());
         }
-        crate::output::outbound(text.as_bytes(), &Value::Null)
-            .map_err(|_| "OMS withheld this Lead answer during its outbound scan.")?;
+        let page = oms_scrub::outbound_page(
+            &answer,
+            crate::MAX_ANSWER,
+            oms_scrub::PageSelector::Offset(offset),
+        )
+        .map_err(|err| match err {
+            oms_scrub::PageError::OutboundWithheld => {
+                "OMS withheld this Lead answer during its outbound scan."
+            }
+            oms_scrub::PageError::InvalidRange => INVALID_ANSWER_RANGE,
+        })?;
         self.bound()?;
         check()?;
         let checked = checked_peer_directory(
@@ -530,9 +783,9 @@ impl<'a> Conversation<'a> {
             return Err(INVALID.into());
         }
         Ok(
-            json!({"turnId":id,"text":text,"offset":offset,"bytes":text.len(),"totalBytes":total,
-            "digest":page["answer_sha256"],"nextCursor":(end<total).then(||super::output_cursor(self.scope,&revision,end)),
-            "hasMore":end<total,"source":"recorded-answer",
+            json!({"turnId":id,"text":page.text,"offset":page.offset,"bytes":page.text.len(),"totalBytes":page.total_bytes,
+            "digest":digest,"nextCursor":page.has_more.then(||super::output_cursor(self.scope,&revision,page.end)),
+            "hasMore":page.has_more,"source":"recorded-answer",
             "handoff":{"room":self.lead["room"],"participant":self.lead["participant"],"provider":self.provider,
                 "leadRequestId":self.lead["request"],"turnId":id,"operation":operation}}),
         )
@@ -596,5 +849,31 @@ impl<'a> Conversation<'a> {
         self.bound()?;
         check()?;
         Ok(selected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lead_answer_range_errors_are_distinct_from_outbound_withheld() {
+        let oversized = "a".repeat(crate::MAX_ANSWER + 1);
+        for invalid in ["", oversized.as_str()] {
+            let err = check_lead_answer(invalid).unwrap_err();
+            assert_eq!(err.0, TurnLookupError::InvalidAnswerRange);
+            assert_eq!(
+                err.0.marker(),
+                json!({"status":"unavailable","reason":"invalid_answer_range"})
+            );
+            assert!(err.1.contains("size limit") || err.1.contains("byte range"));
+        }
+        let planted = ["gh", "p_0123456789abcdef0123456789abcdef0123"].concat();
+        let err = check_lead_answer(&planted).unwrap_err();
+        assert_eq!(err.0, TurnLookupError::OutboundWithheld);
+        assert_eq!(
+            err.0.marker(),
+            json!({"status":"unavailable","reason":"outbound_withheld"})
+        );
     }
 }

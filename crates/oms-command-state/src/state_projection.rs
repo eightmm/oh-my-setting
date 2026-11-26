@@ -100,6 +100,117 @@ fn artifact_rows(ctx: &Context<'_>) -> Result<(Vec<Value>, BTreeSet<String>, usi
         .collect();
     Ok((rows, resolved, bad))
 }
+pub(super) struct DashboardArtifacts {
+    operations: Value,
+    reviews: Value,
+}
+
+fn dashboard_artifacts(
+    rows: &[Value],
+    outcomes_total: usize,
+    bad: usize,
+) -> Result<DashboardArtifacts> {
+    let mut reviews = object([
+        ("outcomes", number(0)),
+        ("passed", number(0)),
+        ("failed", number(0)),
+        ("unknown", number(0)),
+        ("seat_answers", number(0)),
+    ]);
+    for row in rows {
+        let key = if row.text("kind") == "review" {
+            "seat_answers"
+        } else if row.text("kind") == "review-outcome" {
+            "outcomes"
+        } else {
+            continue;
+        };
+        reviews.set(key, number(reviews.get(key).int()? + 1))?;
+        if key == "outcomes" {
+            let key = match row.get("exit").int() {
+                Ok(0) => "passed",
+                Ok(n) if n > 0 => "failed",
+                _ => "unknown",
+            };
+            reviews.set(key, number(reviews.get(key).int()? + 1))?;
+        }
+    }
+    let operations = object([
+        ("available", Value::Bool(bad == 0)),
+        (
+            "recent",
+            Value::Array(
+                rows.iter()
+                    .rev()
+                    .filter(|r| r.text("kind") != "artifact-resolution")
+                    .take(8)
+                    .cloned()
+                    .collect(),
+            ),
+        ),
+        ("omitted", number(outcomes_total.saturating_sub(8))),
+    ]);
+    Ok(DashboardArtifacts {
+        operations,
+        reviews,
+    })
+}
+
+fn project_artifacts(
+    ctx: &Context<'_>,
+    state: &mut Value,
+    include_dashboard: bool,
+) -> Result<Option<DashboardArtifacts>> {
+    let (rows, resolved, bad) = artifact_rows(ctx)?;
+    let outcomes = rows
+        .iter()
+        .filter(|r| r.text("kind") != "artifact-resolution");
+    let status = |row: &Value| {
+        if row.get("exit").is_int(0) {
+            "success"
+        } else if resolved.contains(row.text("event_id")) {
+            "resolved"
+        } else {
+            "unresolved"
+        }
+    };
+    let mut counts = object([
+        ("success", number(0)),
+        ("resolved", number(0)),
+        ("unresolved", number(0)),
+    ]);
+    let mut outcomes_total = 0usize;
+    for row in outcomes.clone() {
+        let key = status(row);
+        counts.set(key, number(counts.get(key).int()? + 1))?;
+        outcomes_total += 1;
+    }
+    let latest = outcomes
+        .rev()
+        .take(5)
+        .map(|row| {
+            let mut projected = row.clone();
+            projected.set("status", string(status(row)))?;
+            Ok(projected)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    state.set(
+        "artifacts",
+        object([
+            ("healthy", Value::Bool(bad == 0)),
+            ("invalid_rows", number(bad)),
+            ("total", number(rows.len())),
+            ("outcomes_total", number(outcomes_total)),
+            ("resolution_events", number(resolved.len())),
+            ("counts", counts),
+            ("latest", Value::Array(latest)),
+        ]),
+    )?;
+    include_dashboard
+        .then(|| dashboard_artifacts(&rows, outcomes_total, bad))
+        .transpose()
+}
+
 const STATE_ACTIONABLE_MAX: usize = 5;
 
 fn format_actionable(ids: &[&str]) -> String {
@@ -279,7 +390,12 @@ fn conversation_task_titles(state: &Value, raw: &[u8], plan: &Value) -> Option<V
         .then_some(titles)
 }
 
-pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Value) -> Result<()> {
+pub(super) fn enrich(
+    ctx: &Context<'_>,
+    host: &dyn HostServices,
+    state: &mut Value,
+    include_dashboard: bool,
+) -> Result<Option<DashboardArtifacts>> {
     let task_text = storage::read(
         &ctx.repo,
         Path::new(".oms/task/current.md"),
@@ -413,44 +529,7 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
     ]);
     state.set("board", board.clone())?;
     state.set("experiments", board)?;
-    let (arts, resolved, bad) = artifact_rows(ctx)?;
-    let mut counts = object([
-        ("success", number(0)),
-        ("resolved", number(0)),
-        ("unresolved", number(0)),
-    ]);
-    let mut outcomes = Vec::new();
-    for mut row in arts
-        .iter()
-        .filter(|r| r.text("kind") != "artifact-resolution")
-        .cloned()
-    {
-        let status = if row.get("exit").is_int(0) {
-            "success"
-        } else if resolved.contains(row.text("event_id")) {
-            "resolved"
-        } else {
-            "unresolved"
-        };
-        counts.set(status, number(counts.get(status).int()? + 1))?;
-        row.set("status", string(status))?;
-        outcomes.push(row);
-    }
-    state.set(
-        "artifacts",
-        object([
-            ("healthy", Value::Bool(bad == 0)),
-            ("invalid_rows", number(bad)),
-            ("total", number(arts.len())),
-            ("outcomes_total", number(outcomes.len())),
-            ("resolution_events", number(resolved.len())),
-            ("counts", counts),
-            (
-                "latest",
-                Value::Array(outcomes.into_iter().rev().take(5).collect()),
-            ),
-        ]),
-    )?;
+    let dashboard_artifacts = project_artifacts(ctx, state, include_dashboard)?;
     let mut command = vec![
         "git",
         "--no-optional-locks",
@@ -807,7 +886,7 @@ pub(super) fn enrich(ctx: &Context<'_>, host: &dyn HostServices, state: &mut Val
             ("auto_update_detail", string("")),
         ]),
     )?;
-    Ok(())
+    Ok(dashboard_artifacts)
 }
 pub(super) fn extra_attention(state: &Value, repo: &Path, items: &mut Vec<Value>) -> Result<()> {
     let anchor = quote(&repo.to_string_lossy());
@@ -822,6 +901,26 @@ pub(super) fn extra_attention(state: &Value, repo: &Path, items: &mut Vec<Value>
             ]));
         }
     };
+    let memory = state.get("memory_review");
+    let command = format!("oms agent-memory --repo {anchor} review");
+    if memory.get("healthy") == &Value::Bool(false) {
+        add(
+            "P2",
+            "memory-review-unavailable",
+            1,
+            "memory review source is unavailable; pending count is unknown".into(),
+            command,
+        );
+    } else {
+        let pending = memory.get("pending").int().unwrap_or(0) as usize;
+        add(
+            "P2",
+            "pending-memory-review",
+            pending,
+            format!("{pending} memory proposal(s) await explicit review; unverified"),
+            command,
+        );
+    }
     let orphans = state
         .get("delegations")
         .array()
@@ -1269,7 +1368,11 @@ pub(super) fn render(report: &Value, tool: &str) -> Result<String> {
     state_text(report)
 }
 
-pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
+pub(super) fn dashboard(
+    ctx: &Context<'_>,
+    state: &Value,
+    artifacts: DashboardArtifacts,
+) -> Result<Value> {
     let ok = [
         "task",
         "plan",
@@ -1335,44 +1438,10 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
         "note",
         string("a done attempt ended its work; acceptance is judged by evidence"),
     )?;
-    let (artifacts, _, bad) = artifact_rows(ctx)?;
-    let outcomes = artifacts
-        .into_iter()
-        .filter(|r| r.text("kind") != "artifact-resolution")
-        .collect::<Vec<_>>();
-    let mut reviews = object([
-        ("outcomes", number(0)),
-        ("passed", number(0)),
-        ("failed", number(0)),
-        ("unknown", number(0)),
-        ("seat_answers", number(0)),
-    ]);
-    for row in &outcomes {
-        let key = if row.text("kind") == "review" {
-            "seat_answers"
-        } else if row.text("kind") == "review-outcome" {
-            "outcomes"
-        } else {
-            continue;
-        };
-        reviews.set(key, number(reviews.get(key).int()? + 1))?;
-        if key == "outcomes" {
-            let key = match row.get("exit").int() {
-                Ok(0) => "passed",
-                Ok(n) if n > 0 => "failed",
-                _ => "unknown",
-            };
-            reviews.set(key, number(reviews.get(key).int()? + 1))?;
-        }
-    }
-    let operations = object([
-        ("available", Value::Bool(bad == 0)),
-        (
-            "recent",
-            Value::Array(outcomes.iter().rev().take(8).cloned().collect()),
-        ),
-        ("omitted", number(outcomes.len().saturating_sub(8))),
-    ]);
+    let DashboardArtifacts {
+        operations,
+        reviews,
+    } = artifacts;
     let criteria = runtime.get("criteria").array().unwrap_or(&[]);
     let acceptance = object([
         ("available", runtime.get("healthy").clone()),
@@ -1454,7 +1523,7 @@ pub(super) fn dashboard(ctx: &Context<'_>, state: &Value) -> Result<Value> {
                         ),
                         (
                             "artifacts",
-                            string(if bad == 0 {
+                            string(if operations.get("available").truth() {
                                 "ok"
                             } else {
                                 "invalid artifact contract"
@@ -1635,21 +1704,19 @@ fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
     } else {
         0
     };
-    let acceptance_omitted = nonneg(dashboard.get("acceptance").get("omitted")).saturating_add(
-        dashboard
-            .get("acceptance")
-            .get("criteria")
-            .array()
-            .unwrap_or(&[])
-            .iter()
-            .map(|row| nonneg(row.get("evidenceOmitted")))
-            .sum::<u64>(),
-    );
+    let acceptance_omitted = nonneg(dashboard.get("acceptance").get("omitted"));
+    let evidence_omitted = dashboard
+        .get("acceptance")
+        .get("criteria")
+        .array()
+        .unwrap_or(&[])
+        .iter()
+        .map(|row| nonneg(row.get("evidenceOmitted")))
+        .sum::<u64>();
     let readiness_omitted = nonneg(dashboard.get("planReadiness").get("omitted"));
     let omitted = nonneg(report.get("operations").get("omitted"))
         .saturating_add(nonneg(report.get("attention").get("omitted")))
         .saturating_add(acceptance_omitted)
-        .saturating_add(readiness_omitted)
         .saturating_add(nonneg(
             dashboard.get("conversationMain").get("participantsOmitted"),
         ))
@@ -1678,7 +1745,6 @@ fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
                 || nonneg(dashboard.get("operationsTrimmed")) > 0,
         ),
         ("acceptance", acceptance_omitted > 0),
-        ("plan", readiness_omitted > 0),
     ] {
         if bounded && sources.text(name) == "ok" {
             let _ = sources.set(name, string("partial"));
@@ -1717,6 +1783,8 @@ fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
         ("latestArtifact", latest_artifact),
         ("omitted", number(omitted)),
         ("trimmed", number(trimmed)),
+        ("readinessOmitted", number(readiness_omitted)),
+        ("evidenceOmitted", number(evidence_omitted)),
     ]);
     let revision = if completeness == "unknown" {
         Value::Null
@@ -2665,6 +2733,19 @@ fn state_text(state: &Value) -> Result<String> {
             out.push_str(&format!("  {} unacknowledged; oldest age: {}\n  read: {} (explicit acknowledgment required)\n",n(mail,"pending"),mail.get("oldest_age_seconds").int().map(|n|format!("{n}s")).unwrap_or_else(|_|"-".into()),mail.text("command")));
         }
     }
+    let memory = state.get("memory_review");
+    if !memory.get("healthy").truth() || n(memory, "pending") > 0 {
+        out.push_str("\n## Memory review\n");
+        if memory.get("healthy").truth() {
+            out.push_str(&format!(
+                "  {} proposal(s) await explicit review; unverified\n",
+                n(memory, "pending")
+            ));
+        } else {
+            out.push_str("  unavailable; pending count is unknown\n");
+        }
+        out.push_str("  inspect: oms agent-memory review\n");
+    }
     let journal = state.get("work_journal");
     if journal.get("present").truth() {
         out.push_str(&format!("\n## Work Journal storage\n  {} event lines, {} event bytes; {} files, {} total bytes\n",n(journal,"event_lines"),n(journal,"events_bytes"),n(journal,"file_count"),n(journal,"total_bytes")));
@@ -3092,7 +3173,7 @@ mod panel_snapshot_tests {
         }"#).unwrap();
         let mut acceptance = report.get("acceptance").clone();
         acceptance
-            .set("criteria", Value::Array(vec![criterion; 10]))
+            .set("criteria", Value::Array(vec![criterion.clone(); 10]))
             .unwrap();
         report.set("acceptance", acceptance).unwrap();
         let task = json::parse(br#"{"id":"task-a","title":"Existing issue task","state":"ready","issue":"example/project#7","selection_eligible":false,"reason":"brief-required","brief":"private-brief"}"#).unwrap();
@@ -3135,9 +3216,78 @@ mod panel_snapshot_tests {
             "Review the remaining criteria"
         );
         assert_eq!(dashboard.get("nextStep").text("scope"), "repository");
-        assert_eq!(dashboard.get("observation").text("completeness"), "partial");
+        let obs = dashboard.get("observation");
+        assert_eq!(obs.text("completeness"), "partial");
+        assert_eq!(obs.get("sources").text("plan"), "ok");
+        assert_eq!(obs.get("sources").text("acceptance"), "partial");
+        assert_eq!(obs.get("evidence").get("omitted"), &number(4));
+        assert_eq!(obs.get("evidence").get("readinessOmitted"), &number(4));
+        assert_eq!(obs.get("evidence").get("evidenceOmitted"), &number(16));
         let wire = String::from_utf8(json::encoded(&snapshot).unwrap()).unwrap();
         assert!(!wire.contains("private-") && wire.len() < 52_000, "{wire}");
+
+        // Display bounds (8 readiness rows, 3 evidence rows per criterion) do not mark a
+        // complete 9-task plan or complete acceptance source as partial.
+        let mut complete_report = json::parse(br#"{
+            "collection":{"ok":true,"sources":{"state":"ok","goal":"ok","artifacts":"ok","attempts":"ok"}},
+            "git":{"available":true,"head":"1234567890abcdef1234567890abcdef12345678"},
+            "goal":{"text":"Finish the project","source":"project"},
+            "task":{"healthy":true},
+            "plan":{"healthy":true,"task_count":9,"verified_count":9,"cancelled_count":0,"task_readiness_omitted":0},
+            "attempts":{"available":true,"total":0,"active":0,"executing":0,"by_state":{},"recent":[],"active_recent":[]},
+            "operations":{"available":true,"recent":[],"omitted":0},
+            "reviews":{"passed":0,"failed":0,"unknown":0},
+            "acceptance":{"available":true,"total":1,"counts":{"verified":1},"complete":true,"omitted":0},
+            "attention":{"items":[],"omitted":0}
+        }"#).unwrap();
+        let done_tasks: Vec<Value> = (0..9)
+            .map(|i| {
+                object([
+                    ("id", string(format!("task-{i}"))),
+                    ("title", string(format!("Completed task {i}"))),
+                    ("state", string("done")),
+                    ("issue", Value::Null),
+                    ("selection_eligible", Value::Bool(false)),
+                    ("reason", string("recorded-done")),
+                ])
+            })
+            .collect();
+        let mut complete_plan = complete_report.get("plan").clone();
+        complete_plan
+            .set("task_readiness", Value::Array(done_tasks))
+            .unwrap();
+        complete_report.set("plan", complete_plan).unwrap();
+        let mut complete_acceptance = complete_report.get("acceptance").clone();
+        let mut verified_criterion = criterion.clone();
+        verified_criterion
+            .set("status", string("verified"))
+            .unwrap();
+        complete_acceptance
+            .set("criteria", Value::Array(vec![verified_criterion]))
+            .unwrap();
+        complete_report
+            .set("acceptance", complete_acceptance)
+            .unwrap();
+        let complete_snapshot = panel_snapshot(&complete_report, &Value::Null);
+        let complete_dashboard = complete_snapshot.get("dashboard");
+        assert_eq!(complete_dashboard.get("degraded"), &Value::Bool(false));
+        assert_eq!(
+            complete_dashboard.get("planReadiness").get("omitted"),
+            &number(1)
+        );
+        let complete_obs = complete_dashboard.get("observation");
+        assert_eq!(complete_obs.text("completeness"), "complete");
+        assert_eq!(complete_obs.get("sources").text("plan"), "ok");
+        assert_eq!(complete_obs.get("sources").text("acceptance"), "ok");
+        assert_eq!(complete_obs.get("evidence").get("omitted"), &number(0));
+        assert_eq!(
+            complete_obs.get("evidence").get("readinessOmitted"),
+            &number(1)
+        );
+        assert_eq!(
+            complete_obs.get("evidence").get("evidenceOmitted"),
+            &number(2)
+        );
 
         let mut unavailable = report.get("acceptance").clone();
         unavailable.set("available", Value::Bool(false)).unwrap();

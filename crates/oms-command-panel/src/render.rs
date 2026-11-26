@@ -2123,8 +2123,10 @@ fn known_elapsed(call: &Value) -> &str {
     if elapsed == "—" { "" } else { elapsed }
 }
 
-/// `placeholder` false drops an unknown total's `— tok` so a narrow row can
-/// keep its operation badge.
+const NOT_LOADED: &str = "not loaded";
+
+/// `placeholder` false drops an unknown total's `— tok` / `not loaded` so a
+/// narrow row can keep its operation badge.
 fn token_span_with(
     call: &Value,
     limit: usize,
@@ -2139,6 +2141,10 @@ fn token_span_with(
         }
         return Vec::new();
     }
+    let (observed, _) = headline_tokens(call);
+    let not_loaded = call["native_child"] == true
+        && observed["total"].as_u64().is_none()
+        && call.get("native_response_usage").is_none();
     // Narrow fallback: when the aligned field does not fit, drop the padding
     // (`~12.5K`, `0 `, `— `) rather than the value.
     let (aligned, trimmed, unit) = token_field(call, columns);
@@ -2166,8 +2172,29 @@ fn token_span_with(
                 .join(" ")
         })
         .filter(|label| label != "rsp");
-    let aligned = (columns >= 44).then_some(aligned.as_str());
-    let fields = [aligned, Some(trimmed.as_str())];
+    let aligned_not_loaded = format!(" {NOT_LOADED}");
+    let aligned_with_unit = format!("{aligned}{unit}");
+    let trimmed_with_unit = format!("{trimmed}{unit}");
+    let candidates: Vec<&str> = if not_loaded {
+        let mut out = Vec::new();
+        if columns >= 56 {
+            out.push(aligned_not_loaded.as_str());
+        }
+        out.push(NOT_LOADED);
+        if columns >= 44 {
+            out.push(aligned_with_unit.as_str());
+        }
+        out.push(trimmed_with_unit.as_str());
+        out
+    } else {
+        [
+            (columns >= 44).then_some(aligned_with_unit.as_str()),
+            Some(trimmed_with_unit.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    };
     let extras: Vec<String> = [
         split
             .as_ref()
@@ -2181,11 +2208,11 @@ fn token_span_with(
     // Prefer the aligned field with elapsed time, then save space without
     // consuming the caller's reserved identity cells.
     let value = extras.iter().find_map(|extra| {
-        fields.into_iter().flatten().find_map(|field| {
+        candidates.iter().find_map(|field| {
             let value = if unknown && !placeholder {
                 format!("{}{edge}", extra.trim_start())
             } else {
-                format!("{field}{unit}{extra}{edge}")
+                format!("{field}{extra}{edge}")
             };
             (width(&value) <= limit).then_some(value)
         })
@@ -12409,6 +12436,10 @@ mod tests {
         assert!(rendered(managed, 40, 100).ends_with("300.0K tok"));
         let foreign = json!({"native_response_usage":{"response":{"total_tokens":7}}});
         assert!(rendered(foreign, 40, 100).ends_with("— tok"));
+        let unloaded = json!({"native_child":true});
+        assert_eq!(rendered(unloaded.clone(), 40, 100), " not loaded");
+        assert_eq!(rendered(unloaded.clone(), 12, 50), "not loaded");
+        assert_eq!(rendered(unloaded, 5, 50), "— ");
         // Absent, invalid, lead and cumulative counters stay unknown.
         for response in [
             json!(null),

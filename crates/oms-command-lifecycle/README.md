@@ -58,6 +58,18 @@ lifecycle implementation as a fallback. `#![forbid(unsafe_code)]` remains enable
   Statuslines invoke `oms claude-statusline` and `oms claude-subagent-statusline`.
   Account mode requires a matching effects reservation
   (`--ownership-receipt`) and removes only exact recorded leaves/hooks.
+- `install-mcp --mcp-tool-profile core|full` records the discovery choice in the
+  managed Claude and Codex MCP registrations. `install-agy-plugin` accepts the
+  same selector for its generated MCP manifest; `install` applies it to enabled
+  MCP components. Without the option, reapply, update reconciliation and
+  `doctor --repair` preserve each host's stored choice. New registrations retain
+  the implicit Core default. The only owned nonempty environment is a single
+  string `OMS_MCP_TOOL_PROFILE` set to `core` or `full`; unknown values, extra
+  environment keys and third-party commands remain refusals, including inside
+  Codex managed blocks. Known profiles remain removable and pass
+  `doctor --integrations`. Antigravity directory fingerprints still reject
+  manual edits; use the selector to update its manifest and marker together.
+  Restart the host's MCP connection to refresh discovery after a change.
 - `install-agy-plugin --probe-surfaces`: disposable home/workspace certification
   checks hook delivery, payload, blocking, and timeout behavior. Cache identity
   uses Bash-compatible binary spelling and stat identity, including macOS path

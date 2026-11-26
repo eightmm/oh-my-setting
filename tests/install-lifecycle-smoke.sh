@@ -50,7 +50,7 @@ EOF
       GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 OH_MY_SETTING_DIR="$checkout" \
       OMS_LOCK_DIR="$plan_dir/locks" OMS_NATIVE_NO_AUTO_STAGE=0 \
       OMS_PLAN_FORBIDDEN_LOG="$plan_dir/forbidden.log" \
-      bash "$checkout/install.sh" --plan
+      bash "$checkout/install.sh" --plan "$@"
   }
   status=0
   out="$(run_plan 2>&1)" || status=$?
@@ -67,10 +67,18 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 [ "${OMS_NATIVE_NO_AUTO_STAGE:-0}" = 1 ] || exit 98
-[ "${4:-}" = -- ] && [ "${5:-}" = install ] && [ "${6:-}" = --plan ] || exit 98
-case "${1:-}" in
+[ "${4:-}" = -- ] && [ "${5:-}" = install ] && [ "${6:-}" = --plan ] && [ "${7:-}" = --plan ] || exit 98
+mode="$1"
+shift 7
+case "$mode" in
   --oms-select) exit 0 ;;
-  --oms-dispatch) printf 'fixture install plan\n' ;;
+  --oms-dispatch)
+    if [ "$#" -gt 0 ]; then
+      printf 'fixture install plan %s\n' "$*"
+    else
+      printf 'fixture install plan\n'
+    fi
+    ;;
   *) exit 98 ;;
 esac
 EOF
@@ -78,6 +86,19 @@ EOF
   oms_smoke_stage_native "$checkout/target/oms-native/$revision" "$plan_dir/built"
   out="$(run_plan 2>&1)" || fail "verified warm install plan failed: $out"
   [ "$out" = 'fixture install plan' ] || fail "warm plan did not dispatch the verified payload: $out"
+  for forwarded in '--mcp-tool-profile core' '--mcp-tool-profile full' '--mcp-tool-profile=full'; do
+    # shellcheck disable=SC2086
+    out="$(run_plan $forwarded 2>&1)" || fail "warm plan rejected $forwarded: $out"
+    [ "$out" = "fixture install plan $forwarded" ] ||
+      fail "warm plan did not forward $forwarded unchanged: $out"
+  done
+  for bad in '--mcp-tool-profile' '--mcp-tool-profile invalid' '--mcp-tool-profile=' \
+    '--mcp-tool-profile core --mcp-tool-profile full'; do
+    status=0
+    # shellcheck disable=SC2086
+    out="$(run_plan $bad 2>&1)" || status=$?
+    [ "$status" -eq 2 ] || fail "install.sh must reject $bad with exit 2 (got $status): $out"
+  done
   [ ! -s "$plan_dir/forbidden.log" ] || fail "warm plan invoked Cargo, a download, or a provider"
   [ ! -e "$checkout/target/lifecycle-build" ] || fail "warm plan rebuilt the payload"
   [ ! -e "$plan_dir/locks" ] || fail "warm plan acquired a lifecycle lock"
@@ -179,6 +200,10 @@ EOF
       fail "explicit environment install plan failed: $out"
     jq -e '.install.ref == "main"' <<< "$out" >/dev/null ||
       fail "install plan did not honor explicit OH_MY_SETTING_REF: $out"
+    out="$("$case_dir/checkout/install.sh" --plan --mcp-tool-profile full 2>&1)" ||
+      fail "install plan with --mcp-tool-profile failed: $out"
+    jq -e '.mcp_tool_profile == "full"' <<< "$out" >/dev/null ||
+      fail "install plan did not forward --mcp-tool-profile: $out"
   fi
 
   (

@@ -100,6 +100,8 @@ fn run_with_source_writer(
     let mut agy_first_child_wake = crate::wakeup::FirstChildWake::default();
     #[cfg(target_os = "linux")]
     let mut codex_roster_wake = crate::wakeup::FirstChildWake::default();
+    #[cfg(target_os = "linux")]
+    let mut claude_roster_wake = crate::wakeup::FirstChildWake::default();
     let mut deadline = Instant::now();
     let mut scope_sample = None;
     let mut read = attention::load(repo, &room);
@@ -124,6 +126,7 @@ fn run_with_source_writer(
     let mut switch = MainSwitch::default();
     let mut pending_detail_usage: Option<DetailUsageRequest> = None;
     let mut retained_detail_usage: Option<DetailUsageEvidence> = None;
+    let mut last_known_usage = std::collections::BTreeMap::<String, DetailUsageEvidence>::new();
     loop {
         if interrupted.load(Ordering::Acquire) {
             return Ok((130, vec![], vec![]));
@@ -146,6 +149,7 @@ fn run_with_source_writer(
         let mut scope_changed = false;
         let mut detail_usage_frame = DetailUsageFrame::Unchanged;
         let mut checked_agy = None;
+        let mut incoming_detail_usage_requested = None;
         let mut incoming_detail_usage = None;
         let (mut report, snapshot_ok) = if let Some(board) = &mut board {
             let (live, ready) = scope_sample.take().unwrap_or_else(|| {
@@ -204,6 +208,7 @@ fn run_with_source_writer(
             {
                 agy_first_child_wake.replace(None);
                 codex_roster_wake.replace(None);
+                claude_roster_wake.replace(None);
             }
             let mut native_projection = None;
             if let Some(reading) = native {
@@ -211,6 +216,7 @@ fn run_with_source_writer(
                 {
                     agy_first_child_wake.replace(reading.observations.agy_first_child_watch());
                     codex_roster_wake.replace(reading.observations.codex_roster_watch());
+                    claude_roster_wake.replace(reading.observations.claude_roster_watch());
                 }
                 native_projection = Some(reading.projection);
                 if accepted_refresh {
@@ -218,6 +224,7 @@ fn run_with_source_writer(
                 }
                 // A queued same-scope refresh restricts actions, while this
                 // completed and generation-checked reading can still paint.
+                incoming_detail_usage_requested = reading.detail_usage_requested;
                 incoming_detail_usage = reading.detail_usage_evidence;
                 observations = reading.observations;
                 main_footer = reading.footer;
@@ -395,12 +402,26 @@ fn run_with_source_writer(
         }) {
             pending_detail_usage = None;
         }
-        reconcile_detail_usage_evidence(
+        let incoming_admitted = reconcile_detail_usage_evidence(
             &mut retained_detail_usage,
             incoming_detail_usage,
             board.as_ref().and_then(|board| board.scope.as_ref()),
             &report,
             &nav,
+            &observations,
+            detail_usage_frame,
+            scope_changed,
+        );
+        let failed_detail_usage = failed_detail_usage_request(
+            incoming_detail_usage_requested.as_ref(),
+            incoming_admitted,
+        );
+        reconcile_last_known_usage(
+            &mut last_known_usage,
+            retained_detail_usage.as_ref(),
+            failed_detail_usage,
+            board.as_ref().and_then(|board| board.scope.as_ref()),
+            &report,
             &observations,
             detail_usage_frame,
             scope_changed,
@@ -445,7 +466,12 @@ fn run_with_source_writer(
                 crate::layout::reflow(repo, &room, services, interrupted);
                 size = crate::layout::dimensions();
             }
-            let display_report = report_for_frame(&report, &nav, retained_detail_usage.as_ref());
+            let display_report = report_for_frame_with_last_known(
+                &report,
+                &nav,
+                retained_detail_usage.as_ref(),
+                &last_known_usage,
+            );
             let frame = frame_with_native_activity(
                 &display_report,
                 &nav,
@@ -500,9 +526,13 @@ fn run_with_source_writer(
             }
             if let Some(terminal) = &mut terminal {
                 #[cfg(target_os = "linux")]
-                let native_fd = [agy_first_child_wake.fd(), codex_roster_wake.fd()];
+                let native_fd = [
+                    agy_first_child_wake.fd(),
+                    codex_roster_wake.fd(),
+                    claude_roster_wake.fd(),
+                ];
                 #[cfg(not(target_os = "linux"))]
-                let native_fd = [None; 2];
+                let native_fd = [None; 3];
                 let (keys, woken, _native_ready) = terminal.wait_woken(
                     deadline
                         .saturating_duration_since(Instant::now())
@@ -518,7 +548,8 @@ fn run_with_source_writer(
                     let now = Instant::now();
                     let agy_woken = agy_first_child_wake.refresh(_native_ready[0], idle, now);
                     let codex_woken = codex_roster_wake.refresh(_native_ready[1], idle, now);
-                    woken || agy_woken || codex_woken
+                    let claude_woken = claude_roster_wake.refresh(_native_ready[2], idle, now);
+                    woken || agy_woken || codex_woken || claude_woken
                 };
                 let mut refresh = woken;
                 let mut collect_ready = false;
@@ -1037,6 +1068,7 @@ fn run_with_source_writer(
                 if scope.changed {
                     pending_detail_usage = None;
                     retained_detail_usage = None;
+                    last_known_usage.clear();
                 } else if pending_detail_usage.is_some() || retained_detail_usage.is_some() {
                     let current_visible;
                     let selected_call = if calls_key.as_ref()
@@ -1105,8 +1137,12 @@ fn run_with_source_writer(
                         crate::layout::reflow(repo, &room, services, interrupted);
                     }
                     let size = pane_size(repo, services, interrupted);
-                    let display_report =
-                        report_for_frame(&report, &nav, retained_detail_usage.as_ref());
+                    let display_report = report_for_frame_with_last_known(
+                        &report,
+                        &nav,
+                        retained_detail_usage.as_ref(),
+                        &last_known_usage,
+                    );
                     let frame = frame(
                         &display_report,
                         &nav,
@@ -1140,8 +1176,12 @@ fn run_with_source_writer(
                     || ((detail_repaint || scope.checkout_repaint) && !dock_moved))
                     && !scope.changed
                 {
-                    let display_report =
-                        report_for_frame(&report, &nav, retained_detail_usage.as_ref());
+                    let display_report = report_for_frame_with_last_known(
+                        &report,
+                        &nav,
+                        retained_detail_usage.as_ref(),
+                        &last_known_usage,
+                    );
                     let frame = frame_with_native_activity(
                         &display_report,
                         &nav,
@@ -1178,8 +1218,12 @@ fn run_with_source_writer(
                     }
                     let size = crate::layout::dimensions();
                     last_size = size;
-                    let display_report =
-                        report_for_frame(&report, &nav, retained_detail_usage.as_ref());
+                    let display_report = report_for_frame_with_last_known(
+                        &report,
+                        &nav,
+                        retained_detail_usage.as_ref(),
+                        &last_known_usage,
+                    );
                     let frame = frame_with_native_activity(
                         &display_report,
                         &nav,
@@ -2220,30 +2264,30 @@ fn reconcile_detail_usage_evidence(
     observations: &Observations,
     frame: DetailUsageFrame,
     scope_changed: bool,
-) {
+) -> bool {
     if retained.is_none() && incoming.is_none() {
-        return;
+        return false;
     }
     if scope_changed || frame == DetailUsageFrame::Rejected || !nav.detail {
         *retained = None;
-        return;
+        return false;
     }
     let Some(scope) = scope else {
         *retained = None;
-        return;
+        return false;
     };
     let Some(main) = scope.main.as_ref() else {
         *retained = None;
-        return;
+        return false;
     };
     if report["room"]["id"] != scope.room || !report_has_live_main(report, main) {
         *retained = None;
-        return;
+        return false;
     }
     let visible = render::visible(report, nav);
     let Some(call) = visible.get(nav.selected) else {
         *retained = None;
-        return;
+        return false;
     };
     let participant = crate::text(call, "participant");
     let matches = |ev: &DetailUsageEvidence| {
@@ -2272,51 +2316,162 @@ fn reconcile_detail_usage_evidence(
         && matches(&ev)
     {
         *retained = Some(ev);
-        return;
+        return true;
     }
     if retained.as_ref().is_some_and(|ev| {
         !matches(ev) || (ev.requires_group && frame == DetailUsageFrame::Observed)
     }) {
         *retained = None;
     }
+    false
 }
 
+fn failed_detail_usage_request(
+    requested: Option<&ChatBinding>,
+    incoming_admitted: bool,
+) -> Option<&ChatBinding> {
+    requested.filter(|_| !incoming_admitted)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_last_known_usage(
+    last_known: &mut std::collections::BTreeMap<String, DetailUsageEvidence>,
+    admitted: Option<&DetailUsageEvidence>,
+    failed_request: Option<&ChatBinding>,
+    scope: Option<&BoardScope>,
+    report: &Value,
+    observations: &Observations,
+    frame: DetailUsageFrame,
+    scope_changed: bool,
+) {
+    if last_known.is_empty() && admitted.is_none() {
+        return;
+    }
+    if scope_changed || frame == DetailUsageFrame::Rejected {
+        last_known.clear();
+        return;
+    }
+    let Some(scope) = scope else {
+        last_known.clear();
+        return;
+    };
+    let Some(main) = scope.main.as_ref() else {
+        last_known.clear();
+        return;
+    };
+    if report["room"]["id"] != scope.room || !report_has_live_main(report, main) {
+        last_known.clear();
+        return;
+    }
+    if frame == DetailUsageFrame::Observed
+        && let Some(failed) = failed_request
+        && let Some((_, participant)) = failed.detail_target()
+    {
+        last_known.remove(participant.as_ref());
+    }
+    let valid = |participant: &str, ev: &DetailUsageEvidence| {
+        let Some((provider, _)) = ev.binding.detail_target() else {
+            return false;
+        };
+        !ev.requires_group
+            && (provider != "claude"
+                || ev.claude_version.is_some_and(|version| {
+                    observations.claude_version(participant) == Some(version)
+                }))
+            && same_footer_scope(&ev.scope, scope)
+            && ev.binding.matches_detail_scope(
+                &scope.room,
+                &main.attempt,
+                &main.owner,
+                &main.pane,
+                main.pid,
+                &main.birth,
+                participant,
+            )
+            && observations.chat_binding(participant) == Some(&ev.binding)
+    };
+    last_known.retain(|participant, ev| valid(participant, ev));
+    if let Some(ev) = admitted
+        && let Some((_, participant)) = ev.binding.detail_target()
+    {
+        if valid(participant.as_ref(), ev) {
+            last_known.insert(participant.into_owned(), ev.clone());
+        } else {
+            last_known.remove(participant.as_ref());
+        }
+    }
+}
+
+#[cfg(test)]
 fn report_for_frame<'a>(
     report: &'a Value,
     nav: &navigation::Navigation,
     retained: Option<&DetailUsageEvidence>,
 ) -> std::borrow::Cow<'a, Value> {
-    if !nav.detail {
+    report_for_frame_with_last_known(report, nav, retained, &std::collections::BTreeMap::new())
+}
+
+fn report_for_frame_with_last_known<'a>(
+    report: &'a Value,
+    nav: &navigation::Navigation,
+    retained: Option<&DetailUsageEvidence>,
+    last_known: &std::collections::BTreeMap<String, DetailUsageEvidence>,
+) -> std::borrow::Cow<'a, Value> {
+    let active_detail = nav.detail.then_some(retained).flatten();
+    if active_detail.is_none() && last_known.is_empty() {
         return std::borrow::Cow::Borrowed(report);
     }
-    let Some(ev) = retained else {
-        return std::borrow::Cow::Borrowed(report);
-    };
-    let Some((provider, participant)) = ev.binding.detail_target() else {
-        return std::borrow::Cow::Borrowed(report);
-    };
+    let selected_participant = nav
+        .detail
+        .then(|| {
+            let visible = render::visible(report, nav);
+            visible
+                .get(nav.selected)
+                .map(|call| crate::text(call, "participant").to_owned())
+        })
+        .flatten();
     let mut cloned = report.clone();
+    let mut changed = false;
     if let Some(rows) = cloned["native_children"].as_array_mut() {
-        let mut matching = rows.iter_mut().filter(|row| {
-            row["native_child"] == true
-                && row["provider"] == provider
-                && row["participant"] == participant.as_ref()
-        });
-        if let (Some(row), None) = (matching.next(), matching.next())
-            && !row["native_response_usage"]["response"].is_object()
-        {
-            if let Some(model) = &ev.observed_model
-                && row.get("observed_model").is_none()
-            {
-                row["observed_model"] = json!(model);
-            }
-            row["native_response_usage"] = json!({
-                "scope": "latest_child_response",
-                "response": ev.response,
+        let mut apply = |ev: &DetailUsageEvidence| {
+            let Some((provider, participant)) = ev.binding.detail_target() else {
+                return;
+            };
+            let mut matching = rows.iter_mut().filter(|row| {
+                row["native_child"] == true
+                    && row["provider"] == provider
+                    && row["participant"] == participant.as_ref()
             });
+            if let (Some(row), None) = (matching.next(), matching.next())
+                && !row["native_response_usage"]["response"].is_object()
+            {
+                if let Some(model) = &ev.observed_model
+                    && row.get("observed_model").is_none()
+                {
+                    row["observed_model"] = json!(model);
+                }
+                row["native_response_usage"] = json!({
+                    "scope": "latest_child_response",
+                    "response": ev.response,
+                });
+                changed = true;
+            }
+        };
+        if let Some(ev) = active_detail {
+            apply(ev);
+        }
+        for (participant, ev) in last_known {
+            if selected_participant.as_deref() == Some(participant.as_str()) {
+                continue;
+            }
+            apply(ev);
         }
     }
-    std::borrow::Cow::Owned(cloned)
+    if changed {
+        std::borrow::Cow::Owned(cloned)
+    } else {
+        std::borrow::Cow::Borrowed(report)
+    }
 }
 
 struct NativeSeed {
@@ -2354,6 +2509,7 @@ pub(crate) struct NativeReading {
     observations: Observations,
     footer: MainFooter,
     agy: Option<AgyDockCheck>,
+    detail_usage_requested: Option<ChatBinding>,
     detail_usage_evidence: Option<DetailUsageEvidence>,
 }
 
@@ -2432,6 +2588,7 @@ impl NativeRequest {
         commands::publish_codex_quota_receipt(repo, Some(&main.attempt), snapshot, sources.clone());
         let report = &mut snapshot.report;
         let detail_usage_req = self.authorized_detail_usage(report);
+        let detail_usage_requested = detail_usage_req.map(|req| req.binding.clone());
         let detail_usage_evidence = panel
             .observe_passively(
                 &mut observations,
@@ -2487,6 +2644,7 @@ impl NativeRequest {
             observations,
             footer,
             agy,
+            detail_usage_requested,
             detail_usage_evidence,
         })
     }
@@ -8128,6 +8286,90 @@ mod tests {
             assert!(dock.history.ends_with("parent summary text"));
             assert!(dock.title.contains("parent summary"));
         }
+        // An unbound Claude row from claude_in (earlier Turn or failing strict custody)
+        // opens its SubagentHandback in the parent-summary dock instead of "Transcript unavailable".
+        {
+            let tmp = std::env::temp_dir()
+                .join(format!("oms-watch-claude-handback-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let cfg = tmp.join("config");
+            let repo_dir = tmp.join("repo");
+            std::fs::create_dir_all(&repo_dir).unwrap();
+            let repo_dir = repo_dir.canonicalize().unwrap();
+            let sess = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+            let key: String = repo_dir
+                .to_str()
+                .unwrap()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let sub = cfg.join("projects").join(&key).join(sess).join("subagents");
+            std::fs::create_dir_all(cfg.join("sessions")).unwrap();
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(
+                cfg.join("sessions/7777.json"),
+                serde_json::json!({"pid": 7777, "sessionId": sess, "cwd": repo_dir.to_str().unwrap()})
+                    .to_string(),
+            )
+            .unwrap();
+            let agent = "a1b2c3d4e5f60718";
+            let lead_body = [
+                serde_json::json!({"type": "assistant", "sessionId": sess, "message": {"content": [
+                    {"type": "tool_use", "name": "Agent", "id": "toolu_hb", "input": {"prompt": "p"}}
+                ]}}),
+                serde_json::json!({"type": "user", "sessionId": sess, "timestamp": "2026-11-26T10:00:00Z",
+                    "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_hb", "content": "ok"}]},
+                    "toolUseResult": {"agentId": agent, "description": "Earlier Turn Worker",
+                        "content": [{"type": "text", "text": "inherited result hidden"}]}}),
+            ]
+            .iter()
+            .map(|r| format!("{r}\n"))
+            .collect::<String>();
+            std::fs::write(
+                cfg.join("projects")
+                    .join(&key)
+                    .join(format!("{sess}.jsonl")),
+                lead_body,
+            )
+            .unwrap();
+            std::fs::write(
+                sub.join(format!("agent-{agent}.jsonl")),
+                format!(
+                    "{}\n",
+                    serde_json::json!({"type": "assistant", "sessionId": sess, "agentId": agent,
+                        "message": {"content": [{"type": "tool_use", "name": "SubagentHandback",
+                            "id": "toolu_out", "input": {"message": "Restored handback message"}}]}})
+                ),
+            )
+            .unwrap();
+            let collected = crate::native_children::claude_in(&cfg, 7777, &repo_dir).unwrap();
+            assert_eq!(collected.len(), 1);
+            let handback_report = serde_json::json!({
+                "collection": {"ok": true},
+                "provider_sessions": ["claude"],
+                "room": {"participants": []},
+                "native_children": collected,
+            });
+            let handback_calls = render::visible(&handback_report, &nav);
+            chat = None;
+            nav.notice = None;
+            nav.selected = 0;
+            assert!(route_chat_open(
+                &input::Key::Enter,
+                None,
+                &handback_calls,
+                &mut nav,
+                &mut fence,
+                &mut chat,
+                |call| unbound(call, &Default::default()),
+            ));
+            let dock = chat.as_ref().unwrap();
+            assert!(nav.notice.is_none());
+            assert!(dock.history.starts_with(super::PARENT_SUMMARY));
+            assert!(dock.history.ends_with("Restored handback message"));
+            assert!(!dock.history.contains("inherited result hidden"));
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
         // A bound child whose read failed shows no parent text in its place.
         chat = None;
         assert!(route_chat_open(
@@ -8512,8 +8754,9 @@ mod tests {
         use super::{
             BoardScope, BoardTarget, DetailUsageEvidence, DetailUsageFrame, InteractiveRefresh,
             LiveMain, MainFooter, NativeRequest, NativeSeed, RefreshKey, RefreshPhase,
-            SelectionFence, apply_selection_key, detail_usage_request,
-            reconcile_detail_usage_evidence, report_for_frame,
+            SelectionFence, apply_selection_key, detail_usage_request, failed_detail_usage_request,
+            reconcile_detail_usage_evidence, reconcile_last_known_usage, report_for_frame,
+            report_for_frame_with_last_known,
         };
         use crate::board_refresh::BoardRefresh;
         use crate::input::Key;
@@ -8771,10 +9014,87 @@ mod tests {
             "{detail_after_ambient}"
         );
 
+        // Plain Board refresh (no selected agent detail) shows "not loaded" before any
+        // counters are known, then preserves the last known usage counters after D closes,
+        // and clears them back to "not loaded" on Turn change or rejected native frames.
+        let mut board_nav = nav.clone();
+        board_nav.detail = false;
+        let render_board =
+            |last_known: &std::collections::BTreeMap<String, DetailUsageEvidence>| {
+                let display =
+                    report_for_frame_with_last_known(&report, &board_nav, None, last_known);
+                super::frame(
+                    &display,
+                    &board_nav,
+                    (120, 18),
+                    &Default::default(),
+                    false,
+                    Some(&mut DockSplit::default()),
+                    None,
+                    None,
+                )
+                .lines
+                .join("\n")
+            };
+        let mut last_known = std::collections::BTreeMap::new();
+        let unloaded_board = render_board(&last_known);
+        assert!(unloaded_board.contains("not loaded"), "{unloaded_board}");
+        reconcile_last_known_usage(
+            &mut last_known,
+            retained.as_ref(),
+            None,
+            Some(&current_scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert_eq!(last_known.len(), 1);
+        reconcile_last_known_usage(
+            &mut last_known,
+            None,
+            None,
+            Some(&current_scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        let retained_board = render_board(&last_known);
+        assert!(
+            retained_board.contains("rsp in 1.2K out 40") && !retained_board.contains("not loaded"),
+            "{retained_board}"
+        );
+        let mut failed_reopen_known = last_known.clone();
+        reconcile_last_known_usage(
+            &mut failed_reopen_known,
+            None,
+            Some(&binding),
+            Some(&current_scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert!(failed_reopen_known.is_empty());
+        let mut turn_changed_known = last_known.clone();
+        reconcile_last_known_usage(
+            &mut turn_changed_known,
+            None,
+            None,
+            Some(&current_scope),
+            &report,
+            &spy.agy_observations(&child, NEW_TURN),
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert!(turn_changed_known.is_empty());
+        assert!(render_board(&turn_changed_known).contains("not loaded"));
+
         let mut group = ev.clone();
         group.requires_group = true;
         let mut retained_group = Some(group.clone());
-        let refresh_group = |retained: &mut Option<DetailUsageEvidence>, incoming, frame| {
+        let refresh_group = |retained: &mut Option<DetailUsageEvidence>, incoming, frame| -> bool {
             reconcile_detail_usage_evidence(
                 retained,
                 incoming,
@@ -8784,19 +9104,42 @@ mod tests {
                 &observations,
                 frame,
                 false,
-            );
+            )
         };
         refresh_group(&mut retained_group, None, DetailUsageFrame::Unchanged);
         assert!(retained_group.as_ref() == Some(&group));
         let mut renewed = group;
         renewed.response["input_tokens"] = 1300.into();
-        refresh_group(
+        let mut superseded_known = last_known.clone();
+        assert_eq!(superseded_known.len(), 1);
+        let admitted_group = refresh_group(
             &mut retained_group,
             Some(renewed.clone()),
             DetailUsageFrame::Observed,
         );
+        assert!(admitted_group);
         assert!(retained_group.as_ref() == Some(&renewed));
         assert!(render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
+        reconcile_last_known_usage(
+            &mut superseded_known,
+            retained_group.as_ref(),
+            failed_detail_usage_request(Some(&binding), admitted_group),
+            Some(&current_scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert!(
+            superseded_known.is_empty(),
+            "newer group-only re-read must evict older non-group last-known entry"
+        );
+        let after_group_board = render_board(&superseded_known);
+        assert!(
+            after_group_board.contains("not loaded")
+                && !after_group_board.contains("rsp in 1.2K out 40"),
+            "{after_group_board}"
+        );
 
         // The same row and Turn can survive a revoked membership or ACL change.
         refresh_group(&mut retained_group, None, DetailUsageFrame::Observed);
@@ -9285,6 +9628,92 @@ mod tests {
             let mut retained = Some(evidence.clone());
             reconcile(&mut retained, None, &report, &nav, observation);
             assert!(retained.is_none());
+        }
+
+        // Last-known retention checks Claude version on ordinary refreshes and evicts
+        // the prior entry whenever a re-read returns evidence rejected by reconcile.
+        let mut base_known = std::collections::BTreeMap::new();
+        reconcile_last_known_usage(
+            &mut base_known,
+            Some(&evidence),
+            None,
+            Some(&scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert_eq!(base_known.len(), 1);
+        reconcile_last_known_usage(
+            &mut base_known,
+            None,
+            None,
+            Some(&scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert_eq!(base_known.len(), 1);
+        for stale_obs in [&later, &new_turn, &Observations::default()] {
+            let mut known = base_known.clone();
+            reconcile_last_known_usage(
+                &mut known,
+                None,
+                None,
+                Some(&scope),
+                &report,
+                stale_obs,
+                DetailUsageFrame::Observed,
+                false,
+            );
+            assert!(
+                known.is_empty(),
+                "plain refresh must evict Claude last-known usage once version or binding changes"
+            );
+        }
+        let mut versionless = evidence.clone();
+        versionless.claude_version = None;
+        let mut missing_version_known = base_known.clone();
+        reconcile_last_known_usage(
+            &mut missing_version_known,
+            Some(&versionless),
+            None,
+            Some(&scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert!(missing_version_known.is_empty());
+        for rejecting_obs in [&later, &unchecked] {
+            let mut known = base_known.clone();
+            let mut active = None;
+            let admitted = reconcile_detail_usage_evidence(
+                &mut active,
+                Some(evidence.clone()),
+                Some(&scope),
+                &report,
+                &nav,
+                rejecting_obs,
+                DetailUsageFrame::Observed,
+                false,
+            );
+            assert!(!admitted && active.is_none());
+            reconcile_last_known_usage(
+                &mut known,
+                active.as_ref(),
+                failed_detail_usage_request(Some(&evidence.binding), admitted),
+                Some(&scope),
+                &report,
+                rejecting_obs,
+                DetailUsageFrame::Observed,
+                false,
+            );
+            assert!(
+                known.is_empty(),
+                "rejected re-read evidence must evict old last-known entry"
+            );
         }
         let mut sibling = nav.clone();
         sibling.selected = visible
@@ -9848,10 +10277,20 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn claude_watch_wakes_on_child_transcript_and_skips_symlinked_directory() {
+        private_native_watch_fixture(
+            "watch::tests::claude_watch_wakes_on_child_transcript_and_skips_symlinked_directory",
+            Some(CodexWatchStimulus::Claude),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     enum CodexWatchStimulus {
         Complete,
         Partial,
         Overview,
+        Claude,
     }
 
     #[cfg(target_os = "linux")]
@@ -9875,7 +10314,8 @@ mod tests {
             ["Codex archived A", "Codex archived B", "Codex archived C"];
         const OVERVIEW_CHILD: &str = "Codex new child fixture";
         const OVERVIEW_PARTIAL_MODEL: &str = "fixture/partial-frame:v2";
-        let codex = stimulus.is_some();
+        let claude = matches!(stimulus, Some(CodexWatchStimulus::Claude));
+        let codex = stimulus.is_some() && !claude;
         let overview = matches!(stimulus, Some(CodexWatchStimulus::Overview));
         let complete_overview_header = std::cell::Cell::new(false);
         let timing = matches!(stimulus, Some(CodexWatchStimulus::Complete))
@@ -10116,6 +10556,7 @@ mod tests {
             Some(CodexWatchStimulus::Complete) => "codex",
             Some(CodexWatchStimulus::Partial) => "partial",
             Some(CodexWatchStimulus::Overview) => "overview",
+            Some(CodexWatchStimulus::Claude) => "claude",
         };
         let tmp = Temp::new(label);
         // A long checkout selects the real five-second no-socket fallback
@@ -10142,6 +10583,10 @@ mod tests {
             mkdir_p(d);
         }
         let codex_home = home.join(".codex");
+        let claude_home = tmp.0.join("claude-home");
+        if claude {
+            mkdir_p(&claude_home);
+        }
         if codex {
             mkdir_p(&codex_home);
             let xdg = home.join(".config");
@@ -10231,7 +10676,8 @@ mod tests {
         std::fs::write(&lock_path, b"").unwrap();
         std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-        let mut holder = Command::new("flock")
+        let mut holder_cmd = Command::new("flock");
+        holder_cmd
             .arg("-n")
             .arg("-F")
             .arg(&lock_path)
@@ -10240,6 +10686,8 @@ mod tests {
                 "-c",
                 if codex {
                     "exec -a codex bash"
+                } else if claude {
+                    "exec -a claude bash"
                 } else {
                     "exec -a agy bash"
                 },
@@ -10250,9 +10698,11 @@ mod tests {
             .current_dir(&repo)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        if claude {
+            holder_cmd.env("CLAUDE_CONFIG_DIR", &claude_home);
+        }
+        let mut holder = holder_cmd.spawn().unwrap();
         let mut h_stdin = holder.stdin.take().unwrap();
         let mut h_reader = BufReader::new(holder.stdout.take().unwrap());
         writeln!(h_stdin, "echo \"READY:$$\"").unwrap();
@@ -10392,6 +10842,8 @@ elif is list-panes -s -t %2 -F "$SESSION"; then
   if [ "$window" != absent ]; then
     if [ -n "${OMS_TEST_CODEX_LEAD:-}" ]; then
       printf '$1\t%s\t%%3\t%s\t0\t0\t\t\t\t\t%s\tcodex\t%s\t0\t._1_\n' "$window" "$lead_pid" "$room" "$attempt"
+    elif [ -n "${OMS_TEST_CLAUDE_LEAD:-}" ]; then
+      printf '$1\t%s\t%%3\t%s\t0\t0\t\t\t\t\t%s\tclaude\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
     else
       printf '$1\t%s\t%%4\t%s\t0\t0\t\t\t\t\t%s\tantigravity\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
     fi
@@ -10427,7 +10879,7 @@ elif { [ "$stage" = dialog ] || [ "$stage" = confirm ]; } && is capture-pane -p 
   printf '%s\n' '└ Models & Quota' 'GEMINI MODELS' 'Weekly Limit Remaining' '[███] 94%' 'Five Hour Limit Remaining' '[███] 86%' 'CLAUDE AND GPT MODELS' 'Weekly Limit Remaining' '[███] 100%'
 elif is capture-pane -p -t %1; then
   printf '› \n\n  GPT-6.2-Sol high · Context 9%% left · weekly 13%% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts\n'
-elif [ -n "${OMS_TEST_CODEX_LEAD:-}" ] && { is capture-pane -p -t %3 || is capture-pane -p -J -S -100 -t %3; }; then
+elif { [ -n "${OMS_TEST_CODEX_LEAD:-}" ] || [ -n "${OMS_TEST_CLAUDE_LEAD:-}" ]; } && { is capture-pane -p -t %3 || is capture-pane -p -J -S -100 -t %3; }; then
   /bin/cat "${OMS_FAKE_PROMPT_FILE?}"
 elif is capture-pane -p -t %4 || is capture-pane -p -J -S -100 -t %4; then
   if [ -n "$stall" ] && [ -e "$stall" ]; then
@@ -10623,6 +11075,9 @@ fi
                 .stderr(Stdio::inherit());
             if codex {
                 pty_cmd.env("OMS_TEST_CODEX_LEAD", "1");
+            }
+            if claude {
+                pty_cmd.env("OMS_TEST_CLAUDE_LEAD", "1");
             }
             let mut child = pty_cmd.spawn().unwrap();
             std::fs::write(&watch_pid, child.id().to_string()).unwrap();
@@ -10917,6 +11372,278 @@ fi
             return;
         }
 
+        if claude {
+            std::fs::write(&lead_window, "@3").unwrap();
+            std::fs::write(&prompt_file, format!("❯ {prompt_line}\n")).unwrap();
+            let session_id = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+            let old_agent = "f0e1d2c3b4a59687";
+            let new_agent = "a1b2c3d4e5f60718";
+            let history = "Claude history fixture";
+            let next = "Claude child-only fixture";
+            let lead_owner = oms_panel_core::terminals::process(lead_pid).unwrap();
+            let proc_start = crate::claude_lead_usage::linux::start_time(&lead_owner.birth)
+                .unwrap()
+                .to_owned();
+            let key: String = repo
+                .to_str()
+                .unwrap()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let sessions_dir = claude_home.join("sessions");
+            let projects_dir = claude_home.join("projects");
+            let project_dir = projects_dir.join(key);
+            let session_dir = project_dir.join(session_id);
+            let subagents_dir = session_dir.join("subagents");
+            let elsewhere = tmp.0.join("claude-symlink-target");
+            for dir in [&sessions_dir, &projects_dir, &project_dir, &session_dir] {
+                mkdir_p(dir);
+            }
+            let record_file = sessions_dir.join(format!("{lead_pid}.json"));
+            std::fs::write(
+                &record_file,
+                json!({
+                    "pid": lead_pid,
+                    "procStart": proc_start,
+                    "sessionId": session_id,
+                    "cwd": repo.to_str().unwrap(),
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::set_permissions(&record_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let lead_transcript = project_dir.join(format!("{session_id}.jsonl"));
+            let lead_entries = [
+                json!({
+                    "type": "user",
+                    "sessionId": session_id,
+                    "isSidechain": false,
+                    "origin": {"kind": "human"},
+                    "promptSource": "typed",
+                    "message": {"role": "user", "content": prompt_line},
+                }),
+                json!({
+                    "type": "assistant",
+                    "sessionId": session_id,
+                    "isSidechain": false,
+                    "message": {"role": "assistant", "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_old",
+                        "name": "Agent",
+                        "input": {"prompt": "old child prompt", "description": history},
+                    }]},
+                }),
+                json!({
+                    "type": "user",
+                    "sessionId": session_id,
+                    "isSidechain": false,
+                    "toolUseResult": {"agentId": old_agent},
+                    "message": {"role": "user", "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_old",
+                        "content": "spawned",
+                    }]},
+                }),
+                json!({
+                    "type": "assistant",
+                    "sessionId": session_id,
+                    "isSidechain": false,
+                    "message": {"role": "assistant", "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_new",
+                        "name": "Agent",
+                        "input": {"prompt": "new child prompt", "description": next},
+                    }]},
+                }),
+                json!({
+                    "type": "user",
+                    "sessionId": session_id,
+                    "isSidechain": false,
+                    "toolUseResult": {"agentId": new_agent},
+                    "message": {"role": "user", "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_new",
+                        "content": "spawned",
+                    }]},
+                }),
+            ];
+            let mut lead_body = String::new();
+            for entry in &lead_entries {
+                lead_body.push_str(&entry.to_string());
+                lead_body.push('\n');
+            }
+            std::fs::write(&lead_transcript, lead_body).unwrap();
+            std::fs::set_permissions(&lead_transcript, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+
+            let primary_captures = || {
+                std::fs::read_to_string(&log)
+                    .unwrap()
+                    .lines()
+                    .filter(|line| *line == "capture-pane -p -t %3")
+                    .count()
+            };
+            let inotify_fds = || {
+                let pid = std::fs::read_to_string(&watch_pid).unwrap();
+                std::fs::read_dir(format!("/proc/{pid}/fd"))
+                    .unwrap()
+                    .flatten()
+                    .filter(|entry| {
+                        std::fs::read_link(entry.path())
+                            .is_ok_and(|target| target == Path::new("anon_inode:inotify"))
+                    })
+                    .count()
+            };
+            let claude_watching = |dir: &Path| {
+                use std::os::unix::fs::MetadataExt;
+                let Ok(meta) = std::fs::symlink_metadata(dir) else {
+                    return false;
+                };
+                let needle = format!(" ino:{:x} ", meta.ino());
+                let pid = std::fs::read_to_string(&watch_pid).unwrap();
+                std::fs::read_dir(format!("/proc/{pid}/fd"))
+                    .unwrap()
+                    .flatten()
+                    .filter(|entry| {
+                        std::fs::read_link(entry.path())
+                            .is_ok_and(|target| target == Path::new("anon_inode:inotify"))
+                    })
+                    .any(|entry| {
+                        let fd = entry.file_name();
+                        std::fs::read_to_string(Path::new(&format!("/proc/{pid}/fdinfo")).join(fd))
+                            .is_ok_and(|info| {
+                                info.lines().any(|line| {
+                                    line.starts_with("inotify ") && line.contains(&needle)
+                                })
+                            })
+                    })
+            };
+            let seed_subagents = |dir: &Path| {
+                let _ = std::fs::remove_dir_all(dir);
+                mkdir_p(dir);
+                for (name, body) in [
+                    (
+                        format!("agent-{old_agent}.meta.json"),
+                        json!({"toolUseId": "toolu_old", "spawnDepth": 1}).to_string(),
+                    ),
+                    (format!("agent-{old_agent}.jsonl"), String::new()),
+                    (
+                        format!("agent-{new_agent}.meta.json"),
+                        json!({"toolUseId": "toolu_new", "spawnDepth": 1}).to_string(),
+                    ),
+                ] {
+                    let file = dir.join(name);
+                    std::fs::write(&file, body).unwrap();
+                    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                }
+            };
+
+            let mut armed_fds = 0;
+            let (_, calls) = run_pty(false, false, &mut |input, stream, screen, rx| {
+                wait_for(stream, screen, rx, "Claude overview", &mut |lines| {
+                    lines.iter().any(|line| line.contains("[Overview]"))
+                        && claude_watching(&session_dir)
+                });
+                input.write_all(b"\t").unwrap();
+                input.flush().unwrap();
+                wait_for(stream, screen, rx, "Claude empty tasks", &mut |lines| {
+                    lines.iter().any(|line| line.contains("[All tasks]"))
+                        && lines.iter().any(|line| line.contains(WORKER))
+                        && lines
+                            .iter()
+                            .all(|line| !line.contains(history) && !line.contains(next))
+                });
+                assert!(claude_watching(&session_dir) && !claude_watching(&subagents_dir));
+                armed_fds = inotify_fds();
+
+                let prior = primary_captures();
+                let started = Instant::now();
+                seed_subagents(&subagents_dir);
+                loop {
+                    apply_frames(stream, screen);
+                    if screen.iter().any(|line| line.contains(history)) {
+                        break;
+                    }
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "Claude lazy subagents paint exceeded 5s; screen:\n{}",
+                        screen.join("\n")
+                    );
+                    if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(10)) {
+                        stream.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                }
+                assert!(screen.iter().all(|line| !line.contains(next)));
+                assert!(claude_watching(&subagents_dir) && !claude_watching(&session_dir));
+                assert_eq!(inotify_fds(), armed_fds);
+                assert_eq!(primary_captures(), prior + 1);
+
+                let prior = primary_captures();
+                let started = Instant::now();
+                let child = subagents_dir.join(format!("agent-{new_agent}.jsonl"));
+                std::fs::write(&child, b"").unwrap();
+                std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o600)).unwrap();
+                loop {
+                    apply_frames(stream, screen);
+                    if screen.iter().any(|line| line.contains(next)) {
+                        break;
+                    }
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "Claude child paint exceeded 5s; screen:\n{}",
+                        screen.join("\n")
+                    );
+                    if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(10)) {
+                        stream.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                }
+                assert_eq!(inotify_fds(), armed_fds);
+                assert_eq!(primary_captures(), prior + 1);
+            });
+            assert!(!calls.contains("UNEXPECTED:"), "{calls}");
+
+            std::fs::remove_dir_all(&subagents_dir).unwrap();
+            seed_subagents(&elsewhere);
+            std::os::unix::fs::symlink(&elsewhere, &subagents_dir).unwrap();
+            let (_, calls) = run_pty(false, false, &mut |input, stream, screen, rx| {
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "Claude symlink overview",
+                    &mut |lines| lines.iter().any(|line| line.contains("[Overview]")),
+                );
+                input.write_all(b"\t").unwrap();
+                input.flush().unwrap();
+                wait_for(stream, screen, rx, "Claude symlink tasks", &mut |lines| {
+                    lines.iter().any(|line| line.contains("[All tasks]"))
+                        && lines.iter().any(|line| line.contains(WORKER))
+                });
+                let unarmed_fds = inotify_fds();
+                assert_eq!(unarmed_fds + 1, armed_fds);
+                assert!(!claude_watching(&elsewhere) && !claude_watching(&session_dir));
+                let prior = primary_captures();
+                let child = subagents_dir.join(format!("agent-{new_agent}.jsonl"));
+                std::fs::write(&child, b"").unwrap();
+                let wait_until = Instant::now() + Duration::from_millis(500);
+                while Instant::now() < wait_until {
+                    if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(25)) {
+                        stream.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                    apply_frames(stream, screen);
+                }
+                assert_eq!(inotify_fds(), unarmed_fds);
+                assert!(!claude_watching(&elsewhere) && !claude_watching(&session_dir));
+                assert_eq!(primary_captures(), prior);
+                assert!(screen.iter().all(|line| !line.contains(next)));
+            });
+            assert!(!calls.contains("UNEXPECTED:"), "{calls}");
+            let _ = holder.kill();
+            let _ = holder.wait();
+            return;
+        }
+
         let mutating_out = Command::new(&fake_tmux)
             .args(["send-keys", "-t", "%4", "Enter"])
             .env_clear()
@@ -11130,30 +11857,13 @@ fi
             (1, run1_captures_p, 0, 0),
             "expected cold-only custody check (1) and exact 1 parent read per observe, 0 candidates, 0 child reads; log:\n{pre_click_tmux_log}"
         );
-        // Usage is a bounded per-refresh scan: each accepted Board refresh does
-        // 2 strict custody checks, 1 parent scan and one suffix read per unique
-        // painted child, capped at orchestrator's AGY_USAGE_ROWS (3). Run 1
-        // accepts every observe (cold, reply wake, `u`), one lead capture each.
-        let accepted = run1_captures_p;
-        let painted = lead_rows
-            .iter()
-            .filter_map(|row| {
-                let body = row["content"]
-                    .as_str()?
-                    .strip_prefix("Created the following subagent:\n")?;
-                let created: Value = serde_json::from_str(body).ok()?;
-                created["conversationId"].as_str().map(str::to_owned)
-            })
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            .min(3);
+        // Ordinary Board refreshes (no selected agent detail) do zero strict
+        // custody checks, zero usage scans and zero child transcript reads.
         assert_eq!(
             (pre_custody, pre_scans, pre_strict_reads, pre_legacy_reads),
-            (2 * accepted, accepted, painted * accepted, 0),
-            "before Click, each of {accepted} accepted refreshes does 2 strict custody checks, 1 usage scan and \
-             1 bounded suffix read per {painted} painted child (never a whole transcript); no legacy reads"
+            (0, 0, 0, 0),
+            "before Click, ordinary refreshes must open zero usage transcripts and zero child bodies"
         );
-        assert!(pre_strict_reads <= 3 * accepted);
 
         // Run 2: Click -> Escape -> Enter -> Inode-swap close -> Re-click -> Live Turn-change close -> 0775 Unbound fallback & Silent Legacy Unavailable.
         let (run2_counters, tmux_log) =
@@ -11381,25 +12091,19 @@ fi
             .lines()
             .filter(|l| *l == "capture-pane -p -t %4")
             .count();
-        // Every observe but the NEW_TURN drift (absent from the lead transcript)
-        // and the 0775 legacy refresh is a usage refresh; those two read nothing.
-        let usage_refreshes = observes - 2;
+        assert!(observes >= 3);
         let dock_reads = 3;
         assert!(
-            custody >= 7 + 2 * usage_refreshes && scans >= 3 + usage_refreshes,
-            "custody={custody} scans={scans} usage_refreshes={usage_refreshes}"
+            custody >= 7 && scans >= 3,
+            "custody={custody} scans={scans}"
         );
         assert_eq!(
             (legacy_reads, strict_reads, leg_cand, leg_child),
-            (0, dock_reads + painted * usage_refreshes, 2, 0),
-            "expected legacy_reads=0, strict_reads = {dock_reads} dock opens + {painted} painted children x \
-             {usage_refreshes} usage refreshes ({observes} observes less Turn drift and 0775), leg_cand=2, \
-             leg_child=0; custody={custody} scans={scans}"
+            (0, dock_reads, 2, 0),
+            "expected legacy_reads=0, strict_reads = {dock_reads} dock opens (zero ordinary refresh reads), \
+             leg_cand=2, leg_child=0; custody={custody} scans={scans}"
         );
-        assert_eq!(
-            legacy_reads + strict_reads,
-            dock_reads + painted * usage_refreshes
-        );
+        assert_eq!(legacy_reads + strict_reads, dock_reads);
 
         std::fs::set_permissions(repo.join(".git"), std::fs::Permissions::from_mode(0o700))
             .unwrap();
@@ -11481,13 +12185,8 @@ fi
         assert_eq!(censuses, 3 * (stalled_accepted + 1) + 1);
         assert_eq!(
             stalled[..4],
-            [
-                2 * stalled_accepted,
-                stalled_accepted,
-                painted * stalled_accepted,
-                0
-            ],
-            "{stalled_accepted} accepted refreshes each read usage; the moved-pane frame reads none"
+            [0, 0, 0, 0],
+            "{stalled_accepted} accepted ordinary refreshes and the moved-pane frame read zero usage transcripts"
         );
 
         set_model("First same-scope observation");
@@ -11621,7 +12320,11 @@ fi
                     screen,
                     rx,
                     "fourth child on fresh Board",
-                    &mut |s| s.iter().any(|line| line.contains("Fourth Usage")),
+                    &mut |s| {
+                        s.iter().any(|line| {
+                            line.contains("Fourth Usage") && line.contains("not loaded")
+                        })
+                    },
                 );
                 child_in.write_all(b"/Fourth Usage\r\x1b[B").unwrap();
                 child_in.flush().unwrap();
@@ -11675,13 +12378,19 @@ fi
                     stream,
                     screen,
                     rx,
-                    "detail closed and usage hidden",
-                    &mut |s| !detail_visible(s) && !has_detail_usage(s),
+                    "detail closed and last known usage retained",
+                    &mut |s| {
+                        !detail_visible(s)
+                            && !has_detail_usage(s)
+                            && s.iter().any(|line| {
+                                line.contains("Fourth Usage Refreshed")
+                                    && line.contains("rsp in 1.2K out 40")
+                            })
+                    },
                 );
             });
         assert!(!detail_log.contains("UNEXPECTED:"), "{detail_log}");
-        assert_eq!(detail_counts[2], 3 * detail_counts[1] + 1);
-        assert_eq!(detail_counts[3], 0);
+        assert_eq!(detail_counts[..4], [2, 1, 1, 0]);
 
         // A markerless typed Turn opens the exact bounded parent roster.
         // It starts empty so only a provider-native write can reveal its first child.

@@ -241,8 +241,8 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 #criteria-list li{padding:.55rem 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
 #criteria-list .criterion-head{display:flex;justify-content:space-between;gap:.6rem;flex-wrap:wrap}
 #criteria-list small{display:block;margin-top:.2rem;white-space:pre-wrap}
-#followup-panel{margin-top:.7rem;padding:.7rem;background:var(--surface);border:1px solid var(--line);border-radius:.55rem}
-#followup-text{display:block;width:100%;margin-top:.35rem;min-height:6rem;resize:vertical;background:var(--bg);border:1px solid var(--line);border-radius:.4rem;padding:.5rem}
+#followup-panel{margin-top:.7rem;padding:.7rem;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm)}
+#followup-text{display:block;width:100%;margin-top:.35rem;min-height:6rem;resize:vertical;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-xs);padding:.5rem}
 #lead-auto-label{display:flex;align-items:center;gap:.4rem;margin-top:.5rem;color:var(--soft)}
 .lead-turn{display:block;color:var(--soft);font-size:.78rem}
 #full-answer{margin-top:.7rem;padding-top:.6rem;border-top:1px solid var(--line)}
@@ -361,6 +361,10 @@ const messages = {
   "turn.replied": ["답변 도착", "Reply received"],
   "turn.failed": ["답변을 받지 못했습니다.", "The request ended without a reply."],
   "turn.unconfirmed": ["전달 상태를 확인할 수 없습니다.", "Delivery is unconfirmed."],
+  "turn.outbound_withheld": ["안전 검사로 답변이 보류되었습니다.", "Answer withheld by the safety scan."],
+  "turn.invalid_answer_range": ["답변 크기 또는 범위를 읽을 수 없습니다.", "Answer size or range unavailable."],
+  "turn.invalid_turn_record": ["전달 기록을 읽을 수 없습니다.", "Turn record unreadable."],
+  "turn.receipt_changed": ["접수 상태가 변경되어 전달을 확인할 수 없습니다.", "Receipt changed · delivery unconfirmed."],
   "turn.not_found": ["이전 전송 기록을 찾을 수 없습니다.", "The previous send was not found."],
   "turn.check": ["전달 상태 확인", "Check delivery"],
   "turn.retry": ["원래 메시지 다시 보내기", "Retry original message"],
@@ -550,7 +554,6 @@ const messages = {
   "journey.next": ["다음 확인 · {v}", "Next check · {v}"],
   "followup.prepare": ["현재 Main에 요청할 초안 준비", "Prepare a follow-up for Main"],
   "followup.result": ["이 결과로 요청 초안 준비", "Prepare a follow-up on this result"],
-  "followup.scope": ["프로젝트: {project}\nRoom: {room}", "Project: {project}\nRoom: {room}"],
   "followup.reference": ["선택한 결과 참조: {v}", "Selected result reference: {v}"],
   "followup.label": ["현재 대화에 추가할 요청 초안", "Request draft for the current conversation"],
   "followup.note": ["초안 추가는 작업 배정이나 실행 시작이 아닙니다.", "Adding a draft does not assign a task or start execution."],
@@ -1210,9 +1213,10 @@ async function readWorkerOutput(s,paged=false){
 }
 function openWorkerOutput(lead,worker,origin){
   if(!currentLeadControl(leadControl) || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
-  const s={ctl:leadControl,room:leadControl.room,projectKey:leadControl.projectKey,leadAttempt:lead.attempt.id,workerAttempt:worker.attempt.id,origin};
+  const label=()=>[workerName(worker),worker.attempt.taskTitle].filter(Boolean).join(' · ');
+  const s={ctl:leadControl,room:leadControl.room,projectKey:leadControl.projectKey,leadAttempt:lead.attempt.id,workerAttempt:worker.attempt.id,label,origin};
   selectedOutput=s;el('output-refresh').disabled=false;
-  put('output-worker',()=>[workerName(worker),worker.attempt.taskTitle].filter(Boolean).join(' · '));
+  put('output-worker',label);
   el('worker-output').showModal();el('output-close').focus();armAuto();readWorkerOutput(s);
 }
 onClick('output-refresh',()=>readWorkerOutput(selectedOutput));
@@ -1221,7 +1225,7 @@ onClick('output-first',()=>{const s=selectedOutput;if(currentWorkerOutput(s) && 
 onClick('output-copy',()=>{const s=selectedOutput;copyDisplayed(s?.text,'output-copy-status',()=>currentWorkerOutput(s) && !s.loading);});
 onClick('output-followup',()=>{
   const s=selectedOutput;if(!currentWorkerOutput(s) || s.loading || !s.text)return;
-  const source={kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,...(s.digest?{digest:s.digest}:{})};
+  const source={kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,summary:[s.label(),t('out.title')].filter(Boolean).join(' · '),...(s.digest?{digest:s.digest}:{})};
   closeWorkerOutput();prepareFollowup(source);
 });
 onClick('output-close',()=>el('worker-output').close());
@@ -1266,7 +1270,7 @@ async function readFullAnswer(s){
       if(handoff && handoff.room===c.ctl.room && handoff.provider===c.provider && handoff.leadRequestId===c.requestId &&
         handoff.turnId===s.turnId && typeof handoff.participant==='string' && typeof handoff.operation==='string' &&
         /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.participant) && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.operation))
-        source={kind:'lead-answer',projectKey:c.ctl.projectKey,...handoff};
+        source={kind:'lead-answer',projectKey:c.ctl.projectKey,summary:[roleTitle('Lead',c.provider),t('answer.title')].join(' · '),...handoff};
     }else{
       const m=s.member,result=await tool('oms_panel_chat',{projectKey:s.projectKey,room:m.room,participant:m.participant,section:'transcript',attempt:s.attempt,evidenceCursor:s.cursor||''},s.generation);
       if(!currentFullAnswer(s))return;
@@ -1274,7 +1278,7 @@ async function readFullAnswer(s){
       if(data?.source!=='room' || data.room!==m.room || data.participant!==m.participant ||
         data.projectKey!==s.projectKey || result.structuredContent?.projectKey!==s.projectKey ||
         data.evidence?.attempt!==s.attempt || data.evidence.section!=='transcript')throw uiError('answer.changed');
-      page=data.evidence;source={kind:'room-result',projectKey:s.projectKey,room:m.room,participant:m.participant,attempt:s.attempt};
+      page=data.evidence;source={kind:'room-result',projectKey:s.projectKey,room:m.room,participant:m.participant,attempt:s.attempt,summary:[el('chat-title').textContent,t('answer.title')].filter(Boolean).join(' · ')};
     }
     acceptChunk(s,page);s.source=source;el('full-answer-body').textContent=s.text;
     put('answer-status',()=>t('answer.loaded',{start:s.text?s.start+1:0,n:s.end,total:s.total}));
@@ -1346,7 +1350,8 @@ function paintLeadControls(){
   el('lead-auto-label').hidden=!known;el('lead-auto').checked=Boolean(auto);
   el('lead-auto').disabled=!known || !ctl.observed;
   el('lead-opt-in-note').hidden=!known;
-  el('lead-refresh').hidden=!known || !(ctl.failed || ctl.pollPaused);
+  const pendingTurn=known && [...ctl.items.values()].some(r=>['reserved','running','unconfirmed'].includes(r.latestTurn?.status) || r.turnState);
+  el('lead-refresh').hidden=!known || !(ctl.failed || ctl.pollPaused || pendingTurn);
   el('lead-refresh').disabled=!known || ctl.reading || ctl.writing;
   if(managedChat && (!known || ctl.items.get(managedChat.provider)?.requestId!==managedChat.requestId ||
       ctl.items.get(managedChat.provider)?.status!=='ready')){
@@ -1366,8 +1371,8 @@ function paintLeadControls(){
     slot.connect.hidden=!known || row?.status!=='not_started';
     slot.connect.disabled=!known || !ctl.observed || ctl.reading || ctl.writing;
     if(!slot.connect.hidden)put(slot.connect,()=>t('lead.connect',{provider:names[provider]}));else slot.connect.textContent='';
-    const latest=row?.latestTurn;
-    put(slot.turn,()=>!latest?'':['reserved','running','unconfirmed'].includes(latest.status)?t('lead.waitingReply'):
+    const latest=row?.latestTurn,turnState=row?.turnState;
+    put(slot.turn,()=>!latest?(turnState?t(Object.hasOwn(messages,'turn.'+turnState.reason)?'turn.'+turnState.reason:'turn.unconfirmed'):''):['reserved','running','unconfirmed'].includes(latest.status)?t('lead.waitingReply'):
       latest.status==='replied'?t(ctl.seenTurns?.get(provider)===latest.turnId?'lead.replyRead':'lead.newReply'):
       latest.status==='failed'?t('turn.failed'):'');
   }
@@ -1383,9 +1388,11 @@ function validatedTeam(response,ctl,provider){
       !['not_started','starting','ready','unconfirmed','unavailable'].includes(item.status) ||
       !(item.status==='unavailable' && item.requestId==null || typeof item.requestId==='string' &&
         /^[a-f0-9]{8}-[a-f0-9]{4}-8[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(item.requestId) && !requests.has(item.requestId)))throw uiError('chatMismatch');
-    const latest=item.latestTurn;
+    const latest=item.latestTurn,turnState=item.turnState;
     if(latest!=null && (!turnUuid(latest.turnId) || !['reserved','running','replied','unconfirmed','failed'].includes(latest.status) ||
       ![latest.submittedAt,latest.lastObservedAt].every(v=>v==null || typeof v==='string' && Number.isFinite(Date.parse(v)))))throw uiError('chatMismatch');
+    if(turnState!=null && (latest!=null || !['unconfirmed','unavailable'].includes(turnState.status) ||
+      !['outbound_withheld','invalid_answer_range','invalid_turn_record','receipt_changed'].includes(turnState.reason)))throw uiError('chatMismatch');
     items.set(item.provider,item);requests.add(item.requestId);
   }
   return {items,projectKey:data.projectKey};
@@ -1407,7 +1414,7 @@ function resetLeadControl(){
 }
 function scheduleLeadRead(ctl){
   clearTimeout(ctl.pollTimer);
-  const waiting=currentLeadControl(ctl) && [...ctl.items.values()].some(r=>r.status==='starting' || ['reserved','running'].includes(r.latestTurn?.status));
+  const waiting=currentLeadControl(ctl) && [...ctl.items.values()].some(r=>r.status==='starting');
   if(!waiting){if(ctl)ctl.pollPaused=false;return;}
   if(ctl.reading || ctl.writing || managedChat)return;
   const delay=ctl.pollDelay;
@@ -1619,7 +1626,7 @@ function settleTurn(c,result,p){
   if(s.pending!==p)return;
   p.status=turn.status;
   const item=c.ctl.items.get(c.provider);
-  if(item && p.status!=='not_found')item.latestTurn={turnId:p.id,status:p.status,submittedAt:item.latestTurn?.submittedAt||null,lastObservedAt:null};
+  if(item && p.status!=='not_found'){item.latestTurn={turnId:p.id,status:p.status,submittedAt:item.latestTurn?.submittedAt||null,lastObservedAt:null};item.turnState=null;}
   if(['reserved','running','replied'].includes(p.status) && !p.accepted){
     p.accepted=true;
     if(s.draft===p.text){p.restore=true;s.draft='';el('chat-text').value='';}
@@ -1692,7 +1699,7 @@ async function readManaged(c,before=null){
       if(answered){c.ctl.seenTurns??=new Map();c.ctl.seenTurns.set(c.provider,answered.turnId);}
       if(latest && turnUuid(latest.turnId) && ['reserved','running','replied','failed','unconfirmed'].includes(latest.status)){
         const row=c.ctl.items.get(c.provider);
-        row.latestTurn={turnId:latest.turnId,status:latest.status,submittedAt:latest.at||null,lastObservedAt:null};
+        row.latestTurn={turnId:latest.turnId,status:latest.status,submittedAt:latest.at||null,lastObservedAt:null};row.turnState=null;
       }
     }
     if(before)c.visited.add(before);
@@ -1715,7 +1722,6 @@ async function sendManaged(c,retry=false){
   if(retry ? s.pending?.status!=='not_found' : !!s.pending || !validText(s.draft))return;
   const p=retry?s.pending:{id:crypto.randomUUID(),text:s.draft,status:'unconfirmed'};
   c.latestTurn=p.id;s.pending=p;s.outcome='';s.writing=true;c.until=Date.now()+120000;c.pollPaused=false;clearTimeout(c.timer);paintComposer(c);
-  c.ctl.pollUntil=c.until;c.ctl.pollDelay=8000;c.ctl.pollPaused=false;
   try{
     const result=await tool('oms_send_lead_message',{room:c.ctl.room,projectKey:c.ctl.projectKey,provider:c.provider,
       leadRequestId:c.requestId,turnId:p.id,text:p.text},c.ctl.generation);
@@ -1882,17 +1888,14 @@ function resultTask(source){
 }
 function prepareFollowup(source=null){
   const main=joinedMain();if(!main || staleView || busy)return;
-  const focus=source?null:journeyFocus(dashboardData),task=source?resultTask(source):focus.task?.id||null;
-  followupDraft={project,projectKey:bindingKey,generation,room:main.room,owner:main.participant,task,source};
   const excerpt=(value,max)=>Array.from(value).length>max?Array.from(value).slice(0,max).join('')+'…':value;
-  const reference=source && [['Kind',source.kind],['Provider',source.provider],['Participant',source.participant],
-    ['Lead request',source.leadRequestId],['Turn',source.turnId],['Operation',source.operation],['Lead attempt',source.leadAttempt],
-    ['Worker attempt',source.workerAttempt],['Attempt',source.attempt],['Digest',source.digest]]
-    .filter(([,value])=>value).map(([label,value])=>label+': '+value).join(' · ');
-  el('followup-text').value=[t('followup.scope',{project:project||displayText(dashboardData.project,255)||'OMS',room:main.room}),
-    bindingKey&&'Project key: '+bindingKey,reference&&t('followup.reference',{v:reference}),task&&'Task: '+task,
-    t('followup.text',{goal:excerpt(displayText(dashboardData.goal,2000)||t('goalUnknown'),400),
-      item:excerpt(source?t('answer.title'):focus.summary||t('evidence.title'),200)})].filter(Boolean).join('\n');
+  const focus=source?null:journeyFocus(dashboardData),task=source?resultTask(source):focus.task?.id||null;
+  const goal=excerpt(displayText(dashboardData.goal,2000)||t('goalUnknown'),400);
+  const summary=excerpt(displayText(source?source.summary:focus.summary,512)||(source?t('answer.title'):t('evidence.title')),200);
+  const turnId=source && turnUuid(source.turnId)?source.turnId:null;
+  followupDraft={project,projectKey:bindingKey,generation,room:main.room,owner:main.participant,task,goal,summary,turnId,source};
+  el('followup-text').value=[turnId&&t('followup.reference',{v:'Turn: '+turnId}),task&&'Task: '+task,
+    t('followup.text',{goal,item:summary})].filter(Boolean).join('\n');
   el('followup-panel').hidden=false;put('followup-status',()=>'');paintFollowup();el('followup-text').focus();
 }
 onClick('followup-open',()=>prepareFollowup());
@@ -1904,7 +1907,7 @@ onClick('followup-add',async()=>{
   const draft=followupDraft,text=el('followup-text').value;
   if(!currentFollowup(draft) || draft.pending || !validText(text) || !contextTypes)return;
   draft.pending=true;paintFollowup();
-  const delivered=await updateContext({project:project||null,projectKey:draft.projectKey,room:draft.room,owner:draft.owner,kind:'oms-followup-draft',...(draft.task?{task:draft.task}:{}),source:draft.source,text});
+  const delivered=await updateContext({kind:'oms-followup-draft',...(project?{project}:{}),goal:draft.goal,summary:draft.summary,...(draft.task?{task:draft.task}:{}),...(draft.turnId?{turnId:draft.turnId}:{}),text});
   if(currentFollowup(draft)){draft.pending=false;put('followup-status',delivered?'followup.done':'followup.failed');paintFollowup();}
 });
 function render(d) {

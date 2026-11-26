@@ -12,9 +12,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 #[cfg(target_os = "linux")]
+mod claude_wake;
+#[cfg(target_os = "linux")]
 mod codex_wake;
 #[cfg(target_os = "linux")]
+pub(crate) use claude_wake::SubagentsWatch as ClaudeSubagentsWatch;
+#[cfg(target_os = "linux")]
 pub(crate) use codex_wake::DayWatch as CodexDayWatch;
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct ClaudeWake {
+    pub(crate) source: Arc<ClaudeSubagentsWatch>,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct ClaudeWakeRequest<'a> {
+    pub(crate) previous: Option<&'a ClaudeWake>,
+}
 
 #[cfg(target_os = "linux")]
 #[derive(Clone)]
@@ -59,6 +74,7 @@ pub(crate) const TASK_PREFIX: &str =
 pub(crate) struct ObservedChildren {
     pub(crate) rows: Vec<Value>,
     pub(crate) codex: BTreeMap<String, CodexLocator>,
+    pub(crate) codex_selected_usage: Option<(Value, Option<String>)>,
     #[cfg(target_os = "linux")]
     pub(crate) codex_wake: Option<CodexWake>,
 }
@@ -73,6 +89,13 @@ pub(crate) struct CodexLocator {
     /// The observation clock: the chat proof re-selects children at this
     /// instant, so later interactions cannot reorder the shown rows.
     observed_ms: u64,
+}
+
+impl CodexLocator {
+    pub(crate) fn detail_participant(&self) -> Option<String> {
+        (!self.turn.is_empty() && !self.child.id.is_empty())
+            .then(|| participant_id("codex", &self.child.id))
+    }
 }
 
 /// Identity of the bound child only: re-observing an unchanged child at a later
@@ -137,6 +160,71 @@ thread_local!(static LEGACY_CANDIDATE_READS: std::cell::Cell<usize> = const { st
 thread_local!(static LEGACY_CHILD_BODY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 #[cfg(all(test, target_os = "linux"))]
 thread_local!(static AGY_PARENT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+#[cfg(test)]
+thread_local!(static CODEX_ROSTER_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+#[cfg(test)]
+thread_local!(static CODEX_TRANSCRIPT_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+#[cfg(test)]
+thread_local!(static CODEX_ROSTER_CHILD_HEADER_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+#[cfg(test)]
+thread_local!(static CODEX_CHILD_BODY_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
+#[cfg(test)]
+pub(crate) fn reset_codex_test_counters() {
+    CODEX_ROSTER_OPENS.with(|n| n.set(0));
+    CODEX_TRANSCRIPT_OPENS.with(|n| n.set(0));
+    CODEX_ROSTER_CHILD_HEADER_BYTES.with(|n| n.set(0));
+    CODEX_CHILD_BODY_BYTES.with(|n| n.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn codex_roster_opens() -> usize {
+    CODEX_ROSTER_OPENS.with(|n| n.get())
+}
+
+#[cfg(test)]
+pub(crate) fn codex_transcript_opens() -> usize {
+    CODEX_TRANSCRIPT_OPENS.with(|n| n.get())
+}
+
+#[cfg(test)]
+pub(crate) fn codex_roster_child_header_bytes() -> usize {
+    CODEX_ROSTER_CHILD_HEADER_BYTES.with(|n| n.get())
+}
+
+#[cfg(test)]
+pub(crate) fn codex_child_body_bytes() -> usize {
+    CODEX_CHILD_BODY_BYTES.with(|n| n.get())
+}
+
+#[cfg(test)]
+thread_local!(static CLAUDE_ROSTER_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+#[cfg(test)]
+thread_local!(static CLAUDE_HANDBACK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+#[cfg(test)]
+thread_local!(static CLAUDE_HANDBACK_PATHS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) });
+
+#[cfg(test)]
+pub(crate) fn reset_claude_test_counters() {
+    CLAUDE_ROSTER_READS.with(|n| n.set(0));
+    CLAUDE_HANDBACK_READS.with(|n| n.set(0));
+    CLAUDE_HANDBACK_PATHS.with(|paths| paths.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn claude_roster_reads() -> usize {
+    CLAUDE_ROSTER_READS.with(|n| n.get())
+}
+
+#[cfg(test)]
+pub(crate) fn claude_handback_reads() -> usize {
+    CLAUDE_HANDBACK_READS.with(|n| n.get())
+}
+
+#[cfg(test)]
+pub(crate) fn claude_handback_paths() -> Vec<PathBuf> {
+    CLAUDE_HANDBACK_PATHS.with(|paths| paths.borrow().clone())
+}
 
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn reset_agy_legacy_reads() {
@@ -343,12 +431,9 @@ pub(crate) fn claude_in(home: &Path, pid: u32, repo: &Path) -> Option<Vec<Value>
     {
         return None;
     }
-    let project_key: String = repo
-        .to_str()?
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let folder = Path::new("projects").join(project_key);
+    let folder = Path::new("projects").join(claude_project_key(repo)?);
+    #[cfg(test)]
+    CLAUDE_ROSTER_READS.with(|n| n.set(n.get() + 1));
     let rows = jsonl(&store, &folder.join(format!("{session}.jsonl")))?;
     if rows.is_empty() {
         return None;
@@ -390,6 +475,11 @@ pub(crate) fn claude_in(home: &Path, pid: u32, repo: &Path) -> Option<Vec<Value>
                     .join(session)
                     .join("subagents")
                     .join(format!("agent-{id}.jsonl"));
+                #[cfg(test)]
+                {
+                    CLAUDE_HANDBACK_READS.with(|n| n.set(n.get() + 1));
+                    CLAUDE_HANDBACK_PATHS.with(|paths| paths.borrow_mut().push(path.clone()));
+                }
                 let child = jsonl(&store, &path).unwrap_or_default();
                 let blocks = || {
                     child
@@ -452,6 +542,34 @@ pub(crate) fn claude_child_row(agent: &str, title: &str, state: &str) -> Value {
     row("claude", agent, &safe(title, 80), "", "", "", state)
 }
 
+/// Claude Code's project folder name: every non-alphanumeric becomes `-`.
+pub(crate) fn claude_project_key(repo: &Path) -> Option<String> {
+    let key: String = repo
+        .to_str()?
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    (!key.is_empty() && key.len() <= 255).then_some(key)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn observe_claude_wake(
+    pid: u32,
+    birth: &str,
+    repo: &Path,
+    wake: ClaudeWakeRequest<'_>,
+) -> Option<ClaudeWake> {
+    let source = ClaudeSubagentsWatch::observe(
+        pid,
+        birth,
+        repo,
+        claude_wake::Request {
+            previous: wake.previous.map(|before| &before.source),
+        },
+    )?;
+    Some(ClaudeWake { source })
+}
+
 fn codex_turn(prompt: &str) -> Option<&str> {
     let assignment = prompt.strip_prefix(TASK_PREFIX)?.strip_prefix(" Turn ")?;
     let (turn, rest) = assignment.split_at_checked(20)?;
@@ -492,10 +610,16 @@ pub(crate) fn observe_codex(
     terminal: &str,
     home: &Path,
     root: &OwnedFd,
+    selected: Option<&CodexLocator>,
     stop: &AtomicBool,
     #[cfg(target_os = "linux")] wake: Option<CodexWakeRequest<'_>>,
 ) -> Option<ObservedChildren> {
     let turn = codex_current_turn(terminal)?;
+    let selected = selected.filter(|expected| {
+        expected.turn == turn
+            && expected.home == home
+            && codex_root_identity(home, root).is_some_and(|actual| actual == expected.root)
+    });
     let mut remaining = CODEX_READ_BUDGET;
     let rollouts = codex_candidates_at(
         home.to_path_buf(),
@@ -510,6 +634,10 @@ pub(crate) fn observe_codex(
                 .map(|before| &before.source),
         }),
     )?;
+    let target = match selected {
+        Some(locator) => CodexUsageTarget::Selected(locator),
+        None => CodexUsageTarget::None,
+    };
     let (observed, _) = codex_rows_checked(
         &rollouts,
         repo,
@@ -517,7 +645,7 @@ pub(crate) fn observe_codex(
         &mut remaining,
         stop,
         codex_now_ms(),
-        true,
+        target,
     )?;
     #[cfg(target_os = "linux")]
     let observed = {
@@ -709,8 +837,14 @@ fn codex_same_version(expected: &Stat, actual: &Stat) -> bool {
         && expected.st_ctime_nsec == actual.st_ctime_nsec
 }
 
+#[derive(Clone, Copy)]
+enum CodexOpenKind {
+    Roster,
+    Transcript,
+}
+
 impl CodexRollouts {
-    fn open(&self, rollout: &CodexRollout) -> Option<(File, Stat)> {
+    fn open(&self, rollout: &CodexRollout, _kind: CodexOpenKind) -> Option<(File, Stat)> {
         let parent = codex_directory(&self.root, rollout.path.parent()?)?;
         let name = rollout.path.file_name()?;
         let named = fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
@@ -721,7 +855,16 @@ impl CodexRollouts {
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
         let fd = fs::openat(&parent, name, flags, Mode::empty()).ok()?;
         let sampled = fs::fstat(&fd).ok()?;
-        codex_same_identity(&rollout.snapshot, &sampled).then(|| (File::from(fd), sampled))
+        let opened =
+            codex_same_identity(&rollout.snapshot, &sampled).then(|| (File::from(fd), sampled));
+        #[cfg(test)]
+        if opened.is_some() {
+            match _kind {
+                CodexOpenKind::Roster => CODEX_ROSTER_OPENS.with(|n| n.set(n.get() + 1)),
+                CodexOpenKind::Transcript => CODEX_TRANSCRIPT_OPENS.with(|n| n.set(n.get() + 1)),
+            }
+        }
+        opened
     }
 
     fn status(&self, rollout: &CodexRollout, file: &File) -> Option<Stat> {
@@ -1195,6 +1338,14 @@ fn codex_rows(
     codex_rows_at(rollouts, repo, turn, remaining, codex_now_ms())
 }
 
+#[derive(Clone, Copy)]
+enum CodexUsageTarget<'a> {
+    None,
+    #[cfg(test)]
+    All,
+    Selected(&'a CodexLocator),
+}
+
 #[cfg(test)]
 fn codex_rows_at(
     rollouts: &CodexRollouts,
@@ -1210,7 +1361,7 @@ fn codex_rows_at(
         remaining,
         &AtomicBool::new(false),
         now_ms,
-        true,
+        CodexUsageTarget::All,
     )
 }
 
@@ -1229,7 +1380,7 @@ fn codex_rows_checked(
     remaining: &mut usize,
     stop: &AtomicBool,
     now_ms: u64,
-    project_usage: bool,
+    usage_target: CodexUsageTarget<'_>,
 ) -> Option<(ObservedChildren, CodexParentSample)> {
     let mut parent: Option<(String, CodexParentSample)> = None;
     let mut children = Vec::new();
@@ -1243,7 +1394,7 @@ fn codex_rows_checked(
         };
         recent_ids.insert(id);
         // An unreadable selected header could belong to another eligible root.
-        let (mut file, sampled) = rollouts.open(rollout)?;
+        let (mut file, sampled) = rollouts.open(rollout, CodexOpenKind::Roster)?;
         let size = u64::try_from(sampled.st_size).ok()?;
         // A fork can repeat an inherited session header after its own first line.
         let header_bytes = codex_read_header(&mut file, size, remaining)?;
@@ -1279,6 +1430,8 @@ fn codex_rows_checked(
             )? {
                 continue;
             }
+            #[cfg(test)]
+            CODEX_ROSTER_CHILD_HEADER_BYTES.with(|n| n.set(n.get() + header_bytes.len()));
             let started = chrono::DateTime::parse_from_rfc3339(text(&header, "timestamp"))
                 .map(|stamp| stamp.to_rfc3339())
                 .unwrap_or_default();
@@ -1335,7 +1488,7 @@ fn codex_rows_checked(
         let Some(id) = codex_filename_id(&rollout.path) else {
             continue;
         };
-        let (mut file, sampled) = rollouts.open(&rollout)?;
+        let (mut file, sampled) = rollouts.open(&rollout, CodexOpenKind::Roster)?;
         let size = u64::try_from(sampled.st_size).ok()?;
         let header_bytes = codex_read_header(&mut file, size, remaining)?;
         let Some(header) = codex_header(&header_bytes, id, repo) else {
@@ -1446,7 +1599,16 @@ fn codex_rows_checked(
         if !child.started.is_empty() {
             child_row["started_at"] = json!(child.started);
         }
-        if project_usage
+        let locator = CodexLocator {
+            home: rollouts.home.clone(),
+            root,
+            turn: turn.to_owned(),
+            parent: parent.clone(),
+            child: CodexAnchor::new(id, child.rollout),
+            observed_ms: now_ms,
+        };
+        #[cfg(test)]
+        if matches!(usage_target, CodexUsageTarget::All)
             && counts[id] == 1
             && let Some(usage) = codex_child_usage(
                 rollouts,
@@ -1466,7 +1628,14 @@ fn codex_rows_checked(
         let participant = text(&child_row, "participant").to_owned();
         let participant = participant.as_str();
         if !seen_participants.insert(participant.to_owned()) {
-            observed.codex.remove(participant);
+            if observed.codex.remove(participant).is_some()
+                && matches!(
+                    usage_target,
+                    CodexUsageTarget::Selected(expected) if expected.child.id == id
+                )
+            {
+                observed.codex_selected_usage = None;
+            }
             child_row
                 .as_object_mut()
                 .unwrap()
@@ -1493,25 +1662,30 @@ fn codex_rows_checked(
                 child_row["codex_recent_creation"] =
                     json!({"at_ms": created, "observed_ms": now_ms});
             }
-            observed.codex.insert(
-                participant.to_owned(),
-                CodexLocator {
-                    home: rollouts.home.clone(),
-                    root,
-                    turn: turn.to_owned(),
-                    parent: parent.clone(),
-                    child: CodexAnchor::new(id, child.rollout),
-                    observed_ms: now_ms,
-                },
-            );
+            if let CodexUsageTarget::Selected(expected) = usage_target
+                && locator == *expected
+                && let Some((usage, model)) = codex_child_usage(
+                    rollouts,
+                    child.rollout,
+                    repo,
+                    id,
+                    parent_id,
+                    &parent_sample.header,
+                    &mut usage_budget,
+                )
+            {
+                observed.codex_selected_usage = Some((usage["response"].clone(), model));
+            }
+            observed.codex.insert(participant.to_owned(), locator);
         }
         observed.rows.push(child_row);
     }
     *remaining -= usage_initial - usage_budget;
-    let has_usage = observed
-        .rows
-        .iter()
-        .any(|row| row.get("native_response_usage").is_some());
+    let has_usage = observed.codex_selected_usage.is_some()
+        || observed
+            .rows
+            .iter()
+            .any(|row| row.get("native_response_usage").is_some());
     if rollouts.root_unchanged()? != root {
         return None;
     }
@@ -1534,6 +1708,7 @@ fn codex_rows_checked(
         }
         parent_now = rollouts.status(&parent_sample.rollout, &parent_sample.file)?;
         if !confirmed {
+            observed.codex_selected_usage = None;
             for row in &mut observed.rows {
                 let fields = row.as_object_mut().unwrap();
                 fields.remove("native_response_usage");
@@ -1578,7 +1753,7 @@ fn codex_child_usage(
             .unwrap();
         }
     });
-    let (mut file, sampled) = rollouts.open(rollout)?;
+    let (mut file, sampled) = rollouts.open(rollout, CodexOpenKind::Transcript)?;
     let size = u64::try_from(sampled.st_size).ok()?;
     let header_bytes = codex_read_header(&mut file, size, remaining)?;
     let header = codex_header(&header_bytes, id, repo)?;
@@ -1601,6 +1776,8 @@ fn codex_child_usage(
     };
     let len = usize::try_from(size.checked_sub(offset)?).ok()?;
     let body = codex_read_range(&mut file, offset, len, remaining)?.ok()?;
+    #[cfg(test)]
+    CODEX_CHILD_BODY_BYTES.with(|n| n.set(n.get() + body.len()));
     let (_, usage) = codex_history_parts(&body, recent_only, repo, id, Some(session), false);
     if !rollouts.confirm_snapshot(
         rollout,
@@ -1686,7 +1863,7 @@ fn codex_chat_checked(
         &mut remaining,
         stop,
         expected.observed_ms,
-        false,
+        CodexUsageTarget::None,
     )?;
     if stop.load(Ordering::Acquire) || !current.codex.values().any(|locator| locator == expected) {
         return None;
@@ -1695,7 +1872,7 @@ fn codex_chat_checked(
         .candidates
         .iter()
         .find(|candidate| candidate.path == expected.child.path)?;
-    let (mut file, sampled) = rollouts.open(child)?;
+    let (mut file, sampled) = rollouts.open(child, CodexOpenKind::Transcript)?;
     let size = u64::try_from(sampled.st_size).ok()?;
     let header_bytes = codex_read_header(&mut file, size, &mut remaining)?;
     let header = codex_header(&header_bytes, &expected.child.id, repo)?;
@@ -1714,6 +1891,8 @@ fn codex_chat_checked(
         return None;
     }
     let body = codex_read_range(&mut file, offset, len, &mut remaining)?.ok()?;
+    #[cfg(test)]
+    CODEX_CHILD_BODY_BYTES.with(|n| n.set(n.get() + body.len()));
     let session = text(&header["payload"], "session_id");
     let usage_session = (uuid(session)
         && oms_panel_core::decode(&parent.header, MAX_LINE)
@@ -3796,6 +3975,142 @@ mod tests {
         assert!(!claude_completion(other, "aa", "tt"));
     }
 
+    #[test]
+    fn claude_in_restores_bounded_handbacks_and_replies_and_ignores_spawn_content() {
+        let base = std::env::temp_dir().join(format!("oms-claude-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let config = base.join("config");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        let pid = 4242u32;
+        let session = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+        let project_key: String = repo
+            .to_str()
+            .unwrap()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let folder = Path::new("projects").join(&project_key);
+        let subagents = config.join(&folder).join(session).join("subagents");
+        std::fs::create_dir_all(config.join("sessions")).unwrap();
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            config.join(format!("sessions/{pid}.json")),
+            json!({"pid": pid, "sessionId": session, "cwd": repo.to_str().unwrap()}).to_string(),
+        )
+        .unwrap();
+
+        let evicted = "0001020304050607";
+        let earlier_handback = "1122334455667788";
+        let reply_only = "2233445566778899";
+        let silent = "33445566778899aa";
+        let spawned_entry = |tool: &str, agent: &str, desc: &str| {
+            json!({
+                "type": "user",
+                "sessionId": session,
+                "timestamp": "2026-11-26T10:00:00Z",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": tool, "content": "tool result hidden"}
+                ]},
+                "toolUseResult": {
+                    "agentId": agent,
+                    "description": desc,
+                    "content": [{"type": "text", "text": "inherited result hidden"}]
+                }
+            })
+        };
+        let lead_rows = [
+            json!({"type": "user", "sessionId": session, "message": {"role": "user", "content": format!("{TASK_PREFIX} Turn {STALE_TURN}. You own this provider's work. Earlier")}}),
+            json!({"type": "assistant", "sessionId": session, "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Agent", "id": "toolu_0", "input": {"prompt": "p0"}},
+                {"type": "tool_use", "name": "Agent", "id": "toolu_1", "input": {"prompt": "p1"}}
+            ]}}),
+            spawned_entry("toolu_0", evicted, "Evicted"),
+            spawned_entry("toolu_1", earlier_handback, "Earlier Handback"),
+            json!({"type": "user", "sessionId": session, "message": {"role": "user", "content": format!("{TASK_PREFIX} Turn {TURN}. You own this provider's work. Current")}}),
+            json!({"type": "assistant", "sessionId": session, "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Agent", "id": "toolu_2", "input": {"prompt": "p2"}},
+                {"type": "tool_use", "name": "Agent", "id": "toolu_3", "input": {"prompt": "p3"}}
+            ]}}),
+            spawned_entry("toolu_2", reply_only, "Reply Only"),
+            spawned_entry("toolu_3", silent, "Silent"),
+        ];
+        let write_lines = |path: &Path, entries: &[Value]| {
+            let body: String = entries.iter().map(|e| format!("{e}\n")).collect();
+            std::fs::write(path, body).unwrap();
+        };
+        write_lines(
+            &config.join(&folder).join(format!("{session}.jsonl")),
+            &lead_rows,
+        );
+        write_lines(
+            &subagents.join(format!("agent-{evicted}.jsonl")),
+            &[json!({
+                "type": "assistant",
+                "sessionId": session,
+                "agentId": evicted,
+                "message": {"content": [{"type": "text", "text": "evicted reply"}]}
+            })],
+        );
+        write_lines(
+            &subagents.join(format!("agent-{earlier_handback}.jsonl")),
+            &[json!({
+                "type": "assistant",
+                "sessionId": session,
+                "agentId": earlier_handback,
+                "message": {"content": [
+                    {"type": "text", "text": "earlier plain reply"},
+                    {"type": "tool_use", "name": "SubagentHandback", "id": "toolu_hb", "input": {"message": "earlier turn handback"}}
+                ]}
+            })],
+        );
+        write_lines(
+            &subagents.join(format!("agent-{reply_only}.jsonl")),
+            &[json!({
+                "type": "assistant",
+                "sessionId": session,
+                "agentId": reply_only,
+                "message": {"content": [{"type": "text", "text": "latest child reply"}]}
+            })],
+        );
+
+        reset_claude_test_counters();
+        let rows = claude_in(&config, pid, &repo).unwrap();
+        assert_eq!(claude_roster_reads(), 1);
+        assert_eq!(claude_handback_reads(), CLAUDE_ROSTER_LIMIT);
+        assert_eq!(
+            claude_handback_paths(),
+            vec![
+                folder
+                    .join(session)
+                    .join("subagents")
+                    .join(format!("agent-{silent}.jsonl")),
+                folder
+                    .join(session)
+                    .join("subagents")
+                    .join(format!("agent-{reply_only}.jsonl")),
+                folder
+                    .join(session)
+                    .join("subagents")
+                    .join(format!("agent-{earlier_handback}.jsonl")),
+            ]
+        );
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["title"], "Silent");
+        assert_eq!(rows[0]["native_answer"], "");
+        assert_eq!(rows[1]["title"], "Reply Only");
+        assert_eq!(rows[1]["native_answer"], "latest child reply");
+        assert_eq!(rows[2]["title"], "Earlier Handback");
+        assert_eq!(rows[2]["native_answer"], "earlier turn handback");
+        assert!(
+            rows.iter()
+                .all(|row| !row.to_string().contains("inherited result hidden"))
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     struct RolloutFixture {
         root: PathBuf,
         store: Store,
@@ -3928,6 +4243,7 @@ mod tests {
             &terminal,
             &home,
             &root,
+            None,
             stop,
             Some(CodexWakeRequest { previous: prior }),
         )?;
@@ -4077,6 +4393,303 @@ mod tests {
         wake.replace(None);
         assert!(wake.fd().is_none());
         assert!(!wake.refresh(true, true, now + Duration::from_secs(2)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn claude_subagents_wake_tracks_child_creation_and_refuses_unsafe_directories() {
+        use crate::wakeup::{ChildWakeSource, FirstChildWake};
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+        use std::time::Duration;
+
+        const PID: u32 = 4242;
+        const BIRTH: &str = "fixture-boot:987654";
+        const SESSION: &str = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+        const OTHER_SESSION: &str = "1a1b2c3d-4e5f-6789-abcd-ef0123456789";
+        const LAZY_CHILD: &str = "1111222233334444";
+        const OLD_CHILD: &str = "f0e1d2c3b4a59687";
+        const NEW_CHILD: &str = "a1b2c3d4e5f60718";
+        const OUT_OF_SCOPE_CHILD: &str = "9999888877776666";
+
+        struct Temp(PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp_root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("oms-claude-wake-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&temp_root)
+            .unwrap();
+        let temp = Temp(temp_root);
+        let base = &temp.0;
+        let repo = base.join("repo");
+        let config = base.join("claude");
+        let sessions = config.join("sessions");
+        let project = config
+            .join("projects")
+            .join(claude_project_key(&repo).unwrap());
+        let session_dir = project.join(SESSION);
+        let subagents = session_dir.join("subagents");
+        let elsewhere = base.join("elsewhere");
+        for path in [
+            &repo,
+            &config,
+            &sessions,
+            &config.join("projects"),
+            &project,
+            &elsewhere,
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let record_path = sessions.join(format!("{PID}.json"));
+        let write_record = |session: &str| {
+            std::fs::write(
+                &record_path,
+                json!({
+                    "pid": PID,
+                    "procStart": "987654",
+                    "sessionId": session,
+                    "cwd": repo.to_str().unwrap(),
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::set_permissions(&record_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        write_record(SESSION);
+        let watch_count = |source: &Arc<ClaudeSubagentsWatch>| {
+            std::fs::read_to_string(format!("/proc/self/fdinfo/{}", source.fd().as_raw_fd()))
+                .unwrap()
+                .lines()
+                .filter(|line| line.starts_with("inotify "))
+                .count()
+        };
+
+        // Missing session directory itself falls back silently.
+        assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&session_dir)
+            .unwrap();
+
+        // Symlinked subagents directory falls back silently and never wakes.
+        symlink(&elsewhere, &subagents).unwrap();
+        assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+        std::fs::write(
+            elsewhere.join(format!("agent-{NEW_CHILD}.jsonl")),
+            b"ignored\n",
+        )
+        .unwrap();
+        std::fs::remove_file(&subagents).unwrap();
+
+        // A session with no subagents/ watches the Lead's session directory for subagents/
+        // only, switches on first child creation, and keeps the watch count bounded at 1.
+        let lazy = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        let same_lazy =
+            ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, Some(&lazy)).unwrap();
+        assert!(Arc::ptr_eq(&lazy, &same_lazy));
+        assert_eq!(watch_count(&lazy), 1);
+        std::fs::write(session_dir.join("notes.txt"), b"ignored\n").unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(session_dir.join("tool-results"))
+            .unwrap();
+        assert_eq!(lazy.changed(), Some(false));
+        assert_eq!(watch_count(&lazy), 1);
+
+        let lazy_now = Instant::now();
+        let mut lazy_wake = FirstChildWake::default();
+        lazy_wake.replace(Some(lazy.clone()));
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&subagents)
+            .unwrap();
+        assert!(!lazy_wake.refresh(true, true, lazy_now));
+        assert_eq!(watch_count(&lazy), 1);
+        std::fs::write(
+            subagents.join(format!("agent-{LAZY_CHILD}.jsonl")),
+            b"first child\n",
+        )
+        .unwrap();
+        assert!(lazy_wake.refresh(true, true, lazy_now));
+        assert_eq!(watch_count(&lazy), 1);
+        let switched =
+            ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, Some(&lazy)).unwrap();
+        assert!(Arc::ptr_eq(&lazy, &switched));
+        drop(switched);
+        drop(same_lazy);
+        drop(lazy_wake);
+        drop(lazy);
+
+        // Also wakes when subagents/ and the first child transcript appear in one burst.
+        std::fs::remove_dir_all(&subagents).unwrap();
+        let burst_lazy = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        let mut burst_wake = FirstChildWake::default();
+        burst_wake.replace(Some(burst_lazy.clone()));
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&subagents)
+            .unwrap();
+        std::fs::write(
+            subagents.join(format!("agent-{LAZY_CHILD}.jsonl")),
+            b"first child\n",
+        )
+        .unwrap();
+        assert!(burst_wake.refresh(true, true, lazy_now));
+        assert_eq!(watch_count(&burst_lazy), 1);
+        drop(burst_wake);
+        drop(burst_lazy);
+
+        // Foreign uid and group/other-writable modes fall back silently.
+        let uid = rustix::process::geteuid().as_raw();
+        assert!(
+            ClaudeSubagentsWatch::prepare_for_uid(
+                &config,
+                PID,
+                BIRTH,
+                &repo,
+                claude_wake::Request { previous: None },
+                uid.wrapping_add(1),
+            )
+            .is_none()
+        );
+        for bad_mode in [0o775, 0o777] {
+            std::fs::set_permissions(&subagents, std::fs::Permissions::from_mode(bad_mode))
+                .unwrap();
+            assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+        }
+        if uid != 0 {
+            std::fs::set_permissions(&subagents, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+        }
+        std::fs::set_permissions(&subagents, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Symlinked ancestor directory falls back silently.
+        let moved_session = base.join("moved-session");
+        std::fs::rename(&session_dir, &moved_session).unwrap();
+        symlink(&moved_session, &session_dir).unwrap();
+        assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+        std::fs::remove_file(&session_dir).unwrap();
+        std::fs::rename(&moved_session, &session_dir).unwrap();
+
+        let existing = subagents.join(format!("agent-{OLD_CHILD}.jsonl"));
+        std::fs::write(&existing, b"prior\n").unwrap();
+        let source = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        let same =
+            ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, Some(&source)).unwrap();
+        assert!(Arc::ptr_eq(&source, &same));
+
+        // Existing child appends and non-transcript files do not wake.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&existing)
+            .unwrap()
+            .write_all(b"more\n")
+            .unwrap();
+        std::fs::write(subagents.join("foreign.jsonl"), b"ignored\n").unwrap();
+        std::fs::write(subagents.join("agent-short.jsonl"), b"ignored\n").unwrap();
+        std::fs::write(
+            subagents.join(format!("agent-{NEW_CHILD}.meta.json")),
+            b"{}",
+        )
+        .unwrap();
+        std::fs::create_dir(subagents.join("nested")).unwrap();
+        assert_eq!(source.changed(), Some(false));
+
+        // Creating a child transcript wakes the Board once without reading its content.
+        let now = Instant::now();
+        let mut wake = FirstChildWake::default();
+        wake.replace(Some(source.clone()));
+        let child_path = subagents.join(format!("agent-{NEW_CHILD}.jsonl"));
+        let mut child = File::create(&child_path).unwrap();
+        assert!(!wake.refresh(true, false, now));
+        assert!(wake.fd().is_none());
+        assert!(wake.refresh(false, true, now));
+        assert!(!wake.refresh(false, true, now + Duration::from_millis(100)));
+        source.record_proven([NEW_CHILD]);
+        child.write_all(b"streaming\n").unwrap();
+        drop(child);
+        assert_eq!(source.changed(), Some(false));
+
+        // Repeated writes to an out-of-scope child (never passed to record_proven)
+        // cause at most one wake across subsequent cooldown windows.
+        let out_path = subagents.join(format!("agent-{OUT_OF_SCOPE_CHILD}.jsonl"));
+        let mut out_child = File::create(&out_path).unwrap();
+        let mut out_wakes = usize::from(wake.refresh(true, true, now + Duration::from_secs(2)));
+        for step in 0..5u64 {
+            out_child
+                .write_all(format!("out-of-scope write {step}\n").as_bytes())
+                .unwrap();
+            out_child.flush().unwrap();
+            if wake.refresh(true, true, now + Duration::from_secs(3 + step * 2)) {
+                out_wakes += 1;
+            }
+        }
+        drop(out_child);
+        let staged = subagents.join("staged.tmp");
+        std::fs::write(&staged, b"atomic rewrite\n").unwrap();
+        std::fs::rename(&staged, &out_path).unwrap();
+        if wake.refresh(true, true, now + Duration::from_secs(20)) {
+            out_wakes += 1;
+        }
+        assert_eq!(out_wakes, 1);
+        assert_eq!(source.changed(), Some(false));
+
+        // After more than 64 children, oldest proven entries are evicted rather than
+        // refusing inserts, keeping newer children quiet against spurious wakes.
+        for idx in 0..70 {
+            let id = format!("{idx:016x}");
+            std::fs::write(subagents.join(format!("agent-{id}.jsonl")), b"seed\n").unwrap();
+            assert_eq!(source.changed(), Some(true));
+        }
+        let newest = format!("{:016x}", 69);
+        let newest_path = subagents.join(format!("agent-{newest}.jsonl"));
+        std::fs::write(&staged, b"rewrite newest\n").unwrap();
+        std::fs::rename(&staged, &newest_path).unwrap();
+        assert_eq!(source.changed(), Some(false));
+
+        // Permission exposure, directory replacement, session switch and queue bounds retire.
+        std::fs::set_permissions(&subagents, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(!source.current());
+        assert_eq!(source.changed(), None);
+        std::fs::set_permissions(&subagents, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let reopened = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        std::fs::write(&staged, b"rewrite after reopen\n").unwrap();
+        std::fs::rename(&staged, &newest_path).unwrap();
+        assert_eq!(reopened.changed(), Some(false));
+        for idx in 100..164 {
+            std::fs::write(
+                subagents.join(format!("agent-{idx:016x}.jsonl")),
+                b"burst\n",
+            )
+            .unwrap();
+        }
+        assert_eq!(reopened.changed(), None);
+
+        let reopened = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        write_record(OTHER_SESSION);
+        assert!(!reopened.current());
+        write_record(SESSION);
+
+        let reopened = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        let retired = subagents.with_extension("old");
+        std::fs::rename(&subagents, &retired).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&subagents)
+            .unwrap();
+        assert!(!reopened.current());
+        assert_eq!(reopened.changed(), None);
     }
 
     pub(crate) fn seed_codex_chat_rollouts(
@@ -4282,7 +4895,7 @@ mod tests {
             &mut baseline,
             &AtomicBool::new(false),
             0,
-            false,
+            CodexUsageTarget::None,
         )
         .unwrap();
         let proof = sample.header.len() + sample.body.len();
@@ -4296,7 +4909,7 @@ mod tests {
             &mut remaining,
             &AtomicBool::new(false),
             0,
-            true,
+            CodexUsageTarget::All,
         )
         .expect("parent append proof must retain roster");
         assert_eq!(observed.rows.len(), 1);
@@ -4318,7 +4931,7 @@ mod tests {
             &mut remaining,
             &AtomicBool::new(false),
             0,
-            true,
+            CodexUsageTarget::All,
         )
         .expect("exhausted optional reserve must retain roster");
         assert_eq!(observed.rows.len(), 1);
@@ -4513,6 +5126,170 @@ mod tests {
         let mut foreign = context("child-turn", Some("gpt-foreign"));
         foreign["payload"]["cwd"] = json!("/somewhere/else");
         assert!(observed(vec![foreign]).get("observed_model").is_none());
+    }
+
+    #[test]
+    fn observe_codex_plain_reads_no_usage_and_selected_reads_only_matching_listed_locator() {
+        let mut fixture = RolloutFixture::new("selected-usage");
+        fixture.date = codex_today().unwrap();
+        let repo = fixture.store.repo();
+        let mut parent = codex_meta(PARENT, repo, json!("vscode"));
+        parent["payload"]["session_id"] = json!(PARENT);
+        fixture.write(
+            fixture.date,
+            PARENT,
+            &[parent, codex_user_event(PARENT, TURN)],
+        );
+
+        let c1 = CHILD;
+        let c2 = SECOND_CHILD;
+        let c3 = "33333333-3333-3333-3333-333333333333";
+        let c4_unlisted = "44444444-4444-4444-4444-444444444444";
+        let all_children = [
+            (c1, 11i64, "gpt-c1", 40u64),
+            (c2, 22i64, "gpt-c2", 30u64),
+            (c3, 33i64, "gpt-c3", 20u64),
+            (c4_unlisted, 44i64, "gpt-c4", 10u64),
+        ];
+        let base_mtime = std::time::SystemTime::now();
+        let mut expected_header_bytes = 0usize;
+        for (id, input, model, age_secs) in all_children {
+            let mut meta = codex_child_meta(id, repo);
+            meta["payload"]["session_id"] = json!(PARENT);
+            expected_header_bytes += meta.to_string().len() + 1;
+            let mut ctx = codex_context("child-turn", repo);
+            ctx["payload"]["model"] = json!(model);
+            let counters = json!({
+                "input_tokens": input,
+                "output_tokens": 5,
+                "cached_input_tokens": 1,
+                "cache_write_input_tokens": 0,
+                "reasoning_output_tokens": 0,
+                "total_tokens": input + 5
+            });
+            let usage = json!({
+                "type": "token_usage_record",
+                "payload": {
+                    "thread_id": id,
+                    "session_id": PARENT,
+                    "turn_id": "child-turn",
+                    "root_turn_id": "root-turn",
+                    "response_id": format!("resp-{id}"),
+                    "usage": counters,
+                    "turn_token_usage": counters,
+                    "thread_token_usage": counters
+                }
+            });
+            fixture.write(
+                fixture.date,
+                id,
+                &[
+                    meta,
+                    ctx,
+                    codex_agent_event(id, "child-turn", "reply"),
+                    usage,
+                ],
+            );
+            File::open(fixture.path(fixture.date, id))
+                .unwrap()
+                .set_modified(base_mtime - std::time::Duration::from_secs(age_secs))
+                .unwrap();
+        }
+        // Candidate order is newest mtime first: [c1, c2, c3, c4_unlisted], so c1..c3 fill
+        // the 3-row roster and c4_unlisted stays unlisted.
+        for (offset, id) in [c1, c2, c3].into_iter().enumerate() {
+            File::open(fixture.path(fixture.date, id))
+                .unwrap()
+                .set_modified(base_mtime + std::time::Duration::from_secs((3 - offset) as u64))
+                .unwrap();
+        }
+
+        let (home, root) = open_ambient_codex_root(repo).unwrap();
+        let terminal = format!("› {}", codex_prompt(TURN));
+        let stop = AtomicBool::new(false);
+        let run_observe = |selected: Option<&CodexLocator>| {
+            reset_codex_test_counters();
+            observe_codex(
+                repo,
+                &terminal,
+                &home,
+                &root,
+                selected,
+                &stop,
+                #[cfg(target_os = "linux")]
+                None,
+            )
+            .unwrap()
+        };
+
+        // 1. Plain observe_codex reads ZERO child usage/body bytes and only bounded roster headers.
+        let plain = run_observe(None);
+        assert_eq!(codex_transcript_opens(), 0);
+        assert_eq!(codex_child_body_bytes(), 0);
+        assert_eq!(codex_roster_opens(), 5);
+        assert_eq!(codex_roster_child_header_bytes(), expected_header_bytes);
+        assert!(plain.codex_selected_usage.is_none());
+        assert_eq!(plain.rows.len(), 3);
+        assert_eq!(plain.codex.len(), 3);
+        assert!(
+            !plain
+                .codex
+                .contains_key(&participant_id("codex", c4_unlisted))
+        );
+        assert!(plain.rows.iter().all(|row| {
+            row.get("native_response_usage").is_none() && row.get("observed_model").is_none()
+        }));
+
+        // 2. Selected listed child reads ONLY its matching locator (1 transcript open).
+        let loc_c2 = plain.codex.get(&participant_id("codex", c2)).unwrap();
+        let with_c2 = run_observe(Some(loc_c2));
+        assert_eq!(codex_transcript_opens(), 1);
+        assert!(codex_child_body_bytes() > 0);
+        assert_eq!(codex_roster_opens(), 5);
+        assert!(with_c2.rows.iter().all(|row| {
+            row.get("native_response_usage").is_none() && row.get("observed_model").is_none()
+        }));
+        let (response, model) = with_c2
+            .codex_selected_usage
+            .expect("listed selected child should load usage");
+        assert_eq!(model.as_deref(), Some("gpt-c2"));
+        assert_eq!(response["input_tokens"], 22);
+        assert_eq!(response["total_tokens"], 27);
+
+        // 3. Unlisted child (evicted past the 3-row roster, no current binding) gets NO read,
+        //    and mismatched turn/home/root/parent/child locators get NO read.
+        let rollouts = codex_candidates(repo, fixture.date).unwrap();
+        let unlisted_rollout = rollouts
+            .candidates
+            .iter()
+            .find(|r| codex_filename_id(&r.path) == Some(c4_unlisted))
+            .unwrap();
+        let mut unlisted_loc = loc_c2.clone();
+        unlisted_loc.child = CodexAnchor::new(c4_unlisted, unlisted_rollout);
+        let mut wrong_turn = loc_c2.clone();
+        wrong_turn.turn = STALE_TURN.into();
+        let mut wrong_home = loc_c2.clone();
+        wrong_home.home = repo.join("other-home");
+        let mut wrong_root = loc_c2.clone();
+        wrong_root.root.1 ^= 1;
+        let mut wrong_parent = loc_c2.clone();
+        wrong_parent.parent.inode ^= 1;
+        let mut wrong_child_inode = loc_c2.clone();
+        wrong_child_inode.child.inode ^= 1;
+
+        for (label, bad) in [
+            ("unlisted", &unlisted_loc),
+            ("wrong-turn", &wrong_turn),
+            ("wrong-home", &wrong_home),
+            ("wrong-root", &wrong_root),
+            ("wrong-parent", &wrong_parent),
+            ("wrong-child-inode", &wrong_child_inode),
+        ] {
+            let result = run_observe(Some(bad));
+            assert!(result.codex_selected_usage.is_none(), "{label}");
+            assert_eq!(codex_transcript_opens(), 0, "{label}");
+            assert_eq!(codex_child_body_bytes(), 0, "{label}");
+        }
     }
 
     #[test]
@@ -5909,12 +6686,12 @@ mod tests {
             .iter()
             .find(|candidate| codex_filename_id(&candidate.path) == Some(CHILD))
             .unwrap();
-        let (pinned, _) = rollouts.open(sampled).unwrap();
+        let (pinned, _) = rollouts.open(sampled, CodexOpenKind::Roster).unwrap();
         let replacement = path.with_extension("replacement");
         std::fs::copy(&path, &replacement).unwrap();
         std::fs::rename(&replacement, &path).unwrap();
         assert!(rollouts.status(sampled, &pinned).is_none());
-        assert!(rollouts.open(sampled).is_none());
+        assert!(rollouts.open(sampled, CodexOpenKind::Roster).is_none());
         let mut remaining = CODEX_READ_BUDGET;
         assert!(codex_rows(&rollouts, repo, TURN, &mut remaining).is_none());
         assert!(fixture.chat(&terminal, locator).is_none());
@@ -5941,7 +6718,7 @@ mod tests {
         );
         let rollouts = fixture.rollouts();
         let rollout = &rollouts.candidates[0];
-        let (mut file, sampled) = rollouts.open(rollout).unwrap();
+        let (mut file, sampled) = rollouts.open(rollout, CodexOpenKind::Roster).unwrap();
         let size = sampled.st_size as usize;
         let mut remaining = CODEX_READ_BUDGET;
         let header = codex_read_header(&mut file, size as u64, &mut remaining).unwrap();
@@ -6276,7 +7053,7 @@ mod tests {
                 &mut remaining,
                 &AtomicBool::new(true),
                 0,
-                true,
+                CodexUsageTarget::All,
             )
             .is_none()
         );

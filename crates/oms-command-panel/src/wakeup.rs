@@ -397,6 +397,83 @@ mod tests {
         assert!(wake.fd().is_none());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn first_child_wake_wakes_on_claude_child_transcript_and_ignores_symlinked_dir() {
+        use crate::native_children::ClaudeSubagentsWatch;
+        use serde_json::json;
+
+        let dir = Dir::new("k");
+        let base = dir.0.canonicalize().unwrap();
+        let repo = base.join("repo");
+        let config = base.join("claude");
+        let sessions = config.join("sessions");
+        let key: String = repo
+            .to_str()
+            .unwrap()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let session = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+        let session_dir = config.join("projects").join(key).join(session);
+        let subagents = session_dir.join("subagents");
+        let elsewhere = base.join("elsewhere");
+        for path in [&repo, &config, &sessions, &session_dir, &elsewhere] {
+            DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)
+                .unwrap();
+        }
+        let pid = 4242u32;
+        let birth = "fixture-boot:987654";
+        let record = sessions.join(format!("{pid}.json"));
+        fs::write(
+            &record,
+            json!({
+                "pid": pid,
+                "procStart": "987654",
+                "sessionId": session,
+                "cwd": repo.to_str().unwrap(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+
+        std::os::unix::fs::symlink(&elsewhere, &subagents).unwrap();
+        assert!(ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, None).is_none());
+        let mut wake = FirstChildWake::<ClaudeSubagentsWatch>::default();
+        assert!(wake.fd().is_none());
+        fs::write(
+            subagents.join("agent-a1b2c3d4e5f60718.jsonl"),
+            b"not read\n",
+        )
+        .unwrap();
+        assert!(!wake.refresh(true, true, Instant::now()));
+
+        fs::remove_file(&subagents).unwrap();
+        DirBuilder::new().mode(0o700).create(&subagents).unwrap();
+        let source = ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, None).unwrap();
+        wake.replace(Some(source));
+        let ready = |wake: &FirstChildWake<ClaudeSubagentsWatch>| {
+            wake.fd().is_some_and(|fd| {
+                let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+                poll(&mut fds, Some(&timespec(Duration::ZERO))).unwrap() > 0
+            })
+        };
+        let now = Instant::now();
+        fs::write(subagents.join("foreign.txt"), b"ignored").unwrap();
+        assert!(!wake.refresh(ready(&wake), true, now));
+
+        let child = subagents.join("agent-a1b2c3d4e5f60718.jsonl");
+        fs::write(&child, [0xff, 0xfe]).unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(ready(&wake));
+        assert!(wake.refresh(true, true, now));
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     #[test]
     fn notify_wakes_a_waiting_watcher_quickly() {
         let dir = Dir::new("a");
