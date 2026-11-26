@@ -2541,7 +2541,9 @@ case "$1 $2" in
       git --git-dir='{bare}' update-ref refs/heads/main "$(squash "$match^{{tree}}")"
     fi ;;
   "pr view")
-    if [ -f '{state}.view' ]; then cat '{state}.view'
+    if [[ "$*" == *'--json state' ]]; then echo '{{"state":"OPEN"}}'
+    elif [ -f '{state}.view' ]; then
+      IFS= read -rd '' text < '{state}.view'; printf '%s' "$text"
     else printf '{{"state":"MERGED","mergeCommit":{{"oid":"%s"}}}}\n' "$(git --git-dir='{bare}' rev-parse refs/heads/main)"; fi ;;
   "run view")
     if [ -f "{state}.jobs$3" ]; then
@@ -2683,7 +2685,6 @@ impl TargetMoveFixture {
 
     fn land(&self, extra: &[&str]) -> (i32, String, String) {
         let mut args = vec![
-            "--pr",
             "--gate",
             r#"git rev-parse HEAD refs/remotes/origin/main >> "$HOME/land-gates""#,
             "--ignore-siblings",
@@ -2699,6 +2700,15 @@ impl TargetMoveFixture {
             &[
                 ("OMS_GH_BIN", self.gh.to_str().unwrap()),
                 ("OMS_LOCK_TIMEOUT", "2"),
+                (
+                    "OMS_CT_INTERRUPT_AT",
+                    self.iso
+                        .home
+                        .path()
+                        .join("interrupt-update")
+                        .to_str()
+                        .unwrap(),
+                ),
             ],
         )
     }
@@ -2902,6 +2912,78 @@ fn target_update_after_publish_only_merges_successor() {
 }
 
 #[test]
+fn externally_merged_pr_preserves_awaiting_receipt() {
+    let f = TargetMoveFixture::new(1, false);
+    let published = f.land(&[]);
+    assert_eq!(published.0, 0, "{published:?}");
+    let directory = fs::read_dir(f.iso.home.path().join(".local/state/oh-my-setting/land"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let receipt = fs::read_dir(directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "json"))
+        .unwrap();
+    let script = fs::read_to_string(&f.gh).unwrap().replace(
+        "\"pr view\")",
+        "\"pr view\")\n    if [[ \"$*\" == *'--json state' ]]; then echo '{\"state\":\"MERGED\"}'; exit 0; fi",
+    );
+    fs::write(&f.gh, script).unwrap();
+    f.advance_target();
+    // Any receipt that recorded the PR, not only awaiting-merge, belongs to reconcile.
+    for state in ["awaiting-merge", "running", "failed"] {
+        let mut row = V::parse(&fs::read(&receipt).unwrap()).unwrap();
+        row.set("state", state);
+        row.set("pr_number", 7usize);
+        row.set("merge", obj([("state", "not-requested".into())]));
+        let original = row.json(false).unwrap();
+        fs::write(&receipt, &original).unwrap();
+        let result = f.land(&["--pr", "--merge"]);
+        assert_refused(&result, "use land reconcile");
+        assert_eq!(fs::read(&receipt).unwrap(), original, "{state}");
+        assert_eq!(f.checkout_head(), f.head, "{state}");
+    }
+}
+
+#[test]
+fn target_update_interruption_preserves_exit_code() {
+    let f = TargetMoveFixture::new(1, false);
+    f.advance_target();
+    let hook = f.repo.join(".git/hooks/pre-merge-commit");
+    fs::write(
+        &hook,
+        format!(
+            "#!{}\nprintf x > \"$HOME/interrupt-update\"\nwhile :; do :; done\n",
+            which("bash").display()
+        ),
+    )
+    .unwrap();
+    let result = f.land(&["--pr", "--merge"]);
+    assert_eq!(result.0, 130, "{result:?}");
+    assert_eq!(f.checkout_head(), f.head);
+}
+
+#[test]
+fn retry_gate_sees_observed_target_in_tracking_ref() {
+    let f = TargetMoveFixture::new(1, false);
+    f.advance_target();
+    fs::remove_file(f.repo.join(".git/hooks/pre-merge-commit")).unwrap();
+    f.iso.git(
+        &f.repo,
+        &["fetch", "-q", f.bare.to_str().unwrap(), &f.tips[0]],
+    );
+    f.iso
+        .git(&f.repo, &["merge", "--no-edit", "--no-ff", &f.tips[0]]);
+    let head = f.checkout_head();
+    let _ = f.land(&["--merge"]);
+    f.assert_gates(&[&head, &f.tips[0]]);
+}
+
+#[test]
 fn target_update_preserves_completed_receipt() {
     let f = TargetMoveFixture::new(1, false);
     let first = f.land(&["--merge"]);
@@ -2921,7 +3003,7 @@ fn target_update_refuses_ignored_collision() {
     f.advance_target();
     fs::write(f.repo.join(".git/info/exclude"), "target.txt\n").unwrap();
     fs::write(f.repo.join("target.txt"), "local data\n").unwrap();
-    let result = f.land(&["--merge"]);
+    let result = f.land(&["--pr", "--merge"]);
     assert_ne!(result.0, 0, "{result:?}");
     assert_eq!(f.checkout_head(), f.head);
     assert_eq!(
@@ -2929,6 +3011,28 @@ fn target_update_refuses_ignored_collision() {
         b"local data\n"
     );
     assert!(!f.log.exists());
+    let directory = f.iso.home.path().join(".local/state/oh-my-setting/land");
+    let rows = fs::read_dir(directory)
+        .unwrap()
+        .flat_map(|d| fs::read_dir(d.unwrap().path()).unwrap())
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .count();
+    assert_eq!(rows, 0, "refusal left a receipt");
+}
+
+#[test]
+fn default_pr_mode_attempts_target_update() {
+    let f = TargetMoveFixture::new(1, false);
+    f.advance_target();
+    fs::write(f.repo.join(".git/info/exclude"), "target.txt\n").unwrap();
+    fs::write(f.repo.join("target.txt"), "local data\n").unwrap();
+    let result = f.land(&["--merge"]);
+    assert_refused(
+        &result,
+        "target update would overwrite an untracked or ignored path",
+    );
+    assert_eq!(f.checkout_head(), f.head);
 }
 
 #[test]
@@ -6812,7 +6916,537 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
         out.unwrap().get("github").get("board").get("reason"),
         &V::Null
     );
+    fs::remove_file(r.dir.join("panel-board-failed")).unwrap();
+
+    // Whole-board deterministic candidate ranking (--project-id NODE_ID --candidates).
+    let (help_code, help_text, help_err) = inproc("github", &["--help"]);
+    assert_eq!(help_code, 0, "{help_err}");
+    assert!(help_text.contains("--candidates"), "{help_text}");
+    assert_refused(
+        &r.run(&iso, &["panel-status", "--candidates"]),
+        "--candidates requires --project-id NODE_ID",
+    );
+    assert_refused(
+        &r.run(
+            &iso,
+            &[
+                "panel-status",
+                "--project-id",
+                "PVT_abc",
+                "--candidates",
+                "--cursor",
+                "abc.123",
+            ],
+        ),
+        "--candidates cannot combine with --cursor",
+    );
+    assert_refused(
+        &r.run(
+            &iso,
+            &[
+                "panel-status",
+                "--project-id",
+                "PVT_abc",
+                "--candidates",
+                "--drift",
+            ],
+        ),
+        "--drift cannot combine with --candidates",
+    );
+    assert_refused(
+        &r.run(
+            &iso,
+            &[
+                "panel-status",
+                "--project-id",
+                "PVT_abc",
+                "--candidates",
+                "--issue",
+                "447",
+            ],
+        ),
+        "project cannot combine with issue, pull or inventory",
+    );
+
+    // Phase options are intentionally non-alphabetical ("Slice 1" before "Foundation" before "Polish")
+    // so ranking proves option-order precedence rather than alphabetical label guessing.
+    let rank_fields = [
+        field(
+            "F_status",
+            "Status",
+            r#"{"id":"s1","name":"Ready"},{"id":"s_prog","name":"In Progress"},{"id":"s2","name":"Backlog"}"#,
+        ),
+        field(
+            "F_prio",
+            "Priority",
+            r#"{"id":"p0","name":"P0"},{"id":"p1","name":"P1"},{"id":"p2","name":"P2"},{"id":"p3","name":"P3"}"#,
+        ),
+        field("F_area", "Area", r#"{"id":"a1","name":"Runtime"}"#),
+        field(
+            "F_phase",
+            "Phase",
+            r#"{"id":"ph_s1","name":"Slice 1"},{"id":"ph_fnd","name":"Foundation"},{"id":"ph_pol","name":"Polish"}"#,
+        ),
+    ]
+    .join(",");
+    let card_vals = |st_id: &str, st: &str, pr_id: &str, pr: &str, ph_id: &str, ph: &str| {
+        [
+            value("F_status", st_id, st),
+            value("F_prio", pr_id, pr),
+            value("F_area", "a1", "Runtime"),
+            value("F_phase", ph_id, ph),
+        ]
+        .join(",")
+    };
+    let board_page = |more: bool, cur: &str, contents: &str| {
+        format!(
+            r#"{{"data":{{"organization":{{"login":"example-org","projectV2":{{"id":"PVT_abc","number":3,"title":"Board","url":"{url}","closed":false,"fields":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{rank_fields}]}},"items":{{"pageInfo":{{"hasNextPage":{more},"endCursor":"{cur}"}},"nodes":[{contents}]}}}}}}}}}}"#
+        )
+    };
+    fs::write(
+        &plan_file,
+        r##"{"tasks":{"planned":{"issue":"#7","state":"pending"}}}"##,
+    )
+    .unwrap();
+    fs::write(
+        packet_dir.join("current.md"),
+        "# Task\n- github_issue: #19\n",
+    )
+    .unwrap();
+
+    let untrusted_marker = iso.home.path().join("never-run-marker");
+    let c30 = issue(
+        30,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s1", "Ready", "p1", "P1", "ph_fnd", "Foundation"),
+    );
+    let c12 = issue(
+        12,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s1", "Ready", "p1", "P1", "ph_s1", "Slice 1"),
+    );
+    let c45 = issue(
+        45,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s1", "Ready", "p0", "P0", "ph_pol", "Polish"),
+    )
+    .replace(
+        r#""title":"Work 45""#,
+        &format!(
+            r#""title":"Work 45 `touch {}`","body":"$(touch {})""#,
+            untrusted_marker.display(),
+            untrusted_marker.display()
+        ),
+    );
+    let c5 = issue(
+        5,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s1", "Ready", "p1", "P1", "ph_s1", "Slice 1"),
+    );
+    let c18 = issue(
+        18,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s1", "Ready", "p2", "P2", "ph_s1", "Slice 1"),
+    );
+    let dup21_active = issue(
+        21,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s1", "Ready", "p0", "P0", "ph_s1", "Slice 1"),
+    );
+    let dup21_archived =
+        issue(21, "OPEN", mine, "", "").replace(r#""isArchived":false"#, r#""isArchived":true"#);
+    let linked7 = issue(
+        7,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s1", "Ready", "p0", "P0", "ph_s1", "Slice 1"),
+    );
+    let packet19 = issue(
+        19,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s1", "Ready", "p0", "P0", "ph_s1", "Slice 1"),
+    );
+    let inprog14 = issue(
+        14,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s_prog", "In Progress", "p0", "P0", "ph_s1", "Slice 1"),
+    );
+    let backlog15 = issue(
+        15,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s2", "Backlog", "p0", "P0", "ph_s1", "Slice 1"),
+    );
+    let unrec16 = issue(
+        16,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s1", "Ready", "p3", "P3", "ph_s1", "Slice 1"),
+    );
+    let foreign99 = issue(
+        99,
+        "OPEN",
+        "elsewhere/secret-repo",
+        "",
+        &card_vals("s1", "Ready", "p0", "P0", "ph_s1", "Slice 1"),
+    );
+    let draft_card = r#"{"type":"DRAFT_ISSUE","isArchived":false,"content":null,"fieldValues":{"pageInfo":{"hasNextPage":false},"nodes":[]}}"#;
+
+    let run_candidates = || {
+        let (code, raw, err) = r.run(
+            &iso,
+            &[
+                "panel-status",
+                "--project-id",
+                "PVT_abc",
+                "--candidates",
+                "--json",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert!(
+            !raw.contains("elsewhere/secret-repo"),
+            "foreign details must not leak: {raw}"
+        );
+        assert!(!untrusted_marker.exists(), "card text must never execute");
+        V::parse(raw.as_bytes()).expect("candidates json")
+    };
+
+    // Order A across 3 pages.
+    fs::write(
+        r.dir.join("panel-board"),
+        board_page(
+            true,
+            "c_p1",
+            &[
+                c30.as_str(),
+                dup21_active.as_str(),
+                linked7.as_str(),
+                foreign99.as_str(),
+                draft_card,
+            ]
+            .join(","),
+        ),
+    )
+    .unwrap();
+    fs::write(
+        r.dir.join("panel-board-after-c_p1"),
+        board_page(
+            true,
+            "c_p2",
+            &[
+                c18.as_str(),
+                inprog14.as_str(),
+                c12.as_str(),
+                packet19.as_str(),
+            ]
+            .join(","),
+        ),
+    )
+    .unwrap();
+    fs::write(
+        r.dir.join("panel-board-after-c_p2"),
+        board_page(
+            false,
+            "c_p3",
+            &[
+                c5.as_str(),
+                dup21_archived.as_str(),
+                backlog15.as_str(),
+                unrec16.as_str(),
+                c45.as_str(),
+            ]
+            .join(","),
+        ),
+    )
+    .unwrap();
+    let doc_a = run_candidates();
+    let cand_a = doc_a.get("github").get("candidates");
+    assert_eq!(cand_a.get("status").text(), Some("available"));
+    assert_eq!(cand_a.get("source").text(), Some("explicit_project"));
+    assert_eq!(
+        cand_a.get("observed_at").text(),
+        doc_a.get("github").get("observedAt").text()
+    );
+    assert!(
+        cand_a
+            .get("observed_at")
+            .text()
+            .is_some_and(|t| t.contains('T') && t.ends_with('Z'))
+    );
+    assert_eq!(cand_a.get("incomplete"), &V::Bool(false));
+    assert_eq!(cand_a.get("reason"), &V::Null);
+    assert_eq!(cand_a.get("pages"), &V::Num("3".into()));
+    assert_eq!(cand_a.get("total"), &V::Num("5".into()));
+    assert_eq!(cand_a.get("omitted"), &V::Num("0".into()));
+
+    let ranked_issues: Vec<_> = cand_a
+        .get("items")
+        .array()
+        .iter()
+        .map(|i| {
+            (
+                i.get("rank").py(),
+                i.get("issue").text().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ranked_issues,
+        [
+            ("1".into(), "example-org/example-repo#45".into()),
+            ("2".into(), "example-org/example-repo#5".into()),
+            ("3".into(), "example-org/example-repo#12".into()),
+            ("4".into(), "example-org/example-repo#30".into()),
+            ("5".into(), "example-org/example-repo#18".into()),
+        ]
+    );
+
+    let recs_a: Vec<_> = cand_a
+        .get("recommendations")
+        .array()
+        .iter()
+        .map(|rec| {
+            (
+                rec.get("issue").text().unwrap().to_owned(),
+                rec.get("state").text().unwrap().to_owned(),
+                rec.get("reason").text().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    // Canonical Issue recommendations appear at most once per Issue, including cross-page duplicates.
+    let unique_issues: std::collections::BTreeSet<_> = recs_a
+        .iter()
+        .map(|(issue_id, _, _)| issue_id.as_str())
+        .collect();
+    assert_eq!(unique_issues.len(), recs_a.len());
+    assert_eq!(
+        recs_a
+            .iter()
+            .filter(|(id, _, _)| id == "example-org/example-repo#21")
+            .collect::<Vec<_>>(),
+        [&(
+            "example-org/example-repo#21".into(),
+            "excluded".into(),
+            "duplicate".into()
+        )]
+    );
+    for (expected_issue, expected_state, expected_reason) in [
+        ("example-org/example-repo#7", "excluded", "plan_linked"),
+        ("example-org/example-repo#19", "excluded", "plan_linked"),
+        (
+            "example-org/example-repo#14",
+            "excluded",
+            "board_in_progress",
+        ),
+        (
+            "example-org/example-repo#15",
+            "excluded",
+            "status_not_ready",
+        ),
+        (
+            "example-org/example-repo#16",
+            "unverified",
+            "priority_unrecognized",
+        ),
+    ] {
+        assert!(
+            recs_a.contains(&(
+                expected_issue.into(),
+                expected_state.into(),
+                expected_reason.into()
+            )),
+            "missing ({expected_issue}, {expected_state}, {expected_reason}) in {recs_a:?}"
+        );
+    }
+
+    // Order B: shuffled saved-view order across pages (including swapping archived/active duplicate order)
+    // yields the exact same candidate ranking and per-Issue recommendations.
+    fs::write(
+        r.dir.join("panel-board"),
+        board_page(
+            true,
+            "c_p1",
+            &[
+                c45.as_str(),
+                dup21_archived.as_str(),
+                packet19.as_str(),
+                c18.as_str(),
+                backlog15.as_str(),
+            ]
+            .join(","),
+        ),
+    )
+    .unwrap();
+    fs::write(
+        r.dir.join("panel-board-after-c_p1"),
+        board_page(
+            true,
+            "c_p2",
+            &[
+                unrec16.as_str(),
+                c5.as_str(),
+                draft_card,
+                linked7.as_str(),
+                c30.as_str(),
+            ]
+            .join(","),
+        ),
+    )
+    .unwrap();
+    fs::write(
+        r.dir.join("panel-board-after-c_p2"),
+        board_page(
+            false,
+            "c_p3",
+            &[
+                dup21_active.as_str(),
+                c12.as_str(),
+                foreign99.as_str(),
+                inprog14.as_str(),
+            ]
+            .join(","),
+        ),
+    )
+    .unwrap();
+    let doc_b = run_candidates();
+    let cand_b = doc_b.get("github").get("candidates");
+    assert_eq!(cand_b.get("items"), cand_a.get("items"));
+    assert_eq!(cand_b.get("recommendations"), cand_a.get("recommendations"));
+
+    // Option ID mismatch is never guessed by option name.
+    let mismatched_id_card = issue(
+        50,
+        "OPEN",
+        mine,
+        "",
+        &card_vals("s1", "Ready", "p_spoof", "P0", "ph_s1", "Slice 1"),
+    );
+    fs::write(
+        r.dir.join("panel-board"),
+        board_page(false, "", &mismatched_id_card),
+    )
+    .unwrap();
+    let mismatch_doc = run_candidates();
+    let mismatch_cand = mismatch_doc.get("github").get("candidates");
+    assert!(mismatch_cand.get("items").array().is_empty());
+    assert_eq!(mismatch_cand.get("incomplete"), &V::Bool(true));
+    assert_eq!(mismatch_cand.get("reason").text(), Some("partial_response"));
+
+    // Partial page (hasNextPage=true with missing cursor), rate limit, and timeout stop the walk
+    // and report incomplete=true with a typed reason.
+    fs::write(r.dir.join("panel-board"), board_page(true, "", &c5)).unwrap();
+    let partial_cand = run_candidates().get("github").get("candidates").clone();
+    assert_eq!(partial_cand.get("incomplete"), &V::Bool(true));
+    assert_eq!(partial_cand.get("reason").text(), Some("partial_response"));
+
+    fs::write(r.dir.join("panel-board"), board_page(true, "c_rl", &c5)).unwrap();
+    fs::write(
+        r.dir.join("panel-board-after-c_rl"),
+        r#"{"data":null,"errors":[{"type":"RATE_LIMITED","message":"rate limit"}]}"#,
+    )
+    .unwrap();
+    fs::write(r.dir.join("panel-board-after-c_rl-failed"), "").unwrap();
+    let rl_cand = run_candidates().get("github").get("candidates").clone();
+    assert_eq!(rl_cand.get("incomplete"), &V::Bool(true));
+    assert_eq!(rl_cand.get("reason").text(), Some("rate_limited"));
+    assert_eq!(rl_cand.get("items").array().len(), 1);
+    fs::remove_file(r.dir.join("panel-board-after-c_rl-failed")).unwrap();
+
+    fs::write(r.dir.join("panel-board-after-c_rl-timeout"), "").unwrap();
+    let to_cand = run_candidates().get("github").get("candidates").clone();
+    assert_eq!(to_cand.get("incomplete"), &V::Bool(true));
+    assert_eq!(to_cand.get("reason").text(), Some("timeout"));
+    assert_eq!(to_cand.get("items").array().len(), 1);
+    fs::remove_file(r.dir.join("panel-board-after-c_rl-timeout")).unwrap();
+
+    // Page bound (MAX_BOARD_PAGES = 25) stops the walk and reports incomplete=true with page_limit.
+    for idx in 1..=25u32 {
+        let cur = format!("c_b{idx}");
+        let card = issue(
+            100 + idx,
+            "OPEN",
+            mine,
+            "",
+            &card_vals("s1", "Ready", "p1", "P1", "ph_s1", "Slice 1"),
+        );
+        let target_file = if idx == 1 {
+            r.dir.join("panel-board")
+        } else {
+            r.dir.join(format!("panel-board-after-c_b{}", idx - 1))
+        };
+        fs::write(target_file, board_page(true, &cur, &card)).unwrap();
+    }
+    let bound_cand = run_candidates().get("github").get("candidates").clone();
+    assert_eq!(bound_cand.get("incomplete"), &V::Bool(true));
+    assert_eq!(bound_cand.get("reason").text(), Some("page_limit"));
+    assert_eq!(bound_cand.get("pages"), &V::Num("25".into()));
+    assert_eq!(bound_cand.get("total"), &V::Num("25".into()));
+
+    // Permission error reports typed project_error reason while keeping explicit --issue working.
+    fs::write(
+        r.dir.join("panel-lookup"),
+        r#"{"number":447,"title":"Direct issue lookup","url":"https://github.com/example-org/example-repo/issues/447","state":"OPEN"}"#,
+    )
+    .unwrap();
+    fs::write(
+        r.dir.join("panel-board"),
+        r#"{"data":null,"errors":[{"type":"INSUFFICIENT_SCOPES","message":"requires read:project"}]}"#,
+    )
+    .unwrap();
+    fs::write(r.dir.join("panel-board-failed"), "").unwrap();
+    let denied_cand = run_candidates().get("github").get("candidates").clone();
+    assert_eq!(denied_cand.get("status").text(), Some("unavailable"));
+    assert_eq!(denied_cand.get("incomplete"), &V::Bool(true));
+    assert_eq!(denied_cand.get("reason").text(), Some("insufficient_scope"));
+    let (issue_code, issue_out, issue_err) =
+        r.run(&iso, &["panel-status", "--json", "--issue", "447"]);
+    assert_eq!(issue_code, 0, "{issue_err}");
+    let issue_doc = V::parse(issue_out.as_bytes()).unwrap();
+    assert_eq!(
+        issue_doc.get("github").get("lookup").get("status").text(),
+        Some("available")
+    );
+    assert_eq!(
+        issue_doc
+            .get("github")
+            .get("lookup")
+            .get("item")
+            .get("title")
+            .text(),
+        Some("Direct issue lookup")
+    );
+
     assert_eq!(r.posts(), 0);
+    for call in r.calls().lines() {
+        assert!(
+            !call.contains("--method POST")
+                && !call.contains("--method PATCH")
+                && !call.contains("--method PUT")
+                && !call.contains("--method DELETE")
+                && !call.contains("mutation"),
+            "unexpected mutating gh call: {call}"
+        );
+    }
 }
 
 #[test]

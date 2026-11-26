@@ -325,7 +325,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v21.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v23.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -334,7 +334,7 @@ fn cross_host_project_reads() {
             html.as_bytes(),
             include_bytes!("../src/conversation-panel.html")
         );
-        let legacy_uri = "ui://oms/conversation-panel/v20.html";
+        let legacy_uri = "ui://oms/conversation-panel/v22.html";
         let legacy = c.call("resources/read", json!({"uri":legacy_uri}));
         let legacy = &legacy["result"]["contents"][0];
         assert_eq!(legacy["uri"], legacy_uri);
@@ -1687,7 +1687,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v21.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v23.html");
     // Codex uses the stdio transport configuration to decide whether to reuse a running server.
     for package in [
         include_str!("../../../plugins/oms/mcp.json"),
@@ -1745,6 +1745,8 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v18.html"),
         json!("ui://oms/conversation-panel/v19.html"),
         json!("ui://oms/conversation-panel/v20.html"),
+        json!("ui://oms/conversation-panel/v21.html"),
+        json!("ui://oms/conversation-panel/v22.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -2042,11 +2044,69 @@ fn conversation_panel() {
             "abc.foo="
         ])
     );
+    let cand_fixture = json!({
+        "git": {},
+        "github": {
+            "repository": "example-org/example-repo",
+            "observedAt": "2026-11-26T00:00:00Z",
+            "candidates": {
+                "status": "available",
+                "source": "explicit_project",
+                "observed_at": "2026-11-26T00:00:00Z",
+                "items": [{"rank": 1, "issue": "example-org/example-repo#447", "number": 447}],
+                "recommendations": [{"issue": "example-org/example-repo#447", "number": 447, "class": "candidate", "state": "recommended", "reason": "ready_with_priority"}],
+                "incomplete": false,
+                "reason": null
+            }
+        }
+    });
+    fixture_settings(&source, json!({"stdout":cand_fixture.to_string()}));
+    let cand_reply = c.tool(
+        "oms_panel_git_status",
+        json!({"boardId":"PVT_fixture","candidates":true}),
+    );
+    assert_eq!(
+        cand_reply["result"]["structuredContent"]["github"]["candidates"]["source"],
+        "explicit_project"
+    );
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "github",
+            "panel-status",
+            "--repo",
+            repo,
+            "--json",
+            "--project-id",
+            "PVT_fixture",
+            "--candidates"
+        ])
+    );
+    let wide_title = "🧪".repeat(120);
+    let wide_items: Vec<_> = (1..=16)
+        .map(|n| json!({"rank": n, "issue": format!("example-org/example-repo#{n}"), "number": n, "title": wide_title}))
+        .collect();
+    let wide_cand = json!({"git": {}, "github": {"candidates": {"status": "available", "source": "explicit_project", "observed_at": "2026-11-26T00:00:00Z", "items": wide_items, "incomplete": true, "reason": "result_limit"}}});
+    fixture_settings(&source, json!({"stdout":wide_cand.to_string()}));
+    let wide_reply = c.tool(
+        "oms_panel_git_status",
+        json!({"boardId":"PVT_fixture","candidates":true}),
+    );
+    assert_eq!(wide_reply["result"]["isError"], false);
+    assert_eq!(
+        wide_reply["result"]["structuredContent"]["github"]["candidates"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        16
+    );
+    assert!(wide_reply.to_string().len() < 60_000);
     for args in [
         json!({"issuePreview":0}),
         json!({"issuePreview":10000000000i64}),
         json!({"issuePreview":"9"}),
         json!({"issuePreview":9,"cursor":null}),
+        json!({"issuePreview":9,"candidates":true}),
         json!({"issuePreview":9,"kind":"issue","number":9}),
         json!({"issuePreview":9,"inventory":"issues"}),
         json!({"issuePreview":9,"boardId":"PVT_1"}),
@@ -2059,6 +2119,12 @@ fn conversation_panel() {
         json!({"boardId":"https://example.invalid/x"}),
         json!({"boardId":"PVT_1","inventory":"issues"}),
         json!({"boardId":"PVT_1","kind":"issue","number":1}),
+        json!({"boardId":"PVT_1","candidates":"yes"}),
+        json!({"boardId":"PVT_1","candidates":true,"cursor":"abc.foo="}),
+        json!({"boardId":"PVT_1","candidates":true,"inventory":"issues"}),
+        json!({"boardId":"PVT_1","candidates":true,"kind":"issue","number":1}),
+        json!({"candidates":true}),
+        json!({"candidates":false}),
         json!({"cursor":"abc"}),
         json!({"inventory":"issues","cursor":"x y"}),
         json!({"inventory":"issues","kind":"issue","number":1}),

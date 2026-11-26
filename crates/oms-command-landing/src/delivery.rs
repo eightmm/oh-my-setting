@@ -389,8 +389,8 @@ enum Pass {
     Updated(Box<HeadUpdate>),
 }
 
-fn requests_target_update(o: &Options, ci_wait: u64) -> bool {
-    o.has("pr")
+fn requests_target_update(o: &Options, mode: Mode, ci_wait: u64) -> bool {
+    mode == Mode::Pr
         && o.has("merge")
         && ci_wait > 0
         && matches!(o.value("merge-method", "squash"), "squash" | "merge")
@@ -629,6 +629,21 @@ fn update_target(
     if receipt_has_completed_or_requested_merge(row) {
         return Err(moved.refuse("existing receipt records a completed or requested merge"));
     }
+    if row.get("pr_number").integer(true) {
+        // A recorded PR merged or closed outside OMS belongs to land reconcile;
+        // updating would re-land its commits over the external merge.
+        let number = row.get("pr_number").py();
+        let repo = ci::query_repo(r.destination)?;
+        let pr = ci::gh(
+            r.c,
+            &["pr", "view", &number, "--repo", &repo, "--json", "state"],
+            Duration::from_secs(30),
+        )?;
+        require(
+            pr.get("state").text() == Some("OPEN"),
+            "recorded PR is not open; use land reconcile",
+        )?;
+    }
     let git = r.git;
     let flag = r.c.interrupted;
     require(!merge_in_progress(git)?, UNFINISHED_MERGE)?;
@@ -682,8 +697,13 @@ fn update_target(
         )?;
         Ok::<_, Error>((before, index, bytes, tracked))
     })();
-    let (before, index, index_bytes, tracked_before) =
-        prepare.map_err(|e| moved.refuse(&e.message))?;
+    let (before, index, index_bytes, tracked_before) = prepare.map_err(|e| {
+        if e.code == 130 || flag.load(std::sync::atomic::Ordering::Relaxed) {
+            Error::new(130, e.message)
+        } else {
+            moved.refuse(&e.message)
+        }
+    })?;
     let prior = if let Some(bytes) = checkpoint {
         bytes.to_vec()
     } else {
@@ -703,6 +723,9 @@ fn update_target(
             flag,
             &environment,
         )?;
+        if merge.code == 130 {
+            return Err(Error::new(130, "target update interrupted"));
+        }
         require(merge.code == 0, "target update merge failed")?;
         git.transport_safe()?;
         git.tracked_clean()?;
@@ -734,7 +757,12 @@ fn update_target(
         row.set("successor_request", request.clone());
         row.set("superseding_update", evidence.clone());
         let bytes = replacement.insert(row.json(false)?);
-        storage::write_external(r.receipt, Some(&prior), bytes, flag)?;
+        storage::write_external(
+            r.receipt,
+            (!prior.is_empty()).then_some(prior.as_slice()),
+            bytes,
+            flag,
+        )?;
         crate::check(flag)?;
         Ok(Box::new(HeadUpdate {
             snapshot,
@@ -752,16 +780,25 @@ fn update_target(
         Err(error) => {
             let restore_receipt: Result<()> = (|| {
                 if let Some(bytes) = replacement {
-                    let current = storage::read_external(r.receipt, false)?;
+                    let current = storage::read_external(r.receipt, true)?;
                     if current == bytes {
                         // A failed fsync or cancellation after rename can leave
                         // the superseded receipt published despite the error.
-                        storage::write_external(
-                            r.receipt,
-                            Some(&bytes),
-                            &prior,
-                            &AtomicBool::new(false),
-                        )?;
+                        if prior.is_empty() {
+                            let _guard = storage::lock(r.receipt, &AtomicBool::new(false))?;
+                            require(
+                                storage::read_external(r.receipt, false)? == bytes,
+                                "receipt changed during rollback",
+                            )?;
+                            std::fs::remove_file(r.receipt)?;
+                        } else {
+                            storage::write_external(
+                                r.receipt,
+                                Some(&bytes),
+                                &prior,
+                                &AtomicBool::new(false),
+                            )?;
+                        }
                     } else {
                         require(current == prior, "receipt changed during target update")?;
                     }
@@ -769,10 +806,23 @@ fn update_target(
                 Ok(())
             })();
             rollback_target_update(git, &before, local_ref, tip, &index, &index_bytes, &tracked_before)
-                .map_err(|_| moved.refuse("target update rollback could not be verified; inspect the checkout before retrying"))?;
-            restore_receipt.map_err(|_| {
-                moved.refuse("target update receipt rollback could not be verified")
+                .map_err(|e| if error.code == 130 || flag.load(std::sync::atomic::Ordering::Relaxed) { Error::new(130, format!("interrupted; target update rollback could not be verified: {}", e.message)) } else { moved.refuse("target update rollback could not be verified; inspect the checkout before retrying") })?;
+            restore_receipt.map_err(|e| {
+                if error.code == 130 || flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    Error::new(
+                        130,
+                        format!(
+                            "interrupted; target update receipt rollback could not be verified: {}",
+                            e.message
+                        ),
+                    )
+                } else {
+                    moved.refuse("target update receipt rollback could not be verified")
+                }
             })?;
+            if error.code == 130 || flag.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(Error::new(130, error.message));
+            }
             Err(moved.refuse(&format!(
                 "target update failed and was rolled back: {}",
                 error.message
@@ -1882,17 +1932,11 @@ fn execute_pass(
     )?;
     let target = o.value("target", "main");
     git.run(&["check-ref-format", &format!("refs/heads/{target}")])?;
-    let requests_update = requests_target_update(o, ci_wait);
-    if requests_update && merge_in_progress(git)? {
-        let destination = git.text(&["remote", "get-url", "--push", remote])?;
-        require(
-            !ci::query_repo(&destination).is_ok_and(|s| s.starts_with("github.com/")),
-            UNFINISHED_MERGE,
-        )?;
+    let safety = git.transport_safe();
+    let unfinished = o.has("merge") && merge_in_progress(git)?;
+    if !unfinished {
+        safety?;
     }
-    git.transport_safe()?;
-    git.tracked_clean()?;
-    let snapshot = git.snapshot()?;
     let local_merge = o.has("local-merge");
     let destination = if local_merge {
         String::new()
@@ -1903,7 +1947,6 @@ fn execute_pass(
         local_merge || destination.lines().count() == 1,
         "land requires one push destination",
     )?;
-    let branch = git.text(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     let github = ci::query_repo(&destination).is_ok_and(|s| s.starts_with("github.com/"));
     let mode = if local_merge {
         Mode::LocalMerge
@@ -1918,6 +1961,16 @@ fn execute_pass(
     } else {
         Mode::Pr
     };
+    let requests_update = requests_target_update(o, mode, ci_wait);
+    if requests_update && github && unfinished {
+        return Err(Error::new(2, UNFINISHED_MERGE));
+    }
+    if unfinished {
+        git.transport_safe()?;
+    }
+    git.tracked_clean()?;
+    let snapshot = git.snapshot()?;
+    let branch = git.text(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     require(
         mode == Mode::Pr || !(o.has("head-branch") || o.has("merge") || o.has("why")),
         "--head-branch, --merge and --why apply to pull-request mode only",
@@ -2163,9 +2216,14 @@ fn execute_pass(
     if moved_before_gate.is_some() {
         row.set("head_branch", head_branch.as_str());
     }
-    save(&receipt, &row, c.interrupted)?;
-    // Only a receipt this pass validated and saved may name the card's head.
-    *c.relay_receipt.borrow_mut() = Some(receipt.clone());
+    // A moved target defers the save to update_target; until then only the
+    // receipt already on disk, validated above, may name the card's head.
+    if moved_before_gate.is_none() {
+        save(&receipt, &row, c.interrupted)?;
+    }
+    if moved_before_gate.is_none() || !previous.is_empty() {
+        *c.relay_receipt.borrow_mut() = Some(receipt.clone());
+    }
     let ctx = Run {
         c,
         o,
@@ -2189,9 +2247,9 @@ fn execute_pass(
         updates,
     };
     if let Some(moved) = moved_before_gate {
-        return update_target(&ctx, &mut row, moved, None, true);
+        return update_target(&ctx, &mut row, moved, Some(&previous), true);
     }
-    if let Some(failed) = gate_phase(&ctx, &mut row, previous_update.map(|_| base.as_str()))? {
+    if let Some(failed) = gate_phase(&ctx, &mut row, (!base.is_empty()).then_some(base.as_str()))? {
         return Ok(Pass::Done(failed));
     }
     require(

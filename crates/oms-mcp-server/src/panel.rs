@@ -12,7 +12,9 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v21.html";
+const URI: &str = "ui://oms/conversation-panel/v23.html";
+const V22: &str = "ui://oms/conversation-panel/v22.html";
+const V21: &str = "ui://oms/conversation-panel/v21.html";
 const V20: &str = "ui://oms/conversation-panel/v20.html";
 const V19: &str = "ui://oms/conversation-panel/v19.html";
 const V18: &str = "ui://oms/conversation-panel/v18.html";
@@ -303,8 +305,8 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         ),
         make(
             GIT,
-            "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one. Use boardId for linked board pages, or issuePreview alone to review immutable metadata for one open issue in the selected project.",
-            json!({"project":project,"issuePreview":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"boardId":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"},"cursor":{"type":"string","minLength":1,"maxLength":500}}),
+            "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one. Use boardId for linked board pages (or with candidates=true for ranked whole-board issue candidates), or issuePreview alone to review immutable metadata for one open issue in the selected project.",
+            json!({"project":project,"issuePreview":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"boardId":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"},"cursor":{"type":"string","minLength":1,"maxLength":500},"candidates":{"type":"boolean"}}),
             &[],
             false
         ),
@@ -943,6 +945,9 @@ fn checkout(dir: &Path) -> PanelResult<bool> {
     Ok(false)
 }
 
+/// JSON-RPC envelope around a tool result: a request id of up to 1024 bytes may escape to six
+/// bytes per byte, plus the fixed `jsonrpc`/`id`/`result` keys.
+const FRAME_RESERVE: usize = 1024 * 6 + 256;
 pub(super) fn response(data: PanelResult<Value>) -> Value {
     match data.and_then(|data| {
         crate::output::outbound(data.to_string().as_bytes(), &Value::Null)
@@ -961,13 +966,41 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                     None
                 };
             let mut text = data.to_string();
-            if data["dashboard"]["managedScratch"].is_object()
-                && text.len() + json!(&text).to_string().len() + 1024 > crate::OUTPUT_LIMIT
+            let is_git_detail = data["git"].is_object() && data["github"].is_object();
+            if (data["dashboard"]["managedScratch"].is_object() || is_git_detail)
+                && crate::value::encode(
+                    &json!({"content":[{"type":"text","text":&text}],"structuredContent":&data,"isError":false}),
+                    true,
+                    false,
+                    false,
+                    false,
+                )
+                .len()
+                    + FRAME_RESERVE
+                    > crate::OUTPUT_LIMIT
             {
-                if text.len() + 1024 > crate::OUTPUT_LIMIT {
-                    return response(Err("OMS panel snapshot exceeds its output limit.".into()));
+                text = if is_git_detail {
+                    "Git and GitHub status available in structuredContent.".into()
+                } else {
+                    "Project dashboard. Canonical status and managed scratch lifecycle observations are in structuredContent.".into()
+                };
+                if crate::value::encode(
+                    &json!({"content":[{"type":"text","text":&text}],"structuredContent":&data,"isError":false}),
+                    true,
+                    false,
+                    false,
+                    false,
+                )
+                .len()
+                    + FRAME_RESERVE
+                    > crate::OUTPUT_LIMIT
+                {
+                    return response(Err(if is_git_detail {
+                        "OMS desktop detail exceeds the response limit.".into()
+                    } else {
+                        "OMS panel snapshot exceeds its output limit.".into()
+                    }));
                 }
-                text = "Project dashboard. Canonical status and managed scratch lifecycle observations are in structuredContent.".into();
             }
             let mut result = json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false});
             if let Some(detail) = definition {
@@ -1080,6 +1113,8 @@ impl Server<'_> {
                             | V18
                             | V19
                             | V20
+                            | V21
+                            | V22
                     )
                 ) =>
             {
@@ -1108,6 +1143,7 @@ impl Server<'_> {
                         "inventory",
                         "boardId",
                         "cursor",
+                        "candidates",
                     ],
                     GRAPH => &["project", "node", "query", "limit", "depth", "includeTests"],
                     CHAT => &[
@@ -1395,9 +1431,16 @@ impl Server<'_> {
     }
 
     fn issue_preview(&self, repo: &Path, args: &Value) -> PanelResult<Value> {
-        if ["kind", "number", "inventory", "boardId", "cursor"]
-            .iter()
-            .any(|key| args.get(key).is_some())
+        if [
+            "kind",
+            "number",
+            "inventory",
+            "boardId",
+            "cursor",
+            "candidates",
+        ]
+        .iter()
+        .any(|key| args.get(key).is_some())
         {
             return Err("Select only one issue to review.".into());
         }
@@ -1615,6 +1658,16 @@ impl Server<'_> {
                     path,
                     "--json".into(),
                 ];
+                let candidates = match args.get("candidates") {
+                    None => None,
+                    Some(v) => Some(v.as_bool().ok_or("Invalid candidates flag.")?),
+                };
+                if candidates.is_some() && args.get("boardId").is_none() {
+                    return Err("Board candidates require boardId.".into());
+                }
+                if candidates == Some(true) && args.get("cursor").is_some() {
+                    return Err("Board candidates cannot combine with cursor.".into());
+                }
                 if args.get("inventory").is_some()
                     || args.get("boardId").is_some()
                     || args.get("cursor").is_some()
@@ -1637,6 +1690,9 @@ impl Server<'_> {
                             })
                             .ok_or("Invalid linked board ID.")?;
                         cmd.extend(["--project-id".into(), id.into()]);
+                        if candidates == Some(true) {
+                            cmd.push("--candidates".into());
+                        }
                     } else {
                         let collection = args["inventory"]
                             .as_str()
