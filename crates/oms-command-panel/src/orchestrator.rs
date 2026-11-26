@@ -6445,9 +6445,9 @@ fn strip_native_answers(rows: &mut [Value]) {
 /// painted from its spawn description; a collector row for it always wins.
 /// The Claude sighting's rows and locators, trusted only when the second exact
 /// pane proof equals the first and every child names the scan's own Turn.
-/// Otherwise nothing from the sighting is painted or bound. Usage and the proven
+/// Otherwise nothing from the sighting is painted or bound. The proven
 /// `started_at`/`ended_at` clocks go only on a child's single painted row.
-fn claude_sighting<P: PartialEq>(
+pub(crate) fn claude_sighting<P: PartialEq>(
     mut rows: Vec<Value>,
     first: &P,
     second: Option<&P>,
@@ -6465,20 +6465,11 @@ fn claude_sighting<P: PartialEq>(
         let mut painted = rows
             .iter_mut()
             .filter(|row| row["participant"] == participant);
-        if let (Some(usage), Some(row), None) = (&child.usage, painted.next(), painted.next()) {
-            row["native_response_usage"] = claude_usage_field(usage);
-            if let Some(model) = usage
-                .response
-                .as_ref()
-                .and_then(|response| response.observed_model.as_deref())
-                .and_then(crate::native_children::observed_model)
-            {
-                row["observed_model"] = json!(model);
-            }
-            // Only the proven spawn and delivered-notice clocks; never from `state`.
+        if let (Some(row), None) = (painted.next(), painted.next()) {
+            // Only the proven spawn and completion-notice clocks; never from `state`.
             for (key, at) in [
-                ("started_at", &usage.spawned_at),
-                ("ended_at", &usage.delivered_at),
+                ("started_at", &child.spawned_at),
+                ("ended_at", &child.completed_at),
             ] {
                 if let Some(at) = at {
                     row[key] = json!(at);
@@ -6488,14 +6479,6 @@ fn claude_sighting<P: PartialEq>(
     }
     let bound = painted_claude_children(children, &rows).collect();
     (rows, bound)
-}
-
-/// A Board row's `native_response_usage`: one response's own counters, never
-/// cumulative, the lead's or context occupancy; clocks as the lead recorded them.
-pub(crate) fn claude_usage_field(usage: &crate::claude_child_chat::ClaudeChildUsage) -> Value {
-    let response = usage.response.as_ref().and_then(claude_response_field);
-    json!({"scope": "latest_child_response", "response": response,
-           "spawned_at": usage.spawned_at, "delivered_at": usage.delivered_at})
 }
 
 pub(crate) fn claude_response_field(
@@ -7308,7 +7291,8 @@ pub(crate) mod tests {
                 locator,
                 title: "t".into(),
                 state: "unknown",
-                usage: None,
+                spawned_at: None,
+                completed_at: None,
                 version: None,
             }
         };
@@ -7330,25 +7314,16 @@ pub(crate) mod tests {
     #[test]
     fn claude_sighting_is_trusted_only_under_one_pane_and_one_turn() {
         use super::claude_sighting;
-        use crate::claude_child_chat::{ClaudeChild, ClaudeChildUsage, ClaudeResponse};
+        use crate::claude_child_chat::ClaudeChild;
         use serde_json::json;
         let spy = super::codex_chat_fixture::BoardSpy::new("claude-sighting");
         let turn = super::codex_chat_fixture::TURN;
-        let read = |usage| ClaudeChildUsage {
-            response: Some(ClaudeResponse {
-                id: "msg_1".into(),
-                at: "2026-11-22T01:00:00Z".into(),
-                usage,
-                observed_model: Some("claude-opus-5-5".into()),
-            }),
-            spawned_at: Some("2026-11-22T00:59:00Z".into()),
-            delivered_at: None,
-        };
         let child = |turn: &str, state| ClaudeChild {
             locator: spy.claude_locator(turn),
             title: "t".into(),
             state,
-            usage: Some(read([1, 2, 3, 4])),
+            spawned_at: Some("2026-11-22T00:59:00Z".into()),
+            completed_at: None,
             version: None,
         };
         let collector = vec![json!({"participant": "native-claude-other", "state": "working"})];
@@ -7362,78 +7337,51 @@ pub(crate) mod tests {
 
         let (rows, bound) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), single());
         assert!(rows.len() == 2 && rows[1]["state"] == "done" && bound.len() == 1);
-        let field = json!({"scope": "latest_child_response", "response": {"message_id": "msg_1",
-            "timestamp": "2026-11-22T01:00:00Z", "input_tokens": 1, "output_tokens": 2,
-            "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4, "total_tokens": 10},
-            "spawned_at": "2026-11-22T00:59:00Z", "delivered_at": null});
-        assert_eq!(rows[1]["native_response_usage"], field);
-        assert!(rows[0].get("native_response_usage").is_none());
-        // The exact reply model is its own row key, never inside the usage object.
-        assert_eq!(rows[1]["observed_model"], "claude-opus-5-5");
-        assert!(rows[0].get("observed_model").is_none());
-        assert!(field["response"].get("observed_model").is_none());
-        let mut unseen = read([1, 2, 3, 4]);
-        unseen.response.as_mut().unwrap().observed_model = None;
-        let no_model = Some((
-            turn.to_owned(),
-            vec![ClaudeChild {
-                usage: Some(unseen),
-                ..child(turn, "done")
-            }],
-        ));
-        let (rows_nm, _) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), no_model);
-        assert!(
-            rows_nm[1].get("observed_model").is_none()
-                && rows_nm[1].get("native_response_usage").is_some()
-        );
-        // Row clocks come from the proven spawn and delivered notice, never the state.
+        assert!(rows.iter().all(|row| {
+            row.get("native_response_usage").is_none() && row.get("observed_model").is_none()
+        }));
+        // Row clocks come from the proven spawn and completion notice, never the state.
         let clocks = |row: &serde_json::Value| {
             (row.get("started_at").cloned(), row.get("ended_at").cloned())
         };
         let spawned = json!("2026-11-22T00:59:00Z");
         assert_eq!(clocks(&rows[1]), (Some(spawned.clone()), None));
         assert_eq!(clocks(&rows[0]), (None, None));
-        // A collector row is the child's single row and carries it the same way.
+        // A collector row is the child's single row and carries clocks the same way.
         let own = json!({"participant": bound[0].0, "state": "working"});
         let (rows, _) = claude_sighting(vec![own.clone()], &"pane", Some(&"pane"), single());
-        assert!(rows.len() == 1 && rows[0]["native_response_usage"] == field);
-        // Two rows of one participant stay bound, but neither gets usage or a model.
+        assert!(rows.len() == 1 && clocks(&rows[0]) == (Some(spawned.clone()), None));
+        // Two rows of one participant stay bound, but neither gets clocks.
         let (rows, bound) = claude_sighting(vec![own.clone(); 2], &"pane", Some(&"pane"), single());
         assert!(rows == vec![own.clone(); 2] && bound.len() == 1);
-        assert!(rows.iter().all(|row| row.get("observed_model").is_none()));
-        // Usage withheld (over the tail budget or unproven) leaves the field absent;
-        // a total past u64 is unknown, the clocks stay.
-        let with = |usage| {
-            let mut child = child(turn, "done");
-            child.usage = usage;
-            Some((turn.to_owned(), vec![child]))
-        };
-        let (rows, bound) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), with(None));
-        assert!(
-            rows.len() == 2 && rows[1].get("native_response_usage").is_none() && bound.len() == 1
-        );
-        assert!(rows[1].get("observed_model").is_none());
+        // Unclocked roster entries leave both fields absent.
+        let unclocked = Some((
+            turn.to_owned(),
+            vec![ClaudeChild {
+                spawned_at: None,
+                completed_at: None,
+                ..child(turn, "done")
+            }],
+        ));
+        let (rows, bound) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), unclocked);
+        assert!(rows.len() == 2 && bound.len() == 1);
         assert_eq!(clocks(&rows[1]), (None, None));
-        let clocked = |state, delivered: Option<&str>| {
-            let mut usage = read([1, 2, 3, 4]);
-            usage.delivered_at = delivered.map(str::to_owned);
-            with(Some(usage)).map(|(turn, mut children)| {
-                children[0].state = state;
-                (turn, children)
-            })
+        let clocked = |state, completed: Option<&str>| {
+            Some((
+                turn.to_owned(),
+                vec![ClaudeChild {
+                    completed_at: completed.map(str::to_owned),
+                    ..child(turn, state)
+                }],
+            ))
         };
-        let delivered = json!("2026-11-22T01:02:00Z");
+        let completed = json!("2026-11-22T01:02:00Z");
         let done = clocked("done", Some("2026-11-22T01:02:00Z"));
         let (rows, _) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), done);
-        assert_eq!(clocks(&rows[1]), (Some(spawned.clone()), Some(delivered)));
+        assert_eq!(clocks(&rows[1]), (Some(spawned.clone()), Some(completed)));
         let running = clocked("working", None);
         let (rows, _) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), running);
-        assert_eq!(clocks(&rows[1]), (Some(spawned.clone()), None));
-        let over = with(Some(read([u64::MAX, 1, 0, 0])));
-        let (rows, _) = claude_sighting(collector.clone(), &"pane", Some(&"pane"), over);
-        let mut unknown = field.clone();
-        unknown["response"] = serde_json::Value::Null;
-        assert_eq!(rows[1]["native_response_usage"], unknown);
+        assert_eq!(clocks(&rows[1]), (Some(spawned), None));
         // A second proof that differs or is missing drops rows and locators.
         for second in [Some(&"moved"), None] {
             let (rows, bound) = claude_sighting(collector.clone(), &"pane", second, single());
@@ -7467,7 +7415,8 @@ pub(crate) mod tests {
             locator: spy.claude_locator(turn),
             title: "Audit panel".into(),
             state: "working",
-            usage: None,
+            spawned_at: None,
+            completed_at: None,
             version: None,
         };
 
@@ -18704,6 +18653,20 @@ pub(crate) mod tests {
                 }),
                 claude_spawn_result("toolu_ca", claude_agent_a, "Claude Researcher"),
                 claude_spawn_result("toolu_cb", claude_agent_b, "Claude Custody Failing"),
+                json!({
+                    "type": "user",
+                    "sessionId": claude_session,
+                    "isSidechain": false,
+                    "timestamp": "2026-11-18T18:00:15Z",
+                    "origin": {"kind": "task-notification"},
+                    "promptSource": "system",
+                    "message": {
+                        "role": "user",
+                        "content": format!(
+                            "<task-notification>\n<task-id>{claude_agent_a}</task-id>\n<tool-use-id>toolu_ca</tool-use-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>"
+                        )
+                    }
+                }),
             ];
             write_strict_file(
                 &claude_project.join(format!("{claude_session}.jsonl")),
@@ -18878,12 +18841,34 @@ pub(crate) mod tests {
                     find_claude(&claude_participant_a)["native_answer"],
                     "claude child reply"
                 );
+                assert_eq!(
+                    find_claude(&claude_participant_a)["started_at"],
+                    "2026-11-18T18:00:02Z"
+                );
+                assert_eq!(
+                    find_claude(&claude_participant_a)["ended_at"],
+                    "2026-11-18T18:00:15Z"
+                );
                 assert!(both_obs.chat_binding(&claude_participant_earlier).is_none());
+                assert!(
+                    find_claude(&claude_participant_earlier)
+                        .get("started_at")
+                        .is_none()
+                        && find_claude(&claude_participant_earlier)
+                            .get("ended_at")
+                            .is_none()
+                );
                 assert_eq!(
                     find_claude(&claude_participant_earlier)["native_answer"],
                     "EARLIER_TURN_HANDBACK"
                 );
                 assert!(both_obs.chat_binding(&claude_participant_b).is_none());
+                assert!(
+                    find_claude(&claude_participant_b)
+                        .get("started_at")
+                        .is_none()
+                        && find_claude(&claude_participant_b).get("ended_at").is_none()
+                );
                 assert_eq!(
                     find_claude(&claude_participant_b)["native_answer"],
                     "CUSTODY_FAILING_HANDBACK"

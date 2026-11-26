@@ -35,8 +35,10 @@ pub(crate) struct ClaudeChild {
     pub(crate) title: String,
     /// "done" only on the lead's own exact completion notice, else "unknown".
     pub(crate) state: &'static str,
-    /// `None` is withheld: not read for this sample, or the read proved nothing.
-    pub(crate) usage: Option<ClaudeChildUsage>,
+    /// Clock of the lead's `Agent` call row.
+    pub(crate) spawned_at: Option<String>,
+    /// Clock of the lead's exact completion notice.
+    pub(crate) completed_at: Option<String>,
     pub(crate) version: Option<ClaudeChildVersion>,
 }
 
@@ -71,17 +73,6 @@ pub(crate) struct ClaudeBoardChildren {
 pub(crate) enum ClaudeSelection<'a> {
     Read(&'a ClaudeChildLocator),
     Recheck(&'a ClaudeChildLocator),
-}
-
-/// What the Board may show of one child: its newest response and the lead's
-/// own clocks. A `None` field is unknown; nothing here measures a duration.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct ClaudeChildUsage {
-    pub(crate) response: Option<ClaudeResponse>,
-    /// Clock of the lead's `Agent` call row.
-    pub(crate) spawned_at: Option<String>,
-    /// Clock of the lead's exact completion notice.
-    pub(crate) delivered_at: Option<String>,
 }
 
 /// One response of the child itself: its `message.id`, the clock of its last
@@ -662,6 +653,27 @@ mod linux {
         Some((raw, chrono::DateTime::parse_from_rfc3339(raw).ok()?))
     }
 
+    /// Lead-observed spawn and completion clocks of one child; `None` is unknown.
+    type Clocks = (Option<String>, Option<String>);
+
+    /// The spawn is the `Agent` call's row; the completion is the exact notice
+    /// that makes the state "done", known only when every such notice comes
+    /// after the call and names one instant no earlier than a known spawn.
+    fn clocks(call: Option<&Value>, called: usize, done: &[(usize, &Value)]) -> Clocks {
+        let spawned = call.and_then(stamp);
+        let mut ends = done.iter().map(|&(at, entry)| {
+            stamp(entry)
+                .filter(|(_, end)| at > called && spawned.is_none_or(|(_, start)| *end >= start))
+        });
+        let first = ends.next().flatten();
+        let completed =
+            first.filter(|(_, end)| ends.all(|other| other.is_some_and(|(_, e)| e == *end)));
+        (
+            spawned.map(|(raw, _)| raw.to_owned()),
+            completed.map(|(raw, _)| raw.to_owned()),
+        )
+    }
+
     pub(super) struct Scan {
         pub(super) turn: String,
         pub(super) children: Vec<ClaudeChild>,
@@ -843,7 +855,7 @@ mod linux {
             )
         };
         if let Some(dir) = &subagents {
-            for (_, _, agent, tool, prompt, title) in found {
+            for (_, called, agent, tool, prompt, title) in found {
                 #[cfg(test)]
                 META_READS.with(|n| n.set(n.get() + 1));
                 // A child whose metadata cannot be proven is left out, not shown.
@@ -866,9 +878,12 @@ mod linux {
                 ) else {
                     continue;
                 };
-                let done = notices
+                let done: Vec<_> = notices
                     .iter()
-                    .any(|(_, _, notice)| claude_completion(notice, agent, tool));
+                    .filter(|(_, _, notice)| claude_completion(notice, agent, tool))
+                    .map(|&(at, entry, _)| (at, entry))
+                    .collect();
+                let (spawned_at, completed_at) = clocks(entries[called].as_ref(), called, &done);
                 children.push(ClaudeChild {
                     locator: ClaudeChildLocator {
                         pid: lead.pid,
@@ -882,8 +897,9 @@ mod linux {
                         child: (stat.st_dev, stat.st_ino),
                     },
                     title: title.chars().take(80).collect(),
-                    state: if done { "done" } else { "unknown" },
-                    usage: None,
+                    state: if done.is_empty() { "unknown" } else { "done" },
+                    spawned_at,
+                    completed_at,
                     version: Some(ClaudeChildVersion::from_stat(&stat)),
                 });
             }
@@ -2118,8 +2134,34 @@ mod tests {
 
     #[test]
     fn a_synthesized_row_is_unknown_until_the_exact_completion_notice() {
-        use crate::orchestrator::merge_claude_rows;
+        use crate::orchestrator::{claude_sighting, merge_claude_rows};
         let mut fixture = Fixture::new("state");
+        let clocks = |f: &Fixture| {
+            super::reset_test_counters();
+            let board = board_children(&f.lead(), &f.repo, None, || {}).unwrap();
+            assert_eq!(super::usage_reads(), 0);
+            assert_eq!(CHILD_READS.with(|n| n.get()), 0);
+            assert_eq!(board.children.len(), 1);
+            let want = (
+                board.children[0].spawned_at.clone(),
+                board.children[0].completed_at.clone(),
+            );
+            let (rows, _) = claude_sighting(
+                Vec::new(),
+                &"pane",
+                Some(&"pane"),
+                Some((board.turn, board.children)),
+            );
+            assert_eq!(
+                (
+                    rows[0]["started_at"].as_str().map(str::to_owned),
+                    rows[0]["ended_at"].as_str().map(str::to_owned),
+                ),
+                want
+            );
+            want
+        };
+        assert_eq!(clocks(&fixture), (None, None));
         let (spawn, end) = ("2026-11-22T01:00:00.000Z", "2026-11-22T01:05:00.000Z");
         fixture.lead[5] = stamped(fixture.lead[5].clone(), spawn);
         fixture.save();
@@ -2132,6 +2174,8 @@ mod tests {
             children[0].state
         };
         assert_eq!(state(&fixture), "unknown");
+        // No done notice: the completion is unknown, never guessed.
+        assert_eq!(clocks(&fixture), (Some(spawn.to_owned()), None));
         let cases = [
             notice(AGENT, "toolu_other", "completed"),
             notice(OLD_AGENT, TOOL, "completed"),
@@ -2141,6 +2185,7 @@ mod tests {
             fixture.lead.push(stamped(wrong, end));
             fixture.save();
             assert_eq!(state(&fixture), "unknown");
+            assert_eq!(clocks(&fixture), (Some(spawn.to_owned()), None));
             fixture.lead.pop();
         }
         // Tags quoted inside another child's summary or result are not a header.
@@ -2173,18 +2218,39 @@ mod tests {
         fixture.lead.push(notice(AGENT, TOOL, "completed"));
         fixture.save();
         assert_eq!(state(&fixture), "done");
+        // Done without a clock on the notice: done, completion still unknown.
+        assert_eq!(clocks(&fixture), (Some(spawn.to_owned()), None));
         let done = fixture.lead.len() - 1;
         let exact = stamped(notice(AGENT, TOOL, "completed"), end);
-        for (label, at) in [
-            ("exact", end),
-            ("before-spawn", "2026-11-22T00:59:59.999Z"),
-            ("not-rfc3339", "2026-11-22 01:05"),
-            ("garbage", "not a clock"),
+        for (label, at, want) in [
+            ("exact", end, Some(end.to_owned())),
+            ("before-spawn", "2026-11-22T00:59:59.999Z", None),
+            ("not-rfc3339", "2026-11-22 01:05", None),
+            ("garbage", "not a clock", None),
         ] {
             fixture.lead[done] = stamped(exact.clone(), at);
             fixture.save();
             assert_eq!(state(&fixture), "done", "{label}");
+            assert_eq!(clocks(&fixture), (Some(spawn.to_owned()), want), "{label}");
         }
+        fixture.lead[done] = exact.clone();
+        // A second exact notice must name the same instant, whatever its spelling.
+        for (other, want) in [
+            ("2026-11-22T10:05:00+09:00", Some(end.to_owned())),
+            ("2026-11-22T01:06:00.000Z", None),
+        ] {
+            fixture.lead.push(stamped(exact.clone(), other));
+            fixture.save();
+            assert_eq!(clocks(&fixture), (Some(spawn.to_owned()), want), "{other}");
+            fixture.lead.pop();
+        }
+        // An unparsable spawn is unknown; the exact notice after the call still counts.
+        fixture.lead[5] = stamped(fixture.lead[5].clone(), "yesterday");
+        fixture.save();
+        assert_eq!(clocks(&fixture), (None, Some(end.to_owned())));
+        fixture.lead[5] = stamped(fixture.lead[5].clone(), spawn);
+        fixture.lead[done] = notice(AGENT, TOOL, "completed");
+        fixture.save();
         // The legacy header without an output file still counts.
         fixture.lead.pop();
         fixture.lead.push(raw_notice(&format!(
@@ -2259,7 +2325,12 @@ mod tests {
         let id = |i: usize| format!("{:016x}", i + 1);
         let tool = |i: usize| format!("toolu_roster_{i}");
         let mut lead = vec![typed(&turn_prompt(TURN))];
-        lead.extend((0..SPAWNED).map(|i| agent_call(&tool(i), &format!("prompt {i}"))));
+        lead.extend((0..SPAWNED).map(|i| {
+            stamped(
+                agent_call(&tool(i), &format!("prompt {i}")),
+                "2026-11-21T07:59:00Z",
+            )
+        }));
         // Answers arrive in reverse, so the most recent ones are the first spawned.
         lead.extend((0..SPAWNED).rev().map(|i| spawned(&tool(i), &id(i))));
         fixture.lead = lead;
@@ -2299,7 +2370,9 @@ mod tests {
         assert_eq!(CHILD_READS.with(|n| n.get()), 0);
         assert!(plain.selected.is_none());
         assert!(plain.checked.is_none());
-        assert!(plain.children.iter().all(|c| c.usage.is_none()));
+        assert!(plain.children.iter().all(|c| {
+            c.spawned_at.as_deref() == Some("2026-11-21T07:59:00Z") && c.completed_at.is_none()
+        }));
 
         let newest = fixture.locator(&id(2));
         super::reset_test_counters();
@@ -2324,7 +2397,10 @@ mod tests {
         assert_eq!(response.usage, [7, 2, 0, 0]);
         assert!(read.checked == Some((oldest.clone(), version)));
         assert_eq!(read.children[0].version, Some(version));
-        assert!(read.children[0].usage.is_none());
+        assert_eq!(
+            read.children[0].spawned_at.as_deref(),
+            Some("2026-11-21T07:59:00Z")
+        );
 
         super::reset_test_counters();
         for _ in 0..3 {
@@ -2367,7 +2443,11 @@ mod tests {
             assert!(lost.selected.is_none());
             assert!(lost.checked.is_none());
             assert!(lost.children[0].version.is_none());
-            assert!(lost.children.iter().all(|child| child.usage.is_none()));
+            assert!(
+                lost.children
+                    .iter()
+                    .all(|child| child.spawned_at.as_deref() == Some("2026-11-21T07:59:00Z"))
+            );
             fs::write(&child_file, &original_body).unwrap();
         }
         append(&child_file, &incomplete);
@@ -2943,7 +3023,11 @@ mod tests {
         assert!(fs::metadata(fixture.lead_path()).unwrap().len() > LEAD_WINDOW);
         let locator = fixture.locator(AGENT);
         assert!(fixture.chat(&locator).as_deref() == Ok(OWN));
-        // Selected usage reads only the same windows.
+        // Roster clocks come from the lead window; selected usage reads only the same windows.
+        assert_eq!(
+            fixture.rows(None).unwrap()[0].spawned_at.as_deref(),
+            Some(spawn)
+        );
         let told = fixture.selected_response(&locator).unwrap();
         assert!(told["message_id"] == "msg_w");
         // A boundary that left the child window is not guessed.
@@ -2952,8 +3036,10 @@ mod tests {
         fixture.child = child;
         fixture.save();
         assert!(fixture.chat(&locator).err() == Some("no-boundary"));
-        // The child keeps its row; only its selected usage is withheld.
-        assert_eq!(fixture.rows(None).unwrap().len(), 1);
+        // The child keeps its row and lead clock; only its selected usage is withheld.
+        let rows = fixture.rows(None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].spawned_at.as_deref(), Some(spawn));
         assert_eq!(fixture.selected_response(&locator).unwrap(), Value::Null);
     }
 
