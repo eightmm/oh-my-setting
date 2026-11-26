@@ -87,6 +87,69 @@ fn targets(raw: &str, cwd: &Path) -> Result<Vec<String>, String> {
     }
     Ok(values)
 }
+// Lead starts and follow-ups have deterministic private addresses. A generic ask
+// may reuse an OMS thread, but cannot establish a Lead opener.
+fn assignment_op(op: &str, binding: &str) -> bool {
+    matches("ask-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}", op)
+        && matches("[0-9a-f]{64}", binding)
+        && op.ends_with(&storage::hash(format!("assignment-operation/{binding}")))
+}
+
+fn private_json(dir: &Directory, name: &str) -> Result<Value, String> {
+    let bytes = storage::read_run(&dir.path, name, 256 * 1024)?;
+    oms_context::parse_json_bounded(&bytes, 256 * 1024)
+        .map_err(|_| "invalid private operation record")?;
+    crate::value::from_slice(&bytes).map_err(|_| "invalid private operation record".into())
+}
+
+fn verify_lead_thread(
+    repo: &Path,
+    thread: &str,
+    operation: &str,
+    binding: &str,
+    provider: &str,
+) -> Result<(), String> {
+    const INVALID: &str = "invalid Lead conversation binding";
+    if !matches!(provider, "codex" | "claude" | "antigravity")
+        || !assignment_op(operation, binding)
+        || !matches("ask-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}", thread)
+        || thread.rsplit_once('-').map(|s| s.0) != operation.rsplit_once('-').map(|s| s.0)
+        || thread == operation
+    {
+        return Err(INVALID.into());
+    }
+    let dir = Directory::run(repo, thread, true)?;
+    let stat = rustix::fs::fstat(&dir.fd).map_err(|_| INVALID)?;
+    if stat.st_mode & 0o077 != 0 || storage::read_run(&dir.path, "status", 32)? != b"0\n" {
+        return Err(INVALID.into());
+    }
+    let meta = private_json(&dir, "meta.json")?;
+    let launch = private_json(&dir, "launch.json")?;
+    let targets = json!([provider]);
+    let context = json!({"include_memory":false,"include_task":false});
+    if meta["operation"] != thread
+        || meta["thread"] != thread
+        || meta["kind"] != "ask"
+        || meta["targets"] != targets
+        || meta["context_options"] != context
+        || meta["answer_storage"] != "operation"
+        || !meta["panel_assignment"]
+            .as_str()
+            .is_some_and(|b| assignment_op(thread, b))
+        || launch
+            != json!({"kind":"ask","targets":targets,"thread":thread,"new_thread":false,
+            "debate_rounds":0,"context_options":context,"preserve_current":true})
+    {
+        return Err(INVALID.into());
+    }
+    let current = Directory::run(repo, thread, true)?;
+    let named = rustix::fs::fstat(&current.fd).map_err(|_| INVALID)?;
+    if (stat.st_dev, stat.st_ino, stat.st_mode) != (named.st_dev, named.st_ino, named.st_mode) {
+        return Err(INVALID.into());
+    }
+    Ok(())
+}
+
 pub(super) use oms_command_operations::peer_operations::{age, status, updated_stamp};
 
 fn tail(dir: &Path) -> String {
@@ -438,6 +501,30 @@ impl Server<'_> {
         self.start_bound_peer(args, None, false)
     }
 
+    /// The caller resolves the active Room owner, its Lead slot and per-message
+    /// reservation. No tool argument grants this private launch mode.
+    pub(crate) fn start_lead_followup(
+        &self,
+        repo: &Path,
+        provider: &str,
+        prompt: &str,
+        operation: &str,
+        thread: &str,
+        binding: &str,
+    ) -> ToolResult {
+        let target = match provider {
+            "agy" | "antigravity" => "antigravity",
+            "codex" | "claude" => provider,
+            _ => return Err("error: invalid Lead provider".into()),
+        };
+        let args = json!({"repo":repo,"kind":"ask","providers":target,"prompt":prompt,
+            "thread":thread,"include_memory":false,"include_task":false});
+        if self.repo(&args)? != repo {
+            return Err("error: Lead repository changed".into());
+        }
+        self.start_bound_peer(&args, Some((operation, binding)), true)
+    }
+
     pub(crate) fn start_bound_peer(
         &self,
         args: &Value,
@@ -484,6 +571,7 @@ impl Server<'_> {
         let raw_prompt = args["prompt"]
             .as_text()
             .ok_or("error: prompt must be a string")?;
+        let followup = assignment.is_some() && preserve_current && args.get("thread").is_some();
         let prompt = raw_prompt
             .as_str()
             .ok_or("error: prompt must be valid UTF-8 text")?;
@@ -494,10 +582,14 @@ impl Server<'_> {
         if kind == "ask" && prompt.contains('\0') {
             return Err("error: prompt contains a NUL byte".into());
         }
-        let prompt = prompt.trim_matches(crate::whitespace);
-        if prompt.is_empty() {
+        if prompt.trim_matches(crate::whitespace).is_empty() {
             return Err("error: prompt is required: a consultation needs a question".into());
         }
+        let prompt = if followup {
+            prompt
+        } else {
+            prompt.trim_matches(crate::whitespace)
+        };
         let targets = targets(text(args, "providers", 16384)?, &self.caller_cwd)?;
         if kind == "advise" && targets.len() > 1 {
             return Err("error: advise asks one advisor; name a single provider".into());
@@ -550,6 +642,11 @@ impl Server<'_> {
         let dir_path = repo.join(RUN_ROOT).join(&op);
         let started = storage::now();
         let mut meta = json!({"operation":op,"kind":kind,"targets":targets,"started_at":started,"answer_storage":"operation","cancellation_supported":true,"title":prefix_chars(&prompt.split(crate::whitespace).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" "),160)});
+        if followup {
+            meta["title"] = json!("Lead conversation");
+            meta["lead_followup"] = json!(true);
+            meta["prompt_sha256"] = json!(storage::hash(prompt));
+        }
         if let Some((_, binding)) = assignment {
             meta["panel_assignment"] = json!(binding);
         }
@@ -562,7 +659,19 @@ impl Server<'_> {
         // Owner reconstruction uses only validated typed fields, not stored argv.
         let mut launch = json!({"kind":kind,"targets":targets,"thread":thread,"new_thread":new,"debate_rounds":rounds,"context_options":context});
         if preserve_current {
-            if assignment.is_none() || kind != "ask" || thread != op {
+            if followup {
+                let (operation, binding) = assignment.ok_or("error: missing Lead binding")?;
+                if kind != "ask"
+                    || targets.len() != 1
+                    || rounds != 0
+                    || new
+                    || context != json!({"include_memory":false,"include_task":false})
+                {
+                    return Err("error: invalid Lead follow-up".into());
+                }
+                verify_lead_thread(&repo, &thread, operation, binding, &targets[0])?;
+                launch["lead_followup"] = json!(binding);
+            } else if assignment.is_none() || kind != "ask" || thread != op {
                 return Err("error: invalid non-selecting assignment".into());
             }
             launch["preserve_current"] = json!(true);
@@ -575,7 +684,20 @@ impl Server<'_> {
                 "--id".into(),
                 thread.clone().into(),
             ];
-            if repo
+            if followup {
+                argv.extend(
+                    [
+                        "context",
+                        "--require-open",
+                        "--notes-only",
+                        "--turns",
+                        "1",
+                        "--max-bytes",
+                        "256",
+                    ]
+                    .map(OsString::from),
+                );
+            } else if repo
                 .join(".oms/threads")
                 .join(format!("{thread}.jsonl"))
                 .exists()
@@ -590,11 +712,8 @@ impl Server<'_> {
                     argv.push("--no-current".into());
                 }
             }
-            if self
-                .command(&argv, &self.caller_cwd, Duration::from_secs(5))?
-                .code
-                != 0
-            {
+            let witness = self.command(&argv, &self.caller_cwd, Duration::from_secs(5))?;
+            if witness.code != 0 || (followup && witness.stdout.is_empty()) {
                 return Err("error: council thread could not be opened".into());
             }
         }
@@ -1182,9 +1301,26 @@ fn owner_run(
         return Err(fail("invalid launch kind"));
     }
     let prompt_bytes = storage::read_run(&dir.path, "prompt.txt", 64 * 1024 + 1).map_err(fail)?;
-    let prompt = std::str::from_utf8(&prompt_bytes)
-        .map_err(fail)?
-        .trim_matches(crate::whitespace);
+    let followup = launch.get("lead_followup");
+    let protected = matches("ask-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}", op);
+    let meta = protected
+        .then(|| private_json(dir, "meta.json"))
+        .transpose()
+        .map_err(fail)?;
+    if meta
+        .as_ref()
+        .is_some_and(|m| m.get("lead_followup").is_some())
+        != followup.is_some()
+    {
+        return Err(fail("Lead follow-up launch disagrees with its receipt"));
+    }
+    let text = std::str::from_utf8(&prompt_bytes).map_err(fail)?;
+    let prompt = if followup.is_some() {
+        text.strip_suffix('\n')
+            .ok_or_else(|| fail("invalid stored Lead prompt"))?
+    } else {
+        text.trim_matches(crate::whitespace)
+    };
     if prompt.is_empty() || prompt.len() > 64 * 1024 || (kind == "ask" && prompt.contains('\0')) {
         return Err(fail("invalid stored prompt"));
     }
@@ -1262,12 +1398,44 @@ fn owner_run(
     if !thread.is_empty() {
         argv.extend(["--thread".into(), thread.into()]);
     }
+    if let Some(binding) = followup {
+        let binding = binding
+            .as_str()
+            .ok_or_else(|| fail("missing Lead binding"))?;
+        if launch["preserve_current"] != true
+            || selected.len() != 1
+            || kind != "ask"
+            || new
+            || rounds != 0
+            || launch["context_options"] != json!({"include_memory":false,"include_task":false})
+        {
+            return Err(fail("invalid stored Lead follow-up"));
+        }
+        let meta = meta
+            .as_ref()
+            .ok_or_else(|| fail("missing Lead follow-up receipt"))?;
+        if meta["lead_followup"] != true
+            || meta["operation"] != op
+            || meta["thread"] != thread
+            || meta["kind"] != kind
+            || meta["panel_assignment"] != binding
+            || meta["answer_storage"] != "operation"
+            || meta["targets"] != launch["targets"]
+            || meta["context_options"] != launch["context_options"]
+            || meta["prompt_sha256"] != storage::hash(prompt)
+        {
+            return Err(fail("Lead follow-up receipt changed"));
+        }
+        verify_lead_thread(repo, thread, op, binding, &selected[0]).map_err(fail)?;
+    } else if protected && thread != op {
+        return Err(fail("missing protected Lead follow-up"));
+    }
     if let Some(field) = launch.get("preserve_current") {
         let preserve = field
             .as_bool()
             .ok_or_else(|| fail("invalid stored preserve_current"))?;
         if preserve {
-            if kind != "ask" || thread != op {
+            if kind != "ask" || (thread != op && followup.is_none()) {
                 return Err(fail("invalid stored non-selecting thread"));
             }
             argv.push("--no-current".into());
@@ -1277,7 +1445,11 @@ fn owner_run(
         argv.push("--new-thread".into());
     }
     if kind == "ask" {
-        argv.extend(["--prompt".into(), prompt.into()]);
+        if followup.is_some() {
+            argv.push(format!("--prompt={prompt}").into());
+        } else {
+            argv.extend(["--prompt".into(), prompt.into()]);
+        }
         if rounds > 0 {
             argv.extend(["--debate".into(), rounds.to_string().into()]);
         }
@@ -1358,26 +1530,181 @@ mod tests {
     use oms_command_operations::peer_operations::status_with;
     use rustix::process::Pid;
 
-    #[test]
-    fn peer_status_observes_atomic_publication_before_reporting_failure_or_stall() {
-        use std::cell::Cell;
-        use std::os::unix::fs::{DirBuilderExt, symlink};
-
-        struct Temp(PathBuf);
-        impl Drop for Temp {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
+    struct Temp(PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    fn temp(name: &str) -> Temp {
+        use std::os::unix::fs::DirBuilderExt;
         let path = std::env::temp_dir()
             .canonicalize()
             .unwrap()
-            .join(format!("oms-peer-terminal-status-{}", std::process::id()));
+            .join(format!("oms-peer-{name}-{}", std::process::id()));
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)
             .unwrap();
-        let repo = Temp(path);
+        Temp(path)
+    }
+
+    #[test]
+    fn lead_followup_runs_only_a_bound_read_only_ask_on_the_existing_thread() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::AtomicBool;
+        let repo = temp("lead-followup");
+        let path = &repo.0;
+        let script = |name: &str, body: &[u8]| {
+            let out = path.join(name);
+            std::fs::write(&out, body).unwrap();
+            std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o700)).unwrap();
+            out
+        };
+        // Record child argv without executing a provider. The native peer contract
+        // separately exercises --no-current against real opened and closed logs.
+        let program = script(
+            "oms",
+            br#"#!/bin/sh
+if [ "$1" = thread ]; then
+    test "$6" = context && test "$7" = --require-open && cat .oms/threads/"$5".jsonl
+else
+    printf '%s\0' "$@" > received
+fi
+"#,
+        );
+        let owner = script(
+            "owner",
+            br#"#!/bin/sh
+echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
+"#,
+        );
+        let flag = AtomicBool::new(false);
+        let server = Server::new(
+            path,
+            path,
+            &flag,
+            crate::Config {
+                profile: crate::ToolProfile::ChatGptPanel,
+                tasks_extension: false,
+                peer_owner: owner,
+                oms_program: Some(program.clone()),
+            },
+        )
+        .unwrap();
+        let op = |binding: &str| {
+            format!(
+                "ask-20261126T010000Z-{}",
+                storage::hash(format!("assignment-operation/{binding}"))
+            )
+        };
+        let root_binding = storage::hash("root");
+        let child_binding = storage::hash("turn");
+        let thread = op(&root_binding);
+        let child = op(&child_binding);
+        let root = Directory::open(path, &format!("{RUN_ROOT}/{thread}"), true, true).unwrap();
+        let context = json!({"include_memory":false,"include_task":false});
+        let targets = json!(["antigravity"]);
+        let start = json!({"kind":"ask","targets":targets,"thread":thread,"new_thread":false,
+            "debate_rounds":0,"context_options":context,"preserve_current":true});
+        let meta = json!({"operation":thread,"kind":"ask","targets":targets,"thread":thread,
+            "context_options":context,"answer_storage":"operation","panel_assignment":root_binding});
+        root.atomic("meta.json", meta.to_string().as_bytes())
+            .unwrap();
+        root.atomic("launch.json", start.to_string().as_bytes())
+            .unwrap();
+        root.atomic("status", b"0\n").unwrap();
+        let threads = Directory::open(path, ".oms/threads", true, true).unwrap();
+        threads.atomic("CURRENT", b"foreground\n").unwrap();
+        let prompt = "--no-current\n같은 대화의 질문  ";
+        let send = |provider| {
+            server.start_lead_followup(path, provider, prompt, &child, &thread, &child_binding)
+        };
+        let no_effect = || {
+            assert!(!path.join(RUN_ROOT).join(&child).exists());
+            assert!(!path.join("received").exists());
+            assert_eq!(
+                std::fs::read(threads.path.join("CURRENT")).unwrap(),
+                b"foreground\n"
+            );
+        };
+        // Missing original log cannot be implicitly recreated.
+        assert!(send("agy").is_err());
+        no_effect();
+        threads
+            .atomic(&format!("{thread}.jsonl"), b"existing conversation\n")
+            .unwrap();
+        assert!(send("codex").is_err());
+        assert!(send("agy,codex").is_err());
+        assert!(
+            server
+                .start_lead_followup(path, "agy", prompt, &child, &thread, &root_binding)
+                .is_err()
+        );
+        no_effect();
+        let started = send("agy").unwrap();
+        let handle: Value = crate::value::from_str(started.as_str().unwrap()).unwrap();
+        assert_eq!(handle["operation"], child);
+        assert_eq!(handle["thread"], thread);
+        let dir = Directory::run(path, &child, true).unwrap();
+        assert_eq!(
+            private_json(&dir, "meta.json").unwrap()["title"],
+            "Lead conversation"
+        );
+        let original_prompt = storage::read_run(&dir.path, "prompt.txt", 8192).unwrap();
+        dir.atomic("prompt.txt", b"modified\n").unwrap();
+        let run = || owner_run(Some(&program), path, path, &child, &dir);
+        assert!(run().is_err());
+        assert!(!path.join("received").exists());
+        dir.atomic("prompt.txt", &original_prompt).unwrap();
+        let mut altered = start.clone();
+        altered["preserve_current"] = json!(false);
+        root.atomic("launch.json", altered.to_string().as_bytes())
+            .unwrap();
+        assert!(run().is_err());
+        assert!(!path.join("received").exists());
+        root.atomic("launch.json", start.to_string().as_bytes())
+            .unwrap();
+        let child_launch = private_json(&dir, "launch.json").unwrap();
+        let mut downgraded = start.clone();
+        downgraded["thread"] = json!(child);
+        dir.atomic("launch.json", downgraded.to_string().as_bytes())
+            .unwrap();
+        assert!(run().is_err());
+        assert!(!path.join("received").exists());
+        dir.atomic("launch.json", child_launch.to_string().as_bytes())
+            .unwrap();
+        run().unwrap();
+        let received = std::fs::read_to_string(path.join("received")).unwrap();
+        let argv: Vec<_> = received.split_terminator('\0').collect();
+        assert_eq!(argv[0], "peer-ask");
+        assert!(argv.windows(2).any(|a| a == ["--thread", thread.as_str()]));
+        assert!(argv.windows(2).any(|a| a == ["--providers", "antigravity"]));
+        for required in [
+            "--no-current",
+            "--no-memory",
+            "--no-task",
+            &format!("--prompt={prompt}"),
+        ] {
+            assert!(argv.contains(&required));
+        }
+        assert!(send("agy").is_err());
+        assert_eq!(
+            std::fs::read(threads.path.join("CURRENT")).unwrap(),
+            b"foreground\n"
+        );
+        assert_eq!(
+            std::fs::read(threads.path.join(format!("{thread}.jsonl"))).unwrap(),
+            b"existing conversation\n"
+        );
+    }
+
+    #[test]
+    fn peer_status_observes_atomic_publication_before_reporting_failure_or_stall() {
+        use std::cell::Cell;
+        use std::os::unix::fs::symlink;
+
+        let repo = temp("terminal-status");
         let dir = Directory::open(
             &repo.0,
             &format!("{RUN_ROOT}/advise-20261123T215445Z-aabbccdd"),

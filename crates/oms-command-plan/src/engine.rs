@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_general_category::{GeneralCategory, get_general_category};
 
+pub(crate) const MAX_BRIEF: usize = 64 * 1024;
 pub const STATES: &[&str] = &[
     "ready",
     "claimed",
@@ -626,6 +627,12 @@ impl<'a> Plan<'a> {
             require(valid_id(id), "plan contains invalid task id")?;
             let mut task = task.clone();
             task.object()?;
+            if let Some(brief) = task.opt("brief") {
+                require(
+                    brief.str()?.len() <= MAX_BRIEF,
+                    "task brief exceeds 65536 bytes",
+                )?;
+            }
             assignment(task.opt("assignment").unwrap_or(&empty()))?;
             task_defaults(&mut task)?;
             crate::decision::validate(&self.store, &task)?;
@@ -2099,6 +2106,9 @@ impl<'a> Plan<'a> {
         if let Some(issue) = issue {
             task.set("issue", string(issue))?;
         }
+        if req.has("brief-file") {
+            task.set("brief", string(self.read_brief(req)?))?;
+        }
         let mut graph = s.ordered()?;
         graph.push(task.clone());
         validate_graph(&graph)?;
@@ -2213,8 +2223,9 @@ impl<'a> Plan<'a> {
         let mut t = s.task(id)?.clone();
         self.exact_cas(req, s, &t, "amendment")?;
         require(
-            matches!(s.plan.get("project_contract"), Value::Null),
-            "proposal-bound tasks cannot be amended",
+            matches!(s.plan.get("project_contract"), Value::Null)
+                || req.has("brief-file") && !req.has("allowed") && !req.has("verify"),
+            "proposal-bound tasks may only amend their brief",
         )?;
         require(
             ["ready", "blocked"].contains(&t.text("state")) && !t.get("lease_id").truth(),
@@ -2223,8 +2234,8 @@ impl<'a> Plan<'a> {
         self.live_veto(s, &[id], "amendment", true)?;
         let reason = reason(req, "amendment")?;
         require(
-            req.has("allowed") || req.has("verify"),
-            "amend requires allowed or verify",
+            req.has("allowed") || req.has("verify") || req.has("brief-file"),
+            "amend requires allowed, verify or brief-file",
         )?;
         let before = object([
             (
@@ -2234,6 +2245,7 @@ impl<'a> Plan<'a> {
                     .unwrap_or(Value::Array(vec![])),
             ),
             ("verify", t.opt("verify").cloned().unwrap_or(string(""))),
+            ("brief", t.opt("brief").cloned().unwrap_or(string(""))),
         ]);
         let allowed = if req.has("allowed") {
             clean_paths(&split_list(req.text("allowed")?))?
@@ -2260,9 +2272,18 @@ impl<'a> Plan<'a> {
         let after = object([
             ("allowed_paths", list(allowed.iter().map(String::as_str))),
             ("verify", string(verify)),
+            (
+                "brief",
+                if req.has("brief-file") {
+                    string(self.read_brief(req)?)
+                } else {
+                    before.get("brief").clone()
+                },
+            ),
         ]);
         t.set("allowed_paths", after.get("allowed_paths").clone())?;
         t.set("verify", after.get("verify").clone())?;
+        t.set("brief", after.get("brief").clone())?;
         history(
             &mut t,
             object([
@@ -2277,6 +2298,28 @@ impl<'a> Plan<'a> {
         s.put(id, t)?;
         self.save(s)?;
         Ok(Response::text(hash))
+    }
+    fn read_brief(&self, req: &Request) -> Result<String> {
+        let path = req
+            .path("brief-file")
+            .ok_or_else(|| error("--brief-file requires a path"))?;
+        let absolute = crate::cli::physical_leaf(&self.context.cwd, path.as_os_str());
+        let root = crate::storage::Store::open(
+            absolute
+                .parent()
+                .ok_or_else(|| error("brief parent unavailable"))?,
+        )?
+        .with_group_resolver(self.services.group_membership_resolver());
+        let bytes = root.read(
+            absolute
+                .file_name()
+                .ok_or_else(|| error("brief file name unavailable"))?,
+            MAX_BRIEF,
+        )?;
+        screen(&bytes)?;
+        let brief = String::from_utf8(bytes).map_err(|_| error("brief file must be UTF-8"))?;
+        require(!brief.trim().is_empty(), "brief file must not be empty")?;
+        Ok(brief)
     }
     fn cancel(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
         self.canonical_existing(s)?;

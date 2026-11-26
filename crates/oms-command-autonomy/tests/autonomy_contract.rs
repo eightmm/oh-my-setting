@@ -203,7 +203,12 @@ impl FeedbackMock {
         counter.load(std::sync::atomic::Ordering::SeqCst)
     }
     fn plan(&self, repo: &Path, args: &[&str]) -> serde_json::Value {
-        let args = args.iter().map(OsString::from).collect::<Vec<_>>();
+        let mut args = args.iter().map(OsString::from).collect::<Vec<_>>();
+        if args.first().is_some_and(|a| a == "add") {
+            let path = repo.join(".oms/fixture-brief");
+            write_private(&path, b"Implement the scoped fixture work.");
+            args.extend(["--brief-file".into(), path.into_os_string()]);
+        }
         let (code, out, err) =
             oms_command_plan::run_with_services(&args, repo, &AtomicBool::new(false), self);
         assert_eq!(code, 0, "{args:?}: {}", String::from_utf8_lossy(&err));
@@ -292,6 +297,43 @@ impl FeedbackMock {
             self,
         )
     }
+}
+
+#[test]
+fn plan_run_refuses_missing_brief_before_provider() {
+    if scrubbed_child("plan_run_refuses_missing_brief_before_provider") {
+        return;
+    }
+    let mock = FeedbackMock::new("missing-brief");
+    let repo = mock.fixture();
+    let args = [
+        "add",
+        "--id",
+        "bare",
+        "--title",
+        "bare",
+        "--allowed",
+        "src",
+        "--verify",
+        "true",
+    ]
+    .map(OsString::from);
+    assert_eq!(
+        oms_command_plan::run_with_services(&args, &repo.0, &AtomicBool::new(false), &mock).0,
+        0
+    );
+    let out = run_with_services(
+        "plan-run",
+        &["--to".into(), "codex".into(), "--id".into(), "bare".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_ne!(out.0, 0);
+    assert!(
+        String::from_utf8_lossy(&out.2).contains("agent-plan amend --id bare --brief-file PATH")
+    );
+    assert_eq!(FeedbackMock::count(&mock.sends), 0);
 }
 impl oms_command_plan::Services for FeedbackMock {}
 impl Services for FeedbackMock {
@@ -2078,7 +2120,7 @@ impl Repo {
 }
 const ORIGIN: &str = "git@github.com:example-org/example-repo.git";
 const ISSUE: &str = "example-org/example-repo#7";
-const ANSWER: &str = r#"{"tasks": [{"id": "t1", "title": "one", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": []}]}"#;
+const ANSWER: &str = r#"{"tasks": [{"id": "t1", "title": "one", "brief": "Implement the scoped task", "allowed": ["src"], "verify": "bash tests/ok.sh", "depends": []}]}"#;
 
 fn intake(tool: &str, repo: &Repo, services: &Planner, args: &[&str]) -> (i32, String, String) {
     let (code, out, err) = run_with_services(

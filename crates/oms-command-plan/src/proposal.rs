@@ -286,6 +286,7 @@ impl Plan<'_> {
                 &["id", "title", "allowed", "verify", "depends"],
                 &[
                     "assignment",
+                    "brief",
                     "covers",
                     "resources",
                     "contracts",
@@ -358,6 +359,15 @@ impl Plan<'_> {
                 route,
                 &self.context.ts,
             )?;
+            if let Some(brief) = row.opt("brief") {
+                let brief = brief.str()?;
+                require(
+                    !brief.trim().is_empty() && brief.len() <= 65536,
+                    "proposal task brief must be nonempty and at most 65536 bytes",
+                )?;
+                screen(brief.as_bytes())?;
+                t.set("brief", string(brief))?;
+            }
             if let Some(reference) = p.opt("discussion") {
                 t.set("discussion", reference.clone())?;
             }
@@ -500,12 +510,13 @@ impl Plan<'_> {
                     "contracts",
                     "priority",
                     "issue",
+                    "brief",
                 ] {
                     let default = if field == "priority" {
                         number(0)
                     } else if field == "assignment" {
                         empty()
-                    } else if ["verify", "role", "issue"].contains(&field) {
+                    } else if ["verify", "role", "issue", "brief"].contains(&field) {
                         string("")
                     } else {
                         Value::Array(vec![])

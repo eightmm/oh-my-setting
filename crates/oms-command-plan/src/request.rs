@@ -150,6 +150,7 @@ pub(crate) const NAMES: &[&str] = &[
     "file",
     "id",
     "title",
+    "brief-file",
     "goal",
     "provider",
     "ttl",
@@ -358,6 +359,7 @@ impl Request {
             ("all-inactive", self.action == Cancel),
             ("discovered-from", self.action == Add),
             ("issue", matches!(self.action, Add | Link)),
+            ("brief-file", matches!(self.action, Add | Amend)),
             ("limit", self.action == Ready),
             ("reuse-pass", self.action == Accept),
             ("landed-commit", self.action == Finish),
@@ -504,6 +506,7 @@ impl Request {
                 "expected-task-sha256",
                 "allowed",
                 "verify",
+                "brief-file",
                 "reason",
             ]),
             Cancel | RelocateDecision => Some(vec![
