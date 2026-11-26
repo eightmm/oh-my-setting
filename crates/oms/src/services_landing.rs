@@ -1250,10 +1250,8 @@ fn dirty_reason(worktree: &Path, interrupted: &AtomicBool) -> Option<String> {
 }
 const OUTPUT_DIGEST_DIR: &str = ".oms/artifacts/output-digest";
 
-/// Check only the capture store. An inaccessible or replaced component
-/// cannot prove that forcing worktree removal would preserve its evidence.
-fn has_output_digest(worktree: &Path) -> rustix::io::Result<bool> {
-    use rustix::fs::{Dir, Mode, OFlags, open, openat};
+fn open_output_digest(worktree: &Path) -> rustix::io::Result<Option<std::os::fd::OwnedFd>> {
+    use rustix::fs::{Mode, OFlags, open, openat};
     use rustix::io::Errno;
 
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -1261,16 +1259,93 @@ fn has_output_digest(worktree: &Path) -> rustix::io::Result<bool> {
     for component in OUTPUT_DIGEST_DIR.split('/') {
         dir = match openat(&dir, component, flags, Mode::empty()) {
             Ok(child) => child,
-            Err(Errno::NOENT) => return Ok(false),
+            Err(Errno::NOENT) => return Ok(None),
             Err(error) => return Err(error),
         };
     }
-    for entry in Dir::new(dir)? {
+    Ok(Some(dir))
+}
+
+/// Check only the capture store. An inaccessible or replaced component
+/// cannot prove that forcing worktree removal would preserve its evidence.
+fn has_output_digest(worktree: &Path) -> rustix::io::Result<bool> {
+    let Some(dir) = open_output_digest(worktree)? else {
+        return Ok(false);
+    };
+    for entry in rustix::fs::Dir::new(dir)? {
         if !matches!(entry?.file_name().to_bytes(), b"." | b"..") {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+fn stat_mtime(stat: &rustix::fs::Stat) -> Option<std::time::SystemTime> {
+    let nsecs = u32::try_from(stat.st_mtime_nsec)
+        .ok()
+        .filter(|&n| n < 1_000_000_000)?;
+    let secs = stat.st_mtime;
+    if secs >= 0 {
+        std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(secs as u64, nsecs))
+    } else {
+        std::time::UNIX_EPOCH
+            .checked_sub(std::time::Duration::new(secs.unsigned_abs(), 0))?
+            .checked_add(std::time::Duration::new(0, nsecs))
+    }
+}
+
+fn output_digest_recently_modified(worktree: &Path, now: std::time::SystemTime) -> bool {
+    use rustix::fs::{AtFlags, Dir, FileType, fstat, statat};
+
+    let Ok(Some(dir)) = open_output_digest(worktree) else {
+        return true;
+    };
+    let Ok(dir_stat) = fstat(&dir) else {
+        return true;
+    };
+    let Some(mut newest) = stat_mtime(&dir_stat) else {
+        return true;
+    };
+    let Ok(entries) = Dir::read_from(&dir) else {
+        return true;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        let Ok(stat) = statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) else {
+            return true;
+        };
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            return true;
+        }
+        let Some(mtime) = stat_mtime(&stat) else {
+            return true;
+        };
+        if mtime > newest {
+            newest = mtime;
+        }
+    }
+    mtime_recently_modified(newest, now)
+}
+
+fn head_integrated(worktree: &Path, interrupted: &AtomicBool) -> bool {
+    let Some(integration_ref) = ["refs/remotes/origin/main", "refs/remotes/origin/HEAD"]
+        .into_iter()
+        .find(|r| git(worktree, &["rev-parse", "-q", "--verify", r], interrupted).is_ok())
+    else {
+        return false;
+    };
+    git(
+        worktree,
+        &["merge-base", "--is-ancestor", "HEAD", integration_ref],
+        interrupted,
+    )
+    .is_ok()
 }
 
 fn keep_reason(
@@ -1334,22 +1409,36 @@ fn keep_reason(
             &head[..head.len().min(12)]
         ));
     }
+    let now = std::time::SystemTime::now();
+    let mut integrated = None;
     let oms = worktree.join(".oms");
     if plain_dir(&oms).is_some() {
-        for record in [
-            "plan/tasks.json",
-            "failures.jsonl",
-            "landings.jsonl",
-            "artifacts/index.jsonl",
-        ] {
+        for record in ["plan/tasks.json", "failures.jsonl", "landings.jsonl"] {
             if std::fs::metadata(oms.join(record)).is_ok_and(|m| m.len() > 0) {
                 return Some(format!("holds .oms/{record}"));
+            }
+        }
+        let index = oms.join("artifacts/index.jsonl");
+        if std::fs::metadata(&index).is_ok_and(|m| m.len() > 0) {
+            let idle = plain_dir(&oms.join("artifacts")).is_some()
+                && std::fs::symlink_metadata(&index)
+                    .is_ok_and(|m| m.is_file() && !recently_modified(&m, now));
+            if !idle || !*integrated.get_or_insert_with(|| head_integrated(worktree, interrupted)) {
+                return Some("holds .oms/artifacts/index.jsonl".into());
             }
         }
     }
     match has_output_digest(worktree) {
         Ok(false) => None,
-        Ok(true) => Some(format!("holds {OUTPUT_DIGEST_DIR}")),
+        Ok(true) => {
+            if !output_digest_recently_modified(worktree, now)
+                && *integrated.get_or_insert_with(|| head_integrated(worktree, interrupted))
+            {
+                None
+            } else {
+                Some(format!("holds {OUTPUT_DIGEST_DIR}"))
+            }
+        }
         Err(_) => Some(format!("{OUTPUT_DIGEST_DIR} is unsafe or unreadable")),
     }
 }
@@ -1592,14 +1681,18 @@ fn temp_dirs(
     Ok(removed_dirs)
 }
 
-fn recently_modified(meta: &std::fs::Metadata, now: std::time::SystemTime) -> bool {
-    let Ok(mtime) = meta.modified() else {
-        return true;
-    };
+fn mtime_recently_modified(mtime: std::time::SystemTime, now: std::time::SystemTime) -> bool {
     match now.duration_since(mtime) {
         Ok(age) => age < std::time::Duration::from_secs(BUILD_OUTPUT_IDLE_SECS),
         Err(_) => true,
     }
+}
+
+fn recently_modified(meta: &std::fs::Metadata, now: std::time::SystemTime) -> bool {
+    let Ok(mtime) = meta.modified() else {
+        return true;
+    };
+    mtime_recently_modified(mtime, now)
 }
 
 fn has_cargo_cachedir_tag(target: &Path, uid: u32) -> bool {
