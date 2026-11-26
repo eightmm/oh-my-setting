@@ -637,6 +637,20 @@ impl Plan<'_> {
     pub(crate) fn status_value(&self, s: &mut Snapshot) -> Result<Value> {
         let tasks = s.ordered()?;
         let count = tasks.len();
+        // Reuse the selector's scope/resource checks; these observations do not
+        // replace route, account, lease or provider admission at execution time.
+        // Legacy status can still describe records whose selector-only fields
+        // are unavailable. Fail closed for this optional detail, not the status.
+        let eligible =
+            self.scheduled(&Request::new(Action::Ready), s)
+                .ok()
+                .map(|(tasks, _, _, _)| {
+                    tasks
+                        .iter()
+                        .map(|task| task.text("id").to_owned())
+                        .collect::<BTreeSet<_>>()
+                });
+        let mut readiness = Vec::new();
         let mut by = BTreeMap::<String, usize>::new();
         let mut actionable = Vec::new();
         let mut stale = Vec::new();
@@ -647,6 +661,48 @@ impl Plan<'_> {
         let mut contract_stale = Vec::new();
         for t in &tasks {
             let view = self.projected_task(s, t, false)?;
+            if let Some(eligible) = &eligible
+                && readiness.len() < 20
+            {
+                let brief_present = !t.text("brief").trim().is_empty();
+                let reason = match t.text("state") {
+                    "done" if view.text("state") == "blocked" => "completion-unverified",
+                    "done" => "recorded-done",
+                    "cancelled" => "cancelled-not-verified",
+                    "failed" => "task-failed",
+                    "blocked" => "task-blocked",
+                    "review" => "parent-review-pending",
+                    "landing" => "landing-in-progress",
+                    "claimed" | "running" if view.get("claim_expired").truth() => "claim-expired",
+                    "claimed" | "running" => "attempt-active",
+                    "ready" if view.get("contract_stale").truth() => "contract-stale",
+                    "ready" if s.contract.get("satisfied") != &Value::Bool(true) => {
+                        "plan-contract-blocked"
+                    }
+                    "ready" if !s.deps_done(t) => "dependencies-unfinished",
+                    "ready"
+                        if t.get("executor_id").truth()
+                            || t.get("executor_soul_sha256").truth() =>
+                    {
+                        "retired-executor"
+                    }
+                    "ready" if !brief_present => "brief-required",
+                    "ready" if !eligible.contains(t.text("id")) => "scope-conflict",
+                    "ready" => "selection-ready",
+                    _ => "reason-unreported",
+                };
+                readiness.push(object([
+                    ("id", t.get("id").clone()),
+                    ("title", t.get("title").clone()),
+                    ("state", view.get("state").clone()),
+                    ("issue", t.get("issue").clone()),
+                    (
+                        "selection_eligible",
+                        Value::Bool(brief_present && eligible.contains(t.text("id"))),
+                    ),
+                    ("reason", string(reason)),
+                ]));
+            }
             if view.get("contract_stale").truth() {
                 contract_stale.push(t.text("id").to_owned());
             }
@@ -745,6 +801,22 @@ impl Plan<'_> {
             ("unfinished_count", number(unfinished)),
             ("by_state", states),
             ("actionable", list(actionable.iter().map(String::as_str))),
+            (
+                "task_readiness",
+                if eligible.is_some() {
+                    Value::Array(readiness)
+                } else {
+                    Value::Null
+                },
+            ),
+            (
+                "task_readiness_omitted",
+                if eligible.is_some() {
+                    number(count.saturating_sub(20))
+                } else {
+                    Value::Null
+                },
+            ),
             ("contract", s.contract.clone()),
             ("stale", Value::Array(stale)),
             ("stale_review", Value::Array(reviews)),

@@ -38,6 +38,20 @@ pub(super) fn validate(name: &str, args: &Value, provider: Option<&str>) -> Pane
             return Err("Select a Lead and supply a valid message ID or page cursor.".into());
         }
     }
+    if let Some(cursor) = args.get("answerPage") {
+        if provider.is_none()
+            || !args["projectKey"].is_string()
+            || !args["leadRequestId"].as_str().is_some_and(uuid)
+            || args.get("turnId").is_none()
+            || args.get("before").is_some()
+        {
+            return Err("A full answer requires the exact project, Lead and message ID.".into());
+        }
+        super::output_position(
+            cursor.as_str().ok_or("Invalid output page cursor.")?,
+            crate::MAX_ANSWER,
+        )?;
+    }
     if name == SEND_LEAD {
         if provider.is_none()
             || !args["projectKey"].is_string()
@@ -359,6 +373,169 @@ impl<'a> Conversation<'a> {
                 .map_err(|_| INVALID)?;
         }
         Ok(())
+    }
+    pub fn latest(
+        &self,
+        server: &Server<'_>,
+        check: impl Fn() -> PanelResult<()>,
+    ) -> PanelResult<Value> {
+        let Some(id) = self.head()? else {
+            return Ok(Value::Null);
+        };
+        let record = self.record(&id)?.ok_or(INVALID)?;
+        let status = self.observe(server, &record)?.0;
+        self.bound()?;
+        check()?;
+        if self.head()?.as_deref() != Some(id.as_str())
+            || self.record(&id)?.as_ref() != Some(&record)
+        {
+            return Err(INVALID.into());
+        }
+        Ok(
+            json!({"turnId":id,"status":status,"submittedAt":record["at"],"lastObservedAt":crate::storage::now()}),
+        )
+    }
+
+    pub fn answer_page(
+        &self,
+        server: &Server<'_>,
+        args: &Value,
+        check: impl Fn() -> PanelResult<()>,
+    ) -> PanelResult<Value> {
+        let id = args["turnId"].as_str().ok_or(INVALID)?;
+        let record = self
+            .record(id)?
+            .ok_or("The selected Lead message is unavailable.")?;
+        if self.observe(server, &record)?.0 != "replied" {
+            return Err("The selected Lead message has no verified completed answer.".into());
+        }
+        let binding = record["binding"].as_str().ok_or(INVALID)?;
+        let operation = assignment_address(self.lead, binding).ok_or(INVALID)?;
+        let result = server
+            .peer_result(&json!({"repo":self.repo,"operation":operation}))
+            .map_err(|_| INVALID)?;
+        let result =
+            crate::value::from_str(result.as_str().ok_or(INVALID)?).map_err(|_| INVALID)?;
+        let details = result["answer_details"].as_array().ok_or(INVALID)?;
+        let [detail] = details.as_slice() else {
+            return Err(INVALID.into());
+        };
+        if result["operation"] != operation
+            || result["exit"] != 0
+            || detail["exit"] != "0"
+            || detail["read_arguments"]["operation"] != operation
+        {
+            return Err(INVALID.into());
+        }
+        let reference = detail["read_arguments"]["answer_ref"]
+            .as_str()
+            .ok_or(INVALID)?;
+        let (name, _) = reference.rsplit_once(':').ok_or(INVALID)?;
+        if !crate::answer_name(name) {
+            return Err(INVALID.into());
+        }
+        let operation_dir = Directory::run(self.repo, &operation, true).map_err(|_| INVALID)?;
+        let directory_identity = |dir: &Directory| {
+            fs::fstat(&dir.fd)
+                .map(|s| (s.st_dev, s.st_ino, s.st_mode))
+                .map_err(|_| INVALID)
+        };
+        let operation_identity = directory_identity(&operation_dir)?;
+        let answers = Directory::open(
+            self.repo,
+            &format!("{RUN_ROOT}/{operation}/answers"),
+            false,
+            true,
+        )
+        .map_err(|_| INVALID)?;
+        let stat = || fs::statat(&answers.fd, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| INVALID);
+        let before = stat()?;
+        if FileType::from_raw_mode(before.st_mode) != FileType::RegularFile
+            || before.st_mode & 0o077 != 0
+        {
+            return Err(INVALID.into());
+        }
+        let identity = |s: &rustix::fs::Stat| (s.st_dev, s.st_ino, s.st_mode, s.st_size);
+        let revision = hash(
+            json!([
+                self.scope,
+                binding,
+                reference,
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_size,
+                [
+                    operation_identity.0,
+                    operation_identity.1,
+                    operation_identity.2
+                ]
+            ])
+            .to_string(),
+        );
+        let cursor = args["answerPage"].as_str().ok_or(INVALID)?;
+        let offset = super::output_position(cursor, crate::MAX_ANSWER)?;
+        super::check_output_cursor(cursor, self.scope, &revision, offset)?;
+        let page = server.peer_result(&json!({"repo":self.repo,"operation":operation,"answer_ref":reference,"answer_offset":offset,"answer_limit":8192}))
+            .map_err(|_| "The retained answer changed. Reopen the result.")?;
+        let page = crate::value::from_str(page.as_str().ok_or(INVALID)?).map_err(|_| INVALID)?;
+        let text = page["answer"].as_str().ok_or(INVALID)?;
+        let end = page["answer_end"].as_u64().ok_or(INVALID)? as usize;
+        let total = page["answer_bytes"].as_u64().ok_or(INVALID)? as usize;
+        if page["operation"] != operation
+            || page["exit"] != 0
+            || page["artifact_exit"] != "0"
+            || page["answer_ref"] != reference
+            || page["answer_sha256"] != detail["answer_sha256"]
+            || page["answer_offset"].as_u64() != Some(offset as u64)
+            || text.len() > 8192
+            || end != offset + text.len()
+            || end > total
+            || page["has_more"] != (end < total)
+            || identity(&stat()?) != identity(&before)
+        {
+            return Err(INVALID.into());
+        }
+        crate::output::outbound(text.as_bytes(), &Value::Null)
+            .map_err(|_| "OMS withheld this Lead answer during its outbound scan.")?;
+        self.bound()?;
+        check()?;
+        let checked = checked_peer_directory(
+            self.repo,
+            self.lead,
+            &operation,
+            self.thread,
+            binding,
+            true,
+            Some((record["digest"].as_str().ok_or(INVALID)?, &record["route"])),
+        )?
+        .ok_or(INVALID)?;
+        if self.record(id)?.as_ref() != Some(&record)
+            || operation_identity
+                != directory_identity(
+                    &Directory::run(self.repo, &operation, true).map_err(|_| INVALID)?,
+                )?
+            || directory_identity(&answers)?
+                != directory_identity(
+                    &Directory::open(
+                        self.repo,
+                        &format!("{RUN_ROOT}/{operation}/answers"),
+                        false,
+                        true,
+                    )
+                    .map_err(|_| INVALID)?,
+                )?
+            || crate::peer::status(&checked) != ("done", Some(0))
+        {
+            return Err(INVALID.into());
+        }
+        Ok(
+            json!({"turnId":id,"text":text,"offset":offset,"bytes":text.len(),"totalBytes":total,
+            "digest":page["answer_sha256"],"nextCursor":(end<total).then(||super::output_cursor(self.scope,&revision,end)),
+            "hasMore":end<total,"source":"recorded-answer",
+            "handoff":{"room":self.lead["room"],"participant":self.lead["participant"],"provider":self.provider,
+                "leadRequestId":self.lead["request"],"turnId":id,"operation":operation}}),
+        )
     }
     pub fn exchange(
         &self,

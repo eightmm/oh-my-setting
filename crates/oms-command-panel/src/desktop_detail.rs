@@ -186,6 +186,7 @@ pub(super) fn chat(
             record,
             section,
             options.integer("page", 1, 1, 10000)?,
+            options.has("evidence-full"),
             services,
             stop,
         )?;
@@ -280,6 +281,20 @@ pub(super) fn worker_output(
     };
     let proof = select()?;
     let attempt = &proof.2;
+    if options.has("page") {
+        let number = options.integer("page", 1, 1, 10000)?;
+        if let Some(mut page) = crate::desktop_evidence::worker_answer_page(repo, attempt, number)?
+        {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) || select()? != proof {
+                return Err(Error::new("worker output binding changed"));
+            }
+            let text = page.as_object_mut().and_then(|o| o.remove("text"));
+            return Ok(
+                json!({"room":id,"leadAttempt":lead,"workerAttempt":worker,"status":"complete",
+                "text":text,"source":page["source"],"truncated":page["hasMore"],"page":page}),
+            );
+        }
+    }
     let (status, text, source, truncated) =
         match crate::desktop_evidence::worker_answer(repo, attempt) {
             Ok(Some((text, source, truncated))) => {

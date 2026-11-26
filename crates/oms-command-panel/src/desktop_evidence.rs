@@ -9,6 +9,7 @@ use std::{
 
 const PAGE_SIZE: usize = 20;
 const LINE_CHARS: usize = 200;
+const ANSWER_PAGE_BYTES: usize = 8192;
 
 pub(super) fn sections(_attempt: &Value) -> Value {
     json!(["info", "events"])
@@ -107,6 +108,16 @@ pub(super) fn worker_answer(
     repo: &Path,
     attempt: &Value,
 ) -> Result<Option<(String, &'static str, bool)>> {
+    Ok(worker_body(repo, attempt)?.map(|body| {
+        let mut text = body.text;
+        let length = text.len();
+        text.truncate(text.floor_char_boundary(16 * 1024));
+        let truncated = text.len() != length;
+        (text, body.source, truncated)
+    }))
+}
+
+fn worker_body(repo: &Path, attempt: &Value) -> Result<Option<Body>> {
     let store = Store::open(repo)?;
     let id = attempt["attempt_id"]
         .as_str()
@@ -121,14 +132,56 @@ pub(super) fn worker_answer(
     } else {
         Vec::new()
     };
+    recorded_answer(&store, id, attempt, native.as_ref(), &index)
+}
+
+pub(super) fn worker_answer_page(
+    repo: &Path,
+    attempt: &Value,
+    page: usize,
+) -> Result<Option<Value>> {
+    worker_body(repo, attempt)?
+        .map(|body| body_page(&body, attempt, page))
+        .transpose()
+}
+
+fn body_page(body: &Body, attempt: &Value, page: usize) -> Result<Value> {
+    if !(1..=10000).contains(&page) {
+        return Err(Error::new("Evidence page unavailable"));
+    }
+    let mut offset = 0;
+    for _ in 1..page {
+        if offset == body.text.len() {
+            return Err(Error::new("Evidence page unavailable"));
+        }
+        offset = body
+            .text
+            .floor_char_boundary((offset + ANSWER_PAGE_BYTES).min(body.text.len()));
+    }
+    let end = body
+        .text
+        .floor_char_boundary((offset + ANSWER_PAGE_BYTES).min(body.text.len()));
+    if offset >= body.text.len() {
+        return Err(Error::new("Evidence page unavailable"));
+    }
+    let revision = oms_panel_core::digest(
+        json!([
+            "desktop-answer-page-v1",
+            body.source,
+            body.digest,
+            oms_panel_core::digest(body.text.as_bytes()),
+            attempt["attempt_id"],
+            attempt["refs"],
+            attempt["provider"],
+            attempt["tool"],
+            attempt["task_id"]
+        ])
+        .to_string()
+        .as_bytes(),
+    );
     Ok(
-        recorded_answer(&store, id, attempt, native.as_ref(), &index)?.map(|body| {
-            let mut text = body.text;
-            let length = text.len();
-            text.truncate(text.floor_char_boundary(16 * 1024));
-            let truncated = text.len() != length;
-            (text, body.source, truncated)
-        }),
+        json!({"text":&body.text[offset..end],"page":page,"offset":offset,"bytes":end-offset,"totalBytes":body.text.len(),
+        "digest":body.digest,"revision":revision,"source":body.source,"nextPage":(end<body.text.len()).then_some(page+1),"hasMore":end<body.text.len()}),
     )
 }
 
@@ -204,6 +257,7 @@ pub(super) fn read(
     selected: &Value,
     section: &str,
     page: usize,
+    full_text: bool,
     _services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Value> {
@@ -212,6 +266,7 @@ pub(super) fn read(
         .ok_or_else(|| Error::new("Missing recorded attempt"))?;
     if !matches!(section, "info" | "events" | "diff" | "files" | "transcript")
         || !(1..=10000).contains(&page)
+        || (full_text && !matches!(section, "transcript" | "diff"))
         || stop.load(Ordering::Relaxed)
     {
         return Err(Error::new("Evidence page unavailable"));
@@ -219,6 +274,7 @@ pub(super) fn read(
     let mut available = vec!["info", "events"];
     let mut proofs = json!({});
     let mut digest = Value::Null;
+    let mut full = None;
     let source;
     let (lines, next, truncated) = if section == "events" {
         source = "lifecycle";
@@ -280,15 +336,37 @@ pub(super) fn read(
                 .ok_or_else(|| Error::new("Verified retained evidence unavailable"))?;
                 source = body.source;
                 digest = json!(body.digest);
-                page_rows(body.text.lines(), page)
+                if full_text {
+                    let part = body_page(&body, selected, page)?;
+                    let text = part["text"]
+                        .as_str()
+                        .ok_or_else(|| Error::new("Evidence page unavailable"))?;
+                    let rows = text.lines().map(str::to_owned).collect();
+                    let next = part["nextPage"].as_u64().map(|n| n as usize);
+                    full = Some(part);
+                    Ok((rows, next, false))
+                } else {
+                    page_rows(body.text.lines(), page)
+                }
             }
             _ => return Err(Error::new("Unsupported or unavailable evidence")),
         }
     }?;
-    Ok(
-        json!({"attempt":id,"section":section,"page":page,"nextPage":next,"source":source,"sections":available,
-        "proofs":proofs,"digest":digest,"lines":lines,"truncated":truncated}),
-    )
+    let mut result = json!({"attempt":id,"section":section,"page":page,"nextPage":next,"source":source,"sections":available,
+        "proofs":proofs,"digest":digest,"lines":lines,"truncated":truncated});
+    if let Some(full) = full {
+        for key in [
+            "text",
+            "offset",
+            "bytes",
+            "totalBytes",
+            "revision",
+            "hasMore",
+        ] {
+            result[key] = full[key].clone();
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -327,8 +405,28 @@ mod tests {
         let events: Vec<_>=(0..21).map(|_| json!({"attempt_id":"bound","event_type":"transition","to_state":"done","argv":"unprojected arguments"}).to_string()).chain([json!({"attempt_id":"other","event_type":"unrelated transition"}).to_string()]).collect();
         fs::write(event_file, format!("{}\n", events.join("\n"))).unwrap();
         let svc = oms_panel_core::SubcommandServices::sibling().unwrap();
-        let fetch =
-            |section, page| read(root, &attempt, section, page, &svc, &AtomicBool::new(false));
+        let fetch = |section, page| {
+            read(
+                root,
+                &attempt,
+                section,
+                page,
+                false,
+                &svc,
+                &AtomicBool::new(false),
+            )
+        };
+        let fetch_full = |page| {
+            read(
+                root,
+                &attempt,
+                "transcript",
+                page,
+                true,
+                &svc,
+                &AtomicBool::new(false),
+            )
+        };
         let info = fetch("info", 1).unwrap();
         assert_eq!(info["proofs"]["files"], row["patch_sha256"]);
         assert_eq!(info["proofs"]["diff"], row["patch_sha256"]);
@@ -350,6 +448,60 @@ mod tests {
             json!(["transition · done"])
         );
         assert!(!first.to_string().contains("unprojected"));
+        let long = format!(
+            "## Answer\n{}\n{}끝",
+            "긴한줄🙂".repeat(1600),
+            "후속 행\n".repeat(25)
+        );
+        let bytes = format!("## Output\nprivate noise\n{long}\n## Exit\n0\n");
+        fs::write(root.join(".oms/artifacts/answer.md"), bytes.as_bytes()).unwrap();
+        row["artifact_sha256"] = json!(oms_panel_core::digest(bytes.as_bytes()));
+        save(&row);
+        let legacy = fetch("transcript", 1).unwrap();
+        assert_eq!(legacy["nextPage"], 2);
+        assert_eq!(legacy["lines"].as_array().unwrap().len(), PAGE_SIZE);
+        assert_eq!(
+            legacy["lines"][1].as_str().unwrap().chars().count(),
+            LINE_CHARS
+        );
+        assert_eq!(legacy["truncated"], true);
+        assert!(legacy.get("text").is_none());
+        let mut joined = String::new();
+        let mut number = 1;
+        let mut revision = None;
+        loop {
+            let part = fetch_full(number).unwrap();
+            assert_eq!(part["offset"], joined.len());
+            let text = part["text"].as_str().unwrap();
+            assert!(text.len() <= ANSWER_PAGE_BYTES);
+            joined.push_str(text);
+            assert_eq!(part["truncated"], false);
+            let worker = worker_answer_page(root, &attempt, number).unwrap().unwrap();
+            assert_eq!(worker["text"], part["text"]);
+            if let Some(expected) = &revision {
+                assert_eq!(&part["revision"], expected);
+            } else {
+                revision = Some(part["revision"].clone());
+            }
+            let Some(next) = part["nextPage"].as_u64() else {
+                break;
+            };
+            number = next as usize;
+        }
+        assert_eq!(
+            joined, long,
+            "long lines and multibyte text must be readable without omitted bytes"
+        );
+        assert!(fetch_full(number + 1).is_err());
+        let changed = b"## Output\n## Answer\nnew retained answer\n## Exit\n0\n";
+        fs::write(root.join(".oms/artifacts/answer.md"), changed).unwrap();
+        assert!(
+            fetch_full(1).is_err(),
+            "changed evidence must still match the retained artifact digest"
+        );
+        row["artifact_sha256"] = json!(oms_panel_core::digest(changed));
+        save(&row);
+        assert_ne!(fetch_full(1).unwrap()["revision"], revision.unwrap());
         fs::write(root.join(".oms/artifacts/work.patch"), b"replacement").unwrap();
         assert!(fetch("files", 1).is_err());
         assert!(fetch("diff", 1).is_err());

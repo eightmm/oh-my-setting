@@ -15,7 +15,8 @@ use std::{
 #[path = "lead_turns.rs"]
 mod lead_turns;
 
-const URI: &str = "ui://oms/conversation-panel/v27.html";
+const URI: &str = "ui://oms/conversation-panel/v28.html";
+const V27: &str = "ui://oms/conversation-panel/v27.html";
 const V26: &str = "ui://oms/conversation-panel/v26.html";
 const V25: &str = "ui://oms/conversation-panel/v25.html";
 const V24: &str = "ui://oms/conversation-panel/v24.html";
@@ -91,6 +92,96 @@ const ASSIGN: &str = "oms_assign_provider";
 const ASSIGN_RESULT: &str = "oms_assign_result";
 const BINDING: &str = "Select a host-configured OMS project, or bind this connection to a project with OMS_PANEL_REPO.";
 type PanelResult<T> = Result<T, String>;
+
+// A cursor is an observation, never authority. The reader re-establishes its
+// physical project, Room custody and immutable answer before checking it.
+fn output_cursor(scope: &str, revision: &str, position: usize) -> String {
+    format!(
+        "{position}:{}",
+        crate::storage::hash(json!(["oms-output-page-v1", scope, revision, position]).to_string())
+    )
+}
+
+fn output_position(cursor: &str, maximum: usize) -> PanelResult<usize> {
+    if cursor.is_empty() {
+        return Ok(0);
+    }
+    let (position, digest) = cursor
+        .split_once(':')
+        .ok_or("Invalid output page cursor.")?;
+    let number = position
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n > 0 && *n <= maximum)
+        .ok_or("Invalid output page cursor.")?;
+    if number.to_string() != position || !crate::matches("[0-9a-f]{64}", digest) {
+        return Err("Invalid output page cursor.".into());
+    }
+    Ok(number)
+}
+
+fn check_output_cursor(
+    cursor: &str,
+    scope: &str,
+    revision: &str,
+    position: usize,
+) -> PanelResult<()> {
+    if !cursor.is_empty() && cursor != output_cursor(scope, revision, position) {
+        return Err(
+            "The output changed or this page belongs to another selection. Reopen the result."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn output_page(
+    page: &Value,
+    text: &str,
+    cursor: &str,
+    position: usize,
+    scope: &str,
+) -> PanelResult<Value> {
+    let err = "The recorded output page could not be verified.";
+    let revision = page["revision"]
+        .as_str()
+        .filter(|s| crate::matches("[0-9a-f]{64}", s))
+        .ok_or(err)?;
+    let digest = page["digest"]
+        .as_str()
+        .filter(|s| crate::matches("[0-9a-f]{64}", s))
+        .ok_or(err)?;
+    let offset = page["offset"]
+        .as_u64()
+        .filter(|n| *n <= 16 * 1024 * 1024)
+        .ok_or(err)?;
+    let total = page["totalBytes"]
+        .as_u64()
+        .filter(|n| *n > 0 && *n <= 16 * 1024 * 1024)
+        .ok_or(err)?;
+    let end = offset + text.len() as u64;
+    let more = end < total;
+    if text.is_empty()
+        || text.len() > 8192
+        || end > total
+        || (position == 0 && offset != 0)
+        || page["bytes"].as_u64() != Some(text.len() as u64)
+        || page["hasMore"] != more
+        || page["page"].as_u64() != Some(position as u64 + 1)
+        || if more {
+            page["nextPage"].as_u64() != Some(position as u64 + 2)
+        } else {
+            !page["nextPage"].is_null()
+        }
+    {
+        return Err(err.into());
+    }
+    check_output_cursor(cursor, scope, revision, position)?;
+    Ok(
+        json!({"offset":offset,"bytes":text.len(),"totalBytes":total,"digest":digest,
+        "hasMore":more,"nextCursor":more.then(||output_cursor(scope,revision,position+1))}),
+    )
+}
 
 // The committed handoff fixes the timestamp. Legacy linked requests keep the
 // original operation from their receipt; only new bound asks use this address.
@@ -283,7 +374,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     let mut chat = make(
         CHAT,
         "Read an exact Room participant’s messages shared with this conversation and its recorded result.",
-        json!({"project":project,"room":ident,"participant":ident,"before":{"type":"integer","minimum":1},"section":{"type":"string","enum":["info","events","files","diff","transcript"]},"attempt":ident,"page":{"type":"integer","minimum":1,"maximum":10000}}),
+        json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$","description":"Required with evidenceCursor: the independently observed physical project key."},"room":ident,"participant":ident,"before":{"type":"integer","minimum":1},"section":{"type":"string","enum":["info","events","files","diff","transcript"]},"attempt":ident,"page":{"type":"integer","minimum":1,"maximum":10000},"evidenceCursor":{"type":"string","maxLength":100,"description":"Empty for the first full transcript or diff page; then use its returned nextCursor."}}),
         &["room", "participant"],
         false,
     );
@@ -291,7 +382,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     let mut worker_output = make(
         WORKER_OUTPUT,
         "Read the recorded output for an exact worker under its Lead in the current Main’s Room.",
-        json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"leadAttempt":ident,"workerAttempt":ident}),
+        json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"leadAttempt":ident,"workerAttempt":ident,"answerPage":{"type":"string","maxLength":100,"description":"Empty for the first full answer page; then use its returned nextCursor."}}),
         &["projectKey", "room", "leadAttempt", "workerAttempt"],
         false,
     );
@@ -321,8 +412,8 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     record_issue["_meta"]["ui"]["visibility"] = json!(["app"]);
     let mut open_leads = make(
         OPEN_LEADS,
-        "Open one bounded OMS readiness conversation for each Codex, Claude and AGY Lead in this chat's verified Room. Reopening reuses the same requests.",
-        json!({"project":project,"room":ident,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$","description":"Optional previously observed physical project key; refuses if the binding changed."}}),
+        "Open bounded OMS readiness conversations for the selected Leads in this chat's verified Room. Omitted providers selects all three. Reopening reuses the same requests.",
+        json!({"project":project,"room":ident,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$","description":"Optional previously observed physical project key; refuses if the binding changed."},"providers":{"type":"array","items":{"type":"string","enum":LEAD_PROVIDERS},"minItems":1,"maxItems":3,"uniqueItems":true}}),
         &["room"],
         true,
     );
@@ -389,7 +480,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         make(
             LEAD_STATUS,
             "Read provider readiness in the current Main’s Room. A selected provider’s answer is visible only in the panel.",
-            json!({"project":project,"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"turnId":turn_id,"before":{"type":"string","description":"An older-page cursor returned by this conversation."}}),
+            json!({"project":project,"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"turnId":turn_id,"before":{"type":"string","description":"An older-page cursor returned by this conversation."},"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"leadRequestId":{"type":"string","format":"uuid"},"answerPage":{"type":"string","maxLength":100,"description":"Read a completed turn's full answer. Requires exact projectKey, leadRequestId and turnId. Empty starts; otherwise use nextCursor."}}),
             &["room"],
             false
         ),
@@ -1216,6 +1307,7 @@ impl Server<'_> {
                             | V24
                             | V25
                             | V26
+                            | V27
                     )
                 ) =>
             {
@@ -1233,8 +1325,17 @@ impl Server<'_> {
                 let allowed: &[&str] = match name {
                     PROJECTS => &[],
                     OPEN => &["project", "leadConversations"],
-                    OPEN_LEADS => &["project", "room", "projectKey"],
-                    LEAD_STATUS => &["project", "room", "provider", "turnId", "before"],
+                    OPEN_LEADS => &["project", "room", "projectKey", "providers"],
+                    LEAD_STATUS => &[
+                        "project",
+                        "room",
+                        "provider",
+                        "turnId",
+                        "before",
+                        "projectKey",
+                        "leadRequestId",
+                        "answerPage",
+                    ],
                     SETTINGS => &["project", "room", "provider", "projectKey", "leadRequestId"],
                     UPDATE_SETTINGS => &[
                         "project",
@@ -1273,15 +1374,18 @@ impl Server<'_> {
                         "room",
                         "leadAttempt",
                         "workerAttempt",
+                        "answerPage",
                     ],
                     CHAT => &[
                         "project",
+                        "projectKey",
                         "room",
                         "participant",
                         "before",
                         "section",
                         "attempt",
                         "page",
+                        "evidenceCursor",
                     ],
                     VIEW => &["project", "view", "page"],
                     CAPABILITIES => &["project", "offset"],
@@ -1387,7 +1491,10 @@ impl Server<'_> {
                             {
                                 data["nativeUri"] = json!(format!("codex://threads/{thread}"));
                             }
-                            let summary = json!({"room":data["room"],"participant":data["participant"],"source":data["source"],"count":data["messages"].as_array().map(Vec::len)});
+                            let mut summary = json!({"room":data["room"],"participant":data["participant"],"source":data["source"],"count":data["messages"].as_array().map(Vec::len)});
+                            if let Some(key) = data.get("projectKey") {
+                                summary["projectKey"] = key.clone();
+                            }
                             let mut result = response(Ok(summary));
                             if crate::output::outbound(data.to_string().as_bytes(), &Value::Null)
                                 .is_err()
@@ -1656,8 +1763,25 @@ impl Server<'_> {
             } else {
                 "unbound"
             };
+            let mut keys = json!({});
+            for alias in projects.keys() {
+                let selection = json!({"project":alias});
+                if let Ok(repo) = self.panel_repo(&selection)
+                    && let Ok(key) = self.project_key(&repo, &selection)
+                {
+                    keys[alias.as_str()] = json!(key);
+                }
+            }
+            let key = if matches!(binding, "pinned" | "cwd") {
+                self.panel_repo(args)
+                    .and_then(|repo| self.project_key(&repo, args))
+                    .ok()
+            } else {
+                None
+            };
             return Ok(json!({
                 "projects": projects.into_keys().collect::<Vec<_>>(),
+                "projectKeys":keys,"projectKey":key,
                 "binding": binding,
                 "readOnly": self.config.profile == ToolProfile::McpApp,
             }));
@@ -1718,6 +1842,23 @@ impl Server<'_> {
         if name == ASSIGN || name == ASSIGN_RESULT {
             return self.assignment(&repo, name, args, meta);
         }
+        let evidence_page = if name == CHAT {
+            args.get("evidenceCursor").map(|v| -> PanelResult<_> {
+                if !matches!(args["section"].as_str(),Some("transcript"|"diff")) || args.get("page").is_some() {
+                    return Err("Full evidence paging requires a transcript or diff and its returned cursor.".into());
+                }
+                let cursor = v.as_str().ok_or("Invalid output page cursor.")?;
+                let position = output_position(cursor,9999)?;
+                let key = self.project_key(&repo,args)?;
+                if args["projectKey"] != key {
+                    return Err("The selected project changed. Full evidence requires its observed project key.".into());
+                }
+                let scope = crate::storage::hash(json!([key,meta["threadId"],args["room"],args["participant"],args["attempt"],args["section"]]).to_string());
+                Ok((cursor,position,key,scope))
+            }).transpose()?
+        } else {
+            None
+        };
         let argv = match name {
             CHAT => {
                 let thread = meta["threadId"]
@@ -1771,6 +1912,10 @@ impl Server<'_> {
                             .filter(|n| (1..=10000).contains(n))
                             .ok_or("Invalid evidence page.")?;
                         cmd.extend(["--page".into(), p.to_string().into()]);
+                    }
+                    if let Some((_, position, _, _)) = &evidence_page {
+                        cmd.extend(["--page".into(), (position + 1).to_string().into()]);
+                        cmd.push("--evidence-full".into());
                     }
                 } else if args.get("page").is_some() || args.get("attempt").is_some() {
                     return Err("Select an evidence section for this attempt.".into());
@@ -2085,7 +2230,36 @@ impl Server<'_> {
                 && data["messages"].is_array() =>
             {
                 let mut data = data;
-                self.attach_assignment_result(&repo, args, meta, &mut data);
+                if let Some((cursor, position, key, scope)) = evidence_page {
+                    if self.project_key(&repo, args)? != key
+                        || data["evidence"]["attempt"] != args["attempt"]
+                        || data["evidence"]["section"] != args["section"]
+                    {
+                        return Err("The evidence selection changed. Reopen the result.".into());
+                    }
+                    data["projectKey"] = json!(key);
+                    let text = data["evidence"]["text"]
+                        .as_str()
+                        .ok_or("Full retained evidence is unavailable.")?;
+                    crate::output::outbound(text.as_bytes(), &Value::Null)
+                        .map_err(|_| "OMS withheld this evidence during its outbound scan.")?;
+                    let page = output_page(&data["evidence"], text, cursor, position, &scope)?;
+                    for field in [
+                        "offset",
+                        "bytes",
+                        "totalBytes",
+                        "digest",
+                        "nextCursor",
+                        "hasMore",
+                    ] {
+                        data["evidence"][field] = page[field].clone();
+                    }
+                    if let Some(evidence) = data["evidence"].as_object_mut() {
+                        evidence.remove("revision");
+                    }
+                } else {
+                    self.attach_assignment_result(&repo, args, meta, &mut data);
+                }
                 Ok(data)
             }
             USAGE if data["providers"].is_array() && data["attempts"].is_array() => Ok(data),
@@ -2352,7 +2526,7 @@ impl Server<'_> {
             return Err("The selected project changed. Reopen the panel for that project.".into());
         }
         let digest = crate::storage::hash(thread);
-        let argv = vec![
+        let mut argv = vec![
             "panel".into(),
             "--repo".into(),
             repo.as_os_str().into(),
@@ -2367,6 +2541,16 @@ impl Server<'_> {
             "--conversation-digest".into(),
             digest[..32].into(),
         ];
+        let page = args
+            .get("answerPage")
+            .map(|v| -> PanelResult<(&str, usize)> {
+                let cursor = v.as_str().ok_or("Invalid output page cursor.")?;
+                Ok((cursor, output_position(cursor, 9999)?))
+            })
+            .transpose()?;
+        if let Some((_, position)) = page {
+            argv.extend(["--page".into(), (position + 1).to_string().into()]);
+        }
         let (raw, _) = self.panel_output(repo, argv, false)?;
         let err = "The recorded worker output could not be verified.";
         oms_context::parse_json_bounded(raw.as_bytes(), 64 * 1024).map_err(|_| err)?;
@@ -2391,7 +2575,7 @@ impl Server<'_> {
                 let text = data["text"]
                     .as_str()
                     .filter(|v| {
-                        !v.trim().is_empty()
+                        (page.is_some() || !v.trim().is_empty())
                             && v.len() <= 16 * 1024
                             && !v
                                 .chars()
@@ -2407,10 +2591,22 @@ impl Server<'_> {
                     && data["truncated"] == false => {}
             _ => return Err(err.into()),
         }
-        Ok(
-            json!({"projectKey":key,"room":room,"leadAttempt":lead,"workerAttempt":worker,"status":data["status"],
-                "source":data["source"],"text":data["text"],"truncated":data["truncated"]}),
-        )
+        let mut result = json!({"projectKey":key,"room":room,"leadAttempt":lead,"workerAttempt":worker,"status":data["status"],
+                "source":data["source"],"text":data["text"],"truncated":data["truncated"]});
+        if let Some((cursor, position)) = page {
+            if data["status"] != "complete" {
+                return Err("The selected worker has no verified completed answer.".into());
+            }
+            let scope = crate::storage::hash(json!([key, digest, room, lead, worker]).to_string());
+            result["page"] = output_page(
+                &data["page"],
+                data["text"].as_str().ok_or(err)?,
+                cursor,
+                position,
+                &scope,
+            )?;
+        }
+        Ok(result)
     }
 
     fn lead_thread_open(&self, repo: &Path, operation: &str) -> PanelResult<bool> {
@@ -2460,6 +2656,28 @@ impl Server<'_> {
                     .ok_or("Unsupported Lead provider.")
             })
             .transpose()?;
+        let subset = args
+            .get("providers")
+            .map(|value| {
+                let values = value
+                    .as_array()
+                    .filter(|v| !v.is_empty() && v.len() <= 3)
+                    .ok_or("Select one to three distinct Lead providers.")?;
+                let mut providers = Vec::new();
+                for value in values {
+                    let provider = value
+                        .as_str()
+                        .filter(|p| LEAD_PROVIDERS.contains(p))
+                        .ok_or("Unsupported Lead provider.")?;
+                    if providers.contains(&provider) {
+                        return Err("Select one to three distinct Lead providers.");
+                    }
+                    providers.push(provider);
+                }
+                Ok(providers)
+            })
+            .transpose()?;
+        let full_answer = args.get("answerPage").is_some();
         let settings = matches!(name, SETTINGS | UPDATE_SETTINGS);
         if settings
             && (selected.is_none()
@@ -2492,6 +2710,7 @@ impl Server<'_> {
         for provider in LEAD_PROVIDERS
             .into_iter()
             .filter(|p| selected.is_none_or(|s| s == *p))
+            .filter(|p| subset.as_ref().is_none_or(|s| s.contains(p)))
         {
             bound()?;
             let run = |action, request: Option<&str>, extra: &[(&str, &str)]| {
@@ -2500,8 +2719,7 @@ impl Server<'_> {
                 self.panel_exec(repo, argv, false).map(|(data, _)| data)
             };
             let provider_arg = [("--provider", provider)];
-            let mut row =
-                json!({"provider":provider,"requestId":Value::Null,"status":"unavailable"});
+            let mut row = json!({"provider":provider,"requestId":Value::Null,"status":"unavailable","latestTurn":Value::Null});
             // The Room store resolves the address against the live Main and its current
             // enrollment. The app cannot choose a different request, participant or peer.
             let Ok(prior) = run("desktop-lead-status", None, &provider_arg) else {
@@ -2657,7 +2875,7 @@ impl Server<'_> {
                 Ok(("ready", transcript))
             };
             let (status, mut transcript) = resolve().unwrap_or(("unconfirmed", Value::Null));
-            if (settings || name == SEND_LEAD) && args["leadRequestId"] != request {
+            if (settings || name == SEND_LEAD || full_answer) && args["leadRequestId"] != request {
                 return Err("The selected Lead changed. Reopen its conversation.".into());
             }
             if (settings
@@ -2668,7 +2886,7 @@ impl Server<'_> {
             {
                 return Err("The original Lead conversation could not be verified.".into());
             }
-            if selected.is_some() && status == "ready" {
+            if status == "ready" && prior["operation"].is_string() {
                 let kickoff = prior["operation"]
                     .as_str()
                     .ok_or("The original Lead receipt is unavailable.")?;
@@ -2681,7 +2899,7 @@ impl Server<'_> {
                     if !valid(&live)
                         || live["operation"] != kickoff
                         || live["assignedAt"] != prior["assignedAt"]
-                        || (settings && !self.lead_thread_open(repo, kickoff)?)
+                        || ((settings || full_answer) && !self.lead_thread_open(repo, kickoff)?)
                     {
                         return Err("The original Lead receipt changed.".into());
                     }
@@ -2698,10 +2916,22 @@ impl Server<'_> {
                     bound()?;
                     return Ok(summary);
                 }
-                turn = conversation.exchange(self, name, args, &mut transcript, current)?;
+                if selected.is_some() {
+                    if full_answer {
+                        let answer = conversation.answer_page(self, args, current)?;
+                        transcript = json!({"turns":[],"cursor":Value::Null,"hasMore":false});
+                        private = Some(
+                            json!({"room":room,"provider":provider,"requestId":request,"status":status,
+                            "transcript":transcript,"answer":answer}),
+                        );
+                    } else {
+                        turn = conversation.exchange(self, name, args, &mut transcript, current)?;
+                    }
+                }
+                row["latestTurn"] = conversation.latest(self, current)?;
             }
             row["status"] = json!(status);
-            if selected.is_some() {
+            if selected.is_some() && private.is_none() {
                 private = Some(
                     json!({"room":room,"provider":provider,"requestId":request,"status":status,"transcript":transcript}),
                 );

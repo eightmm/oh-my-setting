@@ -201,6 +201,34 @@ impl Drop for Client {
 fn payload(v: &Value) -> Value {
     serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
 }
+fn registry_summary(v: &Value) -> Value {
+    let mut data = payload(v);
+    let valid = |key: &Value| {
+        key.as_str().is_some_and(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    };
+    assert!(
+        data["projectKeys"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .all(
+                |(alias, key)| data["projects"].as_array().unwrap().contains(&json!(alias))
+                    && valid(key)
+            )
+    );
+    if matches!(data["binding"].as_str(), Some("cwd" | "pinned")) {
+        assert!(valid(&data["projectKey"]));
+    } else {
+        assert!(data["projectKey"].is_null());
+    }
+    data.as_object_mut().unwrap().remove("projectKeys");
+    data.as_object_mut().unwrap().remove("projectKey");
+    data
+}
 fn good(v: &Value) {
     assert_eq!(v["result"]["isError"], false, "{v}");
 }
@@ -325,7 +353,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v27.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v28.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -378,7 +406,7 @@ fn cross_host_project_reads() {
     std::fs::write(&map, json!({"fixture":repo}).to_string()).unwrap();
     std::fs::set_permissions(map, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(
-        payload(&c.tool("oms_list_projects", json!({}))),
+        registry_summary(&c.tool("oms_list_projects", json!({}))),
         json!({"binding":"catalog","projects":["fixture"],"readOnly":true})
     );
     let obs = json!({"schema":1,"kind":"multi-source-observation","atomic":false,"revision":"obs-v1:0123456789abcdef01234567","observedAt":"2026-11-24T10:00:00Z","completeness":"complete","sources":{"git":"ok","task":"ok","plan":"ok","attempts":"ok","artifacts":"ok","acceptance":"ok","conversation":"unconfirmed"},"evidence":{"scope":"repository","head":"1234567890ab","room":null,"latestArtifact":null,"omitted":0,"trimmed":0}});
@@ -668,7 +696,7 @@ fn packaged_remote_catalog(source: &Path, repo: &Path, home: &Path) {
     let mut readonly = open(generic, &[]);
     for (client, read_only) in [(&mut desktop, false), (&mut readonly, true)] {
         assert_eq!(
-            payload(&projects(client)),
+            registry_summary(&projects(client)),
             json!({"projects":["remote"],"binding":"catalog","readOnly":read_only})
         );
         good(&client.tool("oms_open_panel", json!({"project":"remote"})));
@@ -684,18 +712,18 @@ fn packaged_remote_catalog(source: &Path, repo: &Path, home: &Path) {
     std::fs::remove_file(&map).unwrap();
     bad(&projects(&mut desktop), "Invalid OMS project map");
     assert_eq!(
-        payload(&projects(&mut readonly)),
+        registry_summary(&projects(&mut readonly)),
         json!({"projects":[],"binding":"unbound","readOnly":true})
     );
     let mut pinned = open(generic, &[("OMS_PANEL_REPO", repo.to_str().unwrap())]);
     assert_eq!(
-        payload(&projects(&mut pinned)),
+        registry_summary(&projects(&mut pinned)),
         json!({"projects":[],"binding":"pinned","readOnly":true})
     );
     let inline = json!({"operator":repo}).to_string();
     let mut catalog = open(generic, &[("OMS_PANEL_PROJECTS", &inline)]);
     assert_eq!(
-        payload(&projects(&mut catalog)),
+        registry_summary(&projects(&mut catalog)),
         json!({"projects":["operator"],"binding":"catalog","readOnly":true})
     );
 }
@@ -725,6 +753,18 @@ fn mcp_app_binding_boundaries() {
         )
     };
     let mut c = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
+    bind(json!({"fixture":repo}));
+    let original_key =
+        payload(&c.tool("oms_list_projects", json!({})))["projectKeys"]["fixture"].clone();
+    assert!(original_key.is_string());
+    bind(json!({"fixture":other}));
+    let changed_key =
+        payload(&c.tool("oms_list_projects", json!({})))["projectKeys"]["fixture"].clone();
+    assert!(changed_key.is_string());
+    assert_ne!(
+        original_key, changed_key,
+        "alias remapping must invalidate physical-scope observations"
+    );
     bind(json!({"fixture":repo}));
     let foreign =
         json!({"threadId":"00000000-0000-4000-8000-000000000001","room":"r","participant":"p"});
@@ -1110,6 +1150,54 @@ fn worker_output_reader(c: &mut Client, source: &Path, key: &str, thread: &str) 
     assert_eq!(argv[11], "--conversation-digest");
     assert_eq!(argv[12].as_str().unwrap().len(), 32);
     assert!(!argv.to_string().contains(thread));
+    let mut full = args.clone();
+    full["answerPage"] = json!("");
+    let mut first = base.clone();
+    first["text"] = json!("abc");
+    first["truncated"] = json!(true);
+    first["page"] = json!({"page":1,"offset":0,"bytes":3,"totalBytes":11,"digest":"d".repeat(64),
+        "revision":"e".repeat(64),"hasMore":true,"nextPage":2});
+    configure(&first);
+    let r = request(c, &full);
+    good(&r);
+    let cursor = r["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    assert!(cursor.is_string());
+    full["answerPage"] = cursor;
+    let mut second = first.clone();
+    second["text"] = json!(" \n\t ");
+    second["page"]["page"] = json!(2);
+    second["page"]["offset"] = json!(3);
+    second["page"]["bytes"] = json!(4);
+    second["page"]["nextPage"] = json!(3);
+    configure(&second);
+    let r = request(c, &full);
+    good(&r);
+    assert_eq!(r["result"]["_meta"]["workerOutput"]["text"], " \n\t ");
+    full["answerPage"] = r["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    assert!(full["answerPage"].is_string());
+    bad(&request(c, &args), "could not be verified");
+    second["text"] = json!("defg");
+    second["truncated"] = json!(false);
+    second["page"]["page"] = json!(3);
+    second["page"]["offset"] = json!(7);
+    second["page"]["hasMore"] = json!(false);
+    second["page"]["nextPage"] = Value::Null;
+    configure(&second);
+    let r = request(c, &full);
+    good(&r);
+    assert_eq!(r["result"]["_meta"]["workerOutput"]["text"], "defg");
+    assert!(r["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].is_null());
+    let mut wrong = full.clone();
+    wrong["room"] = json!("other-room");
+    let mut foreign = second.clone();
+    foreign["room"] = wrong["room"].clone();
+    configure(&foreign);
+    bad(&request(c, &wrong), "another selection");
+    second["page"]["revision"] = json!("f".repeat(64));
+    configure(&second);
+    bad(&request(c, &full), "changed");
+    full["answerPage"] = json!("../answer");
+    bad(&request(c, &full), "cursor");
     for status in ["running", "not_recorded", "unavailable"] {
         let mut r = base.clone();
         r["status"] = status.into();
@@ -1246,6 +1334,31 @@ fn desktop_lead_conversations() {
         "project changed",
     );
     assert_eq!(runs(), 0);
+    for providers in [
+        json!([]),
+        json!(["codex", "codex"]),
+        json!(["pi"]),
+        json!("codex"),
+    ] {
+        let invalid = call(
+            &mut c,
+            open,
+            &json!({"room":"lead-room","providers":providers}),
+            owner,
+        );
+        assert_eq!(invalid["result"]["isError"], true);
+        assert_eq!(runs(), 0);
+    }
+    let single = json!({"room":"lead-room","projectKey":key,"providers":["codex"]});
+    let first = payload(&call(&mut c, open, &single, owner));
+    assert_eq!(first["leads"].as_array().unwrap().len(), 1);
+    assert_eq!(first["leads"][0]["provider"], "codex");
+    assert_eq!(
+        first["leads"][0]["requestId"],
+        initial["leads"][0]["requestId"]
+    );
+    good(&call(&mut c, open, &single, owner));
+    assert_eq!(runs(), 1, "selective reopen must reuse its one reservation");
     let opened = payload(&call(
         &mut c,
         open,
@@ -1494,6 +1607,14 @@ fn desktop_lead_conversations() {
         let public = payload(&view);
         let settings = &view["result"]["_meta"]["leadSettings"];
         assert_eq!(settings["selection"], json!({"model":null,"effort":null}));
+        assert_eq!(
+            settings["scope"],
+            json!({"target":"lead-conversation","appliesTo":"next-message",
+            "inheritsToWorkers":false,"mode":"read-only-consultation","continuity":"oms-thread"})
+        );
+        for field in ["account", "failover", "usage"] {
+            assert!(settings[field].is_null());
+        }
         assert_eq!(public["revision"], settings["revision"]);
         assert!(settings["nativeTitle"].is_null());
         assert_eq!(
@@ -1608,6 +1729,20 @@ fn desktop_lead_conversations() {
         assert_eq!(payload(&ack)["turn"]["turnId"], m["turnId"]);
         if seat == 0 {
             until(|| payload(&lookup(&mut c, &m))["turn"]["status"] == "running");
+            let pending = payload(&call(&mut c, read, &args, owner));
+            assert_eq!(pending["leads"][0]["latestTurn"]["turnId"], m["turnId"]);
+            assert_eq!(pending["leads"][0]["latestTurn"]["status"], "running");
+            assert!(!pending.to_string().contains("Private fixture"));
+            bad(
+                &call(
+                    &mut c,
+                    read,
+                    &json!({"room":m["room"],"projectKey":key,"provider":m["provider"],
+                "leadRequestId":m["leadRequestId"],"turnId":m["turnId"],"answerPage":""}),
+                    owner,
+                ),
+                "completed answer",
+            );
             let other = message(0, 9);
             bad(&call(&mut c, send, &other, owner), "unresolved");
             assert_eq!(
@@ -1619,6 +1754,68 @@ fn desktop_lead_conversations() {
             setup(false);
         }
         await_reply(&mut c, &m);
+        let latest = payload(&call(&mut c, read, &args, owner));
+        assert_eq!(latest["leads"][seat]["latestTurn"]["turnId"], m["turnId"]);
+        assert_eq!(latest["leads"][seat]["latestTurn"]["status"], "replied");
+        assert!(latest["leads"][seat]["latestTurn"]["lastObservedAt"].is_string());
+        if seat == 0 {
+            let child = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| {
+                    std::fs::read_to_string(p.join("prompt.txt"))
+                        .ok()
+                        .as_deref()
+                        == Some("Private fixture follow-up 1\n")
+                })
+                .unwrap();
+            let artifact = child.join("answers/fixture.md");
+            let original = std::fs::read(&artifact).unwrap();
+            let long = format!("{}끝", "긴문장🙂".repeat(1500));
+            std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
+            let mut full = json!({"room":m["room"],"projectKey":key,"provider":m["provider"],
+                "leadRequestId":m["leadRequestId"],"turnId":m["turnId"],"answerPage":""});
+            let mut text = String::new();
+            let mut first_cursor = Value::Null;
+            loop {
+                let r = call(&mut c, read, &full, owner);
+                good(&r);
+                let a = &r["result"]["_meta"]["leadConversation"]["answer"];
+                assert_eq!(a["offset"], text.len());
+                assert!(a["text"].as_str().unwrap().len() <= 8192);
+                text.push_str(a["text"].as_str().unwrap());
+                assert_eq!(a["handoff"]["turnId"], m["turnId"]);
+                for field in ["content", "structuredContent"] {
+                    assert!(!r["result"][field].to_string().contains("긴문장"));
+                }
+                if first_cursor.is_null() {
+                    first_cursor = a["nextCursor"].clone();
+                }
+                if a["hasMore"] == false {
+                    break;
+                }
+                full["answerPage"] = a["nextCursor"].clone();
+            }
+            assert_eq!(text, long);
+            assert_eq!(runs(), 4, "reading complete answers must not dispatch");
+            full["answerPage"] = first_cursor;
+            let mut wrong = full.clone();
+            wrong["leadRequestId"] = initial["leads"][1]["requestId"].clone();
+            bad(&call(&mut c, read, &wrong, owner), "selected Lead changed");
+            let mut wrong = full.clone();
+            wrong["room"] = json!("another-room");
+            assert_eq!(call(&mut c, read, &wrong, owner)["result"]["isError"], true);
+            std::fs::write(&artifact, "## Output\nchanged answer\n## Exit\n0\n").unwrap();
+            bad(&call(&mut c, read, &full, owner), "changed");
+            std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
+            // Even an equal answer in a replacement artifact invalidates an observed page.
+            std::fs::rename(&artifact, child.join("retired-answer")).unwrap();
+            std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+            bad(&call(&mut c, read, &full, owner), "changed");
+            std::fs::write(&artifact, original).unwrap();
+        }
         let reset = change_to(
             seat,
             &payload(&changed)["revision"],
@@ -2178,7 +2375,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v27.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v28.html");
     // Codex uses the stdio transport configuration to decide whether to reuse a running server.
     for package in [
         include_str!("../../../plugins/oms/mcp.json"),
@@ -2263,13 +2460,13 @@ fn conversation_panel() {
     );
     bad(&c.tool("oms_panel_snapshot", json!({})), "OMS_PANEL_REPO");
     assert_eq!(
-        payload(&c.tool("oms_list_projects", json!({}))),
+        registry_summary(&c.tool("oms_list_projects", json!({}))),
         json!({"projects":[],"binding":"unbound","readOnly":false})
     );
     assert!(!source.join("last-call.json").exists());
     std::fs::create_dir(repo.join(".oms")).unwrap();
     assert_eq!(
-        payload(&c.tool("oms_list_projects", json!({}))),
+        registry_summary(&c.tool("oms_list_projects", json!({}))),
         json!({"projects":[],"binding":"cwd","readOnly":false})
     );
     let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","currentRoom":null,"project":"demo","goal":"Finish inspection","active":null,"activeAttempts":[],"attention":[{"summary":"Review pending","count":2}]}});
@@ -2398,6 +2595,49 @@ fn conversation_panel() {
         ]
         .map(Value::from)
     );
+    let mut response = detail.clone();
+    response["messages"] = json!([]);
+    response["evidence"] = json!({"attempt":"bound-attempt","section":"transcript","page":1,
+        "source":"indexed-answer","text":"한글","lines":["한글"],"offset":0,"bytes":6,"totalBytes":12,
+        "digest":"a".repeat(64),"revision":"b".repeat(64),"nextPage":2,"hasMore":true,"truncated":false});
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    let project_key = payload(&c.tool("oms_list_projects", json!({})))["projectKey"].clone();
+    assert_eq!(project_key.as_str().unwrap().len(), 64);
+    let mut full = json!({"room":"fixture","participant":"owner","section":"transcript","attempt":"bound-attempt","evidenceCursor":""});
+    bad(&evidence(&mut c, full.clone()), "observed project key");
+    full["projectKey"] = json!("0".repeat(64));
+    bad(&evidence(&mut c, full.clone()), "observed project key");
+    full["projectKey"] = project_key.clone();
+    let r = evidence(&mut c, full.clone());
+    good(&r);
+    assert_eq!(r["result"]["structuredContent"]["projectKey"], project_key);
+    assert_eq!(r["result"]["_meta"]["chat"]["projectKey"], project_key);
+    full["evidenceCursor"] = r["result"]["_meta"]["chat"]["evidence"]["nextCursor"].clone();
+    assert!(full["evidenceCursor"].is_string());
+    for field in ["content", "structuredContent"] {
+        assert!(!r["result"][field].to_string().contains("한글"));
+    }
+    response["evidence"]["page"] = json!(2);
+    response["evidence"]["offset"] = json!(6);
+    response["evidence"]["text"] = json!("결과");
+    response["evidence"]["hasMore"] = json!(false);
+    response["evidence"]["nextPage"] = Value::Null;
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    let r = evidence(&mut c, full.clone());
+    good(&r);
+    assert_eq!(r["result"]["_meta"]["chat"]["evidence"]["text"], "결과");
+    let mut foreign = full.clone();
+    foreign["participant"] = json!("other");
+    response["participant"] = json!("other");
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    bad(&evidence(&mut c, foreign), "another selection");
+    response["participant"] = json!("owner");
+    response["evidence"]["revision"] = json!("c".repeat(64));
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    bad(&evidence(&mut c, full.clone()), "changed");
+    full["page"] = json!(2);
+    bad(&evidence(&mut c, full), "returned cursor");
+    fixture_settings(&source, json!({"stdout":detail.to_string()}));
     bad(
         &evidence(
             &mut c,
@@ -5746,6 +5986,9 @@ fn fake_oms() {
                 },
             );
         std::fs::write(&artifact, format!("## Output\n{reply}\n## Exit\n0\n")).unwrap();
+        // Native peer storage publishes answer artifacts privately (storage::write).
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
         if cfg["leadRoom"] == true {
             // Normal native peer-ask stdout prints the seat path before its response.
             let provider = args.windows(2).find(|a| a[0] == "--providers").unwrap()[1]

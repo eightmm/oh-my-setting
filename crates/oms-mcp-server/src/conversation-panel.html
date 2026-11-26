@@ -60,6 +60,7 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
   .goal-heading{grid-column:1}
   #new-goal{grid-column:2;grid-row:1 / 3;align-self:center}
   #goal,#goal-expand,#progress,#progress-track{grid-column:1}
+  #goal-journey{grid-column:1 / -1}
   #goal-expand{justify-self:start}
 }
 @media(min-width:64rem){
@@ -199,6 +200,23 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 .count[data-tone=warn]{color:var(--warm);font-weight:650}
 #issue-evidence:not(:empty){padding:.6rem .75rem;background-color:var(--bg);border:1px solid var(--line);border-radius:.6rem}
 #chat-messages p,#chat-result,#issue-evidence{white-space:pre-wrap;overflow-wrap:anywhere}
+#goal-journey{margin-top:.7rem;min-width:0}
+#criteria-summary{font-size:.9rem}
+#goal-evidence{padding-top:.7rem}
+#criteria-list{list-style:none;margin:0;padding:0}
+#criteria-list li{padding:.55rem 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+#criteria-list .criterion-head{display:flex;justify-content:space-between;gap:.6rem;flex-wrap:wrap}
+#criteria-list small{display:block;margin-top:.2rem;white-space:pre-wrap}
+#followup-panel{margin-top:.7rem;padding:.7rem;background:var(--surface);border:1px solid var(--line);border-radius:.55rem}
+#followup-text{display:block;width:100%;margin-top:.35rem;min-height:6rem;resize:vertical;background:var(--bg);border:1px solid var(--line);border-radius:.4rem;padding:.5rem}
+#lead-auto-label{display:flex;align-items:center;gap:.4rem;margin-top:.5rem;color:var(--soft)}
+.lead-turn{display:block;color:var(--soft);font-size:.78rem}
+#full-answer{margin-top:.7rem;padding-top:.6rem;border-top:1px solid var(--line)}
+#full-answer-body{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
+#chat-new{align-self:center;flex:none;margin:.2rem .7rem}
+#chat-count{margin-top:0}
+#settings-scope,#settings-catalog{white-space:pre-line}
+button,textarea{max-width:100%}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
 /* Narrow side panels: the media query follows the frame, data-compact follows the host's container report. */
 @media(max-width:420px){
@@ -239,12 +257,15 @@ header{gap:.4rem;padding-bottom:.5rem}
 <noscript><p lang="ko">대화에서 OMS에 프로젝트 상태를 물어보세요.</p><p lang="en">Ask OMS for project status in the conversation.</p></noscript>
 <div id="view" hidden>
 <section id="goal-section" aria-labelledby="goal-label"><div class="section-head"><div class="goal-heading"><h2 id="goal-label" data-i18n="goalLabel">프로젝트 목표</h2><span id="observed-at" class="observed" hidden></span></div><button id="new-goal" type="button" data-i18n="newGoal">새 목표</button></div>
-<p id="goal" tabindex="-1" class="clamp"></p><button id="goal-expand" class="subtle" aria-controls="goal" aria-expanded="false" hidden></button><p id="progress" hidden></p><div id="progress-track" class="progress-track" aria-hidden="true" hidden><span id="progress-fill"></span></div></section>
+<p id="goal" tabindex="-1" class="clamp"></p><button id="goal-expand" class="subtle" aria-controls="goal" aria-expanded="false" hidden></button><p id="progress" hidden></p><div id="progress-track" class="progress-track" aria-hidden="true" hidden><span id="progress-fill"></span></div>
+<div id="goal-journey"><p id="criteria-summary" hidden></p><p id="attention-summary" class="note"></p><p id="next-step" class="note"></p><div class="actions"><button id="evidence-toggle" type="button" aria-expanded="false" aria-controls="goal-evidence" data-i18n="evidence.open">결과 근거 보기</button><button id="followup-open" type="button" data-i18n="followup.prepare" hidden>현재 Main에 요청할 초안 준비</button></div>
+<section id="goal-evidence" hidden><h3 data-i18n="evidence.title">프로젝트 완료 기준과 근거</h3><ul id="criteria-list"></ul><p id="evidence-note" class="note"></p><ul id="readiness-list"></ul></section>
+<section id="followup-panel" hidden><label for="followup-text" data-i18n="followup.label">현재 대화에 추가할 요청 초안</label><textarea id="followup-text" rows="3" maxlength="4000"></textarea><p class="note" data-i18n="followup.note">초안 추가는 작업 배정이나 실행 시작이 아닙니다.</p><div class="actions"><button id="followup-add" type="button" data-i18n="followup.add">대화 문맥에 추가</button><button id="followup-copy" type="button" data-i18n="copy">복사</button><button id="followup-main" type="button" data-i18n="main.continue">Main 대화에서 이어가기</button><button id="followup-close" type="button" data-i18n="close">닫기</button></div><p id="followup-status" class="note" role="status"></p></section></div></section>
 <div>
-<section id="main-card" aria-labelledby="main-name"><h2 id="main-scope" class="label"></h2><div class="identity"><span id="avatar" class="avatar" aria-hidden="true"></span><strong id="main-name" tabindex="-1"></strong></div><p id="main-status" class="note"></p><button id="header-main" type="button" data-i18n="openChat" hidden>대화 열기</button></section>
+<section id="main-card" aria-labelledby="main-name"><h2 id="main-scope" class="label"></h2><div class="identity"><span id="avatar" class="avatar" aria-hidden="true"></span><strong id="main-name" tabindex="-1"></strong></div><p id="main-status" class="note"></p><button id="header-main" type="button" data-i18n="main.continue" hidden>Main 대화에서 이어가기</button></section>
 <section id="approval-card" aria-labelledby="approvals-heading" hidden><h2 id="approvals-heading" tabindex="-1"></h2><div id="approvals"></div></section>
 </div>
-<section id="leads-section" aria-labelledby="leads-heading"><div class="section-head"><h2 id="leads-heading">Leads</h2><button id="open-leads" type="button" aria-describedby="lead-opt-in-note" data-i18n="openLeads" hidden>세 Lead 열기</button></div><p id="lead-opt-in-note" class="note" data-i18n="leadOptIn" hidden></p><p id="lead-control-status" class="note" role="status"></p><button id="lead-auto-off" type="button" class="subtle" data-i18n="autoLeadsOff" hidden>이 프로젝트 자동 열기 해제</button><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
+<section id="leads-section" aria-labelledby="leads-heading"><div class="section-head"><h2 id="leads-heading">Leads</h2><button id="open-leads" type="button" aria-describedby="lead-opt-in-note" data-i18n="openLeads" hidden>세 Lead 연결</button></div><p id="lead-opt-in-note" class="note" data-i18n="leadOptIn" hidden></p><label id="lead-auto-label" hidden><input id="lead-auto" type="checkbox"><span data-i18n="autoLeads">다음에도 세 Lead 자동 연결</span></label><p id="lead-control-status" class="note" role="status"></p><button id="lead-refresh" type="button" class="subtle" data-i18n="turn.check" hidden>상태 확인</button><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
 
 <p id="outcome" hidden></p>
 </div>
@@ -258,16 +279,17 @@ header{gap:.4rem;padding-bottom:.5rem}
 </div></dialog>
 <dialog id="worker-output" aria-labelledby="output-title"><div class="dialog-body"><div class="section-head"><h2 id="output-title" data-i18n="out.title">워커 출력</h2><button id="output-close" type="button" data-i18n="close">닫기</button></div>
 <p id="output-worker"></p><p id="output-status" class="note" role="status"></p><pre id="output-body" hidden></pre><p id="output-limited" class="note" data-i18n="out.limited" hidden>기록된 출력의 일부입니다.</p>
-<button id="output-refresh" type="button" data-i18n="refresh">새로고침</button></div></dialog>
+<div class="actions"><button id="output-refresh" type="button" data-i18n="refresh">새로고침</button><button id="output-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="output-more" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button><button id="output-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="output-followup" type="button" data-i18n="followup.result" hidden>이 결과로 요청 초안 준비</button></div><p id="output-copy-status" class="note" role="status"></p></div></dialog>
 <dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><div class="identity"><span id="chat-avatar" class="avatar" aria-hidden="true" hidden></span><h2 id="chat-title"></h2></div><span class="dialog-actions"><button id="settings-toggle" type="button" aria-controls="chat-settings" aria-expanded="false" data-i18n="prefs.title" hidden>대화 설정</button><button id="chat-refresh" type="button" aria-label="대화 새로고침">↻</button><button id="chat-back" type="button" data-i18n="close">닫기</button></span></div>
 <section id="chat-settings" tabindex="-1" aria-labelledby="settings-toggle" hidden>
-<p id="settings-saved"></p><p id="settings-actual" class="note" hidden></p>
+<p id="settings-scope" class="note"></p><p id="settings-saved"></p><p id="settings-actual" class="note" hidden></p><p id="settings-catalog" class="note"></p>
 <fieldset id="settings-fields" hidden><legend class="sr-only" data-i18n="prefs.next">다음 메시지 설정</legend>
 <label><span data-i18n="prefs.model">모델</span><select id="settings-model"></select></label>
 <label><span data-i18n="prefs.effort">추론 강도</span><select id="settings-effort"></select></label></fieldset>
 <p id="settings-hint" class="note"></p><div id="settings-controls"><p id="settings-status" class="note" role="status"></p><button id="settings-read" type="button" data-i18n="refresh" hidden>새로고침</button><button id="settings-save" type="button" data-i18n="prefs.save" hidden>저장</button></div></section>
-<p id="chat-status" class="note" role="status"></p><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-result"></p></div>
-<form id="chat-compose" hidden><label for="chat-text" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000"></textarea>
+<p id="chat-status" class="note" role="status"></p><button id="chat-new" type="button" class="subtle" data-i18n="chat.new" hidden>새 메시지 보기</button><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-result"></p><p id="chat-result-limited" class="note" data-i18n="turn.partial" hidden>부분 답변</p><button id="chat-result-full" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button>
+<section id="full-answer" hidden><div class="section-head"><h3 data-i18n="answer.title">기록된 출력</h3><button id="answer-close" type="button" data-i18n="close">닫기</button></div><pre id="full-answer-body"></pre><p id="answer-status" class="note" role="status"></p><div class="actions"><button id="answer-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="answer-more" type="button" data-i18n="answer.more" hidden>다음 부분 읽기</button><button id="answer-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="answer-followup" type="button" data-i18n="followup.result" hidden>이 결과로 요청 초안 준비</button></div></section></div>
+<form id="chat-compose" hidden><label for="chat-text" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000" aria-describedby="chat-count chat-delivery"></textarea><span id="chat-count" class="count"></span>
 <div class="actions"><span id="chat-delivery" role="status"></span><button id="chat-check" type="button" hidden></button><button id="chat-send" type="submit" data-i18n="chatSend">보내기</button></div></form></dialog>
 </main><script>
 'use strict';
@@ -294,7 +316,7 @@ const messages = {
   "appr.target": ["대상 · {v}", "Target · {v}"],
   "briefLabel": ["작업 목표", "Goal"],
   "chatLoading": ["대화 여는 중…", "Opening conversation…"],
-  "chatMessage": ["메시지", "Message"],
+  "chatMessage": ["Lead에게 질문 · 읽기 전용 상담", "Ask the Lead · read-only consultation"],
   "chatSend": ["보내기", "Send"],
   "chatYou": ["나", "You"],
   "turn.partial": ["답변 일부", "Partial reply"],
@@ -311,7 +333,7 @@ const messages = {
   "turn.limit": ["메시지를 4,000바이트 이내로 입력하세요.", "Enter a message within 4,000 bytes."],
   "chatMismatch": ["이 작업방의 대화를 불러올 수 없습니다.", "Could not load this conversation."],
   "checkReceipt": ["전달 상태 확인", "Check handoff"],
-  "chooseLeads": ["함께 요청할 Lead", "Request these Leads"],
+  "chooseLeads": ["Main에 제안할 Lead · 즉시 배정 아님", "Suggest Leads to Main · no immediate assignment"],
   "chooseMain": ["새 Main", "New Main"],
   "close": ["닫기", "Close"],
   "closed": ["패널이 닫혔습니다.", "The panel was closed."],
@@ -365,27 +387,27 @@ const messages = {
   "main.headerAria": ["이 대화의 {name} 작업방 대화 보기", "View the room conversation of {name} for this conversation"],
   "more": ["목표 전체 보기", "Read full goal"],
   "mutate.working": ["요청을 처리하는 중…", "Processing the request…"],
-  "newGoal": ["새 목표", "New goal"],
+  "newGoal": ["새 작업 시작", "Start new work"],
   "noJoinedMain": ["이 대화에 연결된 Main을 아직 확인하지 못했습니다.", "No Main has been confirmed for this conversation."],
   "noRecordedMain": ["확인된 프로젝트 Main이 없습니다.", "No project Main has been confirmed."],
   "older": ["이전 메시지", "Earlier messages"],
   "openApp": ["호스트 대화에서 OMS를 열어주세요.", "Open OMS in the host conversation."],
-  "openLeads": ["세 Lead 열기", "Open three Leads"],
+  "openLeads": ["세 Lead 연결", "Connect all three Leads"],
   "auto": ["자동", "Auto"],
   "autoLabel": ["자동 새로고침", "Auto refresh"],
   "briefPlaceholder": ["예: Auth 모듈 테스트 추가 또는 GitHub 이슈 URL", "e.g., Fix auth tests or paste a GitHub issue URL"],
   "observedAt": ["관측 {time}", "Updated {time}"],
   "refreshChat": ["대화 새로고침", "Refresh conversation"],
-  "autoLeadsOff": ["이 프로젝트 자동 열기 해제", "Turn off automatic opening for this project"],
-  "leadOptIn": ["세 공급자에 요청하고, 이 프로젝트를 다시 열 때도 자동으로 연결합니다.", "Request all three providers and open them automatically on future visits to this project."],
+  "autoLeads": ["다음에도 이 프로젝트의 세 Lead 자동 연결", "Automatically connect all three on future project visits"],
+  "leadOptIn": ["Lead 질문은 읽기 전용 상담입니다. 작업 배정은 현재 Main에서 이어가세요.", "Lead questions are read-only consultations. Continue work assignment in the current Main."],
   "transcriptPartial": ["최근 대화 일부입니다.", "Showing part of the recorded conversation."],
   "startingLeads": ["Lead 대화를 여는 중…", "Opening Lead conversations…"],
   "leadStatusFailed": ["Lead 대화 상태를 확인하지 못했습니다. 새로고침해 주세요.", "Could not confirm the Lead conversations. Refresh to check."],
   "lead.starting": ["대화 시작 중", "Starting conversation"],
-  "lead.ready": ["{provider} 대화 열기", "Open {provider} chat"],
+  "lead.ready": ["{provider}에게 질문", "Ask {provider}"],
   "lead.unconfirmed": ["대화 미확인", "Conversation unconfirmed"],
   "lead.unavailable": ["대화 사용 불가", "Conversation unavailable"],
-  "openChat": ["대화 열기", "Open conversation"],
+  "openChat": ["배정 기록 보기", "View assignment record"],
   "waitingAssignment": ["배정 대기", "Waiting for assignment"],
   "unknownAssignment": ["배정 미확인", "Assignment unknown"],
   "partialLeads": ["조회된 담당 기록이 일부입니다.", "Only part of the assignment history is available."],
@@ -459,6 +481,56 @@ const messages = {
   "uncertainIssue": ["전달 상태 미확인", "Handoff unconfirmed"],
   "unknownMain": ["OMS Main 미확인", "OMS Main unconfirmed"],
   "unverifiedIssue": ["이 프로젝트의 열린 이슈를 확인할 수 없습니다.", "Could not verify an open issue for this project."],
+  "main.continue": ["Main 대화에서 이어가기", "Continue in Main conversation"],
+  "main.records": ["현재 대화의 작업방 기록 · 읽기 전용", "Current conversation's Room record · read-only"],
+  "snapshot.stale": ["마지막으로 확인한 프로젝트 상태입니다. 연결을 확인할 때까지 변경 동작을 사용할 수 없습니다.", "Showing the last confirmed project state. Changes are disabled until the connection is checked."],
+  "snapshot.staleTime": ["마지막 확인 {time} · 갱신 미확인", "Last confirmed {time} · refresh unconfirmed"],
+  "poll.paused": ["자동 확인 일시정지 · 상태 확인으로 이어가세요.", "Automatic checks paused. Check status to continue."],
+  "lead.connect": ["{provider} 연결", "Connect {provider}"],
+  "lead.waitingReply": ["답변 대기", "Reply pending"],
+  "lead.newReply": ["새 답변", "New reply"],
+  "lead.replyRead": ["답변 확인됨", "Reply read"],
+  "chat.new": ["새 메시지 보기", "View new messages"],
+  "chat.bytes": ["{n} / 4,000바이트", "{n} / 4,000 bytes"],
+  "copy": ["복사", "Copy"],
+  "copy.done": ["표시된 내용을 복사했습니다.", "Copied the displayed text."],
+  "copy.failed": ["복사할 수 없습니다. 표시된 텍스트를 선택해 복사하세요.", "Cannot copy here. Select and copy the displayed text."],
+  "answer.full": ["전체 출력 읽기", "Read full output"],
+  "answer.title": ["기록된 출력", "Recorded output"],
+  "answer.more": ["다음 부분 읽기", "Read next part"],
+  "answer.loaded": ["표시 범위 {start}–{n} / {total}바이트 · 완료 승인은 별도입니다.", "Showing bytes {start}–{n} / {total} · acceptance is separate."],
+  "answer.first": ["처음부터 읽기", "Read from the start"],
+  "answer.copy": ["표시된 부분 복사", "Copy displayed part"],
+  "answer.changed": ["출력 또는 범위가 변경되어 읽기를 중단했습니다. 다시 열어 확인하세요.", "Output or scope changed. Reopen it to read again."],
+  "evidence.open": ["결과 근거 보기", "View result evidence"],
+  "evidence.close": ["결과 근거 접기", "Hide result evidence"],
+  "evidence.title": ["프로젝트 완료 기준과 근거", "Repository completion criteria and evidence"],
+  "evidence.count": ["프로젝트 완료 기준 {total}개 중 {verified}개 검증 · 작업 수와 별도", "{verified} of {total} repository criteria verified · separate from task count"],
+  "evidence.none": ["기록된 프로젝트 완료 기준이 없습니다.", "No repository completion criteria recorded."],
+  "evidence.unknown": ["프로젝트 완료 기준을 확인할 수 없습니다.", "Repository completion criteria are unconfirmed."],
+  "evidence.partial": ["일부 기준 또는 근거만 표시합니다. 생략된 항목은 미확인입니다.", "Only part of the criteria or evidence is shown. Omitted items remain unknown."],
+  "evidence.reference": ["근거 · {v}", "Evidence · {v}"],
+  "evidence.stale": ["오래된 근거", "Stale evidence"],
+  "evidence.noRef": ["근거 미확인", "Evidence unconfirmed"],
+  "journey.attention": ["프로젝트 확인 필요 · {v}", "Repository needs attention · {v}"],
+  "journey.next": ["다음 확인 · {v}", "Next check · {v}"],
+  "followup.prepare": ["현재 Main에 요청할 초안 준비", "Prepare a follow-up for Main"],
+  "followup.result": ["이 결과로 요청 초안 준비", "Prepare a follow-up on this result"],
+  "followup.scope": ["프로젝트: {project}\nRoom: {room}", "Project: {project}\nRoom: {room}"],
+  "followup.reference": ["선택한 결과 참조: {v}", "Selected result reference: {v}"],
+  "followup.label": ["현재 대화에 추가할 요청 초안", "Request draft for the current conversation"],
+  "followup.note": ["초안 추가는 작업 배정이나 실행 시작이 아닙니다.", "Adding a draft does not assign a task or start execution."],
+  "followup.add": ["대화 문맥에 추가", "Add to conversation context"],
+  "followup.done": ["현재 대화의 문맥에 요청 초안을 추가했습니다. Main 수신이나 실행은 확인되지 않았습니다.", "Added the request draft to this conversation's context. Main receipt and execution are unconfirmed."],
+  "followup.failed": ["대화 문맥 추가를 확인하지 못했습니다. 초안을 복사해 현재 Main 대화에서 이어가세요.", "Context update is unconfirmed. Copy the draft and continue in Main's conversation."],
+  "followup.text": ["프로젝트 목표: {goal}\n확인할 항목: {item}\n현재 범위에서 근거와 미완료 기준을 확인하고 다음 조치를 제안해 주세요.", "Project goal: {goal}\nItem to check: {item}\nCheck the evidence and unmet criteria within the current scope, then propose the next action."],
+  "prefs.scope": ["이 Lead의 읽기 전용 상담 · 다음 메시지부터 적용 · 워커에 상속되지 않음", "This Lead's read-only consultation · applies to the next message · not inherited by workers"],
+  "prefs.continuity": ["OMS 대화 기록을 이어갑니다. 공급자의 native 세션 재개 여부는 별도입니다.", "Continues the OMS thread. Native provider session resumption is separate."],
+  "prefs.catalogAge": ["모델 목록 확인 후 {n}초 경과", "Model catalog observed {n} seconds ago"],
+  "prefs.catalogUnknown": ["모델 목록 관측 시점 미확인", "Model catalog age unconfirmed"],
+  "prefs.unobserved": ["이 답변에 연결된 계정·failover·사용량 증거 미확인", "Account, failover and usage evidence linked to this reply is unconfirmed."],
+  "prefs.actualUnknown": ["실제 사용 모델 미확인", "Served model unconfirmed"],
+  "state.pending": ["확인 대기", "Pending"],
 };
 const LANGS=['ko','en'], LANG_KEY='oms.panel.language';
 let lang='ko', storedLang, hostLocale='', briefInvalid=false;
@@ -490,7 +562,7 @@ function clock(value) {
 }
 function paintObserved() {
   const time=clock(dashboardData?.updated);
-  el('observed-at').hidden=!time;el('observed-at').textContent=time?t('observedAt',{time}):'';
+  el('observed-at').hidden=!time;el('observed-at').textContent=time?t(staleView?'snapshot.staleTime':'observedAt',{time}):'';
 }
 function setStatus(value,tone='info') {
   el('status').setAttribute('data-tone',tone);put('status',value);
@@ -502,10 +574,10 @@ const TONES={
 };
 const stateTone=state=>Object.keys(TONES).find(tone=>TONES[tone].includes(state))||'muted';
 function syncBriefCount() {
-  const count=el('brief-count'), length=Array.from(el('brief').value).length;
+  const count=el('brief-count'), length=Array.from(launchDraft().goal).length;
   count.textContent=String(length).replace(/\B(?=(\d{3})+$)/g,',')+' / 2,000';
   // The limit applies to the submitted goal, which includes the requested-Leads prefix.
-  count.setAttribute('data-tone',Array.from(launchDraft().goal).length>2000?'warn':'muted');
+  count.setAttribute('data-tone',length>2000?'warn':'muted');
 }
 function localize() {
   if(document.documentElement)document.documentElement.lang=lang;
@@ -519,6 +591,7 @@ function localize() {
   el('chat-refresh').setAttribute('aria-label',t('refreshChat'));
   el('brief').setAttribute('placeholder',t('briefPlaceholder'));
   paintObserved();syncBriefCount();
+  if(managedChat)paintComposer(managedChat);
   el('language-choice').value=lang;
   if(briefInvalid)el('brief').setCustomValidity(t('goalRule'));
   syncDisplayMode();measureGoal();
@@ -535,6 +608,8 @@ function setLanguage(next,explicit) {
 const stateLabel=state=>messages['state.'+state]?t('state.'+state):state||t('statusUnknown');
 let dashboardData, members=[], rows=[], selectedChat, chatOrigin, chatCursor, chatPage=0;
 let selectedOutput;
+let staleView=false,bindingKey=null,lastGoodBinding=null,lastGoodGeneration=-1,followupDraft=null,fullAnswer=null,roomResult=null,roomPageSeen=false;
+const roomMessageKeys=new Map();
 let approvedScope=0, issueTicket=0, reviewedIssue;
 const approvalState=new Map();
 
@@ -549,7 +624,7 @@ let busy = false;
 let disposed = false;
 const AUTO_KEY='oms.panel.auto-refresh.v1';
 let autoRefresh=false, autoTimer, lastLoadedAt=0;
-// A failed load hides the view; automatic triggers may retry it this many times.
+// A retained public snapshot never restores write authority; retries stay bounded.
 const AUTO_RETRY_LIMIT=5;
 let transientError=false, autoRetryCount=0;
 let project = '';
@@ -713,6 +788,8 @@ window.addEventListener('message', event => {
 
 async function tool(name, args = {}, expected = generation) {
   if (expected !== generation) throw uiError('projChanged');
+  if ((readOnly || staleView) && ['oms_start_main','oms_decide_approval','oms_record_reviewed_issue',
+    'oms_open_lead_conversations','oms_send_lead_message','oms_update_lead_settings'].includes(name))throw uiError('snapshot.stale');
   const scoped = project && name !== 'oms_list_projects' ? {...args, project} : args;
   const result = await request('tools/call', {name, arguments: scoped});
   if (expected !== generation) throw uiError('projChanged');
@@ -902,6 +979,8 @@ function clearChat() {
   el('chat-compose').hidden=true;el('chat-avatar').hidden=true;el('chat-text').value='';el('chat-delivery').textContent='';
   el('chat-messages').replaceChildren();el('chat-result').textContent='';
   el('chat-older').hidden=true;
+  el('chat-new').hidden=true;el('chat-count').textContent='';roomResult=null;roomPageSeen=false;roomMessageKeys.clear();
+  el('chat-result-limited').hidden=el('chat-result-full').hidden=true;clearFullAnswer();
 }
 function closeDialogs() {
   closeWorkerOutput();
@@ -913,6 +992,7 @@ function resetIssue() {
   el('issue-review').hidden=!issueInput() || !issueOwner();el('issue-review').disabled=false;
 }
 function clearProject() {
+  staleView=false;bindingKey=null;lastGoodBinding=null;lastGoodGeneration=-1;clearFollowup();
   resetLeadControl();leadSlots.clear();paintLeadControls();
   dashboardData=undefined;members=[];rows=[];retryStart=undefined;approvalState.clear();approvedScope++;
   stopAuto();lastLoadedAt=0;paintObserved();
@@ -928,7 +1008,7 @@ function conversationMainName(main) {
 }
 function joinedMain() {
   const m=dashboardData?.conversationMain;
-  return !readOnly && dashboardData?.conversationBinding==='matched' && m?.source==='room-session' &&
+  return !readOnly && !staleView && dashboardData?.conversationBinding==='matched' && m?.source==='room-session' &&
     m.state==='joined' && m.room && m.participant && Object.hasOwn(names,m.provider) ? m : null;
 }
 function issueOwner() {
@@ -1050,32 +1130,44 @@ function clearWorkerOutput(){
   selectedOutput=undefined;
   for(const id of ['output-worker','output-status','output-body']){const e=el(id);bindings.delete(e);e.textContent='';}
   el('output-body').hidden=true;el('output-limited').hidden=true;
+  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=true;put('output-copy-status',()=>'');
 }
 function closeWorkerOutput(){
   if(el('worker-output').open)el('worker-output').close();
   clearWorkerOutput();
 }
-async function readWorkerOutput(s){
+async function readWorkerOutput(s,paged=false){
   if(!s || s!==selectedOutput || s.loading)return;
   const args={projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt};
+  if(paged)args.answerPage=s.cursor||'';else{s.cursor=null;s.digest=null;s.end=0;}
   el('output-body').hidden=true;el('output-body').textContent='';el('output-limited').hidden=true;
   if(!currentWorkerOutput(s)){put('output-status','out.unavailable');return;}
-  s.loading=true;el('output-refresh').disabled=true;put('output-status','out.loading');
+  s.loading=true;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=true;put('output-status','out.loading');
+  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=true;put('output-copy-status',()=>'');
   try{
     const result=await tool('oms_worker_output',args,s.ctl.generation);
     if(!currentWorkerOutput(s))return;
     const data=result.structuredContent, out=result._meta?.workerOutput;
-    if(!data || !out || Object.keys(args).some(k=>data[k]!==args[k] || out[k]!==args[k]) ||
+    if(!data || !out || ['projectKey','room','leadAttempt','workerAttempt'].some(k=>data[k]!==args[k] || out[k]!==args[k]) ||
       !['running','complete','not_recorded','unavailable'].includes(data.status) || out.status!==data.status ||
       typeof out.truncated!=='boolean' || (data.status==='complete'
-        ? !['native-report','indexed-answer'].includes(out.source) || typeof out.text!=='string' || !out.text.trim() ||
+        ? !['native-report','indexed-answer'].includes(out.source) || typeof out.text!=='string' || !(paged?out.text:out.text.trim()) ||
           out.text.length>16384 || new TextEncoder().encode(out.text).length>16384
         : out.text!==null || out.source!==null || out.truncated))throw uiError('out.unavailable');
-    put('output-status','out.'+out.status);
+    if(paged){
+      if(out.status!=='complete')throw uiError('answer.changed');
+      acceptChunk(s,{...out.page,text:out.text});
+      put('output-status',()=>t('answer.loaded',{start:s.start+1,n:s.end,total:s.total}));
+    }else put('output-status','out.'+out.status);
+    s.text=out.text||'';
     el('output-body').textContent=out.text||'';el('output-body').hidden=!out.text;
     el('output-limited').hidden=!(out.text && out.truncated);
-  }catch{if(currentWorkerOutput(s))put('output-status','out.unavailable');}
-  finally{if(selectedOutput===s){s.loading=false;el('output-refresh').disabled=false;}}
+    el('output-copy').hidden=el('output-followup').hidden=!out.text;
+    el('output-more').hidden=!out.text || (paged?!s.cursor:!out.truncated);
+    el('output-first').hidden=!paged || !s.start;
+    put('output-more',paged?'answer.more':'answer.full');
+  }catch{if(currentWorkerOutput(s)){s.text='';s.cursor=null;put('output-status',paged?'answer.changed':'out.unavailable');}}
+  finally{if(selectedOutput===s){s.loading=false;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=false;}}
 }
 function openWorkerOutput(lead,worker,origin){
   if(!currentLeadControl(leadControl) || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
@@ -1085,11 +1177,88 @@ function openWorkerOutput(lead,worker,origin){
   el('worker-output').showModal();el('output-close').focus();armAuto();readWorkerOutput(s);
 }
 onClick('output-refresh',()=>readWorkerOutput(selectedOutput));
+onClick('output-more',()=>readWorkerOutput(selectedOutput,true));
+onClick('output-first',()=>{const s=selectedOutput;if(currentWorkerOutput(s) && !s.loading){s.cursor=null;s.digest=null;s.end=0;readWorkerOutput(s,true);}});
+onClick('output-copy',()=>{const s=selectedOutput;copyDisplayed(s?.text,'output-copy-status',()=>currentWorkerOutput(s) && !s.loading);});
+onClick('output-followup',()=>{
+  const s=selectedOutput;if(!currentWorkerOutput(s) || s.loading || !s.text)return;
+  const source={kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,...(s.digest?{digest:s.digest}:{})};
+  closeWorkerOutput();prepareFollowup(source);
+});
 onClick('output-close',()=>el('worker-output').close());
 on('worker-output','close',()=>{
   if(el('worker-output').open)return;
   const s=selectedOutput;clearWorkerOutput();armAuto();
   if(s && currentLeadControl(s.ctl) && !el('view').hidden)(s.origin?.isConnected===false?el('main-name'):s.origin)?.focus();
+});
+function acceptChunk(reader,page){
+  const bytes=typeof page?.text==='string'?new TextEncoder().encode(page.text).length:-1;
+  if(bytes<0 || bytes>16384 || page.bytes!==bytes || !Number.isSafeInteger(page.offset) || page.offset!==(reader.end||0) ||
+    !Number.isSafeInteger(page.totalBytes) || page.totalBytes<page.offset+bytes || !/^[a-f0-9]{64}$/.test(page.digest) ||
+    reader.digest && (reader.digest!==page.digest || reader.total!==page.totalBytes) ||
+    typeof page.hasMore!=='boolean' || (page.hasMore
+      ? typeof page.nextCursor!=='string' || !page.nextCursor || page.nextCursor.length>4096 || page.nextCursor===reader.cursor || !bytes
+      : page.nextCursor!=null || page.offset+bytes!==page.totalBytes))throw uiError('answer.changed');
+  reader.digest=page.digest;reader.total=page.totalBytes;reader.start=page.offset;reader.end=page.offset+bytes;reader.cursor=page.nextCursor;reader.text=page.text;
+}
+function clearFullAnswer(){
+  fullAnswer=null;el('full-answer').hidden=true;el('full-answer-body').textContent='';
+  el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=true;put('answer-status',()=>'');
+}
+function currentFullAnswer(s){
+  return s && s===fullAnswer && s.generation===generation && !el('full-answer').hidden && (s.kind==='lead'?currentManaged(s.c):
+    s.projectKey===bindingKey && s.member===selectedChat && canChat(s.member) && el('conversation').open);
+}
+async function readFullAnswer(s){
+  if(!currentFullAnswer(s) || s.loading)return;
+  s.loading=true;el('answer-more').disabled=el('answer-first').disabled=true;put('answer-status','chatLoading');
+  try{
+    let page,source;
+    if(s.kind==='lead'){
+      const c=s.c,args={...settingsScope(c),turnId:s.turnId,answerPage:s.cursor||''};
+      const result=await tool('oms_lead_conversation_status',args,c.ctl.generation);
+      if(!currentFullAnswer(s))return;
+      const item=validatedTeam(result,c.ctl,c.provider).items.get(c.provider),privateData=result._meta?.leadConversation;
+      if(item.status!=='ready' || item.requestId!==c.requestId || privateData?.room!==c.ctl.room ||
+        privateData.provider!==c.provider || privateData.requestId!==c.requestId || privateData.answer?.turnId!==s.turnId ||
+        privateData.answer.source!=='recorded-answer')throw uiError('answer.changed');
+      page=privateData.answer;
+      const handoff=page.handoff;
+      if(handoff && handoff.room===c.ctl.room && handoff.provider===c.provider && handoff.leadRequestId===c.requestId &&
+        handoff.turnId===s.turnId && typeof handoff.participant==='string' && typeof handoff.operation==='string' &&
+        /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.participant) && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.operation))
+        source={kind:'lead-answer',projectKey:c.ctl.projectKey,...handoff};
+    }else{
+      const m=s.member,result=await tool('oms_panel_chat',{projectKey:s.projectKey,room:m.room,participant:m.participant,section:'transcript',attempt:s.attempt,evidenceCursor:s.cursor||''},s.generation);
+      if(!currentFullAnswer(s))return;
+      const data=result._meta?.chat;
+      if(data?.source!=='room' || data.room!==m.room || data.participant!==m.participant ||
+        data.projectKey!==s.projectKey || result.structuredContent?.projectKey!==s.projectKey ||
+        data.evidence?.attempt!==s.attempt || data.evidence.section!=='transcript')throw uiError('answer.changed');
+      page=data.evidence;source={kind:'room-result',projectKey:s.projectKey,room:m.room,participant:m.participant,attempt:s.attempt};
+    }
+    acceptChunk(s,page);s.source=source;el('full-answer-body').textContent=s.text;
+    put('answer-status',()=>t('answer.loaded',{start:s.text?s.start+1:0,n:s.end,total:s.total}));
+    el('answer-first').hidden=!s.start;el('answer-more').hidden=!s.cursor;el('answer-copy').hidden=!s.text;el('answer-followup').hidden=!source || !joinedMain();
+  }catch{
+    if(currentFullAnswer(s)){s.text='';s.cursor=null;s.source=null;el('full-answer-body').textContent='';el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=true;put('answer-status','answer.changed');}
+  }finally{if(currentFullAnswer(s)){s.loading=false;el('answer-more').disabled=el('answer-first').disabled=false;}}
+}
+function openFullAnswer(selection){
+  if(selection.kind==='lead'?!currentManaged(selection.c):!canChat(selection.member) || !/^[a-f0-9]{64}$/.test(bindingKey))return;
+  clearFullAnswer();fullAnswer={...selection,projectKey:selection.kind==='room'?bindingKey:selection.c.ctl.projectKey,generation,cursor:null,end:0};el('full-answer').hidden=false;
+  el('answer-close').focus();readFullAnswer(fullAnswer);
+}
+onClick('answer-close',()=>{const s=fullAnswer;clearFullAnswer();s?.origin?.focus();});
+onClick('answer-more',()=>readFullAnswer(fullAnswer));
+onClick('answer-first',()=>{const s=fullAnswer;if(currentFullAnswer(s) && !s.loading){s.cursor=null;s.digest=null;s.end=0;readFullAnswer(s);}});
+onClick('answer-copy',()=>{const s=fullAnswer;copyDisplayed(s?.text,'answer-status',()=>currentFullAnswer(s));});
+onClick('answer-followup',()=>{
+  const s=fullAnswer;if(!currentFullAnswer(s) || !s.source)return;
+  const source={...s.source,digest:s.digest};el('conversation').close();clearChat();prepareFollowup(source);
+});
+onClick('chat-result-full',()=>{
+  if(selectedChat && roomResult?.attempt)openFullAnswer({kind:'room',member:selectedChat,attempt:roomResult.attempt,origin:el('chat-result-full')});
 });
 function renderLeadSlots(leads,complete) {
   const list=el('leads');list.replaceChildren();leadSlots.clear();
@@ -1099,12 +1268,14 @@ function renderLeadSlots(leads,complete) {
     const slot=node('section','','lead-slot'), heading=node('div','','slot-heading');
     const avatar=node('span','','avatar');paintAvatar(avatar,provider);avatar.setAttribute('aria-hidden','true');
     heading.append(avatar,node('h3',roleTitle('Lead',provider)));
-    const status=node('span','','state'), open=node('button','','subtle');
+    const status=node('span','','state'), open=node('button','','subtle'),connect=node('button','','subtle'),turn=node('small','','lead-turn');
     open.type='button';open.hidden=true;
+    connect.type='button';connect.hidden=true;
     const ctl=leadControl;
     open.addEventListener('click',()=>openManagedChat(ctl,provider,open));
-    heading.append(status,open);
-    leadSlots.set(provider,{status,open,placeholder:entries.length?null:(complete?'waitingAssignment':'unknownAssignment')});
+    connect.addEventListener('click',()=>writeLeads(ctl,[provider]));
+    heading.append(status,open,connect,turn);
+    leadSlots.set(provider,{status,open,connect,turn,placeholder:entries.length?null:(complete?'waitingAssignment':'unknownAssignment')});
     slot.append(heading);
     for(const entry of entries)slot.append(leadEntry(entry,true));
     list.append(slot);
@@ -1133,13 +1304,16 @@ function paintLeadControls(){
   const opener=el('open-leads');
   opener.hidden=!known;opener.disabled=!known || !ctl.observed || ctl.reading || ctl.writing;
   const auto=known && autoLeads(ctl);
-  el('lead-auto-off').hidden=!auto;
-  el('lead-opt-in-note').hidden=!known || !ctl.observed || auto;
+  el('lead-auto-label').hidden=!known;el('lead-auto').checked=Boolean(auto);
+  el('lead-auto').disabled=!known || !ctl.observed;
+  el('lead-opt-in-note').hidden=!known;
+  el('lead-refresh').hidden=!known || !(ctl.failed || ctl.pollPaused);
+  el('lead-refresh').disabled=!known || ctl.reading || ctl.writing;
   if(managedChat && (!known || ctl.items.get(managedChat.provider)?.requestId!==managedChat.requestId ||
       ctl.items.get(managedChat.provider)?.status!=='ready')){
     el('conversation').close();clearChat();
   }
-  put('lead-control-status',()=>!known?'':ctl.writing?t('startingLeads'):ctl.failed?t('leadStatusFailed'):'');
+  put('lead-control-status',()=>!known?'':ctl.writing?t('startingLeads'):ctl.failed?t('leadStatusFailed'):ctl.pollPaused?t('poll.paused'):'');
   for(const [provider,slot] of leadSlots){
     const row=known && ctl.items.get(provider);
     const ready=row?.status==='ready', key=row && row.status!=='not_started' && !ready?'lead.'+row.status:ready?null:slot.placeholder;
@@ -1147,12 +1321,21 @@ function paintLeadControls(){
     slot.status.setAttribute('data-tone',stateTone(row && key==='lead.'+row.status?row.status:''));
     if(key)put(slot.status,key);else slot.status.textContent='';
     slot.open.hidden=!ready;
+    slot.open.disabled=!known || !ctl.observed || ctl.writing;
     if(ready)put(slot.open,()=>t('lead.ready',{provider:names[provider]}));else slot.open.textContent='';
+    slot.connect.hidden=!known || row?.status!=='not_started';
+    slot.connect.disabled=!known || !ctl.observed || ctl.reading || ctl.writing;
+    if(!slot.connect.hidden)put(slot.connect,()=>t('lead.connect',{provider:names[provider]}));else slot.connect.textContent='';
+    const latest=row?.latestTurn;
+    put(slot.turn,()=>!latest?'':['reserved','running','unconfirmed'].includes(latest.status)?t('lead.waitingReply'):
+      latest.status==='replied'?t(ctl.seenTurns?.get(provider)===latest.turnId?'lead.replyRead':'lead.newReply'):
+      latest.status==='failed'?t('turn.failed'):'');
   }
 }
 function validatedTeam(response,ctl,provider){
-  const data=response?.structuredContent, expected=provider?[provider]:providers;
+  const data=response?.structuredContent, expected=Array.isArray(provider)?provider:provider?[provider]:providers;
   if(data?.room!==ctl.room || typeof data.projectKey!=='string' || !/^[a-f0-9]{64}$/.test(data.projectKey) || (ctl.projectKey && ctl.projectKey!==data.projectKey) ||
+     (bindingKey && bindingKey!==data.projectKey) ||
      !Array.isArray(data.leads) || data.leads.length!==expected.length)throw uiError('chatMismatch');
   const items=new Map(), requests=new Set();
   for(const item of data.leads){
@@ -1160,6 +1343,9 @@ function validatedTeam(response,ctl,provider){
       !['not_started','starting','ready','unconfirmed','unavailable'].includes(item.status) ||
       !(item.status==='unavailable' && item.requestId==null || typeof item.requestId==='string' &&
         /^[a-f0-9]{8}-[a-f0-9]{4}-8[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(item.requestId) && !requests.has(item.requestId)))throw uiError('chatMismatch');
+    const latest=item.latestTurn;
+    if(latest!=null && (!turnUuid(latest.turnId) || !['reserved','running','replied','unconfirmed','failed'].includes(latest.status) ||
+      ![latest.submittedAt,latest.lastObservedAt].every(v=>v==null || typeof v==='string' && Number.isFinite(Date.parse(v)))))throw uiError('chatMismatch');
     items.set(item.provider,item);requests.add(item.requestId);
   }
   return {items,projectKey:data.projectKey};
@@ -1169,9 +1355,9 @@ function considerLeadOpen(ctl,allowSaved=true){
   const intent=leadIntent;leadIntent=undefined;
   const explicit=intent && intent.generation===generation && intent.id===openSeq &&
     (!intent.room || (intent.room===ctl.room && intent.owner===ctl.owner));
-  if(explicit)rememberLeads(ctl,true);
+  if(ctl.autoOnVisit===undefined)ctl.autoOnVisit=autoLeads(ctl);
   const statuses=[...ctl.items.values()].map(r=>r.status);
-  if((explicit || (allowSaved && autoLeads(ctl))) && !ctl.attempted && statuses.includes('not_started') &&
+  if((explicit || (allowSaved && ctl.autoOnVisit && autoLeads(ctl))) && !ctl.attempted && statuses.includes('not_started') &&
      statuses.every(s=>['not_started','starting','ready'].includes(s)))writeLeads(ctl);
   else paintLeadControls();
 }
@@ -1181,9 +1367,11 @@ function resetLeadControl(){
 }
 function scheduleLeadRead(ctl){
   clearTimeout(ctl.pollTimer);
-  if(!currentLeadControl(ctl) || ctl.reading || ctl.writing || ![...ctl.items.values()].some(r=>r.status==='starting'))return;
+  const waiting=currentLeadControl(ctl) && [...ctl.items.values()].some(r=>r.status==='starting' || ['reserved','running'].includes(r.latestTurn?.status));
+  if(!waiting){if(ctl)ctl.pollPaused=false;return;}
+  if(ctl.reading || ctl.writing || managedChat)return;
   const delay=ctl.pollDelay;
-  if(Date.now()+delay>ctl.pollUntil)return;
+  if(Date.now()+delay>ctl.pollUntil){ctl.pollPaused=true;paintLeadControls();return;}
   ctl.pollDelay=Math.min(delay+4000,15000);
   ctl.pollTimer=setTimeout(()=>{
     if(currentLeadControl(ctl) && Date.now()<=ctl.pollUntil)observeLeads(ctl,true);
@@ -1192,7 +1380,7 @@ function scheduleLeadRead(ctl){
 async function observeLeads(ctl,poll=false){
   if(!currentLeadControl(ctl) || ctl.reading || ctl.writing)return;
   clearTimeout(ctl.pollTimer);
-  if(!poll){ctl.pollUntil=Date.now()+120000;ctl.pollDelay=8000;}
+  if(!poll){ctl.pollUntil=Date.now()+120000;ctl.pollDelay=8000;ctl.pollPaused=false;}
   ctl.reading=true;paintLeadControls();
   try{
     const result=await tool('oms_lead_conversation_status',{room:ctl.room},ctl.generation);
@@ -1205,26 +1393,33 @@ async function observeLeads(ctl,poll=false){
     scheduleLeadRead(ctl);
   }}
 }
-async function writeLeads(ctl){
+async function writeLeads(ctl,selection=providers){
   if(!currentLeadControl(ctl) || !ctl.observed || ctl.writing || ctl.reading)return;
+  if(!Array.isArray(selection) || !selection.length || selection.some(p=>!providers.includes(p)) || new Set(selection).size!==selection.length)return;
   clearTimeout(ctl.pollTimer);
   ctl.attempted=true;ctl.writing=true;ctl.failed=false;paintLeadControls();
   try{
-    const result=await tool('oms_open_lead_conversations',{room:ctl.room,projectKey:ctl.projectKey},ctl.generation);
-    if(currentLeadControl(ctl))Object.assign(ctl,validatedTeam(result,ctl));
+    const result=await tool('oms_open_lead_conversations',{room:ctl.room,projectKey:ctl.projectKey,...(selection.length===3?{}:{providers:selection})},ctl.generation);
+    if(currentLeadControl(ctl)){
+      const checked=validatedTeam(result,ctl,selection);ctl.projectKey=checked.projectKey;
+      for(const [provider,item] of checked.items)ctl.items.set(provider,item);
+    }
   }catch{if(currentLeadControl(ctl)){ctl.failed=true;ctl.observed=false;ctl.items.clear();}}
   finally{if(currentLeadControl(ctl)){
     ctl.writing=false;paintLeadControls();
-    ctl.pollUntil=Date.now()+120000;ctl.pollDelay=8000;scheduleLeadRead(ctl);
+    ctl.pollUntil=Date.now()+120000;ctl.pollDelay=8000;ctl.pollPaused=false;scheduleLeadRead(ctl);paintLeadControls();
   }}
 }
 onClick('open-leads',()=>{
   const ctl=leadControl;
   if(currentLeadControl(ctl) && ctl.observed && !ctl.reading && !ctl.writing){
-    rememberLeads(ctl,true);writeLeads(ctl);
+    writeLeads(ctl);
   }
 });
-onClick('lead-auto-off',()=>{if(currentLeadControl(leadControl)){rememberLeads(leadControl,false);paintLeadControls();}});
+on('lead-auto','change',()=>{if(currentLeadControl(leadControl) && leadControl.observed){
+  rememberLeads(leadControl,el('lead-auto').checked);leadControl.autoOnVisit=false;paintLeadControls();
+}});
+onClick('lead-refresh',()=>observeLeads(leadControl));
 const turnUuid=v=>typeof v==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v);
 function currentManaged(c){
   return c && c===managedChat && currentLeadControl(c.ctl) && el('conversation').open &&
@@ -1234,7 +1429,7 @@ function clearSettings(){
   if(managedChat)managedChat.settings=null;
   el('settings-toggle').setAttribute('aria-expanded','false');
   el('chat-settings').hidden=true;
-  for(const id of ['settings-saved','settings-actual','settings-hint','settings-status']){
+  for(const id of ['settings-saved','settings-actual','settings-hint','settings-status','settings-scope','settings-catalog']){
     const e=el(id);bindings.delete(e);e.textContent='';
   }
   for(const id of ['settings-model','settings-effort'])el(id).replaceChildren();
@@ -1250,7 +1445,10 @@ function confirmedSettings(c,response){
     !meta.selection.model && meta.selection.effort || !Array.isArray(meta.options) ||
     !meta.options.every(o=>o && validOptionText(o.model) && ['catalog','policy'].includes(o.source) && typeof o.fixed==='boolean' &&
       typeof o.requiresEffort==='boolean' && Array.isArray(o.efforts) && o.efforts.every(validOptionText)) ||
-    new Set(meta.options.map(o=>o.model)).size!==meta.options.length)throw uiError('prefs.failed');
+    new Set(meta.options.map(o=>o.model)).size!==meta.options.length ||
+    meta.catalogAgeSeconds!=null && (!Number.isSafeInteger(meta.catalogAgeSeconds) || meta.catalogAgeSeconds<0) ||
+    meta.scope!=null && !(meta.scope.target==='lead-conversation' && meta.scope.appliesTo==='next-message' &&
+      meta.scope.inheritsToWorkers===false && meta.scope.mode==='read-only-consultation' && meta.scope.continuity==='oms-thread'))throw uiError('prefs.failed');
   return meta;
 }
 function settingsOption(select,value,label,disabled=false){
@@ -1274,7 +1472,9 @@ function showSettings(c,data,observedTurn){
   const sessionReported=['claude','agy'].includes(c.provider) && session?.source==='provider-result' &&
     session.scope==='invocation' && session.resumable===false && typeof session.id==='string' &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(session.id);
-  put('settings-actual',()=>[modelReported && t('prefs.actual',{v:served.model}),
+  put('settings-scope',()=>data.scope?t('prefs.scope')+'\n'+t('prefs.continuity'):t('prefs.next'));
+  put('settings-catalog',()=>[Number.isSafeInteger(data.catalogAgeSeconds)?t('prefs.catalogAge',{n:data.catalogAgeSeconds}):t('prefs.catalogUnknown'),t('prefs.unobserved')].join('\n'));
+  put('settings-actual',()=>[modelReported?t('prefs.actual',{v:served.model}):t('prefs.actualUnknown'),
     sessionReported && t('prefs.session',{v:names[c.provider]})].filter(Boolean).join('\n'));
   const select=el('settings-model'), {model,effort}=data.selection;
   select.replaceChildren();settingsOption(select,'',message('prefs.default'));
@@ -1365,7 +1565,9 @@ function paintComposer(c){
   if(c.settings)paintSettings(c);
   el('chat-send').disabled=!c.verified || c.reading || s.settingsSaving || s.writing || !!p || !!c.previous || !validText(s.draft);
   const state=s.writing?'sending':c.previous?'previous':p?.status || s.outcome;
-  put('chat-delivery',()=>state?t('turn.'+state):s.draft && !validText(s.draft)?t('turn.limit'):'');
+  const bytes=new TextEncoder().encode(s.draft||'').length;
+  put('chat-count',()=>t('chat.bytes',{n:bytes.toLocaleString(lang)}));el('chat-count').setAttribute('data-tone',bytes>4000?'warn':'muted');
+  put('chat-delivery',()=>c.pollPaused?t('poll.paused'):s.draft && !validText(s.draft)?t('turn.limit'):state?t('turn.'+state):'');
   const check=el('chat-check');check.hidden=!p && !c.failed && !c.previous || s.writing;check.disabled=c.reading;
   put(check,p?.status==='not_found' && !c.previous?'turn.retry':p || c.previous?'turn.check':'refresh');
 }
@@ -1376,6 +1578,8 @@ function settleTurn(c,result,p){
   const s=c.session;
   if(s.pending!==p)return;
   p.status=turn.status;
+  const item=c.ctl.items.get(c.provider);
+  if(item && p.status!=='not_found')item.latestTurn={turnId:p.id,status:p.status,submittedAt:item.latestTurn?.submittedAt||null,lastObservedAt:null};
   if(['reserved','running','replied'].includes(p.status) && !p.accepted){
     p.accepted=true;
     if(s.draft===p.text){p.restore=true;s.draft='';el('chat-text').value='';}
@@ -1405,6 +1609,10 @@ function paintTurns(c,page,before){
     if(failure)row.append(failure);
     c.keys.set(key(r),failure);
     if(r.truncated===true)row.append(node('small',message('turn.partial')));
+    if(!user && turnUuid(r.turnId)){
+      const button=node('button',message('answer.full'),'subtle');button.type='button';
+      button.addEventListener('click',()=>openFullAnswer({kind:'lead',c,turnId:r.turnId,origin:button}));row.append(button);
+    }
     nodes.push(row);
   }
   for(const r of incoming){
@@ -1417,7 +1625,8 @@ function paintTurns(c,page,before){
   if(!c.cursor && document.activeElement===older)scroll.focus({preventScroll:true});
   older.hidden=!c.cursor;
   if(before)scroll.scrollTop=top+scroll.scrollHeight-height;
-  else if(c.first || nearEnd)scroll.scrollTop=scroll.scrollHeight;
+  else if(c.first || nearEnd){scroll.scrollTop=scroll.scrollHeight;el('chat-new').hidden=true;}
+  else if(fresh.length)el('chat-new').hidden=false;
   c.first=false;
   put('chat-status',()=>page.hasMore && !c.cursor && !c.visited.size?t('transcriptPartial'):!c.keys.size?t('emptyChat'):'');
 }
@@ -1439,6 +1648,12 @@ async function readManaged(c,before=null){
       const latest=page.transcript.turns.filter(r=>r.role==='user').at(-1);
       c.latestTurn=latest?.turnId;
       c.previous=latest && latest.turnId!==p?.id && ['reserved','running','unconfirmed'].includes(latest.status)?latest.status:null;
+      const answered=page.transcript.turns.filter(r=>r.role!=='user' && turnUuid(r.turnId)).at(-1);
+      if(answered){c.ctl.seenTurns??=new Map();c.ctl.seenTurns.set(c.provider,answered.turnId);}
+      if(latest && turnUuid(latest.turnId) && ['reserved','running','replied','failed','unconfirmed'].includes(latest.status)){
+        const row=c.ctl.items.get(c.provider);
+        row.latestTurn={turnId:latest.turnId,status:latest.status,submittedAt:latest.at||null,lastObservedAt:null};
+      }
     }
     if(before)c.visited.add(before);
     c.verified=true;c.failed=false;paintTurns(c,page.transcript,before);
@@ -1447,7 +1662,10 @@ async function readManaged(c,before=null){
   }finally{
     if(currentManaged(c)){
       c.reading=false;el('chat-older').disabled=false;paintComposer(c);
-      if(['reserved','running'].includes(c.previous || c.session.pending?.status) && Date.now()<c.until)c.timer=setTimeout(()=>readManaged(c),8000);
+      const waiting=['reserved','running'].includes(c.previous || c.session.pending?.status);
+      c.pollPaused=waiting && Date.now()>=c.until;
+      if(waiting && !c.pollPaused)c.timer=setTimeout(()=>readManaged(c),8000);
+      paintComposer(c);paintLeadControls();
     }
   }
 }
@@ -1456,7 +1674,8 @@ async function sendManaged(c,retry=false){
   const s=c.session;
   if(retry ? s.pending?.status!=='not_found' : !!s.pending || !validText(s.draft))return;
   const p=retry?s.pending:{id:crypto.randomUUID(),text:s.draft,status:'unconfirmed'};
-  c.latestTurn=p.id;s.pending=p;s.outcome='';s.writing=true;c.until=Date.now()+120000;clearTimeout(c.timer);paintComposer(c);
+  c.latestTurn=p.id;s.pending=p;s.outcome='';s.writing=true;c.until=Date.now()+120000;c.pollPaused=false;clearTimeout(c.timer);paintComposer(c);
+  c.ctl.pollUntil=c.until;c.ctl.pollDelay=8000;c.ctl.pollPaused=false;
   try{
     const result=await tool('oms_send_lead_message',{room:c.ctl.room,projectKey:c.ctl.projectKey,provider:c.provider,
       leadRequestId:c.requestId,turnId:p.id,text:p.text},c.ctl.generation);
@@ -1484,6 +1703,7 @@ function chatRow(from,text,record){
 }
 async function openManagedChat(ctl,provider,origin){
   if(!currentLeadControl(ctl) || ctl.items.get(provider)?.status!=='ready')return;
+  clearTimeout(ctl.pollTimer);ctl.pollTimer=undefined;
   const requestId=ctl.items.get(provider).requestId;
   ctl.sessions??=new Map();
   if(ctl.sessions.get(provider)?.requestId!==requestId)ctl.sessions.set(provider,{requestId,draft:'',pending:null});
@@ -1503,8 +1723,9 @@ on('chat-text','keydown',e=>{if(e.key==='Enter' && (e.ctrlKey || e.metaKey) && !
 onClick('chat-check',()=>{
   const c=managedChat;if(!currentManaged(c))return;
   if(c.session.pending?.status==='not_found' && !c.previous)sendManaged(c,true);
-  else{c.until=Date.now()+120000;readManaged(c);}
+  else{c.until=Date.now()+120000;c.pollPaused=false;readManaged(c);}
 });
+onClick('chat-new',()=>{el('chat-scroll').scrollTop=el('chat-scroll').scrollHeight;el('chat-new').hidden=true;});
 
 function snapshotNotice(d) {
   const completeness=d.observation?(d.observation.completeness||'unknown'):'';
@@ -1513,6 +1734,124 @@ function snapshotNotice(d) {
     d.conversationAttemptsOmitted,d.conversationMain?.participantsOmitted,d.managedScratch?.omittedAttempts].some(n=>n>0);
   return omitted || (completeness && completeness!=='complete')?'snapshot.partial':'';
 }
+const displayText=(v,max=2000)=>typeof v==='string' && v.length<=max && !/[\x00-\x08\x0b-\x1f\x7f]/u.test(v)?v:'';
+const readinessReasons={
+  'selection-ready':['선택 가능 · 실행 권한은 별도 확인','Eligible for selection · execution authority is separate'],
+  'brief-required':['작업 범위 확인 필요','Task brief needed'],
+  'dependencies-unfinished':['선행 작업 대기','Waiting for dependencies'],
+  'contract-stale':['작업 계약 재확인 필요','Task contract needs rechecking'],
+  'plan-contract-blocked':['계획 계약 확인 필요','Plan contract needs checking'],
+  'scope-conflict':['작업 범위 충돌','Scope conflict'],
+  'claim-expired':['작업 소유권 재확인 필요','Task ownership needs rechecking'],
+  'attempt-active':['실행 진행 중','Attempt active'],
+  'parent-review-pending':['Main 검토 대기','Waiting for Main review'],
+  'landing-in-progress':['결과 반영 진행 중','Landing in progress'],
+  'recorded-done':['완료 기록됨','Completion recorded'],
+  'completion-unverified':['완료 검증 필요','Completion needs verification'],
+  'cancelled-not-verified':['취소됨 · 검증 완료 아님','Cancelled · not verified'],
+  'task-blocked':['작업 차단됨','Task blocked'],
+  'task-failed':['작업 실패','Task failed'],
+  'retired-executor':['실행 주체 재확인 필요','Executor needs rechecking'],
+  'reason-unreported':['선택 조건 미확인','Selection conditions unconfirmed'],
+};
+function readinessLabel(task){return readinessReasons[task.reason]?.[lang==='ko'?0:1] || t('statusUnknown');}
+function readinessTasks(d){
+  return d?.planReadiness?.available===true && d.planReadiness.scope==='repository' && Array.isArray(d.planReadiness.tasks)
+    ? d.planReadiness.tasks.slice(0,8).filter(r=>r && displayText(r.id,160) && displayText(r.title,512)):[];
+}
+function journeyFocus(d){
+  const tasks=readinessTasks(d), task=tasks.find(r=>['parent-review-pending','task-blocked','task-failed','brief-required','scope-conflict'].includes(r.reason)) || tasks.find(r=>!['recorded-done','cancelled-not-verified'].includes(r.reason));
+  const attention=Array.isArray(d?.attention)?d.attention.find(r=>displayText(r?.summary,512)):null;
+  return {task,summary:task?[task.title,readinessLabel(task)].join(' · '):displayText(attention?.summary,512)};
+}
+function paintEvidence(){
+  const d=dashboardData||{}, criteria=d.acceptance, list=el('criteria-list');list.replaceChildren();
+  const available=criteria?.available===true && criteria.scope==='repository';
+  const items=available && Array.isArray(criteria.criteria)?criteria.criteria.slice(0,8):[];
+  let partial=Number(criteria?.omitted)>0 || Number(d.planReadiness?.omitted)>0;
+  for(const r of items){
+    if(!displayText(r?.id,160) || !displayText(r.label,2000) || !displayText(r.status,96)){partial=true;continue;}
+    const li=node('li',''),head=node('div','','criterion-head');
+    head.append(node('strong',r.label),node('span',()=>stateLabel(r.status),'state'));li.append(head);
+    const evidence=Array.isArray(r.evidence)?r.evidence.slice(0,3):[];
+    for(const e of evidence){
+      if(!e || typeof e!=='object'){partial=true;continue;}
+      const ref=displayText(e?.reference,1024),kind=displayText(e?.kind,96),status=displayText(e?.status,96);
+      li.append(node('small',()=>t('evidence.reference',{v:[ref||kind||t('evidence.noRef'),status&&stateLabel(status),e.stale===true&&t('evidence.stale')].filter(Boolean).join(' · ')})));
+    }
+    if(!evidence.length)li.append(node('small',message('evidence.noRef')));
+    if(Number(r.evidenceOmitted)>0)partial=true;
+    list.append(li);
+  }
+  put('evidence-note',()=>!available?t('evidence.unknown'):partial?t('evidence.partial'):!items.length?t('evidence.none'):'');
+  const readiness=el('readiness-list');readiness.replaceChildren();
+  for(const task of readinessTasks(d))readiness.append(node('li',()=>task.title+' · '+readinessLabel(task),'note'));
+}
+function paintJourney(d){
+  const c=d.acceptance, valid=c?.available===true && c.scope==='repository' && Number.isSafeInteger(c.total) && c.total>=0 && Number.isSafeInteger(c.verified) && c.verified>=0 && c.verified<=c.total;
+  el('criteria-summary').hidden=false;
+  put('criteria-summary',()=>!valid?t('evidence.unknown'):c.total?t('evidence.count',{total:c.total,verified:c.verified}):t('evidence.none'));
+  const focus=journeyFocus(d),next=d.nextStep?.scope==='repository'?displayText(d.nextStep.summary,1200):'';
+  put('attention-summary',()=>focus.summary?t('journey.attention',{v:focus.summary}):'');
+  put('next-step',()=>next?t('journey.next',{v:next}):'');
+  el('followup-open').hidden=!joinedMain();el('followup-open').disabled=staleView || busy;
+  if(!el('goal-evidence').hidden)paintEvidence();
+}
+function clearFollowup(){
+  followupDraft=null;el('followup-panel').hidden=true;el('followup-text').value='';put('followup-status',()=>'');
+}
+function currentFollowup(d){
+  const main=joinedMain();
+  return d && d===followupDraft && !staleView && d.generation===generation && d.project===project && d.projectKey===bindingKey &&
+    main?.room===d.room && main.participant===d.owner && !el('followup-panel').hidden;
+}
+function paintFollowup(){
+  const current=currentFollowup(followupDraft),valid=validText(el('followup-text').value);
+  el('followup-add').hidden=!contextTypes;el('followup-add').disabled=!current || !valid || followupDraft?.pending;
+  el('followup-copy').disabled=!current || !valid;el('followup-main').disabled=!current;
+  if(current && !valid)put('followup-status','turn.limit');
+  else if(current && el('followup-status').textContent===t('turn.limit'))put('followup-status',()=>'');
+}
+async function copyDisplayed(text,target,current=()=>true){
+  if(!text || !current())return;
+  try{
+    if(!globalThis.navigator?.clipboard?.writeText)throw new Error();
+    await navigator.clipboard.writeText(text);
+    if(current())put(target,'copy.done');
+  }catch{if(current())put(target,'copy.failed');}
+}
+onClick('evidence-toggle',()=>{
+  const show=el('goal-evidence').hidden;el('goal-evidence').hidden=!show;
+  el('evidence-toggle').setAttribute('aria-expanded',String(show));put('evidence-toggle',show?'evidence.close':'evidence.open');
+  if(show)paintEvidence();
+});
+function prepareFollowup(source=null){
+  const main=joinedMain();if(!main || staleView || busy)return;
+  const focus=journeyFocus(dashboardData);
+  followupDraft={project,projectKey:bindingKey,generation,room:main.room,owner:main.participant,task:focus.task?.id||null,source};
+  const excerpt=(value,max)=>Array.from(value).length>max?Array.from(value).slice(0,max).join('')+'…':value;
+  const reference=source && [['Kind',source.kind],['Provider',source.provider],['Participant',source.participant],
+    ['Lead request',source.leadRequestId],['Turn',source.turnId],['Operation',source.operation],['Lead attempt',source.leadAttempt],
+    ['Worker attempt',source.workerAttempt],['Attempt',source.attempt],['Digest',source.digest]]
+    .filter(([,value])=>value).map(([label,value])=>label+': '+value).join(' · ');
+  el('followup-text').value=[t('followup.scope',{project:project||displayText(dashboardData.project,255)||'OMS',room:main.room}),
+    bindingKey&&'Project key: '+bindingKey,reference&&t('followup.reference',{v:reference}),focus.task?.id&&'Task: '+focus.task.id,
+    t('followup.text',{goal:excerpt(displayText(dashboardData.goal,2000)||t('goalUnknown'),400),
+      item:excerpt(source?t('answer.title'):focus.summary||t('evidence.title'),200)})].filter(Boolean).join('\n');
+  el('followup-panel').hidden=false;put('followup-status',()=>'');paintFollowup();el('followup-text').focus();
+}
+onClick('followup-open',()=>prepareFollowup());
+on('followup-text','input',paintFollowup);
+onClick('followup-close',()=>{clearFollowup();el('followup-open').focus();});
+onClick('followup-copy',()=>{const draft=followupDraft;copyDisplayed(el('followup-text').value,'followup-status',()=>currentFollowup(draft));});
+onClick('followup-main',()=>{const m=joinedMain();if(currentFollowup(followupDraft))openConversation(m,()=>conversationMainName(m),el('followup-main'));});
+onClick('followup-add',async()=>{
+  const draft=followupDraft,text=el('followup-text').value;
+  if(!currentFollowup(draft) || draft.pending || !validText(text) || !contextTypes)return;
+  draft.pending=true;paintFollowup();
+  const delivered=await updateContext({project:project||null,projectKey:draft.projectKey,room:draft.room,owner:draft.owner,kind:'oms-followup-draft',task:draft.task,source:draft.source,text});
+  if(currentFollowup(draft)){draft.pending=false;put('followup-status',delivered?'followup.done':'followup.failed');paintFollowup();}
+});
 function render(d) {
   for(const element of bindings.keys())if(element.isConnected===false)bindings.delete(element);
   const prior=joinedMain();dashboardData=d;const main=joinedMain();
@@ -1521,7 +1860,7 @@ function render(d) {
     resetLeadControl();
     leadControl={room:main.room,owner:main.participant,generation,items:new Map()};
   }
-  if(readOnly || prior?.room!==main?.room || prior?.participant!==main?.participant){closeDialogs();resetIssue();}
+  if(readOnly || prior?.room!==main?.room || prior?.participant!==main?.participant){closeDialogs();resetIssue();clearFollowup();}
   const goal=(!Object.hasOwn(d,'goalAvailability') || d.goalAvailability==='available') && typeof d.goal==='string' && d.goal.trim()?d.goal:'';
   put('goal',()=>goal || t(d.goalAvailability==='absent' && d.goal==null?'goalNone':'goalUnknown'));
 
@@ -1550,10 +1889,11 @@ function render(d) {
   put('lead-note',()=>partial?t('partialLeads'):'');
   if(selectedChat && !canChat(selectedChat)){el('conversation').close();clearChat();}
   if(reviewedIssue && !sameIssue(reviewedIssue))resetIssue();
-  const criteria=d.acceptance, complete=criteria?.available===true && criteria.complete===true && Number.isSafeInteger(criteria.total) &&
+  const criteria=d.acceptance, complete=criteria?.available===true && criteria.scope==='repository' && criteria.complete===true && Number.isSafeInteger(criteria.total) &&
     criteria.total>0 && criteria.verified===criteria.total;
   el('outcome').hidden=!complete;
   if(complete)put('outcome',()=>t('criteriaMet',{n:criteria.verified}));
+  paintJourney(d);
   el('view').hidden=false;paintObserved();measureGoal();
 }
 function canChat(member) {
@@ -1584,14 +1924,25 @@ async function readChat(before,openNative=false) {
       try {const result=await request('ui/open-link',{url:uri},5000);if(current() && !result?.isError){el('conversation').close();return;}} catch {}
       if(!current())return;
     }
-    const messages=page.messages.map(msg=>chatRow(msg.from||'',msg.text||'',msg));
-    const list=el('chat-messages'),scroll=el('chat-scroll'),top=scroll.scrollTop,height=scroll.scrollHeight;
-    if(before==null){list.replaceChildren(...messages);el('chat-result').textContent=page.result?.text||'';}else list.prepend(...messages);
-    chatCursor=Number.isSafeInteger(page.nextBefore) && page.messages.length && page.nextBefore<=page.messages[0].seq && (before==null || page.nextBefore<before)?page.nextBefore:null;
+    const list=el('chat-messages'),scroll=el('chat-scroll'),top=scroll.scrollTop,height=scroll.scrollHeight,first=!roomPageSeen,nearEnd=height-top-scroll.clientHeight<36;
+    const fresh=page.messages.filter(msg=>!roomMessageKeys.has(msg.seq));
+    for(const msg of page.messages)roomMessageKeys.set(msg.seq,chatRow(msg.from||'',msg.text||'',msg));
+    list.replaceChildren(...[...roomMessageKeys].sort((a,b)=>a[0]-b[0]).map(([,row])=>row));
+    if(before==null){
+      if(roomResult?.attempt!==page.result?.attempt && fullAnswer?.kind==='room')clearFullAnswer();
+      roomResult=typeof page.result?.attempt==='string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(page.result.attempt)?page.result:null;
+      el('chat-result').textContent=page.result?.text||'';
+      el('chat-result-limited').hidden=page.result?.truncated!==true;
+      el('chat-result-full').hidden=!roomResult || !/^[a-f0-9]{64}$/.test(bindingKey);
+    }
+    if(first || before!=null)chatCursor=Number.isSafeInteger(page.nextBefore) && page.messages.length && page.nextBefore<=page.messages[0].seq && (before==null || page.nextBefore<before)?page.nextBefore:null;
     if(chatCursor==null && document.activeElement===el('chat-older'))scroll.focus({preventScroll:true});
     el('chat-older').hidden=chatCursor==null;
-    scroll.scrollTop=before==null?scroll.scrollHeight:top+scroll.scrollHeight-height;
-    put('chat-status',()=>!list.children.length && !el('chat-result').textContent?t('emptyChat'):'');
+    if(before!=null)scroll.scrollTop=top+scroll.scrollHeight-height;
+    else if(first || nearEnd){scroll.scrollTop=scroll.scrollHeight;el('chat-new').hidden=true;}
+    else if(fresh.length)el('chat-new').hidden=false;
+    roomPageSeen=true;
+    put('chat-status',()=>!list.children.length && !el('chat-result').textContent?t('emptyChat'):t('main.records'));
   } catch {if(current())put('chat-status','chatMismatch');}
   finally {if(current())el('chat-older').disabled=false;}
 }
@@ -1612,10 +1963,10 @@ for(const [id,close] of [['conversation',closeChat],['launcher',closeLauncher],[
 }
 on('conversation','close',()=>{
   if(el('conversation').open)return;
-  clearChat();armAuto();
+  clearChat();if(leadControl)scheduleLeadRead(leadControl);armAuto();
   if(!el('view').hidden && !el('launcher').open && !disposed && (document.activeElement===document.body || document.activeElement===el('chat-back')))(chatOrigin?.isConnected===false?el('main-name'):chatOrigin)?.focus();
 });
-onClick('new-goal',()=>{if(!readOnly && !el('view').hidden){el('launcher').showModal();el('brief').focus();resetIssue();syncBriefCount();armAuto();}});
+onClick('new-goal',()=>{if(!readOnly && !staleView && !busy && !el('view').hidden){el('launcher').showModal();el('brief').focus();resetIssue();syncBriefCount();armAuto();}});
 onClick('close-launch',closeLauncher);
 on('launcher','close',()=>{if(!el('launcher').open){resetIssue();armAuto();}});
 onClick('goal-expand',()=>{
@@ -1703,14 +2054,16 @@ on('brief','paste',event=>{
 });
 function setBusy(value,writing=false) {
   busy=value;el('refresh').disabled=value;el('project-choice').disabled=value && writing;
-  el('controls').disabled=value;el('view').ariaBusy=String(value);
-  for(const b of el('approvals').querySelectorAll('button'))b.disabled=value;
+  el('controls').disabled=value || staleView;el('view').ariaBusy=String(value);
+  el('new-goal').disabled=value || staleView;el('header-main').disabled=staleView;
+  el('followup-open').disabled=value || staleView;
+  for(const b of el('approvals').querySelectorAll('button'))b.disabled=value || staleView;
   el('refresh').setAttribute('aria-busy',String(value && !disposed));
   armAuto();
 }
 function panelIdle() {
   return Boolean(!disposed && !el('conversation').open && !el('launcher').open && !el('worker-output').open &&
-    ((dashboardData && !el('view').hidden) || (transientError && autoRetryCount<AUTO_RETRY_LIMIT)));
+    (transientError?autoRetryCount<AUTO_RETRY_LIMIT:dashboardData && !el('view').hidden));
 }
 function resetAutoRetry(){transientError=false;autoRetryCount=0;}
 function autoReload(){if(transientError)autoRetryCount+=1;refresh();}
@@ -1735,6 +2088,7 @@ function launchNotice(value){
 }
 async function loadStatus(expected,recover=true) {
   setStatus(dashboardData?'refreshing':'connecting');
+  let confirmedBinding=null;
   try{
     await initialize();
     const registry=(await tool('oms_list_projects',{},expected)).structuredContent||{};
@@ -1743,10 +2097,18 @@ async function loadStatus(expected,recover=true) {
     readOnly=registry.readOnly===true;
     if(binding==='unbound'){resetAutoRetry();project='';clearProject();el('scope').hidden=true;setStatus('project.unbound');return;}
     if(!chooseProject(aliases)){resetAutoRetry();return;}
+    const key=project?registry.projectKeys?.[project]:registry.projectKey;
+    confirmedBinding=typeof key==='string' && /^[a-f0-9]{64}$/.test(key)?key:null;
+    if(lastGoodBinding && confirmedBinding && lastGoodBinding!==confirmedBinding){
+      // An alias can point at a different physical checkout without a picker change.
+      generation++;clearProject();setBusy(false);refresh();return;
+    }
+    bindingKey=confirmedBinding;
     if(project && (!contextKey||contextKey==='null'))updateContext({project});
     const snapshot=await tool('oms_panel_snapshot',{},expected), d=snapshot.structuredContent?.dashboard||snapshot._meta?.dashboard;
     if(!d || typeof d!=='object' || Array.isArray(d))throw uiError('status.badSnapshot');
-    render(d);resetAutoRetry();lastLoadedAt=Date.now();const notice=snapshotNotice(d);setStatus(()=>notice?t(notice):'',notice?'warn':'info');
+    staleView=false;render(d);lastGoodBinding=confirmedBinding;lastGoodGeneration=generation;
+    resetAutoRetry();lastLoadedAt=Date.now();const notice=snapshotNotice(d);setStatus(()=>notice?t(notice):'',notice?'warn':'info');
     if(readOnly){retryStart=undefined;el('approval-card').hidden=true;el('approvals').replaceChildren();return;}
     try{
       const response=await tool('oms_list_approvals',{},expected);
@@ -1759,9 +2121,13 @@ async function loadStatus(expected,recover=true) {
     }
   }catch{if(expected===generation && !disposed){
     transientError=true;
+    const retained=dashboardData && confirmedBinding && confirmedBinding===lastGoodBinding && lastGoodGeneration===expected;
+    staleView=Boolean(retained);
     resetLeadControl();leadIntent=undefined;paintLeadControls();
-    dashboardData=undefined;members=[];rows=[];approvedScope++;closeDialogs();resetIssue();updateContext(null);el('view').hidden=true;
-    setStatus('connectionFailed','warn');
+    members=[];approvedScope++;closeDialogs();resetIssue();clearFollowup();updateContext(null);
+    if(!retained){dashboardData=undefined;rows=[];el('view').hidden=true;}
+    else{el('view').hidden=false;el('approvals').replaceChildren();el('approval-card').hidden=true;paintObserved();}
+    setStatus(retained?'snapshot.stale':'connectionFailed','warn');
   }}
 }
 function renderApprovals(rows, incomplete) {
@@ -1807,7 +2173,7 @@ function renderApprovals(rows, incomplete) {
       button.type = 'button';
       button.disabled = busy;
       button.addEventListener('click', async () => {
-        if(readOnly || scope!==approvedScope || disposed || expected!==generation || !row.id || !row.digest || !Number.isSafeInteger(row.version))return;
+        if(readOnly || staleView || scope!==approvedScope || disposed || expected!==generation || !row.id || !row.digest || !Number.isSafeInteger(row.version))return;
         const hadFocus = document.activeElement === button;
         let acknowledged = false;
         await mutate(
@@ -1843,7 +2209,7 @@ async function refresh() {
 }
 
 async function mutate(action, onSuccess, expected = generation, recoverAfter = () => true) {
-  if (busy || expected !== generation || el('view').hidden) return;
+  if (busy || staleView || readOnly || expected !== generation || el('view').hidden) return;
   setBusy(true, true);
   el('receipt').className = '';
   launchNotice('mutate.working');
@@ -1873,7 +2239,7 @@ function finishStart(request) {
 }
 on('launch','submit', event => {
   event.preventDefault();
-  if (readOnly || busy || el('view').hidden) return;
+  if (readOnly || staleView || busy || el('view').hidden) return;
   const draft = launchDraft(), {main, goal} = draft;
   if (!goal || Array.from(goal).length > 2000 || /[\x00-\x1f\x7f]/u.test(goal)) {
     if(!el('launcher').open){el('launcher').showModal();armAuto();}
