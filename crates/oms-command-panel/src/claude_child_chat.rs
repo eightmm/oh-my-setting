@@ -133,6 +133,8 @@ pub(crate) fn claude_board_children(
 
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{claude_board_children, claude_child_chat, claude_current_children};
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use linux::{lead_roster_opens, reset_test_counters, transcript_opens};
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -168,9 +170,29 @@ mod linux {
 
     #[cfg(test)]
     thread_local! {
-        // Record metadata and suffix attempts independently of which are accepted.
+        // Record metadata, open and suffix attempts independently of which are accepted.
+        pub(super) static LEAD_ROSTER_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static TRANSCRIPT_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static META_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static CHILD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_test_counters() {
+        LEAD_ROSTER_OPENS.with(|n| n.set(0));
+        TRANSCRIPT_OPENS.with(|n| n.set(0));
+        META_READS.with(|n| n.set(0));
+        CHILD_READS.with(|n| n.set(0));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transcript_opens() -> usize {
+        TRANSCRIPT_OPENS.with(|n| n.get())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lead_roster_opens() -> usize {
+        LEAD_ROSTER_OPENS.with(|n| n.get())
     }
 
     impl ClaudeChildVersion {
@@ -265,20 +287,25 @@ mod linux {
                 .iter()
                 .position(|child| child.locator == *locator)
         });
+        enum CheckedChild {
+            Read(File, Stat, ClaudeResponse),
+            Stat(Stat),
+        }
         let checked = selected_index.and_then(|index| {
             let child = &scan.children[index];
-            let (file, stat, response) = match selected? {
+            let (checked, stat) = match selected? {
                 ClaudeSelection::Read(_) => {
                     let read = read_child(&scan, &child.locator, || {}).ok()?;
-                    (read.file, read.stat, Some(read.response?))
+                    let stat = read.stat;
+                    (CheckedChild::Read(read.file, stat, read.response?), stat)
                 }
                 ClaudeSelection::Recheck(_) => {
-                    let (file, stat) = child_file(&scan, &child.locator).ok()?;
-                    (file, stat, None)
+                    let stat = child_stat(&scan, &child.locator).ok()?;
+                    (CheckedChild::Stat(stat), stat)
                 }
             };
             let version = ClaudeChildVersion::from_stat(&stat);
-            (child.version == Some(version)).then_some((index, file, stat, version, response))
+            (child.version == Some(version)).then_some((index, checked, version))
         });
         if !scan.children.is_empty() {
             between();
@@ -295,13 +322,21 @@ mod linux {
             }
         }
         // Check the exact name/ancestors via confirm and the held version
-        // after the caller's pane recheck. A retained selection needs no body.
-        let checked = checked.and_then(|(index, file, stat, version, response)| {
-            (confirmed && fs::fstat(&file).is_ok_and(|now| unchanged(&stat, &now))).then_some((
-                scan.children[index].locator.clone(),
-                version,
-                response,
-            ))
+        // after the caller's pane recheck. A retained selection needs no open or body.
+        let checked = checked.and_then(|(index, checked, version)| {
+            if !confirmed {
+                return None;
+            }
+            let locator = &scan.children[index].locator;
+            let response = match checked {
+                CheckedChild::Read(file, stat, response) => fs::fstat(&file)
+                    .is_ok_and(|now| unchanged(&stat, &now))
+                    .then_some(Some(response))?,
+                CheckedChild::Stat(stat) => child_stat(&scan, locator)
+                    .is_ok_and(|now| unchanged(&stat, &now))
+                    .then_some(None)?,
+            };
+            Some((locator.clone(), version, response))
         });
         if let Some(index) = selected_index
             && checked.is_none()
@@ -415,8 +450,33 @@ mod linux {
             Ok(Self { fd, names, trail })
         }
 
+        fn stat_file(&self, name: &str, limit: u64, stage: &'static str) -> Stage<Stat> {
+            let stat =
+                fs::statat(&self.fd, name, fs::AtFlags::SYMLINK_NOFOLLOW).map_err(|_| stage)?;
+            gate(
+                FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+                    && stat.st_nlink == 1
+                    && strict(&stat)
+                    && u64::try_from(stat.st_size).is_ok_and(|size| size <= limit),
+                stage,
+            )?;
+            let mut names = self.names.clone();
+            names.push(name.to_owned());
+            self.trail
+                .borrow_mut()
+                .0
+                .push((names, true, (stat.st_dev, stat.st_ino)));
+            Ok(stat)
+        }
+
         fn file(&self, name: &str, limit: u64, stage: &'static str) -> Stage<(File, Stat)> {
             let fd = fs::openat(&self.fd, name, FILE, Mode::empty()).map_err(|_| stage)?;
+            #[cfg(test)]
+            match stage {
+                "lead-transcript" => LEAD_ROSTER_OPENS.with(|n| n.set(n.get() + 1)),
+                "child-transcript" => TRANSCRIPT_OPENS.with(|n| n.set(n.get() + 1)),
+                _ => {}
+            }
             let stat = fs::fstat(&fd).map_err(|_| stage)?;
             gate(
                 FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
@@ -446,17 +506,27 @@ mod linux {
         let root = open_dir(config).ok_or("path-changed")?;
         for (names, file, ident) in &trail.0 {
             let mut fd = None;
-            for (depth, name) in names.iter().enumerate() {
-                let flags = if *file && depth + 1 == names.len() {
-                    FILE
-                } else {
-                    DIR
-                };
-                let next = fs::openat(fd.as_ref().unwrap_or(&root), name, flags, Mode::empty())
-                    .map_err(|_| "path-changed")?;
-                fd = Some(next);
-            }
-            let now = fs::fstat(fd.as_ref().unwrap_or(&root)).map_err(|_| "path-changed")?;
+            let now = if *file {
+                let (leaf, dirs) = names.split_last().ok_or("path-changed")?;
+                for name in dirs {
+                    let next = fs::openat(fd.as_ref().unwrap_or(&root), name, DIR, Mode::empty())
+                        .map_err(|_| "path-changed")?;
+                    fd = Some(next);
+                }
+                fs::statat(
+                    fd.as_ref().unwrap_or(&root),
+                    leaf,
+                    fs::AtFlags::SYMLINK_NOFOLLOW,
+                )
+                .map_err(|_| "path-changed")?
+            } else {
+                for name in names {
+                    let next = fs::openat(fd.as_ref().unwrap_or(&root), name, DIR, Mode::empty())
+                        .map_err(|_| "path-changed")?;
+                    fd = Some(next);
+                }
+                fs::fstat(fd.as_ref().unwrap_or(&root)).map_err(|_| "path-changed")?
+            };
             let kind = FileType::from_raw_mode(now.st_mode);
             gate(
                 (now.st_dev, now.st_ino) == *ident
@@ -836,7 +906,7 @@ mod linux {
                 {
                     continue;
                 }
-                let Ok((_, stat)) = dir.file(
+                let Ok(stat) = dir.stat_file(
                     &format!("agent-{agent}.jsonl"),
                     TRANSCRIPT_LIMIT,
                     "child-transcript",
@@ -947,6 +1017,20 @@ mod linux {
             file,
             stat,
         })
+    }
+
+    fn child_stat(scan: &Scan, expected: &ClaudeChildLocator) -> Stage<Stat> {
+        let dir = scan.subagents.as_ref().ok_or("locator")?;
+        let stat = dir.stat_file(
+            &format!("agent-{}.jsonl", expected.agent),
+            TRANSCRIPT_LIMIT,
+            "child-transcript",
+        )?;
+        gate(
+            (stat.st_dev, stat.st_ino) == expected.child,
+            "child-replaced",
+        )?;
+        Ok(stat)
     }
 
     fn child_file(scan: &Scan, expected: &ClaudeChildLocator) -> Stage<(File, Stat)> {
@@ -2297,12 +2381,15 @@ mod tests {
             (2, vec![false, true, true])
         );
         assert_eq!(read(0), [false; 3]);
-        CHILD_READS.with(|n| n.set(0));
+        super::reset_test_counters();
         let plain = board_children(&fixture.lead(), &fixture.repo, 0, None, || {}).unwrap();
+        assert_eq!(super::transcript_opens(), 0);
+        assert_eq!(super::lead_roster_opens(), 1);
         assert_eq!(CHILD_READS.with(|n| n.get()), 0);
         assert!(plain.selected.is_none());
         assert!(plain.children.iter().all(|c| c.usage.is_none()));
         let newest = fixture.locator(&id(2));
+        super::reset_test_counters();
         let on_demand = board_children(
             &fixture.lead(),
             &fixture.repo,
@@ -2311,8 +2398,21 @@ mod tests {
             || {},
         )
         .unwrap();
+        assert_eq!(super::transcript_opens(), 1);
         assert_eq!(CHILD_READS.with(|n| n.get()), 1);
         assert_eq!(on_demand.selected.as_ref().unwrap().1.id, "msg_2");
+        super::reset_test_counters();
+        let rechecked = board_children(
+            &fixture.lead(),
+            &fixture.repo,
+            0,
+            Some(ClaudeSelection::Recheck(&newest)),
+            || {},
+        )
+        .unwrap();
+        assert_eq!(super::transcript_opens(), 0);
+        assert_eq!(CHILD_READS.with(|n| n.get()), 0);
+        assert!(rechecked.checked.is_some());
 
         let oldest = fixture.locator(&id(0));
         let selected = |locator| {

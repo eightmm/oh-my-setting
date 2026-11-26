@@ -398,10 +398,7 @@ fn run_with_source_writer(
         }) {
             pending_detail_usage = None;
         }
-        let failed_detail_usage = incoming_detail_usage_requested
-            .as_ref()
-            .filter(|_| incoming_detail_usage.is_none());
-        reconcile_detail_usage_evidence(
+        let incoming_admitted = reconcile_detail_usage_evidence(
             &mut retained_detail_usage,
             incoming_detail_usage,
             board.as_ref().and_then(|board| board.scope.as_ref()),
@@ -410,6 +407,10 @@ fn run_with_source_writer(
             &observations,
             detail_usage_frame,
             scope_changed,
+        );
+        let failed_detail_usage = failed_detail_usage_request(
+            incoming_detail_usage_requested.as_ref(),
+            incoming_admitted,
         );
         reconcile_last_known_usage(
             &mut last_known_usage,
@@ -2254,30 +2255,30 @@ fn reconcile_detail_usage_evidence(
     observations: &Observations,
     frame: DetailUsageFrame,
     scope_changed: bool,
-) {
+) -> bool {
     if retained.is_none() && incoming.is_none() {
-        return;
+        return false;
     }
     if scope_changed || frame == DetailUsageFrame::Rejected || !nav.detail {
         *retained = None;
-        return;
+        return false;
     }
     let Some(scope) = scope else {
         *retained = None;
-        return;
+        return false;
     };
     let Some(main) = scope.main.as_ref() else {
         *retained = None;
-        return;
+        return false;
     };
     if report["room"]["id"] != scope.room || !report_has_live_main(report, main) {
         *retained = None;
-        return;
+        return false;
     }
     let visible = render::visible(report, nav);
     let Some(call) = visible.get(nav.selected) else {
         *retained = None;
-        return;
+        return false;
     };
     let participant = crate::text(call, "participant");
     let matches = |ev: &DetailUsageEvidence| {
@@ -2306,13 +2307,21 @@ fn reconcile_detail_usage_evidence(
         && matches(&ev)
     {
         *retained = Some(ev);
-        return;
+        return true;
     }
     if retained.as_ref().is_some_and(|ev| {
         !matches(ev) || (ev.requires_group && frame == DetailUsageFrame::Observed)
     }) {
         *retained = None;
     }
+    false
+}
+
+fn failed_detail_usage_request(
+    requested: Option<&ChatBinding>,
+    incoming_admitted: bool,
+) -> Option<&ChatBinding> {
+    requested.filter(|_| !incoming_admitted)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2352,7 +2361,14 @@ fn reconcile_last_known_usage(
         last_known.remove(participant.as_ref());
     }
     let valid = |participant: &str, ev: &DetailUsageEvidence| {
+        let Some((provider, _)) = ev.binding.detail_target() else {
+            return false;
+        };
         !ev.requires_group
+            && (provider != "claude"
+                || ev.claude_version.is_some_and(|version| {
+                    observations.claude_version(participant) == Some(version)
+                }))
             && same_footer_scope(&ev.scope, scope)
             && ev.binding.matches_detail_scope(
                 &scope.room,
@@ -2368,9 +2384,12 @@ fn reconcile_last_known_usage(
     last_known.retain(|participant, ev| valid(participant, ev));
     if let Some(ev) = admitted
         && let Some((_, participant)) = ev.binding.detail_target()
-        && valid(participant.as_ref(), ev)
     {
-        last_known.insert(participant.into_owned(), ev.clone());
+        if valid(participant.as_ref(), ev) {
+            last_known.insert(participant.into_owned(), ev.clone());
+        } else {
+            last_known.remove(participant.as_ref());
+        }
     }
 }
 
@@ -8642,7 +8661,7 @@ mod tests {
         use super::{
             BoardScope, BoardTarget, DetailUsageEvidence, DetailUsageFrame, InteractiveRefresh,
             LiveMain, MainFooter, NativeRequest, NativeSeed, RefreshKey, RefreshPhase,
-            SelectionFence, apply_selection_key, detail_usage_request,
+            SelectionFence, apply_selection_key, detail_usage_request, failed_detail_usage_request,
             reconcile_detail_usage_evidence, reconcile_last_known_usage, report_for_frame,
             report_for_frame_with_last_known,
         };
@@ -8982,7 +9001,7 @@ mod tests {
         let mut group = ev.clone();
         group.requires_group = true;
         let mut retained_group = Some(group.clone());
-        let refresh_group = |retained: &mut Option<DetailUsageEvidence>, incoming, frame| {
+        let refresh_group = |retained: &mut Option<DetailUsageEvidence>, incoming, frame| -> bool {
             reconcile_detail_usage_evidence(
                 retained,
                 incoming,
@@ -8992,19 +9011,42 @@ mod tests {
                 &observations,
                 frame,
                 false,
-            );
+            )
         };
         refresh_group(&mut retained_group, None, DetailUsageFrame::Unchanged);
         assert!(retained_group.as_ref() == Some(&group));
         let mut renewed = group;
         renewed.response["input_tokens"] = 1300.into();
-        refresh_group(
+        let mut superseded_known = last_known.clone();
+        assert_eq!(superseded_known.len(), 1);
+        let admitted_group = refresh_group(
             &mut retained_group,
             Some(renewed.clone()),
             DetailUsageFrame::Observed,
         );
+        assert!(admitted_group);
         assert!(retained_group.as_ref() == Some(&renewed));
         assert!(render_detail(&report, &nav, retained_group.as_ref()).contains("1300 in"));
+        reconcile_last_known_usage(
+            &mut superseded_known,
+            retained_group.as_ref(),
+            failed_detail_usage_request(Some(&binding), admitted_group),
+            Some(&current_scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert!(
+            superseded_known.is_empty(),
+            "newer group-only re-read must evict older non-group last-known entry"
+        );
+        let after_group_board = render_board(&superseded_known);
+        assert!(
+            after_group_board.contains("not loaded")
+                && !after_group_board.contains("rsp in 1.2K out 40"),
+            "{after_group_board}"
+        );
 
         // The same row and Turn can survive a revoked membership or ACL change.
         refresh_group(&mut retained_group, None, DetailUsageFrame::Observed);
@@ -9493,6 +9535,92 @@ mod tests {
             let mut retained = Some(evidence.clone());
             reconcile(&mut retained, None, &report, &nav, observation);
             assert!(retained.is_none());
+        }
+
+        // Last-known retention checks Claude version on ordinary refreshes and evicts
+        // the prior entry whenever a re-read returns evidence rejected by reconcile.
+        let mut base_known = std::collections::BTreeMap::new();
+        reconcile_last_known_usage(
+            &mut base_known,
+            Some(&evidence),
+            None,
+            Some(&scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert_eq!(base_known.len(), 1);
+        reconcile_last_known_usage(
+            &mut base_known,
+            None,
+            None,
+            Some(&scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert_eq!(base_known.len(), 1);
+        for stale_obs in [&later, &new_turn, &Observations::default()] {
+            let mut known = base_known.clone();
+            reconcile_last_known_usage(
+                &mut known,
+                None,
+                None,
+                Some(&scope),
+                &report,
+                stale_obs,
+                DetailUsageFrame::Observed,
+                false,
+            );
+            assert!(
+                known.is_empty(),
+                "plain refresh must evict Claude last-known usage once version or binding changes"
+            );
+        }
+        let mut versionless = evidence.clone();
+        versionless.claude_version = None;
+        let mut missing_version_known = base_known.clone();
+        reconcile_last_known_usage(
+            &mut missing_version_known,
+            Some(&versionless),
+            None,
+            Some(&scope),
+            &report,
+            &observations,
+            DetailUsageFrame::Observed,
+            false,
+        );
+        assert!(missing_version_known.is_empty());
+        for rejecting_obs in [&later, &unchecked] {
+            let mut known = base_known.clone();
+            let mut active = None;
+            let admitted = reconcile_detail_usage_evidence(
+                &mut active,
+                Some(evidence.clone()),
+                Some(&scope),
+                &report,
+                &nav,
+                rejecting_obs,
+                DetailUsageFrame::Observed,
+                false,
+            );
+            assert!(!admitted && active.is_none());
+            reconcile_last_known_usage(
+                &mut known,
+                active.as_ref(),
+                failed_detail_usage_request(Some(&evidence.binding), admitted),
+                Some(&scope),
+                &report,
+                rejecting_obs,
+                DetailUsageFrame::Observed,
+                false,
+            );
+            assert!(
+                known.is_empty(),
+                "rejected re-read evidence must evict old last-known entry"
+            );
         }
         let mut sibling = nav.clone();
         sibling.selected = visible

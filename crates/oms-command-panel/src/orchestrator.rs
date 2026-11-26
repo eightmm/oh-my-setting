@@ -17499,6 +17499,7 @@ pub(crate) mod tests {
                     board.open_chat(binding, None, &attempts)
                 };
 
+                crate::native_children::reset_codex_test_counters();
                 let (mut rows, report) = observe(&host);
                 if std::fs::metadata(&alternate)
                     .unwrap()
@@ -17509,6 +17510,22 @@ pub(crate) mod tests {
                     assert_eq!(report["native_children"], json!([]));
                     continue;
                 }
+                assert_eq!(
+                    crate::native_children::codex_transcript_opens(),
+                    0,
+                    "plain Codex Board refresh must open zero usage/chat transcripts"
+                );
+                assert_eq!(crate::native_children::codex_child_body_bytes(), 0);
+                assert_eq!(crate::native_children::codex_roster_opens(), 2);
+                assert!(
+                    (1..=512).contains(&crate::native_children::codex_roster_child_header_bytes()),
+                    "roster open must read only the bounded first-line header"
+                );
+                assert!(
+                    !report["native_children"]
+                        .to_string()
+                        .contains("native_response_usage")
+                );
                 let binding = rows
                     .chat_binding(&participant)
                     .expect("painted bound child")
@@ -17524,7 +17541,116 @@ pub(crate) mod tests {
                     open(&host, &binding).as_deref(),
                     Some("Proved alternate reply")
                 );
+                assert_eq!(crate::native_children::codex_transcript_opens(), 1);
+                assert!(crate::native_children::codex_child_body_bytes() > 0);
                 if requested.is_none() {
+                    let mut wrong_pane = binding.pane.clone();
+                    wrong_pane.lead.id = "%99".into();
+                    assert!(binding.codex_usage_locator(&binding.pane).is_some());
+                    assert!(binding.codex_usage_locator(&wrong_pane).is_none());
+                    let empty_turn = ChatBinding {
+                        pane: binding.pane.clone(),
+                        locator: NativeLocator::Codex(
+                            crate::native_children::fixture_codex_locator(""),
+                        ),
+                    };
+                    assert!(empty_turn.codex_usage_locator(&binding.pane).is_none());
+
+                    // Seed session-bound token usage on the alternate child rollout: plain refresh
+                    // still reads only bounded roster headers (zero usage opens), while selected
+                    // detail reads only the matching Codex locator.
+                    let day_dir = std::fs::read_dir(alternate.join("sessions"))
+                        .unwrap()
+                        .flatten()
+                        .next()
+                        .and_then(|y| std::fs::read_dir(y.path()).unwrap().flatten().next())
+                        .and_then(|m| std::fs::read_dir(m.path()).unwrap().flatten().next())
+                        .unwrap()
+                        .path();
+                    let parent_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+                    let child_id = "11111111-1111-1111-1111-111111111111";
+                    for entry in std::fs::read_dir(&day_dir).unwrap().flatten() {
+                        let path = entry.path();
+                        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                        let mut lines: Vec<Value> = std::fs::read_to_string(&path)
+                            .unwrap()
+                            .lines()
+                            .map(|l| serde_json::from_str(l).unwrap())
+                            .collect();
+                        lines[0]["payload"]["session_id"] = json!(parent_id);
+                        if name.contains(child_id) {
+                            lines[1]["payload"]["model"] = json!("gpt-5.4");
+                            let counters = json!({
+                                "input_tokens": 11,
+                                "output_tokens": 4,
+                                "cached_input_tokens": 2,
+                                "cache_write_input_tokens": 0,
+                                "reasoning_output_tokens": 1,
+                                "total_tokens": 15
+                            });
+                            lines.push(json!({
+                                "type": "token_usage_record",
+                                "payload": {
+                                    "thread_id": child_id,
+                                    "session_id": parent_id,
+                                    "turn_id": "reply-turn",
+                                    "root_turn_id": "root-turn",
+                                    "response_id": "resp-1",
+                                    "usage": counters,
+                                    "turn_token_usage": counters,
+                                    "thread_token_usage": counters
+                                }
+                            }));
+                        }
+                        let mut body = lines
+                            .iter()
+                            .map(Value::to_string)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        body.push('\n');
+                        std::fs::write(&path, body).unwrap();
+                    }
+                    crate::native_children::reset_codex_test_counters();
+                    let (billed_obs, billed_plain) = observe(&host);
+                    assert_eq!(crate::native_children::codex_transcript_opens(), 0);
+                    assert_eq!(crate::native_children::codex_child_body_bytes(), 0);
+                    assert_eq!(crate::native_children::codex_roster_opens(), 2);
+                    assert!(
+                        !billed_plain["native_children"]
+                            .to_string()
+                            .contains("native_response_usage")
+                    );
+                    let billed_binding = billed_obs.chat_binding(&participant).unwrap().clone();
+                    let panel = Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop).unwrap();
+                    let generation = panel.observation_generation_with_host(&host).unwrap();
+                    crate::native_children::reset_codex_test_counters();
+                    let mut detail_report = accepted_codex_scope();
+                    let selected_usage = panel
+                        .observe_reading(
+                            &mut billed_obs.clone(),
+                            &mut detail_report,
+                            true,
+                            &host,
+                            |_, _, _| None,
+                            Some(&generation),
+                            DetailUsageSelection {
+                                requested: Some(&billed_binding),
+                                active: None,
+                            },
+                        )
+                        .expect("selected Codex child should return attributable usage");
+                    assert_eq!(crate::native_children::codex_transcript_opens(), 1);
+                    assert!(crate::native_children::codex_child_body_bytes() > 0);
+                    assert_eq!(selected_usage.observed_model.as_deref(), Some("gpt-5.4"));
+                    assert!(!selected_usage.requires_group);
+                    assert_eq!(selected_usage.response["input_tokens"], 11);
+                    assert_eq!(selected_usage.response["output_tokens"], 4);
+                    assert_eq!(selected_usage.response["total_tokens"], 15);
+                    assert!(
+                        !detail_report["native_children"]
+                            .to_string()
+                            .contains("native_response_usage")
+                    );
                     continue;
                 }
                 let assert_withheld = |host: &FakeHost| {
@@ -18401,8 +18527,145 @@ pub(crate) mod tests {
                 assert!(!accepted_frame || *rows == accepted);
             }
 
-            // With a Claude lead too, both providers are fenced from one census with zero usage opens.
-            let claude_pid = 4_194_305; // above Linux's pid_max, so it reads nothing
+            // With a real Claude lead too, both providers are fenced from one census with
+            // zero child transcript opens on plain refreshes, and 1 open on selected detail.
+            let mut claude_holder = Command::new("bash")
+                .args(["-c", "echo \"READY:$$\" && exec sleep 60"])
+                .env_clear()
+                .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+                .env("HOME", &home)
+                .current_dir(&repo)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut claude_ready = String::new();
+            BufReader::new(claude_holder.stdout.take().unwrap())
+                .read_line(&mut claude_ready)
+                .unwrap();
+            let claude_pid: u32 = claude_ready
+                .trim()
+                .strip_prefix("READY:")
+                .unwrap()
+                .parse()
+                .unwrap();
+            let claude_owner = terminals::process(claude_pid).unwrap();
+            let claude_start = claude_owner.birth.rsplit_once(':').unwrap().1;
+            let claude_root = private_dir(&home.join(".claude"));
+            let claude_sessions = private_dir(&claude_root.join("sessions"));
+            let claude_projects = private_dir(&claude_root.join("projects"));
+            let claude_project_key: String = repo
+                .to_str()
+                .unwrap()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let claude_project = private_dir(&claude_projects.join(claude_project_key));
+            let claude_session = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+            let claude_subagents =
+                private_dir(&private_dir(&claude_project.join(claude_session)).join("subagents"));
+            let write_strict_file = |path: &Path, body: &str| {
+                std::fs::write(path, body).unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            };
+            write_strict_file(
+                &claude_sessions.join(format!("{claude_pid}.json")),
+                &json!({
+                    "pid": claude_pid,
+                    "procStart": claude_start,
+                    "sessionId": claude_session,
+                    "cwd": repo.to_str().unwrap()
+                })
+                .to_string(),
+            );
+            let claude_agent_a = "a1b2c3d4e5f60718";
+            let claude_agent_b = "b2c3d4e5f6071829";
+            let claude_lead_lines = [
+                json!({
+                    "type": "user",
+                    "sessionId": claude_session,
+                    "isSidechain": false,
+                    "promptSource": "typed",
+                    "origin": {"kind": "human"},
+                    "message": {"role": "user", "content": prompt_line}
+                }),
+                json!({
+                    "type": "assistant",
+                    "sessionId": claude_session,
+                    "isSidechain": false,
+                    "timestamp": "2026-11-18T18:00:02Z",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "name": "Agent", "id": "toolu_ca", "input": {"prompt": "inspect a", "description": "Claude Researcher"}},
+                        {"type": "tool_use", "name": "Agent", "id": "toolu_cb", "input": {"prompt": "inspect b", "description": "Claude Sibling"}}
+                    ]}
+                }),
+                json!({
+                    "type": "user",
+                    "sessionId": claude_session,
+                    "isSidechain": false,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_ca", "content": "spawned"}]},
+                    "toolUseResult": {"agentId": claude_agent_a, "description": "Claude Researcher"}
+                }),
+                json!({
+                    "type": "user",
+                    "sessionId": claude_session,
+                    "isSidechain": false,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_cb", "content": "spawned"}]},
+                    "toolUseResult": {"agentId": claude_agent_b, "description": "Claude Sibling"}
+                }),
+            ];
+            write_strict_file(
+                &claude_project.join(format!("{claude_session}.jsonl")),
+                &claude_lead_lines
+                    .iter()
+                    .map(|row| format!("{row}\n"))
+                    .collect::<String>(),
+            );
+            for (agent, tool, prompt, msg_id, input_tokens) in [
+                (claude_agent_a, "toolu_ca", "inspect a", "msg_ca", 19u64),
+                (claude_agent_b, "toolu_cb", "inspect b", "msg_cb", 29u64),
+            ] {
+                write_strict_file(
+                    &claude_subagents.join(format!("agent-{agent}.meta.json")),
+                    &json!({"toolUseId": tool, "spawnDepth": 1}).to_string(),
+                );
+                let child_lines = [
+                    json!({
+                        "type": "user",
+                        "sessionId": claude_session,
+                        "agentId": agent,
+                        "isSidechain": true,
+                        "message": {"role": "user", "content": prompt}
+                    }),
+                    json!({
+                        "type": "assistant",
+                        "sessionId": claude_session,
+                        "agentId": agent,
+                        "isSidechain": true,
+                        "timestamp": "2026-11-18T18:00:10Z",
+                        "message": {
+                            "id": msg_id,
+                            "model": "claude-sonnet-4-6",
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "claude child reply"}],
+                            "usage": {
+                                "input_tokens": input_tokens,
+                                "output_tokens": 5,
+                                "cache_creation_input_tokens": 0,
+                                "cache_read_input_tokens": 0
+                            }
+                        }
+                    }),
+                ];
+                write_strict_file(
+                    &claude_subagents.join(format!("agent-{agent}.jsonl")),
+                    &child_lines
+                        .iter()
+                        .map(|row| format!("{row}\n"))
+                        .collect::<String>(),
+                );
+            }
             spy.leads.borrow_mut().push(FakeLead {
                 window: "@5".into(),
                 pane_id: "%5".into(),
@@ -18410,28 +18673,51 @@ pub(crate) mod tests {
                 active: false,
                 provider: "claude".into(),
             });
-            let uid = rustix::process::getuid().as_raw();
-            host.owners
-                .insert(claude_pid, owner_entry(claude_pid, "claude-birth", uid));
+            host.owners.insert(claude_pid, claude_owner);
             let both = Panel::load_for_caller(&repo, ROOM, "%2", &spy, &spy.stop).unwrap();
             let current = both.observation_generation_with_host(&host).unwrap();
             let claude_capture: Vec<String> = ["tmux", "capture-pane", "-p", "-t", "%5"]
                 .map(str::to_owned)
                 .into();
+            let claude_participant_a =
+                crate::native_children::participant_id("claude", claude_agent_a);
+            let mut both_obs = obs.clone();
             for (expected, fence) in [(None, vec![]), (Some(&current), census.clone())] {
                 crate::agy_child_chat::reset_all_agy_counters();
+                crate::claude_child_chat::reset_test_counters();
+                crate::native_children::reset_codex_test_counters();
                 spy.calls.borrow_mut().clear();
-                both.observe_reading(
-                    &mut obs.clone(),
-                    &mut accepted_codex_scope(),
-                    true,
-                    &host,
-                    |_, _, _| None,
-                    expected,
-                    DetailUsageSelection::default(),
+                let mut both_report = accepted_codex_scope();
+                both_obs = obs.clone();
+                assert!(
+                    both.observe_reading(
+                        &mut both_obs,
+                        &mut both_report,
+                        true,
+                        &host,
+                        |_, _, _| None,
+                        expected,
+                        DetailUsageSelection::default(),
+                    )
+                    .is_none()
                 );
                 assert_eq!(crate::agy_child_chat::transcript_opens(), 0);
+                assert_eq!(crate::claude_child_chat::transcript_opens(), 0);
+                assert_eq!(crate::claude_child_chat::lead_roster_opens(), 1);
+                assert_eq!(crate::native_children::codex_transcript_opens(), 0);
                 assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
+                assert!(
+                    both_report["native_children"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|row| row["participant"] == claude_participant_a)
+                );
+                assert!(
+                    !both_report["native_children"]
+                        .to_string()
+                        .contains("native_response_usage")
+                );
                 assert_eq!(
                     *spy.calls.borrow(),
                     [
@@ -18442,6 +18728,47 @@ pub(crate) mod tests {
                     .concat()
                 );
             }
+            let claude_binding_a = both_obs
+                .chat_binding(&claude_participant_a)
+                .unwrap()
+                .clone();
+            crate::claude_child_chat::reset_test_counters();
+            let claude_selected = both
+                .observe_reading(
+                    &mut both_obs.clone(),
+                    &mut accepted_codex_scope(),
+                    true,
+                    &host,
+                    |_, _, _| None,
+                    Some(&current),
+                    DetailUsageSelection {
+                        requested: Some(&claude_binding_a),
+                        active: None,
+                    },
+                )
+                .expect("selected Claude child should return attributable usage");
+            assert_eq!(crate::claude_child_chat::transcript_opens(), 1);
+            assert_eq!(claude_selected.response["input_tokens"], 19);
+            assert!(claude_selected.claude_version.is_some());
+            crate::claude_child_chat::reset_test_counters();
+            assert!(
+                both.observe_reading(
+                    &mut both_obs.clone(),
+                    &mut accepted_codex_scope(),
+                    true,
+                    &host,
+                    |_, _, _| None,
+                    Some(&current),
+                    DetailUsageSelection {
+                        requested: None,
+                        active: Some(&claude_binding_a),
+                    },
+                )
+                .is_none()
+            );
+            assert_eq!(crate::claude_child_chat::transcript_opens(), 0);
+            let _ = claude_holder.kill();
+            let _ = claude_holder.wait();
             spy.leads.borrow_mut().pop();
             host.owners.remove(&claude_pid);
 
