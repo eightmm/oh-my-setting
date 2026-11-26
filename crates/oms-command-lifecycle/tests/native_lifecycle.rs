@@ -321,6 +321,15 @@ impl Services for ColdUpdateHost {
             if self.fail == "apply-locked-verify" {
                 fs::write(self.root.join("verify-reached"), b"").unwrap();
             }
+            // Only OMS-authored lines of a failing child may reach the caller.
+            let sample = concat!("gh", "p_", "abcdefghijklmnopqrstuvwxyz0123456789");
+            let stderr = format!(
+                "error: superseded\nError: private-provider-output\nhint: kept hint\n\
+                 - private-provider-output\n  error: private-provider-output\n\
+                 error: {}\nerror: shaped {sample}\nerror: ctl\x1bcontrol-marker\n\
+                 error: kept cause\rprivate-provider-output\n",
+                "x".repeat(400)
+            );
             return (
                 if matches!(self.fail.as_str(), "verify" | "apply-locked-verify") {
                     7
@@ -328,7 +337,7 @@ impl Services for ColdUpdateHost {
                     0
                 },
                 vec![],
-                vec![],
+                stderr.into_bytes(),
             );
         }
         if matches!(
@@ -2097,6 +2106,26 @@ echo build >> "$root/flow"
             "{}",
             String::from_utf8_lossy(&out.2)
         );
+        if host.fail == "verify" {
+            let error = String::from_utf8_lossy(&out.2);
+            let long = format!("error: {}", "x".repeat(293));
+            assert!(
+                error.contains(&format!(
+                    "provider output withheld\nhint: kept hint\n{long}\n[oms-redacted:"
+                )),
+                "{error}"
+            );
+            assert!(error.contains("]\nerror: kept cause\n"), "{error}");
+            for hidden in [
+                "private-provider-output",
+                "superseded",
+                "ghp_",
+                "control-marker",
+                "\u{1b}",
+            ] {
+                assert!(!error.contains(hidden), "{error}");
+            }
+        }
         assert_eq!(host.git(&source, &["rev-parse", "HEAD"]), host.before);
         assert_eq!(
             host.git(&source, &["symbolic-ref", "--short", "HEAD"]),
@@ -3436,6 +3465,11 @@ case "$*" in
     echo gone > "$state" ;;
   'plugin add oh-my-setting@oh-my-setting-local'|'plugin marketplace add '*) echo here > "$state" ;;
   'plugin list --json')
+    if [ -e "$OMS_LIFECYCLE_FIXTURE/broken-market" ]; then
+      printf '%s\n' 'Error: failed to load configured marketplace snapshot(s):' \
+        "- \`oms-desktop\` at $OMS_LIFECYCLE_FIXTURE/desktop-preview: marketplace root does not contain a supported manifest" >&2
+      exit 1
+    fi
     if [ -e "$OMS_LIFECYCLE_FIXTURE/market-sibling" ]; then
       sibling='{"pluginId":"oms@oh-my-setting-local","installed":true}'
       hooks='{"pluginId":"oh-my-setting@oh-my-setting-local","installed":true},'
@@ -3664,6 +3698,24 @@ esac
     assert_ne!(call("install-codex-plugin", &[], &source, &host).0, 0);
     assert_eq!(read(&hooks_file)["foreign"], true);
     fs::write(&hooks_file, &payload).unwrap();
+    // A broken foreign marketplace is named, without its path or any removal.
+    let broken = root.join("broken-market");
+    fs::write(&broken, "").unwrap();
+    let out = call("install-codex-plugin", &[], &source, &host);
+    assert_ne!(out.0, 0);
+    let error = String::from_utf8(out.2).unwrap();
+    assert!(error.contains("no configuration changed"), "{error}");
+    assert!(
+        error.contains("failed marketplace(s): oms-desktop\n"),
+        "{error}"
+    );
+    assert!(
+        error.contains("\nhint: codex plugin marketplace remove oms-desktop\n"),
+        "{error}"
+    );
+    assert!(!error.contains("desktop-preview"), "{error}");
+    assert!(!error.contains(root.to_str().unwrap()), "{error}");
+    fs::remove_file(broken).unwrap();
     // Antigravity injects its routing hint through the current systemMessage envelope.
     let hint: Value = serde_json::from_slice(&success(call(
         "agy-hook",

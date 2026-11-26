@@ -6239,8 +6239,8 @@ fn run_with_host(
         effort: options.get("reasoning-effort"),
         permissions: None,
     };
-    // Typed task binding covers only ordinary Codex Leads; other providers and
-    // the alternate Codex keep their managed-dispatch contract unchanged.
+    // Typed task binding is specific to ordinary Codex Leads. Claude and AGY
+    // Plan work uses the managed runner.
     let typed = provider == "codex" && !options.has("lead") && !options.has("focus-orchestrator");
     if typed {
         native_result::guard_unbound(&panel, options)?;
@@ -14540,12 +14540,10 @@ pub(crate) mod tests {
                             &host,
                         )
                     };
-                    assert!(
-                        conversation(false)
-                            .unwrap_err()
-                            .message
-                            .contains("canonical work is pending")
-                    );
+                    let guidance = conversation(false).unwrap_err().message;
+                    assert!(guidance.contains("canonical work is pending"));
+                    assert!(guidance.contains("oms plan-run --to PROVIDER --id TASK"));
+                    assert!(guidance.contains("--unbound"));
                     assert!(spy.mutating_calls().is_empty());
                     let unbound = conversation(true).unwrap();
                     let unbound: Value = serde_json::from_slice(&unbound.1).unwrap();
