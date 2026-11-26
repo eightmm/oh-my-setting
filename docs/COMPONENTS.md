@@ -1535,6 +1535,13 @@ Explicitly authored notes, pins and legacy manual notes keep their existing
 eligibility. `show`, `search` and explicit `recall` still expose stored proposals
 for review; no source notes are deleted. Acceptance does not verify a claim.
 
+`oms state` reports the bounded pending-review count; `oms inbox` provides a
+`pending-memory-review` action pointing to `oms agent-memory review`. Invalid,
+unsafe or oversized review sources remain unavailable with an unknown count.
+The prompt state hint appears once per session and when a new candidate arrives,
+without repeating merely because an existing candidate was decided. Neither the
+hint nor `inbox --fix-safe` accepts a proposal.
+
 `oms agent-memory import --from serena|PATH` reads Markdown memory written
 elsewhere — a file, a directory of `.md`/`.txt` files, or the repository's
 `.serena/memories` — and lists each bullet or sentence as a candidate with its

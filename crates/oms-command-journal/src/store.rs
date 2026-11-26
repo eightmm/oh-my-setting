@@ -1842,6 +1842,40 @@ pub struct DistillReport {
     pub warnings: Vec<String>,
 }
 
+impl DistillReport {
+    /// Fixed labels and counts only: prompt hooks must not forward refusal or
+    /// storage diagnostic text recovered from a local source.
+    pub fn prompt_summary(&self) -> String {
+        let mut counts = Vec::new();
+        if self.promoted > 0 {
+            counts.push(format!("{} queued for memory review", self.promoted));
+        }
+        if self.deduped > 0 {
+            counts.push(format!("{} already in shared memory", self.deduped));
+        }
+        if !self.skipped_refused.is_empty() {
+            counts.push(format!(
+                "{} refused by the memory writer",
+                self.skipped_refused.len()
+            ));
+        }
+        if self.dropped > 0 {
+            counts.push(format!("{} beyond the per-run cap", self.dropped));
+        }
+        if !self.warnings.is_empty() {
+            counts.push(format!(
+                "{} warning(s); inspect `oms agent-memory health` and `oms journal status`",
+                self.warnings.len()
+            ));
+        }
+        if counts.is_empty() {
+            String::new()
+        } else {
+            format!("[work-journal] distill: {}\n", counts.join(", "))
+        }
+    }
+}
+
 type VerifiedSource = (
     crate::cold::ColdManifest,
     Vec<Value>,
