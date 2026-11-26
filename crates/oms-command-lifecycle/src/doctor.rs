@@ -1417,13 +1417,54 @@ fn surfaces(paths: &Paths) -> Result<Vec<Value>> {
     Ok(rows)
 }
 
+fn codex_mcp_finding(paths: &Paths, codex_config: &Path) -> Value {
+    if !r::exists(codex_config) {
+        return finding(
+            "codex_mcp",
+            "error",
+            "recorded integration is missing, changed, or unproven",
+        );
+    }
+    let mut dry_run = Options::default();
+    dry_run.tool = "install-mcp".into();
+    match r::read(codex_config, r::LIMIT)
+        .and_then(|raw| crate::integrations::converge_codex_mcp(paths, &dry_run, &raw))
+    {
+        Ok((Some(current), _)) if current["args"] == json!(["mcp-server"]) => {
+            finding("codex_mcp", "ok", "recorded integration matches")
+        }
+        Ok(_) => finding(
+            "codex_mcp",
+            "error",
+            "recorded integration is missing, changed, or unproven",
+        ),
+        Err(err) => finding(
+            "codex_mcp",
+            "error",
+            format!(
+                "{}; hint: move or delete the outside table by hand",
+                clean(&err.1)
+            ),
+        ),
+    }
+}
+
 fn integrations(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
+    integrations_at(paths, options, flag, &paths.codex_config()?)
+}
+
+pub(crate) fn integrations_at(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    codex_config: &Path,
+) -> Result<crate::Output> {
     let receipt = paths
         .require_owner()?
         .ok_or_else(|| r::Error(2, "integration checks require an install receipt".into()))?;
     let components = &receipt["components"];
     let mut rows = Vec::new();
-    let mut record = |component: &str, enabled: bool, healthy: bool| {
+    let record = |component: &str, enabled: bool, healthy: bool| {
         let (level, message) = if !enabled {
             ("note", "not recorded; skipped")
         } else if healthy {
@@ -1434,21 +1475,21 @@ fn integrations(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<c
                 "recorded integration is missing, changed, or unproven",
             )
         };
-        rows.push(finding(component, level, message));
+        finding(component, level, message)
     };
     r::check(flag)?;
     let hooks = components["claude_hooks"] == true;
-    record(
+    rows.push(record(
         "claude_hooks",
         hooks,
         !hooks || surfaces(paths).is_ok_and(|rows| rows.iter().all(|row| row["level"] != "error")),
-    );
+    ));
     let codex = components["codex_plugin"] == true;
-    record(
+    rows.push(record(
         "codex_plugin",
         codex,
         !codex || crate::plugins::codex_healthy(paths, flag).unwrap_or(false),
-    );
+    ));
     r::check(flag)?;
     let agy = components["agy_plugin"] == true;
     let agy_owned = !agy
@@ -1457,18 +1498,15 @@ fn integrations(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<c
             &paths.home.join(".gemini/config/plugins/oh-my-setting"),
         )
         .unwrap_or(false);
-    record("agy_plugin", agy, agy_owned);
+    rows.push(record("agy_plugin", agy, agy_owned));
     let mcp = components["mcp"] == true;
     if mcp || agy {
-        // Reuse doctor inventory parsing, but require only the managed scopes
-        // written by installation. Unrelated custom servers are never launched.
+        // Reuse doctor inventory parsing for JSON MCP manifests; Codex runs
+        // install's own TOML dry-run classifier on the file bytes so doctor
+        // never reports ok where install, repair, or uninstall would refuse.
         let inventory = specs(paths)?;
-        for (enabled, provider, scope, section) in [
-            (mcp, "claude", "user", "claude_mcp"),
-            (mcp, "codex", "user", "codex_mcp"),
-            (agy, "antigravity", "plugin-oh-my-setting", "agy_mcp"),
-        ] {
-            let healthy = inventory.servers.iter().any(|server| {
+        let json_mcp_healthy = |provider: &str, scope: &str| {
+            inventory.servers.iter().any(|server| {
                 server.provider == provider
                     && server.scope == scope
                     && server.name == "oh-my-setting"
@@ -1483,11 +1521,25 @@ fn integrations(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<c
                 layer["provider"] == provider
                     && layer["scope"] == scope
                     && layer["status"] == "parsed"
-            });
-            record(section, enabled, healthy);
+            })
+        };
+        rows.push(record(
+            "claude_mcp",
+            mcp,
+            !mcp || json_mcp_healthy("claude", "user"),
+        ));
+        if mcp {
+            rows.push(codex_mcp_finding(paths, codex_config));
+        } else {
+            rows.push(record("codex_mcp", false, true));
         }
+        rows.push(record(
+            "agy_mcp",
+            agy,
+            !agy || json_mcp_healthy("antigravity", "plugin-oh-my-setting"),
+        ));
     } else {
-        record("mcp", false, true);
+        rows.push(record("mcp", false, true));
     }
     r::check(flag)?;
     let mut result = report(paths, rows);

@@ -2983,6 +2983,68 @@ fn doctor_integration_diagnostics(source: &Path, root: &Path, host: &NativeServi
             saved
         );
     }
+    for bad_codex in [
+        format!(
+            "# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\n# user comment inside env\nOMS_MCP_TOOL_PROFILE = \"full\"\n",
+            json!(executable)
+        ),
+        format!(
+            "# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"full\" # inline user note\n",
+            json!(executable)
+        ),
+        format!(
+            "# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.\"env\"]\nOMS_MCP_TOOL_PROFILE = \"full\"\n",
+            json!(executable)
+        ),
+        format!(
+            "[mcp_servers]\noh-my-setting.command = {}\noh-my-setting.args = [\"mcp-server\"]\noh-my-setting.env.OMS_MCP_TOOL_PROFILE = \"full\"\n",
+            json!(executable)
+        ),
+    ] {
+        fs::write(&codex, bad_codex).unwrap();
+        let saved = (fs::read(&claude).unwrap(), fs::read(&codex).unwrap());
+        let report = inspect(json!({"mcp":true}));
+        assert_eq!(report["exit"], 1, "{report}");
+        assert_eq!(
+            (fs::read(&claude).unwrap(), fs::read(&codex).unwrap()),
+            saved
+        );
+        let reason = "an unmanaged TOML table already occupies this registration";
+        for (tool, args) in [
+            ("install-mcp", &["--remove"][..]),
+            ("uninstall", &["--yes"][..]),
+        ] {
+            let out = call(tool, args, source, host);
+            assert_eq!(out.0, 2, "{tool}: {}", String::from_utf8_lossy(&out.2));
+            assert!(String::from_utf8_lossy(&out.2).contains(reason));
+            assert_eq!(
+                (fs::read(&claude).unwrap(), fs::read(&codex).unwrap()),
+                saved
+            );
+        }
+        for (section, level) in [("claude_mcp", "ok"), ("codex_mcp", "error")] {
+            assert!(
+                report["findings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["section"] == section && r["level"] == level),
+                "{report}"
+            );
+        }
+        let codex_finding = report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["section"] == "codex_mcp")
+            .unwrap();
+        let message = codex_finding["message"].as_str().unwrap();
+        assert!(message.starts_with(reason), "{message}");
+        assert!(
+            message.contains("hint: move or delete the outside table by hand"),
+            "{message}"
+        );
+    }
     for invalid in [
         json!({"args":[]}),
         json!({"disabled":true}),
@@ -4397,17 +4459,27 @@ esac
             assert!(!cleaned.contains("mcp_servers"));
         }
     }
-    fs::write(
-        &codex_config,
-        format!("{custom}\n[mcp_servers.oh-my-setting]\ncommand = \"custom-mcp\"\nargs = []\nenv = {{ OMS_MCP_TOOL_PROFILE = \"full\" }}\n"),
-    )
-    .unwrap();
-    let refused_mcp = call("install-mcp", &["--remove"], &source, &host);
-    assert_ne!(refused_mcp.0, 0);
-    assert!(
-        String::from_utf8_lossy(&refused_mcp.2)
-            .contains("an unmanaged TOML table already occupies this registration")
-    );
+    for refused_toml in [
+        format!(
+            "{custom}\n[mcp_servers.oh-my-setting]\ncommand = \"custom-mcp\"\nargs = []\nenv = {{ OMS_MCP_TOOL_PROFILE = \"full\" }}\n"
+        ),
+        format!(
+            "{custom}\n# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\n# user comment inside env\nOMS_MCP_TOOL_PROFILE = \"full\"\n",
+            json!(home.join(".local/bin/oms"))
+        ),
+        format!(
+            "{custom}\n# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"full\" # inline user note\n",
+            json!(home.join(".local/bin/oms"))
+        ),
+    ] {
+        fs::write(&codex_config, &refused_toml).unwrap();
+        let before = fs::read(&codex_config).unwrap();
+        let reason = "an unmanaged TOML table already occupies this registration";
+        let refused_mcp = call("install-mcp", &["--remove"], &source, &host);
+        assert_eq!(refused_mcp.0, 2);
+        assert!(String::from_utf8_lossy(&refused_mcp.2).contains(reason));
+        assert_eq!(fs::read(&codex_config).unwrap(), before);
+    }
     fs::write(&codex_config, custom).unwrap();
     write(
         &source.join("plugins/antigravity/plugin.json"),

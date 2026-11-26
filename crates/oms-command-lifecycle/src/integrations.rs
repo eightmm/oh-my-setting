@@ -536,6 +536,51 @@ pub(crate) fn owned_mcp_entry(current: &Value, paths: &Paths, executable: &Path)
     Ok(native || legacy || cached)
 }
 
+fn has_toml_comment(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut string: Option<(u8, bool)> = None;
+    while i < bytes.len() {
+        if let Some((quote, multiline)) = string {
+            if quote == b'"' && bytes[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            let triple = if quote == b'"' { b"\"\"\"" } else { b"'''" };
+            if multiline && bytes[i..].starts_with(triple) {
+                i += 3;
+                for _ in 0..2 {
+                    if bytes.get(i) == Some(&quote) {
+                        i += 1;
+                    }
+                }
+                string = None;
+                continue;
+            }
+            if !multiline && bytes[i] == quote {
+                i += 1;
+                string = None;
+                continue;
+            }
+            i += 1;
+        } else if bytes[i] == b'#' {
+            return true;
+        } else if bytes[i..].starts_with(b"\"\"\"") {
+            string = Some((b'"', true));
+            i += 3;
+        } else if bytes[i..].starts_with(b"'''") {
+            string = Some((b'\'', true));
+            i += 3;
+        } else if matches!(bytes[i], b'"' | b'\'') {
+            string = Some((bytes[i], false));
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 fn strip_owned_toml_sections(base: &str, require_server_header: bool) -> Result<String> {
     let mut lines = base
         .split_inclusive('\n')
@@ -598,10 +643,7 @@ fn strip_owned_toml_sections(base: &str, require_server_header: bool) -> Result<
                 !s.is_empty() && !s.starts_with('#')
             })
             .unwrap_or(h);
-        if lines[h + 1..=last_kv]
-            .iter()
-            .any(|l| l.trim_start().starts_with('#'))
-        {
+        if has_toml_comment(&lines[h..=last_kv].concat()) {
             return r::fail("an unmanaged TOML table already occupies this registration");
         }
         lines.drain(h..=last_kv);
@@ -678,6 +720,85 @@ fn toml_block(
     }
     Ok(format!("{}\n{begin}\n{block}\n{end}\n", base.trim_end()))
 }
+/// Dry-runs or prepares the Codex `config.toml` MCP registration on `raw` bytes.
+/// `doctor --integrations` and `install-mcp` share this routine so doctor never
+/// reports `codex_mcp` ok for bytes that install, repair, or uninstall refuse.
+pub(crate) fn converge_codex_mcp(
+    paths: &Paths,
+    options: &Options,
+    raw: &[u8],
+) -> Result<(Option<Value>, String)> {
+    let executable = paths.home.join(".local/bin/oms");
+    let raw = std::str::from_utf8(raw)
+        .map_err(|_| r::Error(2, "Codex configuration is not UTF-8".into()))?;
+    let mut expected = crate::config::toml(raw.as_bytes())?;
+    if !expected.is_object() {
+        return r::fail("Codex configuration is not an object");
+    }
+    if expected
+        .get("mcp_servers")
+        .is_some_and(|servers| !servers.is_object())
+    {
+        return r::fail("invalid MCP server table");
+    }
+    let current = expected
+        .get("mcp_servers")
+        .and_then(|servers| servers.get("oh-my-setting"))
+        .cloned();
+    // A marker delimits the bytes to edit; it does not authorize dropping an
+    // unknown environment, launch option, or third-party command in that block.
+    if let Some(ref current) = current
+        && !owned_mcp_entry(current, paths, &executable)?
+    {
+        return r::fail("an unmanaged TOML table already occupies this registration");
+    }
+    let entry = managed_mcp_entry(paths, options, current.as_ref(), false)?;
+    let section = "[mcp_servers.oh-my-setting]";
+    let block = if options.has("--remove") {
+        String::new()
+    } else {
+        let mut block = format!(
+            "{section}\ncommand = {}\nargs = [\"mcp-server\"]",
+            serde_json::to_string(&executable)
+                .map_err(|_| r::Error(2, "invalid native command path".into()))?
+        );
+        if let Some(profile) = entry["env"][MCP_TOOL_PROFILE].as_str() {
+            block.push_str(&format!("\nenv = {{ {MCP_TOOL_PROFILE} = \"{profile}\" }}"));
+        }
+        block
+    };
+    let body = toml_block(raw, &block, section, paths, &executable)?;
+    let candidate = crate::config::toml(body.as_bytes())?;
+    if options.has("--remove") {
+        if let Some(servers) = expected
+            .get_mut("mcp_servers")
+            .and_then(Value::as_object_mut)
+        {
+            servers.remove("oh-my-setting");
+        }
+        if expected["mcp_servers"]
+            .as_object()
+            .is_some_and(|v| v.is_empty())
+            && candidate.get("mcp_servers").is_none()
+        {
+            expected.as_object_mut().unwrap().remove("mcp_servers");
+        }
+    } else {
+        expected
+            .as_object_mut()
+            .ok_or_else(|| r::Error(2, "Codex configuration is not an object".into()))?
+            .entry("mcp_servers")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| r::Error(2, "invalid MCP server table".into()))?
+            .insert("oh-my-setting".into(), entry);
+    }
+    if candidate != expected {
+        return r::fail("MCP block edit changed unrelated TOML data; configuration retained");
+    }
+    Ok((current, body))
+}
+
 fn mcp(paths: &Paths, options: &Options, tx: &mut Transaction, flag: &AtomicBool) -> Result<()> {
     if !options.has("--remove") {
         crate::payload::verify(paths, flag)?.recheck()?;
@@ -718,75 +839,11 @@ fn mcp_registrations(
         servers.insert("oh-my-setting".into(), entry);
     }
     let raw = if r::exists(config) {
-        String::from_utf8(r::read(config, r::LIMIT)?)
-            .map_err(|_| r::Error(2, "Codex configuration is not UTF-8".into()))?
+        r::read(config, r::LIMIT)?
     } else {
-        String::new()
+        Vec::new()
     };
-    let mut expected = crate::config::toml(raw.as_bytes())?;
-    if !expected.is_object() {
-        return r::fail("Codex configuration is not an object");
-    }
-    if expected
-        .get("mcp_servers")
-        .is_some_and(|servers| !servers.is_object())
-    {
-        return r::fail("invalid MCP server table");
-    }
-    let current = expected
-        .get("mcp_servers")
-        .and_then(|servers| servers.get("oh-my-setting"));
-    // A marker delimits the bytes to edit; it does not authorize dropping an
-    // unknown environment, launch option, or third-party command in that block.
-    if let Some(current) = current
-        && !owned_mcp_entry(current, paths, &executable)?
-    {
-        return r::fail("an unmanaged TOML table already occupies this registration");
-    }
-    let entry = managed_mcp_entry(paths, options, current, false)?;
-    let section = "[mcp_servers.oh-my-setting]";
-    let block = if options.has("--remove") {
-        String::new()
-    } else {
-        let mut block = format!(
-            "{section}\ncommand = {}\nargs = [\"mcp-server\"]",
-            serde_json::to_string(&executable)
-                .map_err(|_| r::Error(2, "invalid native command path".into()))?
-        );
-        if let Some(profile) = entry["env"][MCP_TOOL_PROFILE].as_str() {
-            block.push_str(&format!("\nenv = {{ {MCP_TOOL_PROFILE} = \"{profile}\" }}"));
-        }
-        block
-    };
-    let body = toml_block(&raw, &block, section, paths, &executable)?;
-    let candidate = crate::config::toml(body.as_bytes())?;
-    if options.has("--remove") {
-        if let Some(servers) = expected
-            .get_mut("mcp_servers")
-            .and_then(Value::as_object_mut)
-        {
-            servers.remove("oh-my-setting");
-        }
-        if expected["mcp_servers"]
-            .as_object()
-            .is_some_and(|v| v.is_empty())
-            && candidate.get("mcp_servers").is_none()
-        {
-            expected.as_object_mut().unwrap().remove("mcp_servers");
-        }
-    } else {
-        expected
-            .as_object_mut()
-            .ok_or_else(|| r::Error(2, "Codex configuration is not an object".into()))?
-            .entry("mcp_servers")
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .ok_or_else(|| r::Error(2, "invalid MCP server table".into()))?
-            .insert("oh-my-setting".into(), entry);
-    }
-    if candidate != expected {
-        return r::fail("MCP block edit changed unrelated TOML data; configuration retained");
-    }
+    let (_, body) = converge_codex_mcp(paths, options, &raw)?;
     if r::exists(&claude) || !options.has("--remove") {
         tx.write(&claude, &r::bytes(&value)?, 0o600)?;
     }
@@ -1305,6 +1362,30 @@ mod tests {
             assert!(!removed.contains(MCP_TOOL_PROFILE));
             fs::write(&claude, &saved.0).unwrap();
         }
+        fs::create_dir_all(&paths.config).unwrap();
+        let receipt_bytes = r::bytes(
+            &json!({"schema":1,"source_root":paths.source,"commit":"fixture",
+            "version":"1","channel":"edge","installed_at":"fixture",
+            "plugin":{"name":"oh-my-setting","version":"1","sha256":"fixture"},
+            "components":{"mcp":true}}),
+        )
+        .unwrap();
+        fs::write(&paths.receipt, &receipt_bytes).unwrap();
+        let doctor_opts =
+            crate::cli::parse("doctor", &["--integrations".into(), "--json".into()]).unwrap();
+        let inspect_doctor = || -> Value {
+            let out = crate::doctor::integrations_at(
+                &paths,
+                &doctor_opts,
+                &AtomicBool::new(false),
+                &codex,
+            )
+            .unwrap();
+            assert_eq!(fs::read(&paths.receipt).unwrap(), receipt_bytes);
+            let report = r::parse(&out.1).unwrap();
+            assert_eq!(out.0, report["exit"].as_i64().unwrap() as i32);
+            report
+        };
         for bad_outside_env in [
             format!("[mcp_servers.oh-my-setting.env]\n{MCP_TOOL_PROFILE} = \"unknown\"\n"),
             format!(
@@ -1313,6 +1394,13 @@ mod tests {
             format!(
                 "[mcp_servers.oh-my-setting.env]\n# user comment inside env\n{MCP_TOOL_PROFILE} = \"full\"\n"
             ),
+            format!(
+                "[mcp_servers.oh-my-setting.env]\n{MCP_TOOL_PROFILE} = \"full\" # inline user note\n"
+            ),
+            format!(
+                "[mcp_servers.oh-my-setting.env]\n{MCP_TOOL_PROFILE} = 'full' # inline single-quoted note\n"
+            ),
+            format!("[mcp_servers.oh-my-setting.\"env\"]\n{MCP_TOOL_PROFILE} = \"full\"\n"),
         ] {
             fs::write(
                 &codex,
@@ -1322,11 +1410,70 @@ mod tests {
             )
             .unwrap();
             let before = bytes();
-            assert!(converge(&[]).is_err());
+            let err = converge(&[]).unwrap_err();
+            assert_eq!(
+                err.1,
+                "an unmanaged TOML table already occupies this registration"
+            );
             assert_eq!(bytes(), before);
-            assert!(converge(&["--remove"]).is_err());
+            for args in [&["--mcp-tool-profile", "core"][..], &["--remove"][..]] {
+                let other_err = converge(args).unwrap_err();
+                assert_eq!(other_err.1, err.1);
+                assert_eq!(bytes(), before);
+            }
+            let report = inspect_doctor();
+            assert_eq!(report["exit"], 1, "{report}");
+            let codex_finding = report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["section"] == "codex_mcp")
+                .unwrap();
+            assert_eq!(codex_finding["level"], "error");
+            let message = codex_finding["message"].as_str().unwrap();
+            assert!(message.starts_with(&err.1), "{message}");
+            assert!(
+                message.contains("hint: move or delete the outside table by hand"),
+                "{message}"
+            );
             assert_eq!(bytes(), before);
         }
+        // Unmarked table migration also refuses trailing inline comments and dotted spellings.
+        for unmarked_refused in [
+            format!(
+                "{user}[mcp_servers.oh-my-setting]\ncommand = {native} # keep inline note\nargs = [\"mcp-server\"]\n"
+            ),
+            format!(
+                "{user}[mcp_servers]\noh-my-setting.command = {native}\noh-my-setting.args = [\"mcp-server\"]\noh-my-setting.env.{MCP_TOOL_PROFILE} = \"full\"\n"
+            ),
+        ] {
+            fs::write(&codex, unmarked_refused).unwrap();
+            let before = bytes();
+            let err = converge(&[]).unwrap_err();
+            assert_eq!(
+                err.1,
+                "an unmanaged TOML table already occupies this registration"
+            );
+            assert_eq!(bytes(), before);
+            assert_eq!(converge(&["--remove"]).unwrap_err().1, err.1);
+            assert_eq!(bytes(), before);
+            let report = inspect_doctor();
+            assert_eq!(report["exit"], 1);
+            assert!(report["findings"].as_array().unwrap().iter().any(|row| {
+                row["section"] == "codex_mcp"
+                    && row["level"] == "error"
+                    && row["message"]
+                        .as_str()
+                        .is_some_and(|m| m.starts_with(&err.1))
+            }));
+            assert_eq!(bytes(), before);
+        }
+        assert!(!has_toml_comment(
+            "command = \"/tmp/user#hash/.local/bin/oms\"\nargs = [\"mcp-server\"]\n"
+        ));
+        assert!(has_toml_comment(
+            "command = \"/tmp/user#hash/.local/bin/oms\" # trailing note\n"
+        ));
         // Array-of-tables [[mcp_servers]] returns a clean exit-2 error without panicking.
         fs::write(
             &codex,
