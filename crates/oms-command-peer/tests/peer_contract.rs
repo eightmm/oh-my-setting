@@ -4417,6 +4417,7 @@ fn thread_hot_paths_read_each_log_once_and_keep_stale_contracts() {
 fn delegate_warm_cargo_slot_cache_and_opt_out() {
     isolated("delegate_warm_cargo_slot_cache_and_opt_out", || {
         use oms_command_peer::process::{Completed, Executor, Invocation};
+        use sha2::{Digest, Sha256};
         use std::sync::Mutex;
 
         struct ObservedCall {
@@ -4424,8 +4425,10 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
             cwd: PathBuf,
             env_override: Option<PathBuf>,
             effective_stdout: String,
+            slot_lock_busy: bool,
         }
         struct EnvRecorder {
+            repo: PathBuf,
             mutate: AtomicBool,
             calls: Mutex<Vec<ObservedCall>>,
         }
@@ -4449,49 +4452,58 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                     .iter()
                     .rfind(|(k, _)| k == "CARGO_TARGET_DIR")
                     .map(|(_, v)| PathBuf::from(v));
-                if prog == "bash" {
-                    let cwd = request.cwd.clone();
-                    let completed =
-                        oms_command_peer::process::Native.execute(request, interrupted)?;
-                    self.calls.lock().unwrap().push(ObservedCall {
-                        prog,
-                        cwd,
-                        env_override,
-                        effective_stdout: String::from_utf8_lossy(&completed.stdout)
-                            .trim_end_matches('\n')
-                            .to_owned(),
+                let slot_lock_busy = env_override
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .filter(|dir| {
+                        dir.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with("slot-"))
+                    })
+                    .is_some_and(|slot_dir| {
+                        let mut settings = oms_lock::Settings::from_env().unwrap();
+                        settings.cwd = self.repo.clone();
+                        let lock = oms_lock::Lock::for_file(&slot_dir.join("slot.lock"), settings)
+                            .unwrap();
+                        matches!(lock.try_acquire(), Err(oms_lock::Error::Busy))
                     });
-                    return Ok(completed);
-                }
-                if self.mutate.load(Ordering::SeqCst) {
+                let cwd = request.cwd.clone();
+                let completed = oms_command_peer::process::Native.execute(request, interrupted)?;
+                if prog != "bash" && self.mutate.load(Ordering::SeqCst) {
                     fs::write(
-                        request.cwd.join("Cargo.toml"),
+                        cwd.join("Cargo.toml"),
                         "[package]\nname = \"probe\"\nversion = \"0.1.1\"\n",
                     )
                     .unwrap();
                 }
+                let raw = String::from_utf8_lossy(&completed.stdout);
+                let effective_stdout = if prog == "bash" {
+                    raw.trim_end_matches('\n').to_owned()
+                } else {
+                    raw.lines()
+                        .find_map(|line| line.strip_prefix("EFFECTIVE="))
+                        .unwrap_or("")
+                        .to_owned()
+                };
                 self.calls.lock().unwrap().push(ObservedCall {
                     prog,
-                    cwd: request.cwd,
+                    cwd,
                     env_override,
-                    effective_stdout: String::new(),
+                    effective_stdout,
+                    slot_lock_busy,
                 });
-                Ok(Completed {
-                    code: 0,
-                    stdout: b"CONFIDENCE: 0.9\nGATE: pass\n".to_vec(),
-                    stderr: Vec::new(),
-                    complete: true,
-                    cleanup_complete: Some(true),
-                    owned_cleanup: None,
-                    elapsed: std::time::Duration::ZERO,
-                })
+                Ok(completed)
             }
         }
 
         let home = fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap();
         let fake_codex = home.join(format!("fake-bin-{}/codex", std::process::id()));
         fs::create_dir_all(fake_codex.parent().unwrap()).unwrap();
-        fs::write(&fake_codex, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(
+            &fake_codex,
+            "#!/bin/sh\ncat >/dev/null\nprintf 'EFFECTIVE=%s\\nCONFIDENCE: 0.9\\nGATE: pass\\n' \"${CARGO_TARGET_DIR-<unset>}\"\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -4505,7 +4517,14 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
             std::env::var("PATH").unwrap_or_default()
         );
         if std::env::var_os("OMS_SLOT_INNER").is_none() {
-            for mode in ["slot", "optout", "empty", "caller-target"] {
+            for mode in [
+                "slot",
+                "optout",
+                "empty",
+                "caller-target",
+                "optout-caller-target",
+                "slot-cache-off-caller-target",
+            ] {
                 let mut cmd = Command::new(std::env::current_exe().unwrap());
                 cmd.args([
                     "--exact",
@@ -4535,6 +4554,14 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                     "caller-target" => {
                         cmd.env("CARGO_TARGET_DIR", &caller_target);
                     }
+                    "optout-caller-target" => {
+                        cmd.env("CARGO_TARGET_DIR", &caller_target)
+                            .env("OMS_DELEGATE_ISOLATED_BUILD", "1");
+                    }
+                    "slot-cache-off-caller-target" => {
+                        cmd.env("CARGO_TARGET_DIR", &caller_target)
+                            .env("OMS_CARGO_SLOT_CACHE", "0");
+                    }
                     _ => unreachable!(),
                 }
                 let out = cmd.output().unwrap();
@@ -4553,11 +4580,12 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
         }
 
         let repo = Repo::new();
+        repo.write(".gitignore", "/target\n");
         repo.write(
             "Cargo.toml",
             "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n",
         );
-        repo.git(&["add", "Cargo.toml"]);
+        repo.git(&["add", ".gitignore", "Cargo.toml"]);
         repo.git(&[
             "-c",
             "user.name=Fixture",
@@ -4570,6 +4598,7 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
 
         let mode = std::env::var("OMS_SLOT_INNER").unwrap();
         let recorder = EnvRecorder {
+            repo: repo.0.clone(),
             mutate: AtomicBool::new(true),
             calls: Mutex::new(Vec::new()),
         };
@@ -4641,68 +4670,196 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
             String::from_utf8_lossy(&review_out.2)
         );
 
+        repo.write("tests/probe_test.rs", "#[test]\nfn red_probe() {}\n");
+        repo.git(&["add", "tests/probe_test.rs"]);
+        let advise_values = args(&[
+            "advise",
+            "--json",
+            "--repo",
+            repo.0.to_str().unwrap(),
+            "--red-check",
+            verify_cmd,
+        ]);
+        let advise_out = oms_command_peer::run_with_executor(
+            "peer-review",
+            &advise_values,
+            &repo.0,
+            source,
+            &stop,
+            &recorder,
+        );
+        assert_eq!(
+            advise_out.0,
+            0,
+            "advise red-check ({mode}) failed: {}{}",
+            String::from_utf8_lossy(&advise_out.1),
+            String::from_utf8_lossy(&advise_out.2)
+        );
+
+        let is_temp_tree =
+            |cwd: &Path| cwd.starts_with(repo.0.join(".oms/tmp")) && cwd.ends_with("tree");
         let calls = recorder.calls.lock().unwrap();
         assert_eq!(
             calls.len(),
-            4,
-            "{mode}: expected delegate+verify and review+verify"
+            6,
+            "{mode}: expected delegate+verify, review+verify, and red-check control+file"
         );
+        assert!(calls[0].prog.ends_with("codex"), "{}", calls[0].prog);
         assert_eq!(calls[1].prog, "bash");
+        assert!(calls[2].prog.ends_with("codex"), "{}", calls[2].prog);
         assert_eq!(calls[3].prog, "bash");
-        assert!(
-            calls[1].cwd.starts_with(repo.0.join(".oms/tmp")) && calls[1].cwd.ends_with("tree"),
-            "unexpected temporary-tree verify cwd: {}",
-            calls[1].cwd.display()
-        );
+        assert_eq!(calls[4].prog, "bash");
+        assert_eq!(calls[5].prog, "bash");
+        assert_eq!(calls[0].cwd, calls[1].cwd);
+        for idx in [0, 1, 2, 4, 5] {
+            assert!(
+                is_temp_tree(&calls[idx].cwd),
+                "call {idx} ({mode}) expected temp tree cwd, got {}",
+                calls[idx].cwd.display()
+            );
+            assert!(
+                !calls[idx].cwd.exists(),
+                "call {idx} ({mode}) temp tree was not removed: {}",
+                calls[idx].cwd.display()
+            );
+            assert_ne!(
+                Path::new(&calls[idx].effective_stdout),
+                caller_target,
+                "call {idx} ({mode}) leaked caller CARGO_TARGET_DIR"
+            );
+            assert!(
+                !Path::new(&calls[idx].effective_stdout).starts_with(&caller_target),
+                "call {idx} ({mode}) used subdirectory of caller CARGO_TARGET_DIR: {}",
+                calls[idx].effective_stdout
+            );
+        }
         assert_eq!(
             calls[3].cwd, repo.0,
             "real-repo verify cwd must be repo root"
         );
+        assert!(calls[3].env_override.is_none());
 
         match mode.as_str() {
             "optout" => {
-                assert!(
-                    calls[0].env_override.is_none(),
-                    "OMS_DELEGATE_ISOLATED_BUILD=1 must omit CARGO_TARGET_DIR"
-                );
-                assert!(calls[1].env_override.is_none());
-                assert_eq!(calls[1].effective_stdout, "<unset>");
-                assert!(calls[3].env_override.is_none());
-                assert_eq!(calls[3].effective_stdout, "<unset>");
+                for idx in [0, 1, 2, 3, 4, 5] {
+                    assert!(
+                        calls[idx].env_override.is_none(),
+                        "call {idx} must omit CARGO_TARGET_DIR when opted out without caller target"
+                    );
+                    assert_eq!(calls[idx].effective_stdout, "<unset>", "call {idx}");
+                }
             }
-            "slot" | "empty" => {
-                let first_dir = calls[0]
+            "optout-caller-target" | "slot-cache-off-caller-target" => {
+                for idx in [0, 1, 2, 4, 5] {
+                    let expected = calls[idx].cwd.join("target");
+                    assert_eq!(
+                        calls[idx].env_override.as_deref(),
+                        Some(expected.as_path()),
+                        "call {idx} ({mode})"
+                    );
+                    assert_eq!(
+                        Path::new(&calls[idx].effective_stdout),
+                        expected,
+                        "call {idx} ({mode})"
+                    );
+                }
+                assert_eq!(Path::new(&calls[3].effective_stdout), caller_target);
+            }
+            "slot" | "empty" | "caller-target" => {
+                let codex_slot = calls[0]
                     .env_override
                     .as_ref()
-                    .expect("slot-0 CARGO_TARGET_DIR assigned")
+                    .expect("codex slot-0 CARGO_TARGET_DIR assigned")
                     .to_string_lossy()
                     .into_owned();
                 assert!(
-                    first_dir.contains("cargo-slots/") && first_dir.ends_with("/slot-0/target"),
-                    "unexpected slot path ({mode}): {first_dir}"
+                    codex_slot.contains("cargo-slots/") && codex_slot.ends_with("/slot-0/target"),
+                    "unexpected codex slot path ({mode}): {codex_slot}"
                 );
-                assert_eq!(
-                    calls[1].env_override.as_deref(),
-                    calls[0].env_override.as_deref()
+                for idx in [0, 1, 2] {
+                    assert_eq!(
+                        calls[idx].env_override.as_deref(),
+                        Some(Path::new(&codex_slot)),
+                        "call {idx} ({mode})"
+                    );
+                    assert_eq!(
+                        calls[idx].effective_stdout, codex_slot,
+                        "call {idx} ({mode})"
+                    );
+                    assert!(
+                        calls[idx].slot_lock_busy,
+                        "call {idx} ({mode}) slot lock not held"
+                    );
+                }
+                let red_slot = calls[4]
+                    .env_override
+                    .as_ref()
+                    .expect("red-check slot-0 CARGO_TARGET_DIR assigned")
+                    .to_string_lossy()
+                    .into_owned();
+                assert!(
+                    Path::new(&red_slot).starts_with(xdg_cache.join("oh-my-setting/cargo-slots"))
+                        && red_slot.ends_with("/slot-0/target"),
+                    "unexpected red-check slot path ({mode}): {red_slot}"
                 );
-                assert_eq!(calls[1].effective_stdout, first_dir);
-                assert!(calls[3].env_override.is_none());
-                assert_eq!(
-                    calls[3].effective_stdout,
-                    if mode == "empty" { "" } else { "<unset>" }
-                );
-            }
-            "caller-target" => {
-                let peer_tree_target = caller_target.join("oms-peer-tree");
-                assert_eq!(
-                    calls[1].env_override.as_deref(),
-                    Some(peer_tree_target.as_path())
-                );
-                assert_eq!(Path::new(&calls[1].effective_stdout), peer_tree_target);
-                assert!(calls[3].env_override.is_none());
-                assert_eq!(Path::new(&calls[3].effective_stdout), caller_target);
+                for idx in [4, 5] {
+                    assert_eq!(
+                        calls[idx].env_override.as_deref(),
+                        Some(Path::new(&red_slot)),
+                        "call {idx} ({mode})"
+                    );
+                    assert_eq!(calls[idx].effective_stdout, red_slot, "call {idx} ({mode})");
+                    assert!(
+                        calls[idx].slot_lock_busy,
+                        "call {idx} ({mode}) slot lock not held"
+                    );
+                }
+                match mode.as_str() {
+                    "slot" => assert_eq!(calls[3].effective_stdout, "<unset>"),
+                    "empty" => assert_eq!(calls[3].effective_stdout, ""),
+                    "caller-target" => {
+                        assert_eq!(Path::new(&calls[3].effective_stdout), caller_target);
+                    }
+                    _ => unreachable!(),
+                }
             }
             _ => unreachable!(),
+        }
+        drop(calls);
+
+        if mode == "caller-target" {
+            let repo_hash = format!("{:x}", Sha256::digest(repo.0.to_string_lossy().as_bytes()));
+            let slot_base = xdg_cache
+                .join("oh-my-setting/cargo-slots")
+                .join(&repo_hash[..16]);
+            let mut held = Vec::new();
+            let mut settings = oms_lock::Settings::from_env().unwrap();
+            settings.cwd = repo.0.clone();
+            for idx in 0..12 {
+                let dir = slot_base.join(format!("slot-{idx}"));
+                fs::create_dir_all(&dir).unwrap();
+                let lock =
+                    oms_lock::Lock::for_file(&dir.join("slot.lock"), settings.clone()).unwrap();
+                held.push(lock.try_acquire().unwrap());
+            }
+            let busy_out = oms_command_peer::run_with_executor(
+                "peer-review",
+                &advise_values,
+                &repo.0,
+                source,
+                &stop,
+                &recorder,
+            );
+            assert_eq!(busy_out.0, 0);
+            drop(held);
+            let calls = recorder.calls.lock().unwrap();
+            assert_eq!(calls.len(), 8);
+            for idx in [6, 7] {
+                let expected = calls[idx].cwd.join("target");
+                assert_eq!(calls[idx].env_override.as_deref(), Some(expected.as_path()));
+                assert_eq!(Path::new(&calls[idx].effective_stdout), expected);
+                assert!(!calls[idx].cwd.exists());
+            }
         }
     });
 }

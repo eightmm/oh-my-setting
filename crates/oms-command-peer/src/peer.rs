@@ -948,6 +948,9 @@ fn call_routed(
         return fail("Team request lead lifecycle enrollment unavailable");
     }
     let mut usage_env = crate::usage::operation_env(&[])?;
+    let cargo_guard = private
+        .as_ref()
+        .map(|tree| tree.cargo_env(&route.provider, &mut usage_env));
     if args.has("team-requests") {
         usage_env.push((
             "OMS_TEAM_REQUEST_PROTOCOL".into(),
@@ -989,6 +992,7 @@ fn call_routed(
         output_mode(args),
         context,
     );
+    drop(cargo_guard);
     let mut result = match result {
         Ok(r) => r,
         Err(error) => crate::process::Completed {

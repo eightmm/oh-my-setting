@@ -17,16 +17,24 @@ struct CargoSlot {
     target_dir: PathBuf,
 }
 
+#[must_use = "slot lock must outlive processes running in the temporary worktree"]
+pub(crate) struct CargoTargetGuard {
+    _slot: Option<CargoSlot>,
+}
+
 const CARGO_SLOTS: usize = 12;
 
-fn acquire_cargo_slot(repo: &Path, provider: &str) -> Option<CargoSlot> {
-    if !(repo.join("Cargo.toml").is_file() || repo.join("rust/Cargo.toml").is_file()) {
-        return None;
-    }
-    if std::env::var_os("OMS_DELEGATE_ISOLATED_BUILD").as_deref() == Some(OsStr::new("1"))
+fn is_cargo_repo(repo: &Path) -> bool {
+    repo.join("Cargo.toml").is_file() || repo.join("rust/Cargo.toml").is_file()
+}
+
+fn cargo_slot_opted_out() -> bool {
+    std::env::var_os("OMS_DELEGATE_ISOLATED_BUILD").as_deref() == Some(OsStr::new("1"))
         || std::env::var_os("OMS_CARGO_SLOT_CACHE").as_deref() == Some(OsStr::new("0"))
-        || std::env::var_os("CARGO_TARGET_DIR").is_some_and(|v| !v.is_empty())
-    {
+}
+
+fn acquire_cargo_slot(repo: &Path, tree: &Path, provider: &str) -> Option<CargoSlot> {
+    if !(is_cargo_repo(repo) || is_cargo_repo(tree)) || cargo_slot_opted_out() {
         return None;
     }
     let key = storage::hash(repo.to_string_lossy().as_bytes());
@@ -530,21 +538,30 @@ impl Worktree {
         let _ = unlinkat(&oms, id, AtFlags::REMOVEDIR);
     }
 
-    pub(crate) fn verify_env(
+    // Never inherit the caller's CARGO_TARGET_DIR into a temporary tree: older
+    // source mtimes let later real-checkout builds reuse temp-tree binaries.
+    pub(crate) fn cargo_env(
         &self,
-        command: &str,
-        environment: &[(OsString, OsString)],
-        context: &Context<'_>,
-    ) -> Result<process::Completed> {
-        let mut env = environment.to_vec();
-        if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR").filter(|v| !v.is_empty()) {
-            env.retain(|(k, _)| k != "CARGO_TARGET_DIR");
+        provider: &str,
+        env: &mut Vec<(OsString, OsString)>,
+    ) -> CargoTargetGuard {
+        let caller_has_target = std::env::var_os("CARGO_TARGET_DIR").is_some_and(|v| !v.is_empty());
+        let cargo_repo = is_cargo_repo(&self.owner) || is_cargo_repo(&self.path);
+        let opted_out = cargo_slot_opted_out();
+        let slot = acquire_cargo_slot(&self.owner, &self.path, provider);
+        env.retain(|(k, _)| k != "CARGO_TARGET_DIR");
+        if let Some(slot) = &slot {
             env.push((
                 "CARGO_TARGET_DIR".into(),
-                PathBuf::from(dir).join("oms-peer-tree").into_os_string(),
+                slot.target_dir.as_os_str().to_owned(),
+            ));
+        } else if caller_has_target || (cargo_repo && !opted_out) {
+            env.push((
+                "CARGO_TARGET_DIR".into(),
+                self.path.join("target").into_os_string(),
             ));
         }
-        verify_env(command, &self.path, &env, context)
+        CargoTargetGuard { _slot: slot }
     }
 }
 
@@ -1156,16 +1173,8 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut verify_exit_code: Option<i32> = None;
     let mut needs_keep = args.has("keep-worktree");
     let mut interactive_stdout = String::new();
-    let cargo_slot = acquire_cargo_slot(&repo, &target.provider);
-    let mut extra_env: Vec<(OsString, OsString)> = cargo_slot
-        .as_ref()
-        .map(|slot| {
-            vec![(
-                "CARGO_TARGET_DIR".into(),
-                slot.target_dir.as_os_str().to_owned(),
-            )]
-        })
-        .unwrap_or_default();
+    let mut extra_env = Vec::new();
+    let cargo_guard = worktree.cargo_env(&target.provider, &mut extra_env);
     extra_env = crate::usage::operation_env(&extra_env)?;
     if let Some(bound) = &plan {
         extra_env.extend(bound.launch_environment()?);
@@ -1395,7 +1404,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             && let Some(command) = &command
         {
             transition(&repo, &attempt, "verifying", obj([]), context)?;
-            let checked = worktree.verify_env(command, &extra_env, context)?;
+            let checked = verify_env(command, &worktree.path, &extra_env, context)?;
             code = checked.code;
             if !checked.complete && code == 0 {
                 code = 1;
@@ -1458,6 +1467,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             "\nRepair the rejected changes and verification failure within the original scope.\n",
         );
     }
+    drop(cargo_guard);
     let no_change = !read && captured.is_empty();
     if no_change && !args.has("allow-no-change") && dispatch.panel.is_some() {
         code = 6;
