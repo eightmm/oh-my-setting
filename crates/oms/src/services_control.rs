@@ -2153,6 +2153,119 @@ fn validate_landings_rows(raw: &[u8]) -> oms_command_state::Result<()> {
     Ok(())
 }
 
+const LIFECYCLE_REFERENCE_LIMIT: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoundedLifecycleRead {
+    Missing,
+    Bytes(Vec<u8>),
+    ExceedsBound,
+}
+
+fn read_lifecycle_references(
+    repo: &Path,
+    max_bytes: usize,
+) -> oms_command_state::Result<BoundedLifecycleRead> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, fstat, open, openat, statat};
+    use rustix::io::Errno;
+    use std::io::Read as _;
+
+    let lifecycle_dir = repo.join(".oms/lifecycle");
+    let dir_fd = match open(
+        &lifecycle_dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Ok(BoundedLifecycleRead::Missing),
+        Err(Errno::LOOP) => {
+            return Err(state_err(
+                2,
+                format!("refusing symlinked path: {}", lifecycle_dir.display()),
+            ));
+        }
+        Err(Errno::NOTDIR) => {
+            return Err(state_err(2, "refusing non-directory .oms/lifecycle"));
+        }
+        Err(err) => {
+            if let Some(meta) = no_symlink_metadata(&lifecycle_dir)?
+                && !meta.is_dir()
+            {
+                return Err(state_err(2, "refusing non-directory .oms/lifecycle"));
+            }
+            return Err(state_err(1, std::io::Error::from(err).to_string()));
+        }
+    };
+    let dir_stat = fstat(&dir_fd).map_err(|e| state_err(1, std::io::Error::from(e).to_string()))?;
+    if FileType::from_raw_mode(dir_stat.st_mode) != FileType::Directory {
+        return Err(state_err(2, "refusing non-directory .oms/lifecycle"));
+    }
+
+    let lifecycle_path = lifecycle_dir.join("events.jsonl");
+    let file_fd = match openat(
+        &dir_fd,
+        "events.jsonl",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Ok(BoundedLifecycleRead::Missing),
+        Err(Errno::LOOP) => {
+            return Err(state_err(
+                2,
+                format!("refusing symlinked path: {}", lifecycle_path.display()),
+            ));
+        }
+        Err(Errno::ISDIR) => {
+            return Err(state_err(
+                2,
+                format!("refusing non-regular file: {}", lifecycle_path.display()),
+            ));
+        }
+        Err(err) => {
+            if let Ok(st) = statat(&dir_fd, "events.jsonl", AtFlags::SYMLINK_NOFOLLOW) {
+                let ft = FileType::from_raw_mode(st.st_mode);
+                if ft == FileType::Symlink {
+                    return Err(state_err(
+                        2,
+                        format!("refusing symlinked path: {}", lifecycle_path.display()),
+                    ));
+                }
+                if ft != FileType::RegularFile {
+                    return Err(state_err(
+                        2,
+                        format!("refusing non-regular file: {}", lifecycle_path.display()),
+                    ));
+                }
+            }
+            return Err(state_err(1, std::io::Error::from(err).to_string()));
+        }
+    };
+
+    let file_stat =
+        fstat(&file_fd).map_err(|e| state_err(1, std::io::Error::from(e).to_string()))?;
+    if FileType::from_raw_mode(file_stat.st_mode) != FileType::RegularFile {
+        return Err(state_err(
+            2,
+            format!("refusing non-regular file: {}", lifecycle_path.display()),
+        ));
+    }
+
+    let hint = usize::try_from(file_stat.st_size)
+        .unwrap_or(max_bytes)
+        .min(max_bytes)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(hint);
+    std::fs::File::from(file_fd)
+        .take((max_bytes as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| state_err(1, e.to_string()))?;
+    if bytes.len() > max_bytes {
+        return Ok(BoundedLifecycleRead::ExceedsBound);
+    }
+    Ok(BoundedLifecycleRead::Bytes(bytes))
+}
+
 fn gc_landing_captures_native(
     repo: &Path,
     days: u64,
@@ -2190,39 +2303,30 @@ fn gc_landing_captures_native(
     let index = oms_reference::capture::CaptureIndex::load(&repo).map_err(|e| state_err(2, e))?;
     index.check().map_err(|e| state_err(2, e))?;
 
-    let lifecycle_dir = repo.join(".oms/lifecycle");
-    if let Some(meta) = no_symlink_metadata(&lifecycle_dir)?
-        && !meta.is_dir()
-    {
-        return Err(state_err(2, "refusing non-directory .oms/lifecycle"));
-    }
-    let lifecycle_path = lifecycle_dir.join("events.jsonl");
-    if let Some(meta) = no_symlink_metadata(&lifecycle_path)? {
-        if !meta.is_file() {
-            return Err(state_err(
-                2,
-                format!("refusing non-regular file: {}", lifecycle_path.display()),
-            ));
-        }
-        // An incomplete reference scan cannot authorize capture deletion.
-        // The planner's canonical lifecycle pass emits the file-specific advice.
-        if meta.len() > 32 * 1024 * 1024 {
+    // Open `.oms/lifecycle/events.jsonl` once without following symlinks and
+    // bound the read on that handle so an unguarded writer crossing 32 MiB
+    // mid-pass defers capture deletion rather than failing the whole gc plan.
+    let lifecycle_bytes = match read_lifecycle_references(&repo, LIFECYCLE_REFERENCE_LIMIT)? {
+        BoundedLifecycleRead::Missing => None,
+        BoundedLifecycleRead::Bytes(bytes) => Some(bytes),
+        BoundedLifecycleRead::ExceedsBound => {
             return Ok(oms_command_state::GcHookResult::Deferred(
                 "landing capture retention deferred: lifecycle references exceed 32 MiB; captures retained".into(),
             ));
         }
-    }
+    };
 
     let mut reference_haystack = Vec::new();
-    for rel in [
-        ".oms/plan/tasks.json",
-        ".oms/lifecycle/events.jsonl",
-        ".oms/artifacts/index.jsonl",
-    ] {
-        if let Some(bytes) = read_bounded_regular(&repo.join(rel), 32 * 1024 * 1024)? {
-            reference_haystack.extend_from_slice(&bytes);
-            reference_haystack.push(b'\n');
-        }
+    for bytes in [
+        read_bounded_regular(&repo.join(".oms/plan/tasks.json"), 32 * 1024 * 1024)?,
+        lifecycle_bytes,
+        read_bounded_regular(&repo.join(".oms/artifacts/index.jsonl"), 32 * 1024 * 1024)?,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        reference_haystack.extend_from_slice(&bytes);
+        reference_haystack.push(b'\n');
     }
 
     let released_ids: std::collections::BTreeSet<String> = index
@@ -2667,7 +2771,91 @@ mod gc_host_tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(dir.join(".oms")).unwrap();
-        std::fs::canonicalize(dir).unwrap()
+        let dir = std::fs::canonicalize(dir).unwrap();
+        chmod_repo_private(&dir);
+        dir
+    }
+
+    fn chmod_repo_private(root: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let dir_mode = if dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("oms-landing-capture-"))
+            {
+                0o700
+            } else {
+                0o750
+            };
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(dir_mode)).unwrap();
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let p = entry.unwrap().path();
+                let meta = std::fs::symlink_metadata(&p).unwrap();
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+                if meta.is_dir() {
+                    stack.push(p);
+                } else {
+                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640)).unwrap();
+                }
+            }
+        }
+    }
+
+    fn seed_released_landing_capture(
+        repo: &Path,
+        landing_id: &str,
+        generation: &str,
+        patch_bytes: &[u8],
+    ) -> (PathBuf, PathBuf, String) {
+        let cap_dir = repo
+            .join(".oms/landing-patches")
+            .join(format!("oms-landing-capture-{generation}"));
+        std::fs::create_dir_all(&cap_dir).unwrap();
+        let cap_patch = cap_dir.join(format!("{landing_id}.patch"));
+        std::fs::write(&cap_patch, patch_bytes).unwrap();
+        age_file(&cap_patch, 60);
+
+        let managed = oms_reference::obj([
+            ("version", 1usize.into()),
+            ("generation", generation.into()),
+            ("landing_id", landing_id.into()),
+            (
+                "namespace",
+                oms_reference::digest(repo.as_os_str().as_bytes()).into(),
+            ),
+            ("directory", cap_dir.to_str().unwrap().into()),
+            (
+                "bytes",
+                oms_reference::V::Num((2 * patch_bytes.len()).to_string()),
+            ),
+            ("sha256", oms_reference::digest(patch_bytes).into()),
+        ]);
+        let mut ledger = Vec::new();
+        for (event, ts) in [
+            ("capture-reserved", "2026-11-01T00:00:00Z"),
+            ("capture-released", "2026-11-01T00:00:01Z"),
+        ] {
+            let row = oms_reference::obj([
+                ("schema", 1usize.into()),
+                ("event", event.into()),
+                ("landing_id", landing_id.into()),
+                ("ts", ts.into()),
+                ("managed_capture", managed.clone()),
+            ]);
+            ledger.extend_from_slice(&oms_reference::encoded(&row).unwrap());
+        }
+        std::fs::write(repo.join(".oms/landings.jsonl"), &ledger).unwrap();
+        chmod_repo_private(repo);
+        let rel = cap_patch
+            .strip_prefix(repo)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        (cap_dir, cap_patch, rel)
     }
 
     #[test]
@@ -2683,9 +2871,60 @@ mod gc_host_tests {
 
         // Empty/valid landings ledger preserves unproven legacy land-*.patch.
         std::fs::write(repo.join(".oms/landings.jsonl"), b"").unwrap();
+        chmod_repo_private(&repo);
         let ok = host.gc_landing_captures(&repo, 30, true).unwrap();
         assert_eq!(ok, GcHookResult::Reclaimed(vec![]));
         assert!(legacy_patch.exists());
+
+        // Released capture is reclaimed while loose unproven patch stays intact.
+        let generation = "ab".repeat(16);
+        let (cap_dir, cap_patch, cap_rel) = seed_released_landing_capture(
+            &repo,
+            "land-20261120T000000Z-unit",
+            &generation,
+            b"diff --git a/x b/x\n",
+        );
+        assert_eq!(
+            host.gc_landing_captures(&repo, 30, false).unwrap(),
+            GcHookResult::Reclaimed(vec![("landing-capture".to_string(), cap_rel.clone())])
+        );
+        assert!(cap_patch.exists());
+        assert_eq!(
+            host.gc_landing_captures(&repo, 30, true).unwrap(),
+            GcHookResult::Reclaimed(vec![("landing-capture".to_string(), cap_rel)])
+        );
+        assert!(!cap_patch.exists());
+        assert!(!cap_dir.exists());
+        assert!(legacy_patch.exists());
+
+        // Single-handle lifecycle reader accepts exact bound, defers bound+1, and
+        // fails closed on symlinks and non-regular files.
+        assert_eq!(
+            read_lifecycle_references(&repo, 64).unwrap(),
+            BoundedLifecycleRead::Missing
+        );
+        let lifecycle_dir = repo.join(".oms/lifecycle");
+        std::fs::create_dir_all(&lifecycle_dir).unwrap();
+        let events_path = lifecycle_dir.join("events.jsonl");
+        std::fs::write(&events_path, vec![b'x'; 64]).unwrap();
+        assert_eq!(
+            read_lifecycle_references(&repo, 64).unwrap(),
+            BoundedLifecycleRead::Bytes(vec![b'x'; 64])
+        );
+        std::fs::write(&events_path, vec![b'x'; 65]).unwrap();
+        assert_eq!(
+            read_lifecycle_references(&repo, 64).unwrap(),
+            BoundedLifecycleRead::ExceedsBound
+        );
+        std::fs::remove_file(&events_path).unwrap();
+        let outside = repo.join("outside-lifecycle.jsonl");
+        std::fs::write(&outside, b"{}\n").unwrap();
+        std::os::unix::fs::symlink(&outside, &events_path).unwrap();
+        assert_eq!(read_lifecycle_references(&repo, 64).unwrap_err().code, 2);
+        std::fs::remove_file(&events_path).unwrap();
+        std::fs::create_dir(&events_path).unwrap();
+        assert_eq!(read_lifecycle_references(&repo, 64).unwrap_err().code, 2);
+        std::fs::remove_dir_all(&lifecycle_dir).unwrap();
 
         // Malformed row fails closed with exit code 2.
         std::fs::write(repo.join(".oms/landings.jsonl"), b"{not json}\n").unwrap();
@@ -2699,12 +2938,14 @@ mod gc_host_tests {
     fn gc_dispatch_logs_defers_protects_active_and_reclaims_aged_settled() {
         if let Some(repo_raw) = std::env::var_os("OMS_GC_OVERSIZED_TEST_REPO") {
             let repo = PathBuf::from(repo_raw);
+            let apply = std::env::var_os("OMS_GC_OVERSIZED_TEST_APPLY").is_some_and(|v| v == "1");
             let stopped = Arc::new(AtomicBool::new(false));
             let host = ControlServices::new(&stopped, &repo).unwrap();
             let mut runtime_svc =
                 crate::services_runtime::RuntimeServices::new(&stopped, &repo).unwrap();
+            let mode_flag = if apply { "--apply" } else { "--dry-run" };
             let gc_args = [
-                OsString::from("--dry-run"),
+                OsString::from(mode_flag),
                 OsString::from("--repo"),
                 repo.as_os_str().to_owned(),
             ];
@@ -2807,14 +3048,93 @@ mod gc_host_tests {
         assert!(active_log.exists());
         assert!(unsettled.exists());
 
-        // Oversized (>32 MiB) valid lifecycle log does not disable gc planning, emits one
-        // advisory line pointing to `oms agent-events compact`, and keeps live attempts protected.
         std::fs::remove_file(plan_dir.join("tasks.json")).unwrap();
         std::fs::remove_file(&active_log).unwrap();
         std::fs::remove_file(&unsettled).unwrap();
+
         let lifecycle_dir = repo.join(".oms/lifecycle");
         std::fs::create_dir_all(&lifecycle_dir).unwrap();
         let events_path = lifecycle_dir.join("events.jsonl");
+
+        let locks_dir = repo.join("locks");
+        std::fs::create_dir_all(&locks_dir).unwrap();
+        let set_locks_private = || {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&locks_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        set_locks_private();
+
+        let run_gc = |target_repo: &Path, apply: bool| {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "services_control::gc_host_tests::gc_dispatch_logs_defers_protects_active_and_reclaims_aged_settled",
+                    "--nocapture",
+                ])
+                .env("OMS_GC_OVERSIZED_TEST_REPO", target_repo)
+                .env("OMS_GC_OVERSIZED_TEST_APPLY", if apply { "1" } else { "0" })
+                .env("OMS_LOCK_DIR", &locks_dir)
+                .env_remove("OMS_HARNESS_CHILD")
+                .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+                .env_remove("OMS_STATE_REPO")
+                .env_remove("OMS_FAIL_LEDGER")
+                .env_remove("OMS_ATTEMPT_STALE_SECONDS")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let code: i32 = std::fs::read_to_string(target_repo.join("gc-child.code"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let stdout = std::fs::read(target_repo.join("gc-child.stdout")).unwrap();
+            let stderr = std::fs::read(target_repo.join("gc-child.stderr")).unwrap();
+            (code, stdout, stderr)
+        };
+        let run_gc_dry = |target_repo: &Path| run_gc(target_repo, false);
+
+        // First prove that with a normal-sized lifecycle log, `gc --apply` reclaims
+        // the aged released landing capture.
+        let capture_landing_id = "land-20261120T000000Z-oversized-check";
+        let capture_generation = "cd".repeat(16);
+        let patch_bytes = b"diff --git a/x b/x\n";
+        std::fs::write(
+            &events_path,
+            concat!(
+                r#"{"schema":1,"event_id":"ev-norm-c","attempt_id":"att-norm-0","ts":"2026-11-20T00:00:00Z","seq":1,"event_type":"attempt.created","from_state":null,"to_state":"queued","task_id":"task-norm-0"}"#,
+                "\n",
+                r#"{"schema":1,"event_id":"ev-norm-s","attempt_id":"att-norm-0","ts":"2026-11-20T00:00:01Z","seq":2,"event_type":"attempt.state_changed","from_state":"queued","to_state":"cancelled"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let (normal_cap_dir, normal_cap_patch, normal_cap_rel) = seed_released_landing_capture(
+            &repo,
+            capture_landing_id,
+            &capture_generation,
+            patch_bytes,
+        );
+        set_locks_private();
+        let (norm_code, norm_stdout, norm_stderr) = run_gc(&repo, true);
+        assert_eq!(
+            norm_code,
+            0,
+            "normal gc --apply failed: {}",
+            String::from_utf8_lossy(&norm_stderr)
+        );
+        let norm_out = String::from_utf8_lossy(&norm_stdout);
+        assert!(
+            norm_out
+                .lines()
+                .any(|line| line == format!("- landing-capture: {normal_cap_rel}")),
+            "released capture should be reclaimed with a normal lifecycle log: {norm_out}"
+        );
+        assert!(!normal_cap_patch.exists());
+        assert!(!normal_cap_dir.exists());
+
+        // Now re-seed the exact same released capture and build an oversized (>32 MiB)
+        // valid lifecycle log at runtime (without referencing `capture_landing_id`, so
+        // only the size-bound deferral protects the capture).
         let pad = "a".repeat(220);
         let refs_json = (0..32)
             .map(|k| format!(r#""note_{k:02}":"{pad}""#))
@@ -2841,7 +3161,7 @@ mod gc_host_tests {
             use std::io::Write as _;
             writeln!(
                 events_bytes,
-                r#"{{"schema":1,"event_id":"ev-live-oversized","attempt_id":"att-live-oversized","ts":"2026-11-20T00:00:02Z","seq":1,"event_type":"attempt.created","from_state":null,"to_state":"queued","task_id":"task-live-oversized","refs":{{"patch":".oms/landing-patches/land-oversized.patch"}}}}"#,
+                r#"{{"schema":1,"event_id":"ev-live-oversized","attempt_id":"att-live-oversized","ts":"2026-11-20T00:00:02Z","seq":1,"event_type":"attempt.created","from_state":null,"to_state":"queued","task_id":"task-live-oversized"}}"#,
             )
             .unwrap();
         }
@@ -2856,62 +3176,14 @@ mod gc_host_tests {
             age_file(path, 60);
         }
 
-        // Landing state must not make the same oversized planner fail before
-        // it reaches dispatch projection and the lifecycle advisory.
-        std::fs::write(repo.join(".oms/landings.jsonl"), b"").unwrap();
-        let patch = repo.join(".oms/landing-patches/land-oversized.patch");
-        std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
-        let patch_bytes = b"diff --git a/x b/x\n";
-        std::fs::write(&patch, patch_bytes).unwrap();
-        age_file(&patch, 60);
+        let (cap_dir, cap_patch, cap_rel) = seed_released_landing_capture(
+            &repo,
+            capture_landing_id,
+            &capture_generation,
+            patch_bytes,
+        );
+        set_locks_private();
 
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mut stack = vec![repo.clone()];
-            while let Some(dir) = stack.pop() {
-                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750)).unwrap();
-                for entry in std::fs::read_dir(&dir).unwrap() {
-                    let p = entry.unwrap().path();
-                    if p.is_dir() {
-                        stack.push(p);
-                    } else {
-                        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640))
-                            .unwrap();
-                    }
-                }
-            }
-        }
-
-        let locks_dir = repo.join("locks");
-        std::fs::create_dir_all(&locks_dir).unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&locks_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let run_gc_dry = |target_repo: &Path| {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "services_control::gc_host_tests::gc_dispatch_logs_defers_protects_active_and_reclaims_aged_settled",
-                    "--nocapture",
-                ])
-                .env("OMS_GC_OVERSIZED_TEST_REPO", target_repo)
-                .env("OMS_LOCK_DIR", &locks_dir)
-                .env_remove("OMS_STATE_REPO")
-                .env_remove("OMS_FAIL_LEDGER")
-                .env_remove("OMS_ATTEMPT_STALE_SECONDS")
-                .status()
-                .unwrap();
-            assert!(status.success());
-            let code: i32 = std::fs::read_to_string(target_repo.join("gc-child.code"))
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            let stdout = std::fs::read(target_repo.join("gc-child.stdout")).unwrap();
-            let stderr = std::fs::read(target_repo.join("gc-child.stderr")).unwrap();
-            (code, stdout, stderr)
-        };
         let (gc_code, gc_stdout, gc_stderr) = run_gc_dry(&repo);
         assert_eq!(
             gc_code,
@@ -2930,6 +3202,10 @@ mod gc_host_tests {
             !gc_out.contains("att-live-oversized.log"),
             "non-terminal attempt log must stay protected: {gc_out}"
         );
+        assert!(
+            !gc_out.contains(&cap_rel),
+            "oversized lifecycle log must not schedule landing capture for reclaim: {gc_out}"
+        );
         let advisory_lines: Vec<&str> = gc_out
             .lines()
             .filter(|line| line.contains(".oms/lifecycle/events.jsonl"))
@@ -2947,35 +3223,66 @@ mod gc_host_tests {
             gc_out
                 .contains("landing capture retention deferred: lifecycle references exceed 32 MiB")
         );
-        assert_eq!(std::fs::read(&patch).unwrap(), patch_bytes);
+        assert_eq!(std::fs::read(&cap_patch).unwrap(), patch_bytes);
+
+        // Run `gc --apply` against the oversized log: the released capture survives,
+        // landing capture retention reports deferred, and other gc steps still apply.
+        let (apply_code, apply_stdout, apply_stderr) = run_gc(&repo, true);
+        assert_eq!(
+            apply_code,
+            0,
+            "oversized gc --apply failed: {}",
+            String::from_utf8_lossy(&apply_stderr)
+        );
+        let apply_out = String::from_utf8_lossy(&apply_stdout);
+        assert!(
+            apply_out.lines().any(
+                |line| line == "- dispatch-logs: .oms/panel-state/dispatch-logs/att-term-0.log"
+            ),
+            "other gc steps must still reclaim eligible items under --apply: {apply_out}"
+        );
+        assert!(
+            !apply_out.contains("att-live-oversized.log"),
+            "non-terminal attempt log must stay protected under --apply: {apply_out}"
+        );
+        assert!(
+            !apply_out.contains(&cap_rel),
+            "deferred landing capture must not be reclaimed under --apply: {apply_out}"
+        );
+        assert!(
+            apply_out
+                .contains("landing capture retention deferred: lifecycle references exceed 32 MiB"),
+            "landing capture deferral should be reported under --apply: {apply_out}"
+        );
+        let apply_advisories: Vec<&str> = apply_out
+            .lines()
+            .filter(|line| line.contains(".oms/lifecycle/events.jsonl"))
+            .collect();
+        assert_eq!(
+            apply_advisories.len(),
+            1,
+            "unexpected gc --apply output: {apply_out}"
+        );
+        assert!(!term_attempt_log.exists());
+        assert!(live_attempt_log.exists());
+        assert!(cap_dir.is_dir());
+        assert_eq!(std::fs::read(&cap_patch).unwrap(), patch_bytes);
+
         for apply in [false, true] {
             assert!(matches!(
                 host.gc_landing_captures(&repo, 30, apply).unwrap(),
                 GcHookResult::Deferred(reason) if reason.contains("lifecycle references exceed 32 MiB")
             ));
-            assert_eq!(std::fs::read(&patch).unwrap(), patch_bytes);
+            assert_eq!(std::fs::read(&cap_patch).unwrap(), patch_bytes);
         }
-
-        let oversized_plan = host.gc_dispatch_logs(&repo, 30, false).unwrap();
-        assert_eq!(
-            oversized_plan,
-            GcHookResult::Reclaimed(vec![(
-                "dispatch-logs".to_string(),
-                ".oms/panel-state/dispatch-logs/att-term-0.log".to_string(),
-            )])
-        );
-        let oversized_applied = host.gc_dispatch_logs(&repo, 30, true).unwrap();
-        assert_eq!(oversized_plan, oversized_applied);
-        assert!(!term_attempt_log.exists());
-        assert!(live_attempt_log.exists());
-        assert_eq!(std::fs::read(&patch).unwrap(), patch_bytes);
         assert_eq!(
             host.gc_dispatch_logs(&repo, 30, false).unwrap(),
             GcHookResult::Reclaimed(vec![])
         );
 
         // Malformed, non-regular and symlinked lifecycle logs still fail closed,
-        // both through dispatch-log collection and through the gc planner directly.
+        // through landing/dispatch hooks and through the gc planner's own
+        // `lifecycle_events_len` check at `gc.rs`.
         std::fs::write(&events_path, b"{not valid json}\n").unwrap();
         let bad_err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
         assert_eq!(bad_err.code, 2);
@@ -2983,6 +3290,10 @@ mod gc_host_tests {
 
         std::fs::remove_file(&events_path).unwrap();
         std::fs::create_dir(&events_path).unwrap();
+        assert_eq!(
+            host.gc_landing_captures(&repo, 30, false).unwrap_err().code,
+            2
+        );
         let non_reg_err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
         assert_eq!(non_reg_err.code, 2);
         assert_eq!(run_gc_dry(&repo).0, 2);
@@ -2991,22 +3302,69 @@ mod gc_host_tests {
         let outside = repo.join("outside-events.jsonl");
         std::fs::write(&outside, b"").unwrap();
         std::os::unix::fs::symlink(&outside, &events_path).unwrap();
+        assert_eq!(
+            host.gc_landing_captures(&repo, 30, false).unwrap_err().code,
+            2
+        );
         let symlink_err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
         assert_eq!(symlink_err.code, 2);
         assert_eq!(run_gc_dry(&repo).0, 2);
 
+        // Remove both `logs_dir` and landing state so `run_gc_dry` skips
+        // `host.gc_landing_captures` and `host.gc_dispatch_logs` and exercises
+        // the planner's own `lifecycle_events_len` path in `gc.rs`.
         std::fs::remove_dir_all(&logs_dir).unwrap();
-        assert_eq!(run_gc_dry(&repo).0, 2);
+        std::fs::remove_file(repo.join(".oms/landings.jsonl")).unwrap();
+        std::fs::remove_dir_all(repo.join(".oms/landing-patches")).unwrap();
+
+        let (sym_code, _, sym_stderr) = run_gc_dry(&repo);
+        assert_eq!(sym_code, 2);
+        assert!(
+            String::from_utf8_lossy(&sym_stderr).contains("refusing symlinked path:"),
+            "expected planner symlink error, got: {}",
+            String::from_utf8_lossy(&sym_stderr)
+        );
+
         std::fs::remove_file(&events_path).unwrap();
         std::fs::create_dir(&events_path).unwrap();
-        assert_eq!(run_gc_dry(&repo).0, 2);
+        let (dir_code, _, dir_stderr) = run_gc_dry(&repo);
+        assert_eq!(dir_code, 2);
+        assert!(
+            String::from_utf8_lossy(&dir_stderr).contains("refusing non-regular file:"),
+            "expected planner non-regular error, got: {}",
+            String::from_utf8_lossy(&dir_stderr)
+        );
+
         std::fs::remove_dir(&events_path).unwrap();
+        std::fs::remove_dir(&lifecycle_dir).unwrap();
+        std::fs::write(&lifecycle_dir, b"not a directory\n").unwrap();
+        let (nondir_code, _, nondir_stderr) = run_gc_dry(&repo);
+        assert_eq!(nondir_code, 2);
+        assert!(
+            String::from_utf8_lossy(&nondir_stderr)
+                .contains("refusing non-directory .oms/lifecycle"),
+            "expected planner non-directory .oms/lifecycle error, got: {}",
+            String::from_utf8_lossy(&nondir_stderr)
+        );
+        std::fs::remove_file(&lifecycle_dir).unwrap();
+        std::fs::create_dir_all(&lifecycle_dir).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&lifecycle_dir, std::fs::Permissions::from_mode(0o750))
+                .unwrap();
+        }
+
         std::fs::write(&events_path, b"{not valid json}\n").unwrap();
         {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&events_path, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
-        assert_eq!(run_gc_dry(&repo).0, 2);
+        let (malformed_code, _, malformed_stderr) = run_gc_dry(&repo);
+        assert_eq!(malformed_code, 2);
+        assert!(
+            !malformed_stderr.is_empty(),
+            "expected planner lifecycle parse error on stderr"
+        );
 
         let _ = std::fs::remove_dir_all(&repo);
     }
