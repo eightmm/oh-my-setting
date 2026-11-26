@@ -3574,9 +3574,12 @@ In that mode `oms agent-plan add`, `add-batch` and `apply-proposal` need an issu
 task (`--issue`, a row `issue`, or a `--discovered-from` parent bound to one), `oms
 agent-task init|update|rotate --issue REF` binds the packet, and `oms agent-memory
 recall` adds commit and merged-PR rows. `oms github status` reports the mode offline;
-`refresh` and `adopt-merged` (a preview, then `--apply --expected-sha256`) are its only
-network reads, and `post-evidence --issue --pull --yes` is its only GitHub write: an
-explicit, parent-only comment with an idempotent receipt. The
+`panel-status`, `refresh` and `adopt-merged` (a preview, then `--apply --expected-sha256`)
+are its only network reads, and `post-evidence --issue --pull --yes` is its only GitHub
+write: an explicit, parent-only comment with an idempotent receipt. `oms github
+panel-status --project-id NODE_ID --drift|--candidates [--json]` walks a linked Projects
+v2 board read-only to report board/repository drift or bounded, deterministic Issue
+candidate rankings without mutating GitHub or `.oms/` state. The
 [command](../crates/oms-command-landing/src/github.rs) reads the declaration through
 the shared [`oms-github` crate](../crates/oms-github/src/declaration.rs).
 
