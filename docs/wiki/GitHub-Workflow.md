@@ -80,8 +80,8 @@ requires `boardId` and takes no cursor.
 
 | Output | Content |
 |---|---|
-| `items` | Ranked origin Issues, at most 25 |
-| `recommendations` | One row per Issue across all pages, deduplicated by `owner/repo#N`, with `class`, `state` (`recommended`, `excluded` or `unverified`) and `reason` |
+| `items` | Ranked origin Issues, at most 25 rows and 10,000 encoded bytes; the rest are counted in `omitted` and the read is marked incomplete (`result_limit`) |
+| `recommendations` | Issues from all pages read, deduplicated by `owner/repo#N`, with `class`, `state` (`recommended`, `excluded` or `unverified`) and `reason`; at most 100 rows and 8,000 encoded bytes, with the rest counted in `recommendationsOmitted` and the read marked incomplete (`result_limit`) |
 | `pages`, `itemsRead`, `incomplete`, `reason` | Completeness: up to 25 pages of 20 items; `reason` is `null` only for a complete walk |
 
 - **Eligibility.** An Issue is ranked only when it is open, in the origin
