@@ -5354,6 +5354,8 @@ fn native_command(
                 argv.extend([
                     "--session-id".into(),
                     session_id.map(str::to_owned).unwrap_or_else(new_uuid),
+                    "--name".into(),
+                    "OMS Main · Claude".into(),
                 ]);
             }
             if let Some(m) = &resolution.model {
@@ -8219,6 +8221,34 @@ exit 98
             .filter(|word| !word.is_empty())
             .map(|word| std::str::from_utf8(word).unwrap().into())
             .collect()
+    }
+
+    #[test]
+    fn claude_resume_preserves_user_name_and_new_main_registers_native_title() {
+        let policy = oms_panel_core::routing::Policy::bundled().unwrap();
+        let capability = super::required_main_capability("claude").unwrap();
+        let sid = "01234567-89ab-4def-8123-456789abcdef";
+        for resume in [false, true] {
+            let mut args =
+                crate::commands::strings(&["--launch", "claude", "--task", "사용자 목표"]);
+            if resume {
+                args.extend(crate::commands::strings(&["--resume", sid]));
+            }
+            let options = crate::cli::Options::parse(&args).unwrap();
+            let admitted = super::MainAdmission::plan(capability, &policy, &options).unwrap();
+            let argv = super::native_command(&admitted, Path::new("."), None, None, Some(sid));
+            assert_eq!(argv.last().unwrap(), "사용자 목표");
+            if resume {
+                assert!(argv.windows(2).any(|p| p == ["--resume", sid]));
+                assert!(!argv.iter().any(|a| a == "--name"));
+            } else {
+                assert!(argv.windows(2).any(|p| p == ["--session-id", sid]));
+                assert!(
+                    argv.windows(2)
+                        .any(|p| p == ["--name", "OMS Main · Claude"])
+                );
+            }
+        }
     }
 
     #[test]
