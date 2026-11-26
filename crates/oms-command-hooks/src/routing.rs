@@ -241,10 +241,14 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
         );
     }
     if on("OMS_STATE_HINTS") && is_adopted {
-        let hint = state_hint(&v, &repo, ctx);
-        if !hint.is_empty() {
-            output.push_str(&hint);
-            output.push('\n');
+        for hint in [
+            memory_review_hint(&v, &repo, ctx),
+            state_hint(&v, &repo, ctx),
+        ] {
+            if !hint.is_empty() {
+                output.push_str(&hint);
+                output.push('\n');
+            }
         }
     }
     if env("OMS_SKILL_ROUTER_OFF") == "1" {
@@ -398,6 +402,51 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
     }
     injection(ctx, &repo, &v, "prompt", output.as_bytes());
     out(output)
+}
+fn memory_review_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
+    let result = (|| -> Result<String, String> {
+        let path = state_path(repo, v, ".memory-review");
+        let (pending, fresh) = update_memory_review_state(&path, &ctx.snapshot.now(), || {
+            oms_command_memory::pending_review(repo, ctx.interrupted)
+        })?;
+        Ok(if fresh {
+            format!(
+                "[oms] memory review: {pending} pending proposal(s); inspect `oms agent-memory review`. Acceptance is explicit and does not verify a claim."
+            )
+        } else {
+            String::new()
+        })
+    })();
+    result.unwrap_or_default()
+}
+fn update_memory_review_state(
+    path: &Path,
+    now: &str,
+    observe: impl FnOnce() -> Result<oms_command_memory::PendingReviewSummary, String>,
+) -> Result<(usize, bool), String> {
+    // Observe candidates under the same lock as the receipt update. Otherwise
+    // an older caller can overwrite a newer seen set and repeat its hint.
+    mutate(path, STATE_MAX, false, |raw| {
+        let summary = observe()?;
+        let previous = document(raw).unwrap_or_else(|| json!({}));
+        let seen: BTreeSet<_> = previous["candidates"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let fresh = summary
+            .candidate_fingerprints
+            .iter()
+            .any(|id| !seen.contains(id.as_str()));
+        let candidates = json!(summary.candidate_fingerprints);
+        let next = if previous["candidates"] == candidates {
+            raw.to_vec()
+        } else {
+            json_line(&json!({"schema":1,"updated_at":now,"candidates":candidates}))
+        };
+        Ok((next, (summary.pending, fresh)))
+    })
 }
 fn state_hint(_v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     let day = chrono::DateTime::<chrono::Utc>::from(ctx.snapshot.time())
@@ -1603,6 +1652,118 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn memory_review_hint_is_once_per_session_and_new_candidate() {
+        if std::env::var_os("OMS_ROUTING_REVIEW_ISOLATED").is_none() {
+            let env = TempDir::new("review-env");
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "--exact",
+                "routing::tests::memory_review_hint_is_once_per_session_and_new_candidate",
+                "--nocapture",
+            ]);
+            for (key, _) in std::env::vars_os() {
+                if key.to_str().is_some_and(|k| k.starts_with("OMS_")) {
+                    cmd.env_remove(key);
+                }
+            }
+            let result = cmd
+                .env("OMS_ROUTING_REVIEW_ISOLATED", "1")
+                .env("OMS_LOCK_DIR", env.0.join("locks"))
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let tmp = TempDir::new("review-hint");
+        let repo = tmp.0.canonicalize().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let cancel = AtomicBool::new(false);
+        let host = crate::NoHostServices;
+        let snapshot = Snapshot::default();
+        let ctx = Context {
+            snapshot: &snapshot,
+            provider: Some("claude"),
+            cwd: &repo,
+            source: &repo,
+            interrupted: &cancel,
+            host: &host,
+        };
+        let proposal = |body: &str| {
+            let (code, out, err) = oms_command_memory::append_project_note(
+                &repo,
+                "agent",
+                "task_close",
+                body,
+                &cancel,
+            );
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+            String::from_utf8(out).unwrap().trim().to_owned()
+        };
+        let accept = |id: &str| {
+            let (code, _, err) = oms_command_memory::run_with_source(
+                &["review".into(), "--accept".into(), id.into()],
+                &repo,
+                &repo,
+                &cancel,
+            );
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        };
+        let first = proposal("First automatic proposal text stays private to review");
+        let second = proposal("Second automatic proposal text stays private to review");
+        let event = json!({"session_id":"memory-review-session"});
+        assert!(!repo.join(".oms/hooks").exists());
+        let hint = memory_review_hint(&event, &repo, &ctx);
+        assert!(hint.contains("2 pending proposal(s)"), "{hint}");
+        assert!(hint.contains("oms agent-memory review"), "{hint}");
+        assert!(!hint.contains("--accept"), "{hint}");
+        let receipt_path = state_path(&repo, &event, ".memory-review");
+        let observed = update_memory_review_state(&receipt_path, &snapshot.now(), || {
+            assert!(
+                lock(&receipt_path, &repo).is_err(),
+                "pending observation must be serialized with the seen receipt; a stale pre-lock snapshot could re-arm a newer hint"
+            );
+            oms_command_memory::pending_review(&repo, &cancel)
+        })
+        .unwrap();
+        assert_eq!(observed, (2, false));
+        assert!(memory_review_hint(&event, &repo, &ctx).is_empty());
+        accept(&first);
+        assert!(
+            memory_review_hint(&event, &repo, &ctx).is_empty(),
+            "deciding an old candidate must not re-arm attention"
+        );
+        let third = proposal("New candidate replaces a decided proposal");
+        assert!(memory_review_hint(&event, &repo, &ctx).contains("2 pending proposal(s)"));
+        assert!(memory_review_hint(&event, &repo, &ctx).is_empty());
+        let other = json!({"session_id":"another-memory-review-session"});
+        assert!(memory_review_hint(&other, &repo, &ctx).contains("2 pending proposal(s)"));
+        let receipt = fs::read_to_string(state_path(&repo, &event, ".memory-review")).unwrap();
+        assert!(!receipt.contains("proposal"));
+        assert!(!receipt.contains(&third));
+        accept(&second);
+        accept(&third);
+        assert!(memory_review_hint(&event, &repo, &ctx).is_empty());
+        assert_eq!(
+            oms_command_memory::pending_review(&repo, &cancel)
+                .unwrap()
+                .pending,
+            0
+        );
     }
 
     #[test]

@@ -351,6 +351,18 @@ fn collect_snapshot(
             ("latest_pending", Value::Array(pending)),
         ]),
     )?;
+    let memory_review = match oms_command_memory::pending_review(&ctx.repo, ctx.interrupted) {
+        Ok(summary) => object([
+            ("healthy", Value::Bool(true)),
+            ("pending", number(summary.pending)),
+        ]),
+        Err(_) => object([
+            ("healthy", Value::Bool(false)),
+            ("pending", Value::Null),
+            ("error", string("status-unavailable")),
+        ]),
+    };
+    state.set("memory_review", memory_review)?;
     let failure_rows = storage::rows(&ctx.repo, Path::new(".oms/failures.jsonl"));
     let repeat = failure_rows
         .as_ref()

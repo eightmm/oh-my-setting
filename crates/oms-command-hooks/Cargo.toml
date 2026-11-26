@@ -19,6 +19,8 @@ oms-command-landing = { path = "../oms-command-landing" }
 oms-command-journal = { path = "../oms-command-journal" }
 oms-command-lifecycle = { path = "../oms-command-lifecycle" }
 oms-command-autonomy = { path = "../oms-command-autonomy" }
+oms-contract-markdown = { path = "../oms-contract-markdown" }
+oms-work-inspect = { path = "../oms-work-inspect" }
 oms-reference = { path = "../oms-reference" }
 oms-json = { path = "../oms-json" }
 oms-lock = { path = "../oms-lock" }
