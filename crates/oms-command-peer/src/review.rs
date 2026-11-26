@@ -533,15 +533,40 @@ fn marker(line: &str) -> bool {
     line.starts_with("[oms-redacted:") && line.ends_with(']')
 }
 
+fn withheld_finding() -> V {
+    obj([
+        ("withheld", "redacted".into()),
+        ("severity", "blocking".into()),
+    ])
+}
+
 pub(crate) fn redacted_findings(raw: &str, answer: &str) -> Result<Vec<(V, Option<usize>)>> {
     let raw_blocks = findings_blocks(raw);
     let blocks = findings_blocks(answer);
+    let aligned = raw_blocks.len() == blocks.len()
+        && raw_blocks
+            .iter()
+            .zip(&blocks)
+            .all(|(raw, redacted)| raw.len() == redacted.len());
+    let missing = if aligned {
+        0
+    } else {
+        raw_blocks
+            .iter()
+            .flatten()
+            .filter(|line| !line.is_empty())
+            .count()
+            .saturating_sub(
+                blocks
+                    .iter()
+                    .flatten()
+                    .filter(|line| !line.is_empty())
+                    .count(),
+            )
+    };
     let mut rows = Vec::new();
     let mut index = 0;
     for (block_index, block) in blocks.iter().enumerate() {
-        let raw_block = raw_blocks
-            .get(block_index)
-            .filter(|r| r.len() == block.len());
         for (line_index, line) in block.iter().enumerate() {
             let current = index;
             index += 1;
@@ -549,26 +574,24 @@ pub(crate) fn redacted_findings(raw: &str, answer: &str) -> Result<Vec<(V, Optio
                 break;
             }
             if marker(line) {
-                let placeholder = || {
-                    obj([
-                        ("withheld", "redacted".into()),
-                        ("severity", "blocking".into()),
-                    ])
-                };
-                let recovered = raw_block.and_then(|b| b.get(line_index)).and_then(|line| {
-                    let wrapped = format!("```findings\n{line}\n```");
-                    let parsed = parse_findings(&wrapped).0;
-                    let original = V::parse(line.as_bytes()).ok()?;
-                    parsed.into_iter().next().map(|row| (row, original))
-                });
+                let recovered = aligned
+                    .then(|| raw_blocks[block_index][line_index])
+                    .and_then(|line| {
+                        let wrapped = format!("```findings\n{line}\n```");
+                        let parsed = parse_findings(&wrapped).0;
+                        let original = V::parse(line.as_bytes()).ok()?;
+                        parsed.into_iter().next().map(|row| (row, original))
+                    });
                 let safe = if let Some((row, original)) = recovered {
                     let path = text(&row, "file");
                     if path.is_empty() || safety::redact(path.as_bytes())? != path.as_bytes() {
-                        placeholder()
+                        withheld_finding()
                     } else {
                         let summary = text(&original, "summary");
                         let redacted = safety::redact(summary.as_bytes())?;
-                        let summary = if redacted == summary.as_bytes() {
+                        let summary = if summary.chars().any(char::is_control)
+                            || redacted == summary.as_bytes()
+                        {
                             "summary withheld: redacted by the outbound scanner".to_owned()
                         } else {
                             clean(&String::from_utf8_lossy(&redacted), 500)
@@ -583,22 +606,75 @@ pub(crate) fn redacted_findings(raw: &str, answer: &str) -> Result<Vec<(V, Optio
                         ])
                     }
                 } else {
-                    placeholder()
+                    withheld_finding()
                 };
                 rows.push((safe, Some(current)));
             } else if !line.is_empty() {
                 let wrapped = format!("```findings\n{line}\n```");
-                rows.extend(
-                    parse_findings(&wrapped)
-                        .0
-                        .into_iter()
-                        .map(|row| (row, None)),
-                );
+                for mut row in parse_findings(&wrapped).0 {
+                    let Ok(original) = V::parse(line.as_bytes()) else {
+                        rows.push((withheld_finding(), Some(current)));
+                        continue;
+                    };
+                    let mut changed = false;
+                    let mut file_changed = false;
+                    for field in ["file", "summary", "quote", "rule"] {
+                        if let Some(value) = original.get(field).text() {
+                            let redacted = safety::redact(value.as_bytes())?;
+                            if redacted != value.as_bytes() {
+                                changed = true;
+                                file_changed |= field == "file";
+                                row.set(field, clean(&String::from_utf8_lossy(&redacted), 500));
+                            }
+                        }
+                    }
+                    if file_changed {
+                        row = withheld_finding();
+                        row.set("redacted", true);
+                        row.set("quote_complete", false);
+                    } else if changed {
+                        if text(&original, "summary").chars().any(char::is_control) {
+                            row.set(
+                                "summary",
+                                "summary withheld: redacted by the outbound scanner",
+                            );
+                        }
+                        if let V::Obj(fields) = &mut row {
+                            fields.remove(b"quote".as_slice());
+                            fields.remove(b"rule".as_slice());
+                        }
+                        row.set("quote_complete", false);
+                        row.set("redacted", true);
+                    }
+                    rows.push((row, changed.then_some(current)));
+                }
             }
         }
     }
+    for _ in 0..missing {
+        rows.push((withheld_finding(), Some(index)));
+        index += 1;
+    }
     Ok(rows)
 }
+
+fn special_finding_id(run: &str, artifact: &Path, index: usize, finding: &V) -> String {
+    format!(
+        "f-{}",
+        &storage::hash(
+            format!(
+                "{}\0{}\0{}\0{}\0{}",
+                run,
+                artifact.file_name().unwrap_or_default().to_string_lossy(),
+                index,
+                text(finding, "file"),
+                finding.get("line").py()
+            )
+            .as_bytes()
+        )[..12]
+    )
+}
+
 type Lines = BTreeMap<String, (BTreeSet<usize>, BTreeSet<usize>)>;
 fn diff_lines(patch: &[u8]) -> Lines {
     let mut files = Lines::new();
@@ -874,13 +950,10 @@ pub(crate) fn finish(
         seat_rows.push(seat_row);
         let (findings, _) = if matches!(state, "pass" | "fail") {
             (
-                seat.findings.clone().unwrap_or_else(|| {
-                    parse_findings(&seat.answer)
-                        .0
-                        .into_iter()
-                        .map(|row| (row, None))
-                        .collect()
-                }),
+                match &seat.findings {
+                    Some(findings) => findings.clone(),
+                    None => redacted_findings(&seat.answer, &seat.answer)?,
+                },
                 0,
             )
         } else {
@@ -901,20 +974,7 @@ pub(crate) fn finish(
                 )[..12]
             );
             let ident = if let Some(index) = special {
-                format!(
-                    "f-{}",
-                    &storage::hash(
-                        format!(
-                            "{}\0{}\0{}\0{}\0{}",
-                            run,
-                            seat.target.provider,
-                            index,
-                            text(&finding, "file"),
-                            finding.get("line").py()
-                        )
-                        .as_bytes()
-                    )[..12]
-                )
+                special_finding_id(run, &seat.artifact, index, &finding)
             } else {
                 if !seen.insert(ident.clone()) {
                     continue;
@@ -2045,5 +2105,95 @@ mod redaction_regression_tests {
         );
         let rows = redacted_findings(&mismatch, &redacted).unwrap();
         assert_eq!(text(&rows[0].0, "withheld"), "redacted");
+    }
+    #[test]
+    fn multiline_recovered_summary_is_withheld() {
+        let sensitive = format!("{}{} = example", "to", "ken");
+        let row = obj([
+            ("file", "a.rs".into()),
+            ("line", 1usize.into()),
+            ("summary", format!("context\n{sensitive}").into()),
+            ("extra", sensitive.into()),
+        ]);
+        let raw = format!(
+            "```findings\n{}\n```",
+            String::from_utf8(row.json(false).unwrap()).unwrap()
+        );
+        let answer = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
+        let rows = redacted_findings(&raw, &answer).unwrap();
+        assert_eq!(
+            text(&rows[0].0, "summary"),
+            "summary withheld: redacted by the outbound scanner"
+        );
+    }
+
+    #[test]
+    fn multiline_ordinary_summary_with_decoded_hit_is_withheld() {
+        let key = format!("{}{}", "to", "ken");
+        let encoded = format!("context\\n{}\\u006f{} = example", &key[..1], &key[2..]);
+        let json = format!("{{\"file\":\"a.rs\",\"line\":1,\"summary\":\"{encoded}\"}}");
+        let raw = format!("```findings\n{json}\n```");
+        let answer = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
+        assert_eq!(answer, raw);
+        let rows = redacted_findings(&raw, &answer).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].1.is_some());
+        assert_eq!(
+            text(&rows[0].0, "summary"),
+            "summary withheld: redacted by the outbound scanner"
+        );
+    }
+
+    #[test]
+    fn escaped_decoded_fields_are_redacted() {
+        let key = format!("{}{}", "to", "ken");
+        for field in ["file", "summary", "quote", "rule"] {
+            let encoded = format!("{}\\u006f{} = example", &key[..1], &key[2..]);
+            let mut row = obj([
+                ("file", "a.rs".into()),
+                ("line", 1usize.into()),
+                ("summary", "safe".into()),
+            ]);
+            row.set(field, "REPLACE");
+            let json = String::from_utf8(row.json(false).unwrap())
+                .unwrap()
+                .replace("REPLACE", &encoded);
+            let raw = format!("```findings\n{json}\n```");
+            let answer = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
+            assert_eq!(answer, raw);
+            let rows = redacted_findings(&raw, &answer).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].1.is_some());
+            if field == "file" {
+                assert_eq!(text(&rows[0].0, "withheld"), "redacted");
+                assert!(rows[0].0.get("redacted").truth());
+                assert!(!rows[0].0.get("quote_complete").truth());
+            } else {
+                assert!(rows[0].0.get("redacted").truth());
+                assert!(!rows[0].0.has("quote") && !rows[0].0.has("rule"));
+                assert!(!rows[0].0.get("quote_complete").truth());
+            }
+        }
+    }
+
+    #[test]
+    fn multiline_scanner_loss_produces_placeholders() {
+        let header = format!("{}{} {} {}{}", "---", "--BEGIN", "PRIVATE", "KEY", "-----");
+        let raw = format!("```findings\n{header}\nfirst\nsecond\n```\n");
+        let answer = String::from_utf8(safety::redact(raw.as_bytes()).unwrap()).unwrap();
+        let rows = redacted_findings(&raw, &answer).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(
+            rows.iter()
+                .all(|(row, index)| index.is_some() && text(row, "withheld") == "redacted")
+        );
+    }
+    #[test]
+    fn special_ids_distinguish_same_provider_seat_artifacts() {
+        let row = withheld_finding();
+        let first = special_finding_id("run", Path::new("codex-model-a.md"), 0, &row);
+        let second = special_finding_id("run", Path::new("codex-model-b.md"), 0, &row);
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 14);
     }
 }
