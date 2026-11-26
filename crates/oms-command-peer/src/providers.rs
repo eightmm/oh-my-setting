@@ -2823,6 +2823,7 @@ pub(crate) fn capacity(result: &Completed) -> bool {
             "rate_limit",
             "capacity",
             "usage limit",
+            "spend cap",
         ]
         .iter()
         .any(|word| body.contains(word))
@@ -2935,6 +2936,23 @@ fn running_accounts(repo: &Path) -> Result<std::collections::BTreeMap<String, us
 #[cfg(test)]
 mod bridge_route_tests {
     use super::*;
+
+    #[test]
+    fn capacity_includes_workspace_spend_cap() {
+        let stop = |code, complete, text: &str| Completed {
+            code,
+            stdout: text.as_bytes().to_vec(),
+            stderr: Vec::new(),
+            complete,
+            cleanup_complete: Some(true),
+            owned_cleanup: None,
+            elapsed: Duration::ZERO,
+        };
+        let cap = "You hit your spend cap set by the owner of your workspace.";
+        assert!(capacity(&stop(0, false, cap)));
+        assert!(capacity(&stop(1, true, cap)));
+        assert!(!capacity(&stop(0, true, cap)));
+    }
     use crate::process::Executor;
     use std::{
         fs,

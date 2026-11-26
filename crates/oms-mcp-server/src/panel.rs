@@ -15,7 +15,8 @@ use std::{
 #[path = "lead_turns.rs"]
 mod lead_turns;
 
-const URI: &str = "ui://oms/conversation-panel/v24.html";
+const URI: &str = "ui://oms/conversation-panel/v25.html";
+const V24: &str = "ui://oms/conversation-panel/v24.html";
 const V23: &str = "ui://oms/conversation-panel/v23.html";
 const V22: &str = "ui://oms/conversation-panel/v22.html";
 const V21: &str = "ui://oms/conversation-panel/v21.html";
@@ -1155,6 +1156,7 @@ impl Server<'_> {
                             | V21
                             | V22
                             | V23
+                            | V24
                     )
                 ) =>
             {
