@@ -453,6 +453,11 @@ fn fixture(tasks: &[(&str, &str)]) -> Repo {
     git(&repo.0, &["commit", "-qm", "seed"]);
     let mock = Mock::default();
     mock.plan(&repo.0, &["init", "--goal", "parallel"]);
+    fs::write(
+        repo.0.join(".oms/fixture-brief"),
+        "Implement the scoped task.",
+    )
+    .unwrap();
     // Ids are chosen so the plan's id-tiebroken creation order equals `tasks`.
     for (id, allowed) in tasks {
         mock.plan(
@@ -467,6 +472,8 @@ fn fixture(tasks: &[(&str, &str)]) -> Repo {
                 allowed,
                 "--verify",
                 "true",
+                "--brief-file",
+                ".oms/fixture-brief",
             ],
         );
     }
@@ -492,6 +499,33 @@ fn state(repo: &Repo, id: &str) -> Value {
     let mock = Mock::default();
     let (_, shown) = mock.plan(&repo.0, &["show", "--id", id]);
     serde_json::from_str(&shown).unwrap()
+}
+
+#[test]
+fn parallel_skips_tasks_without_briefs() {
+    if scrubbed_child("parallel_skips_tasks_without_briefs") {
+        return;
+    }
+    let repo = fixture(&[("t2-briefed", "b/")]);
+    let mock = Mock::default();
+    mock.plan(
+        &repo.0,
+        &[
+            "add",
+            "--id",
+            "t1-unbriefed",
+            "--title",
+            "missing",
+            "--allowed",
+            "a/",
+            "--verify",
+            "true",
+        ],
+    );
+    let (_, out, err) = run(&repo, &mock, &["--parallel"]);
+    assert!(out.contains("started=1"), "{out}{err}");
+    assert_eq!(state(&repo, "t1-unbriefed")["state"], "ready");
+    assert_ne!(state(&repo, "t2-briefed")["state"], "ready");
 }
 
 #[test]
@@ -705,6 +739,8 @@ fn overlapping_resources_never_run_together() {
             allowed,
             "--verify",
             "true",
+            "--brief-file",
+            ".oms/fixture-brief",
         ];
         if let Some(res) = resources {
             args.extend(["--resources", res]);

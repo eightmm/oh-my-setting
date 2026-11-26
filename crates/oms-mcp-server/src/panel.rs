@@ -12,7 +12,13 @@ use std::{
     time::Duration,
 };
 
-const URI: &str = "ui://oms/conversation-panel/v22.html";
+#[path = "lead_turns.rs"]
+mod lead_turns;
+
+const URI: &str = "ui://oms/conversation-panel/v25.html";
+const V24: &str = "ui://oms/conversation-panel/v24.html";
+const V23: &str = "ui://oms/conversation-panel/v23.html";
+const V22: &str = "ui://oms/conversation-panel/v22.html";
 const V21: &str = "ui://oms/conversation-panel/v21.html";
 const V20: &str = "ui://oms/conversation-panel/v20.html";
 const V19: &str = "ui://oms/conversation-panel/v19.html";
@@ -72,6 +78,7 @@ const DECIDE: &str = "oms_decide_approval";
 const RECORD_ISSUE: &str = "oms_record_reviewed_issue";
 const ISSUE_STATUS: &str = "oms_reviewed_issue_status";
 const OPEN_LEADS: &str = "oms_open_lead_conversations";
+const SEND_LEAD: &str = "oms_send_lead_message";
 const LEAD_STATUS: &str = "oms_lead_conversation_status";
 const LEAD_PROVIDERS: [&str; 3] = ["codex", "claude", "agy"];
 const LEAD_PROMPT: &str = "Acknowledge availability as this Room's provider Lead, then wait for explicit work. Do not inspect or change the repository, use tools, or delegate.";
@@ -98,6 +105,18 @@ fn assignment_directory(
     op: &str,
     binding: &str,
     recovering: bool,
+) -> PanelResult<Option<PathBuf>> {
+    checked_peer_directory(repo, data, op, op, binding, recovering, None)
+}
+
+fn checked_peer_directory(
+    repo: &Path,
+    data: &Value,
+    op: &str,
+    thread: &str,
+    binding: &str,
+    recovering: bool,
+    prompt_digest: Option<&str>,
 ) -> PanelResult<Option<PathBuf>> {
     use crate::storage::Directory;
     let dir = match Directory::run(repo, op, recovering) {
@@ -160,8 +179,11 @@ fn assignment_directory(
         crate::storage::meta(&dir.path)
     };
     if proof["operation"] != op
-        || proof["thread"] != op
+        || proof["thread"] != thread
         || proof["kind"] != "ask"
+        || prompt_digest.is_some_and(|digest| {
+            proof["lead_followup"] != true || proof["prompt_sha256"] != digest
+        })
         || proof["panel_assignment"] != binding
         || (data["purpose"] == "provider-lead" && proof["answer_storage"] != "operation")
         || proof["targets"] != json!([data["provider"]])
@@ -200,6 +222,7 @@ pub(super) fn runtime_request(request: &Value) -> bool {
                     | ASSIGN_RESULT
                     | OPEN_LEADS
                     | LEAD_STATUS
+                    | SEND_LEAD
             )
         )
 }
@@ -282,16 +305,34 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         true,
     );
     open_leads["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true});
+    let turn_id = json!({"type":"string","format":"uuid","description":"A lowercase UUIDv4 created for this explicit user message. Reuse it only with the identical text."});
+    let mut send = make(
+        SEND_LEAD,
+        "Send a user's explicit message to this Lead's existing OMS conversation. Repeated submissions with the same turn ID never start another call.",
+        json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"},"turnId":turn_id,"text":{"type":"string","minLength":1,"maxLength":4000}}),
+        &[
+            "projectKey",
+            "room",
+            "provider",
+            "leadRequestId",
+            "turnId",
+            "text",
+        ],
+        true,
+    );
+    send["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true});
+    send["_meta"]["ui"]["visibility"] = json!(["app"]);
     let all = json!([
         opener,
         chat,
         record_issue,
         issue_status,
         open_leads,
+        send,
         make(
             LEAD_STATUS,
             "Read provider readiness in the current Main’s Room. A selected provider’s answer is visible only in the panel.",
-            json!({"project":project,"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS}}),
+            json!({"project":project,"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"turnId":turn_id,"before":{"type":"string","description":"An older-page cursor returned by this conversation."}}),
             &["room"],
             false
         ),
@@ -304,8 +345,8 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         ),
         make(
             GIT,
-            "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one. Use boardId for linked board pages, or issuePreview alone to review immutable metadata for one open issue in the selected project.",
-            json!({"project":project,"issuePreview":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"boardId":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"},"cursor":{"type":"string","minLength":1,"maxLength":500}}),
+            "Read Git, open repository issues, PRs and linked GitHub Projects. Use inventory and nextCursor to page through all open issues or PRs, or kind and number to look up one. Use boardId for linked board pages (or with candidates=true for ranked whole-board issue candidates), or issuePreview alone to review immutable metadata for one open issue in the selected project.",
+            json!({"project":project,"issuePreview":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"kind":{"type":"string","enum":["issue","pull"]},"number":{"type":"integer","minimum":1,"maximum":9_999_999_999u64},"inventory":{"type":"string","enum":["issues","pullRequests"]},"boardId":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$"},"cursor":{"type":"string","minLength":1,"maxLength":500},"candidates":{"type":"boolean"}}),
             &[],
             false
         ),
@@ -944,6 +985,9 @@ fn checkout(dir: &Path) -> PanelResult<bool> {
     Ok(false)
 }
 
+/// JSON-RPC envelope around a tool result: a request id of up to 1024 bytes may escape to six
+/// bytes per byte, plus the fixed `jsonrpc`/`id`/`result` keys.
+const FRAME_RESERVE: usize = 1024 * 6 + 256;
 pub(super) fn response(data: PanelResult<Value>) -> Value {
     match data.and_then(|data| {
         crate::output::outbound(data.to_string().as_bytes(), &Value::Null)
@@ -962,13 +1006,41 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                     None
                 };
             let mut text = data.to_string();
-            if data["dashboard"]["managedScratch"].is_object()
-                && text.len() + json!(&text).to_string().len() + 1024 > crate::OUTPUT_LIMIT
+            let is_git_detail = data["git"].is_object() && data["github"].is_object();
+            if (data["dashboard"]["managedScratch"].is_object() || is_git_detail)
+                && crate::value::encode(
+                    &json!({"content":[{"type":"text","text":&text}],"structuredContent":&data,"isError":false}),
+                    true,
+                    false,
+                    false,
+                    false,
+                )
+                .len()
+                    + FRAME_RESERVE
+                    > crate::OUTPUT_LIMIT
             {
-                if text.len() + 1024 > crate::OUTPUT_LIMIT {
-                    return response(Err("OMS panel snapshot exceeds its output limit.".into()));
+                text = if is_git_detail {
+                    "Git and GitHub status available in structuredContent.".into()
+                } else {
+                    "Project dashboard. Canonical status and managed scratch lifecycle observations are in structuredContent.".into()
+                };
+                if crate::value::encode(
+                    &json!({"content":[{"type":"text","text":&text}],"structuredContent":&data,"isError":false}),
+                    true,
+                    false,
+                    false,
+                    false,
+                )
+                .len()
+                    + FRAME_RESERVE
+                    > crate::OUTPUT_LIMIT
+                {
+                    return response(Err(if is_git_detail {
+                        "OMS desktop detail exceeds the response limit.".into()
+                    } else {
+                        "OMS panel snapshot exceeds its output limit.".into()
+                    }));
                 }
-                text = "Project dashboard. Canonical status and managed scratch lifecycle observations are in structuredContent.".into();
             }
             let mut result = json!({"content":[{"type":"text","text":text}],"structuredContent":data,"isError":false});
             if let Some(detail) = definition {
@@ -1082,6 +1154,9 @@ impl Server<'_> {
                             | V19
                             | V20
                             | V21
+                            | V22
+                            | V23
+                            | V24
                     )
                 ) =>
             {
@@ -1100,7 +1175,16 @@ impl Server<'_> {
                     PROJECTS => &[],
                     OPEN => &["project", "leadConversations"],
                     OPEN_LEADS => &["project", "room", "projectKey"],
-                    LEAD_STATUS => &["project", "room", "provider"],
+                    LEAD_STATUS => &["project", "room", "provider", "turnId", "before"],
+                    SEND_LEAD => &[
+                        "project",
+                        "projectKey",
+                        "room",
+                        "provider",
+                        "leadRequestId",
+                        "turnId",
+                        "text",
+                    ],
                     APPROVALS | SNAPSHOT | WORK_ITEMS | USAGE => &["project"],
                     GIT => &[
                         "project",
@@ -1110,6 +1194,7 @@ impl Server<'_> {
                         "inventory",
                         "boardId",
                         "cursor",
+                        "candidates",
                     ],
                     GRAPH => &["project", "node", "query", "limit", "depth", "includeTests"],
                     CHAT => &[
@@ -1159,7 +1244,7 @@ impl Server<'_> {
                 if name == GRAPH {
                     return self.graph_reply(id, params, result);
                 }
-                if name == LEAD_STATUS {
+                if matches!(name, LEAD_STATUS | SEND_LEAD) {
                     match result {
                         Ok(mut data) => {
                             let private = data
@@ -1397,9 +1482,16 @@ impl Server<'_> {
     }
 
     fn issue_preview(&self, repo: &Path, args: &Value) -> PanelResult<Value> {
-        if ["kind", "number", "inventory", "boardId", "cursor"]
-            .iter()
-            .any(|key| args.get(key).is_some())
+        if [
+            "kind",
+            "number",
+            "inventory",
+            "boardId",
+            "cursor",
+            "candidates",
+        ]
+        .iter()
+        .any(|key| args.get(key).is_some())
         {
             return Err("Select only one issue to review.".into());
         }
@@ -1520,7 +1612,7 @@ impl Server<'_> {
                 .ok_or("A lowercase UUID requestId is required.")?;
             Ok(format!("oms-app-{key}"))
         };
-        if matches!(name, OPEN_LEADS | LEAD_STATUS) {
+        if matches!(name, OPEN_LEADS | LEAD_STATUS | SEND_LEAD) {
             return self.lead_conversations(&repo, name, args, meta);
         }
         if matches!(name, RECORD_ISSUE | ISSUE_STATUS) {
@@ -1617,6 +1709,16 @@ impl Server<'_> {
                     path,
                     "--json".into(),
                 ];
+                let candidates = match args.get("candidates") {
+                    None => None,
+                    Some(v) => Some(v.as_bool().ok_or("Invalid candidates flag.")?),
+                };
+                if candidates.is_some() && args.get("boardId").is_none() {
+                    return Err("Board candidates require boardId.".into());
+                }
+                if candidates == Some(true) && args.get("cursor").is_some() {
+                    return Err("Board candidates cannot combine with cursor.".into());
+                }
                 if args.get("inventory").is_some()
                     || args.get("boardId").is_some()
                     || args.get("cursor").is_some()
@@ -1639,6 +1741,9 @@ impl Server<'_> {
                             })
                             .ok_or("Invalid linked board ID.")?;
                         cmd.extend(["--project-id".into(), id.into()]);
+                        if candidates == Some(true) {
+                            cmd.push("--candidates".into());
+                        }
                     } else {
                         let collection = args["inventory"]
                             .as_str()
@@ -2136,6 +2241,7 @@ impl Server<'_> {
                     .ok_or("Unsupported Lead provider.")
             })
             .transpose()?;
+        lead_turns::validate(name, args, selected)?;
         let digest = crate::storage::hash(thread);
         let project_key = || -> PanelResult<String> {
             if self.panel_repo(args)? != repo {
@@ -2167,6 +2273,7 @@ impl Server<'_> {
         };
         let mut rows = Vec::new();
         let mut private = None;
+        let mut turn = None;
         let mut has_authority = false;
         for provider in LEAD_PROVIDERS
             .into_iter()
@@ -2312,15 +2419,13 @@ impl Server<'_> {
                 else {
                     return Ok(("unconfirmed", Value::Null));
                 };
-                let mut transcript = Value::Null;
-                if selected.is_some() {
-                    transcript = self.provider_thread(repo, &operation, canonical, "");
-                    if transcript["turns"].as_array().is_none_or(Vec::is_empty)
-                        || transcript.to_string().len() > crate::OUTPUT_LIMIT / 2
-                    {
-                        transcript = json!({"turns":[{"role":canonical,"text":answer.chars().take(4000).collect::<String>(),"at":Value::Null}],"cursor":Value::Null,"hasMore":false});
-                    }
-                }
+                let transcript = if selected.is_some() {
+                    // This is the original kickoff answer only. Other user turns need
+                    // their own protected receipt and exact child operation proof.
+                    json!({"turns":[{"role":canonical,"text":crate::storage::byte_prefix(answer,4000),"truncated":answer.len()>4000,"at":Value::Null}],"cursor":Value::Null,"hasMore":false})
+                } else {
+                    Value::Null
+                };
                 let live = run("desktop-lead-status", Some(request), &provider_arg)?;
                 if !valid(&live)
                     || live["operation"] != operation
@@ -2356,7 +2461,35 @@ impl Server<'_> {
                 }
                 Ok(("ready", transcript))
             };
-            let (status, transcript) = resolve().unwrap_or(("unconfirmed", Value::Null));
+            let (status, mut transcript) = resolve().unwrap_or(("unconfirmed", Value::Null));
+            if name == SEND_LEAD && args["leadRequestId"] != request {
+                return Err("The selected Lead changed. Reopen its conversation.".into());
+            }
+            if (name == SEND_LEAD || args.get("turnId").is_some() || args.get("before").is_some())
+                && status != "ready"
+            {
+                return Err("The original Lead conversation could not be verified.".into());
+            }
+            if selected.is_some() && status == "ready" {
+                let kickoff = prior["operation"]
+                    .as_str()
+                    .ok_or("The original Lead receipt is unavailable.")?;
+                let binding =
+                    crate::storage::hash(json!([&digest[..32], room, request]).to_string());
+                let conversation =
+                    lead_turns::Conversation::open(repo, kickoff, &binding, &prior, provider)?;
+                let current = || {
+                    let live = run("desktop-lead-status", Some(request), &provider_arg)?;
+                    if !valid(&live)
+                        || live["operation"] != kickoff
+                        || live["assignedAt"] != prior["assignedAt"]
+                    {
+                        return Err("The original Lead receipt changed.".into());
+                    }
+                    Ok(())
+                };
+                turn = conversation.exchange(self, name, args, &mut transcript, current)?;
+            }
             row["status"] = json!(status);
             if selected.is_some() {
                 private = Some(
@@ -2370,6 +2503,9 @@ impl Server<'_> {
             return Err("OMS could not verify the current Main in the selected Room.".into());
         }
         let mut result = json!({"room":room,"projectKey":key,"leads":rows});
+        if let Some(turn) = turn {
+            result["turn"] = turn;
+        }
         if let Some(private) = private {
             result["leadConversation"] = private;
         }

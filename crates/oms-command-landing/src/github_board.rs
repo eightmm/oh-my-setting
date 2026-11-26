@@ -1,7 +1,7 @@
-//! Read a page of cards or a full read-only drift report from a board linked to this repository.
-use super::super::{digits, plan_issue_evidence, spawn, strict, task_issue_evidence};
+//! Read a page of cards, whole-board ranked candidates, or a drift report from a board linked to this repository.
+use super::super::{IssueRef, digits, plan_issue_evidence, spawn, strict, task_issue_evidence};
 use super::{
-    Kind, Number, READ_TIMEOUT, Slug, WEB, display, project_error, projects, stable_id,
+    Kind, Number, READ_TIMEOUT, Slug, WEB, bound_rows, display, project_error, projects, stable_id,
     valid_cursor, work_item,
 };
 use crate::{Context, V, obj};
@@ -20,6 +20,11 @@ const MAX_BOARD_PAGES: usize = 25;
 const MAX_WORK_PAGES: usize = 10;
 const STATUS_DRIFT_LIMIT: usize = 50;
 const MISSING_LIMIT: usize = 20;
+const CANDIDATE_LIMIT: usize = 25;
+const CANDIDATES_WALK_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+const CANDIDATES_BYTES: usize = 10_000;
+const RECOMMENDATION_LIMIT: usize = 100;
+const RECOMMENDATIONS_BYTES: usize = 8_000;
 
 /// Explicit board identity: `https://github.com/{orgs|users}/LOGIN/projects/N`.
 fn board_target(url: &str) -> Option<(&'static str, String, Number)> {
@@ -52,6 +57,8 @@ fn board_empty(status: &str, reason: Option<&str>) -> V {
 
 /// Selected read-only fields: exact names only; duplicates are ambiguous, never guessed.
 type Fields = BTreeMap<&'static str, (String, BTreeMap<String, String>)>;
+type FieldOrder = BTreeMap<&'static str, BTreeMap<String, usize>>;
+type OrderedFields = BTreeMap<&'static str, (String, Vec<(String, String)>)>;
 
 fn single_select_field(connection: &V, name: &str) -> Option<(String, Vec<(String, String)>)> {
     if connection.get("pageInfo").get("hasNextPage") != &V::Bool(false) {
@@ -85,12 +92,22 @@ fn single_select_field(connection: &V, name: &str) -> Option<(String, Vec<(Strin
     (options.len() == ordered.len()).then_some((id, ordered))
 }
 
-fn board_fields(connection: &V) -> (V, Fields, bool) {
+fn board_fields_with_order(connection: &V) -> (V, Fields, FieldOrder, OrderedFields, bool) {
     let mut fields = Fields::new();
+    let mut ranks = FieldOrder::new();
+    let mut ordered_fields = OrderedFields::new();
     let mut missing = Vec::new();
     for name in BOARD_FIELDS {
         if let Some((id, ordered)) = single_select_field(connection, name) {
-            fields.insert(name, (id, ordered.into_iter().collect()));
+            let order_map = ordered
+                .iter()
+                .enumerate()
+                .map(|(idx, (opt_id, _))| (opt_id.clone(), idx))
+                .collect();
+            let by_id = ordered.iter().cloned().collect();
+            ranks.insert(name, order_map);
+            ordered_fields.insert(name, (id.clone(), ordered));
+            fields.insert(name, (id, by_id));
         } else {
             missing.push(V::from(name));
         }
@@ -100,6 +117,11 @@ fn board_fields(connection: &V) -> (V, Fields, bool) {
         .map(|(name, (id, _))| (*name, obj([("id", id.clone().into())]))));
     let partial = !missing.is_empty();
     report.set("missing", V::Arr(missing));
+    (report, fields, ranks, ordered_fields, partial)
+}
+
+fn board_fields(connection: &V) -> (V, Fields, bool) {
+    let (report, fields, _, _, partial) = board_fields_with_order(connection);
     (report, fields, partial)
 }
 
@@ -439,6 +461,94 @@ fn fetch_board_raw(
     })
 }
 
+fn planned_issues(c: &Context<'_>, root: &Path, slug: &Slug) -> Option<(BTreeSet<String>, bool)> {
+    c.state(root).ok().filter(|p| p == root).and_then(|state| {
+        let (links, complete) = plan_issue_evidence(&state, slug).ok()?;
+        let mut linked: BTreeSet<_> = links
+            .into_iter()
+            .map(|(_, issue)| issue.number.to_string())
+            .collect();
+        let (packet, packet_complete) = task_issue_evidence(&state, slug).ok()?;
+        if let Some(issue) = packet {
+            linked.insert(issue.number.to_string());
+        }
+        Some((linked, complete && packet_complete))
+    })
+}
+
+fn card_evidence_gap(
+    partial_page: bool,
+    planned: &Option<(BTreeSet<String>, bool)>,
+    schema_ok: bool,
+) -> Option<&'static str> {
+    if partial_page {
+        Some("partial_response")
+    } else if !planned.as_ref().is_some_and(|(_, complete)| *complete) {
+        Some("plan_unverified")
+    } else if !schema_ok {
+        Some("field_schema_unverified")
+    } else {
+        None
+    }
+}
+
+fn refine_candidate_class(
+    row: &mut V,
+    duplicate: bool,
+    closed: bool,
+    planned: &Option<(BTreeSet<String>, bool)>,
+    number: &str,
+    page_unverified: bool,
+) {
+    let class = if duplicate {
+        "duplicate"
+    } else if closed {
+        "closed_board"
+    } else if planned
+        .as_ref()
+        .is_some_and(|(links, _)| links.contains(number))
+    {
+        "plan_linked"
+    } else if planned.is_none() || row.get("incomplete") == &V::Bool(true) || page_unverified {
+        "unverified"
+    } else if row
+        .get("fields")
+        .get("Status")
+        .get("name")
+        .text()
+        .is_some_and(|s| s.eq_ignore_ascii_case("In Progress"))
+    {
+        "board_in_progress"
+    } else {
+        "candidate"
+    };
+    row.set("class", class);
+}
+
+fn verified_option_rank(row: &V, node: &V, field_name: &'static str, ranks: &FieldOrder) -> usize {
+    let selection = row.get("fields").get(field_name);
+    let Some(option_id) = selection.get("optionId").text() else {
+        return usize::MAX;
+    };
+    let verified = node
+        .get("fieldValues")
+        .get("nodes")
+        .array()
+        .iter()
+        .any(|v| {
+            v.get("field").get("id") == selection.get("fieldId")
+                && v.get("optionId") == selection.get("optionId")
+                && v.get("name") == selection.get("name")
+        });
+    if !verified {
+        return usize::MAX;
+    }
+    ranks
+        .get(field_name)
+        .and_then(|m| m.get(option_id).copied())
+        .unwrap_or(usize::MAX)
+}
+
 /// Read one explicitly linked Projects v2 board page. Read-only evidence: neither
 /// board state nor item order grants a claim, lease, approval or permission.
 pub(super) fn page(
@@ -489,29 +599,15 @@ pub(super) fn page(
     ) else {
         return Ok(board_empty("unavailable", Some("partial_response")));
     };
-    let planned = c.state(root).ok().filter(|p| p == root).and_then(|state| {
-        let (links, complete) = plan_issue_evidence(&state, slug).ok()?;
-        let mut linked: BTreeSet<_> = links
-            .into_iter()
-            .map(|(_, issue)| issue.number.to_string())
-            .collect();
-        let (packet, packet_complete) = task_issue_evidence(&state, slug).ok()?;
-        if let Some(issue) = packet {
-            linked.insert(issue.number.to_string());
-        }
-        Some((linked, complete && packet_complete))
-    });
-    let evidence_gap = if has_errors || nodes.len() > 20 {
-        Some("partial_response")
-    } else if !planned.as_ref().is_some_and(|(_, complete)| *complete) {
-        Some("plan_unverified")
-    } else if !recommendation_schema(board.get("fields"), &chosen) {
-        Some("field_schema_unverified")
-    } else {
-        None
-    };
+    let planned = planned_issues(c, root, slug);
+    let evidence_gap = card_evidence_gap(
+        has_errors || nodes.len() > 20,
+        &planned,
+        recommendation_schema(board.get("fields"), &chosen),
+    );
     // Keep both copies out of recommendations, even when an archived or closed
-    // copy was omitted from browse candidates. This comparison is page-local.
+    // copy was omitted from browse candidates. This comparison is page-local;
+    // `candidates(...)` performs the cross-page canonical Issue deduplication.
     let mut issue_numbers = BTreeSet::new();
     let mut duplicates = BTreeSet::new();
     for node in nodes.iter().take(20) {
@@ -538,30 +634,8 @@ pub(super) fn page(
             if row.get("class").text() == Some("candidate")
                 && let Some(number) = digits(row.get("number")).map(str::to_owned)
             {
-                let class = if !seen.insert(number.clone()) {
-                    "duplicate"
-                } else if *closed {
-                    "closed_board"
-                } else if planned
-                    .as_ref()
-                    .is_some_and(|(links, _)| links.contains(&number))
-                {
-                    "plan_linked"
-                } else if planned.is_none() || row.get("incomplete") == &V::Bool(true) || has_errors
-                {
-                    "unverified"
-                } else if row
-                    .get("fields")
-                    .get("Status")
-                    .get("name")
-                    .text()
-                    .is_some_and(|s| s.eq_ignore_ascii_case("In Progress"))
-                {
-                    "board_in_progress"
-                } else {
-                    "candidate"
-                };
-                row.set("class", class);
+                let seen_dup = !seen.insert(number.clone());
+                refine_candidate_class(&mut row, seen_dup, *closed, &planned, &number, has_errors);
             }
             let duplicate = row.get("kind").text() == Some("issue")
                 && digits(row.get("number")).is_some_and(|n| duplicates.contains(n));
@@ -651,9 +725,12 @@ fn reason_rank(reason: &str) -> u8 {
         "page_limit" => 7,
         "status_field_unavailable" => 8,
         "partial_response" => 9,
-        "unavailable" => 10,
-        "unsupported" => 11,
-        _ => 12,
+        "plan_unverified" => 10,
+        "field_schema_unverified" => 11,
+        "result_limit" => 12,
+        "unavailable" => 13,
+        "unsupported" => 14,
+        _ => 15,
     }
 }
 
@@ -946,6 +1023,523 @@ fn verified_status<'a>(
     Some(Some(label.as_str()))
 }
 
+struct BoardWalkPage {
+    board: V,
+    nodes: Vec<V>,
+    has_errors: bool,
+    truncated_nodes: bool,
+}
+
+struct BoardWalk {
+    closed: bool,
+    board_meta: V,
+    first_board: V,
+    pages_data: Vec<BoardWalkPage>,
+    pages: usize,
+    items_read: usize,
+    exhausted: bool,
+    reason: Option<&'static str>,
+}
+
+enum BoardWalkOutcome {
+    Ready(Box<BoardWalk>),
+    Unavailable {
+        status: &'static str,
+        reason: Option<String>,
+    },
+}
+
+fn walk_board_pages(
+    c: &Context<'_>,
+    root: &Path,
+    slug: Option<&Slug>,
+    expected_id: &str,
+    classify: fn(i32, &[V]) -> Option<&'static str>,
+    deadline: Option<std::time::Instant>,
+) -> crate::Result<BoardWalkOutcome> {
+    crate::require(
+        stable_id(&V::from(expected_id)).is_some(),
+        "invalid project node id",
+    )?;
+    let target = match resolve_board(c, root, slug, expected_id)? {
+        BoardLookup::Ready(target) => target,
+        BoardLookup::Unavailable { status, reason } => {
+            return Ok(BoardWalkOutcome::Unavailable { status, reason });
+        }
+    };
+
+    let mut after: Option<String> = None;
+    let mut seen_cursors = BTreeSet::new();
+    let mut pages = 0usize;
+    let mut items_read = 0usize;
+    let mut exhausted = false;
+    let mut reason: Option<&'static str> = None;
+    let mut closed_state = false;
+    let mut board_meta: Option<V> = None;
+    let mut first_board: Option<V> = None;
+    let mut pages_data = Vec::new();
+
+    while pages < MAX_BOARD_PAGES {
+        pages += 1;
+        let (board, has_errors, err_reason) =
+            match fetch_board_raw(c, root, &target, expected_id, after.as_deref(), classify)? {
+                BoardPageRaw::Ok {
+                    board,
+                    has_errors,
+                    error_reason,
+                } => (board, has_errors, error_reason),
+                BoardPageRaw::Failed(err) => {
+                    if pages == 1 {
+                        return Ok(BoardWalkOutcome::Unavailable {
+                            status: "unavailable",
+                            reason: err.map(str::to_owned),
+                        });
+                    }
+                    record_reason(&mut reason, err.unwrap_or("unavailable"));
+                    break;
+                }
+            };
+        if has_errors {
+            record_reason(&mut reason, err_reason.unwrap_or("partial_response"));
+        }
+        if pages == 1 {
+            let V::Bool(closed) = board.get("closed") else {
+                return Ok(BoardWalkOutcome::Unavailable {
+                    status: "unavailable",
+                    reason: Some("partial_response".into()),
+                });
+            };
+            closed_state = *closed;
+            board_meta = Some(obj([
+                ("id", expected_id.into()),
+                ("number", V::Num(target.number.to_string())),
+                (
+                    "title",
+                    display(board.get("title"), 120).unwrap_or_default().into(),
+                ),
+                ("url", target.canonical.as_str().into()),
+                ("state", if *closed { "CLOSED" } else { "OPEN" }.into()),
+                ("owner", target.login.as_str().into()),
+            ]));
+            first_board = Some(board.clone());
+        }
+        let (V::Arr(nodes), V::Bool(more)) = (
+            board.get("items").get("nodes"),
+            board.get("items").get("pageInfo").get("hasNextPage"),
+        ) else {
+            if pages == 1 {
+                return Ok(BoardWalkOutcome::Unavailable {
+                    status: "unavailable",
+                    reason: Some("partial_response".into()),
+                });
+            }
+            record_reason(&mut reason, "partial_response");
+            break;
+        };
+        let truncated_nodes = nodes.len() > 20;
+        if truncated_nodes {
+            record_reason(&mut reason, "partial_response");
+        }
+        let page_nodes: Vec<V> = nodes.iter().take(20).cloned().collect();
+        items_read += page_nodes.len();
+        let more = *more;
+        let next = board
+            .get("items")
+            .get("pageInfo")
+            .get("endCursor")
+            .text()
+            .filter(|s| valid_cursor(s))
+            .map(str::to_owned);
+        pages_data.push(BoardWalkPage {
+            board,
+            nodes: page_nodes,
+            has_errors,
+            truncated_nodes,
+        });
+        if !more {
+            exhausted = true;
+            break;
+        }
+        let Some(cursor) = next else {
+            record_reason(&mut reason, "partial_response");
+            break;
+        };
+        if !seen_cursors.insert(cursor.clone()) {
+            record_reason(&mut reason, "partial_response");
+            break;
+        };
+        if pages >= MAX_BOARD_PAGES {
+            record_reason(&mut reason, "page_limit");
+            break;
+        }
+        // Stop before a read that could outlast the caller's deadline and report it as incomplete.
+        if deadline.is_some_and(|d| std::time::Instant::now() + READ_TIMEOUT > d) {
+            record_reason(&mut reason, "timeout");
+            break;
+        }
+        after = Some(cursor);
+    }
+
+    Ok(BoardWalkOutcome::Ready(Box::new(BoardWalk {
+        closed: closed_state,
+        board_meta: board_meta.unwrap_or(V::Null),
+        first_board: first_board.unwrap_or(V::Null),
+        pages_data,
+        pages,
+        items_read,
+        exhausted,
+        reason,
+    })))
+}
+
+fn candidates_empty(status: &str, reason: Option<&str>, observed_at: &str) -> V {
+    obj([
+        ("status", status.into()),
+        ("source", "explicit_project".into()),
+        ("observed_at", observed_at.into()),
+        ("board", V::Null),
+        ("items", V::Arr(vec![])),
+        ("total", 0usize.into()),
+        ("omitted", 0usize.into()),
+        ("limit", CANDIDATE_LIMIT.into()),
+        ("recommendations", V::Arr(vec![])),
+        ("recommendationsTotal", 0usize.into()),
+        ("recommendationsOmitted", 0usize.into()),
+        ("pages", 0usize.into()),
+        ("itemsRead", 0usize.into()),
+        ("incomplete", true.into()),
+        ("reason", reason.map(V::from).unwrap_or(V::Null)),
+    ])
+}
+
+/// Whole-board deterministic candidate ranking for an explicitly linked Projects v2 board.
+/// Walks all pages up to `MAX_BOARD_PAGES`, deduplicating by canonical `IssueRef` across pages
+/// and ranking recommended candidates by `(Priority option order, Phase option order, IssueRef)`.
+pub(super) fn candidates(
+    c: &Context<'_>,
+    root: &Path,
+    slug: Option<&Slug>,
+    expected_id: &str,
+    observed_at: &str,
+) -> crate::Result<V> {
+    // The MCP panel kills its child after 30 seconds; leave room for process start and encoding.
+    let deadline = std::time::Instant::now() + CANDIDATES_WALK_BUDGET;
+    let walk = match walk_board_pages(c, root, slug, expected_id, project_error, Some(deadline))? {
+        BoardWalkOutcome::Ready(walk) => *walk,
+        BoardWalkOutcome::Unavailable { status, reason } => {
+            // An unclassified failure still needs a typed incomplete reason.
+            return Ok(candidates_empty(
+                status,
+                Some(reason.as_deref().unwrap_or("unavailable")),
+                observed_at,
+            ));
+        }
+    };
+    let slug = slug.expect("walk_board_pages returned Ready without slug");
+    let mut reason = walk.reason;
+    let (fields_report, chosen, ranks, ordered_schema, field_incomplete) =
+        board_fields_with_order(walk.first_board.get("fields"));
+    let first_schema_ok =
+        !field_incomplete && recommendation_schema(walk.first_board.get("fields"), &chosen);
+    let schema_consistent = walk.pages_data.iter().skip(1).all(|p| {
+        let (_, _, _, page_ordered, page_partial) = board_fields_with_order(p.board.get("fields"));
+        p.board.get("closed") == &V::Bool(walk.closed)
+            && page_partial == field_incomplete
+            && page_ordered == ordered_schema
+            && recommendation_schema(p.board.get("fields"), &chosen) == first_schema_ok
+    });
+    if !schema_consistent {
+        record_reason(&mut reason, "partial_response");
+    }
+    let schema_ok = schema_consistent && first_schema_ok;
+    let planned = planned_issues(c, root, slug);
+    if !planned.as_ref().is_some_and(|(_, complete)| *complete) {
+        record_reason(&mut reason, "plan_unverified");
+    } else if !schema_ok {
+        record_reason(&mut reason, "field_schema_unverified");
+    }
+
+    let mut seen_numbers = BTreeSet::new();
+    let mut duplicate_numbers = BTreeSet::new();
+    for page_data in &walk.pages_data {
+        for node in &page_data.nodes {
+            let issue = node.get("content");
+            if issue.get("__typename").text() == Some("Issue")
+                && issue
+                    .get("repository")
+                    .get("nameWithOwner")
+                    .text()
+                    .and_then(|s| Slug::parse(s).ok())
+                    .is_some_and(|r| r.matches(slug))
+                && let Some(number) =
+                    digits(issue.get("number")).and_then(|n| Number::parse(n).ok())
+                && !seen_numbers.insert(number)
+            {
+                duplicate_numbers.insert(number);
+            }
+        }
+    }
+
+    let issue_sort_prefix = (
+        slug.owner.to_ascii_lowercase(),
+        slug.repo.to_ascii_lowercase(),
+    );
+    let mut emitted_duplicates = BTreeSet::new();
+    let mut ranked_candidates: Vec<((usize, usize, Number), V)> = Vec::new();
+    let mut all_recommendations: Vec<((u8, usize, usize, Number), V)> = Vec::new();
+
+    for page_data in &walk.pages_data {
+        let page_gap = card_evidence_gap(
+            page_data.has_errors || page_data.truncated_nodes || !schema_consistent,
+            &planned,
+            schema_ok,
+        );
+        for node in &page_data.nodes {
+            let content = node.get("content");
+            let dup_number = (content.get("__typename").text() == Some("Issue")
+                && content
+                    .get("repository")
+                    .get("nameWithOwner")
+                    .text()
+                    .and_then(|s| Slug::parse(s).ok())
+                    .is_some_and(|r| r.matches(slug)))
+            .then(|| digits(content.get("number")).and_then(|n| Number::parse(n).ok()))
+            .flatten()
+            .filter(|n| duplicate_numbers.contains(n));
+
+            if let Some(number) = dup_number {
+                match node.get("isArchived") {
+                    V::Bool(true) => {
+                        if node.get("type").text() != Some("ISSUE")
+                            || work_item(content, slug, Kind::Issue, false).is_none()
+                        {
+                            record_reason(&mut reason, "partial_response");
+                        }
+                    }
+                    V::Bool(false) => {
+                        let row = board_item(node, slug, &chosen);
+                        if row.get("incomplete") == &V::Bool(true)
+                            || row.get("class").text() == Some("unknown")
+                        {
+                            record_reason(&mut reason, "partial_response");
+                        }
+                    }
+                    _ => record_reason(&mut reason, "partial_response"),
+                }
+                if emitted_duplicates.insert(number) {
+                    let issue_ref = IssueRef {
+                        slug: slug.clone(),
+                        number,
+                    };
+                    all_recommendations.push((
+                        (2, usize::MAX, usize::MAX, number),
+                        obj([
+                            ("issue", issue_ref.to_string().into()),
+                            ("number", V::Num(number.to_string())),
+                            ("class", "duplicate".into()),
+                            ("state", "excluded".into()),
+                            ("reason", "duplicate".into()),
+                        ]),
+                    ));
+                }
+                continue;
+            }
+
+            if node.get("isArchived") == &V::Bool(true) {
+                match (node.get("type").text(), content.get("__typename").text()) {
+                    (Some("DRAFT_ISSUE"), _) => {}
+                    (Some("ISSUE"), Some("Issue")) => {
+                        let Some(repository) = content
+                            .get("repository")
+                            .get("nameWithOwner")
+                            .text()
+                            .and_then(|s| Slug::parse(s).ok())
+                        else {
+                            record_reason(&mut reason, "partial_response");
+                            continue;
+                        };
+                        if !repository.matches(slug) {
+                            continue;
+                        }
+                        let Some(number) =
+                            work_item(content, slug, Kind::Issue, false).and_then(|r| {
+                                digits(r.get("number")).and_then(|n| Number::parse(n).ok())
+                            })
+                        else {
+                            record_reason(&mut reason, "partial_response");
+                            continue;
+                        };
+                        let issue_ref = IssueRef {
+                            slug: slug.clone(),
+                            number,
+                        };
+                        all_recommendations.push((
+                            (2, usize::MAX, usize::MAX, number),
+                            obj([
+                                ("issue", issue_ref.to_string().into()),
+                                ("number", V::Num(number.to_string())),
+                                ("class", "archived".into()),
+                                ("state", "excluded".into()),
+                                ("reason", "archived".into()),
+                            ]),
+                        ));
+                    }
+                    (Some("PULL_REQUEST"), Some("PullRequest")) => {
+                        let Some(repository) = content
+                            .get("repository")
+                            .get("nameWithOwner")
+                            .text()
+                            .and_then(|s| Slug::parse(s).ok())
+                        else {
+                            record_reason(&mut reason, "partial_response");
+                            continue;
+                        };
+                        if repository.matches(slug)
+                            && work_item(content, slug, Kind::Pull, false).is_none()
+                        {
+                            record_reason(&mut reason, "partial_response");
+                        }
+                    }
+                    _ => record_reason(&mut reason, "partial_response"),
+                }
+                continue;
+            }
+
+            let mut row = board_item(node, slug, &chosen);
+            if row.get("incomplete") == &V::Bool(true) || row.get("class").text() == Some("unknown")
+            {
+                record_reason(&mut reason, "partial_response");
+            }
+            if row.get("kind").text() != Some("issue") {
+                continue;
+            }
+            let Some(number_str) = digits(row.get("number")).map(str::to_owned) else {
+                record_reason(&mut reason, "partial_response");
+                continue;
+            };
+            let Ok(number) = Number::parse(&number_str) else {
+                record_reason(&mut reason, "partial_response");
+                continue;
+            };
+            if row.get("class").text() == Some("candidate") {
+                refine_candidate_class(
+                    &mut row,
+                    false,
+                    walk.closed,
+                    &planned,
+                    &number_str,
+                    page_data.has_errors || !schema_consistent,
+                );
+            }
+            let advice = recommendation(&row, node, page_gap, false);
+            let priority_idx = verified_option_rank(&row, node, "Priority", &ranks);
+            let phase_idx = verified_option_rank(&row, node, "Phase", &ranks);
+            let state = advice
+                .get("state")
+                .text()
+                .unwrap_or("unverified")
+                .to_owned();
+            let why = advice
+                .get("reason")
+                .text()
+                .unwrap_or("item_evidence_incomplete")
+                .to_owned();
+            let issue_ref = IssueRef {
+                slug: slug.clone(),
+                number,
+            };
+            let state_rank = match state.as_str() {
+                "recommended" => 0,
+                "unverified" => 1,
+                _ => 2,
+            };
+            all_recommendations.push((
+                (state_rank, priority_idx, phase_idx, number),
+                obj([
+                    ("issue", issue_ref.to_string().into()),
+                    ("number", V::Num(number.to_string())),
+                    ("class", row.get("class").clone()),
+                    ("state", state.as_str().into()),
+                    ("reason", why.as_str().into()),
+                ]),
+            ));
+            if state == "recommended" {
+                row.set("issue", issue_ref.to_string());
+                row.set("recommendation", advice);
+                ranked_candidates.push(((priority_idx, phase_idx, number), row));
+            }
+        }
+    }
+
+    ranked_candidates.sort_by(|(a, _), (b, _)| {
+        (&a.0, &a.1, &issue_sort_prefix, &a.2).cmp(&(&b.0, &b.1, &issue_sort_prefix, &b.2))
+    });
+    let total = ranked_candidates.len();
+    let mut items: Vec<V> = ranked_candidates
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (_, mut row))| {
+            row.set("rank", idx + 1);
+            row
+        })
+        .collect();
+    let mut truncated_items = items.len() > CANDIDATE_LIMIT;
+    items.truncate(CANDIDATE_LIMIT);
+    bound_rows(&mut items, CANDIDATES_BYTES, &mut truncated_items);
+    let omitted = total.saturating_sub(items.len());
+    if truncated_items {
+        record_reason(&mut reason, "result_limit");
+    }
+
+    all_recommendations.sort_by(|(a, _), (b, _)| {
+        (&a.0, &a.1, &a.2, &issue_sort_prefix, &a.3).cmp(&(
+            &b.0,
+            &b.1,
+            &b.2,
+            &issue_sort_prefix,
+            &b.3,
+        ))
+    });
+    let recommendations_total = all_recommendations.len();
+    let mut recommendations: Vec<V> = all_recommendations.into_iter().map(|(_, r)| r).collect();
+    let mut truncated_recs = recommendations.len() > RECOMMENDATION_LIMIT;
+    recommendations.truncate(RECOMMENDATION_LIMIT);
+    bound_rows(
+        &mut recommendations,
+        RECOMMENDATIONS_BYTES,
+        &mut truncated_recs,
+    );
+    let recommendations_omitted = recommendations_total.saturating_sub(recommendations.len());
+    if truncated_recs {
+        record_reason(&mut reason, "result_limit");
+    }
+
+    let incomplete = !walk.exhausted || reason.is_some();
+    if incomplete && reason.is_none() {
+        reason = Some("partial_response");
+    }
+    let mut board_meta = walk.board_meta;
+    board_meta.set("fields", fields_report);
+
+    Ok(obj([
+        ("status", "available".into()),
+        ("source", "explicit_project".into()),
+        ("observed_at", observed_at.into()),
+        ("board", board_meta),
+        ("items", V::Arr(items)),
+        ("total", total.into()),
+        ("omitted", omitted.into()),
+        ("limit", CANDIDATE_LIMIT.into()),
+        ("recommendations", V::Arr(recommendations)),
+        ("recommendationsTotal", recommendations_total.into()),
+        ("recommendationsOmitted", recommendations_omitted.into()),
+        ("pages", walk.pages.into()),
+        ("itemsRead", walk.items_read.into()),
+        ("incomplete", incomplete.into()),
+        ("reason", reason.map(V::from).unwrap_or(V::Null)),
+    ]))
+}
+
 /// Read-only drift report for one explicitly identified Projects v2 board.
 /// Walks board pagination plus open repository issues and pull requests without
 /// mutating the board, issues or pull requests.
@@ -956,31 +1550,36 @@ pub(super) fn drift(
     expected_id: &str,
     observed_at: &str,
 ) -> crate::Result<V> {
-    crate::require(
-        stable_id(&V::from(expected_id)).is_some(),
-        "invalid project node id",
-    )?;
-    let target = match resolve_board(c, root, slug, expected_id)? {
-        BoardLookup::Ready(target) => target,
-        BoardLookup::Unavailable { status, reason } => {
+    let walk = match walk_board_pages(c, root, slug, expected_id, drift_error, None)? {
+        BoardWalkOutcome::Ready(walk) => *walk,
+        BoardWalkOutcome::Unavailable { status, reason } => {
             return Ok(drift_empty(status, reason.as_deref(), observed_at));
         }
     };
-    let slug = slug.expect("resolve_board returned Ready without slug");
+    let slug = slug.expect("walk_board_pages returned Ready without slug");
+    let board_pages = walk.pages;
+    let board_items_read = walk.items_read;
+    let mut board_reason = walk.reason;
+    let board_meta = walk.board_meta;
 
-    let mut after: Option<String> = None;
-    let mut seen_cursors = BTreeSet::new();
-    let mut board_pages = 0usize;
-    let mut board_items_read = 0usize;
-    let mut board_complete = false;
-    let mut board_reason: Option<&'static str> = None;
-
-    let mut board_meta: Option<V> = None;
     let mut status_field_available = false;
     let mut status_field_id = String::new();
     let mut status_options_ordered: Vec<String> = Vec::new();
     let mut status_options_by_id: BTreeMap<String, String> = BTreeMap::new();
     let mut done_matched: Vec<String> = Vec::new();
+    if let Some((fid, opts)) = single_select_field(walk.first_board.get("fields"), "Status") {
+        status_field_available = true;
+        status_field_id = fid;
+        for (oid, name) in opts {
+            if DONE_STATUS_NAMES.contains(&name.as_str()) && !done_matched.contains(&name) {
+                done_matched.push(name.clone());
+            }
+            status_options_ordered.push(name.clone());
+            status_options_by_id.insert(oid, name);
+        }
+    } else {
+        record_reason(&mut board_reason, "status_field_unavailable");
+    }
 
     let mut board_present: BTreeSet<(Kind, Number)> = BTreeSet::new();
     let mut seen_active: BTreeSet<(Kind, Number)> = BTreeSet::new();
@@ -994,79 +1593,8 @@ pub(super) fn drift(
     let mut excluded_draft = 0usize;
     let mut excluded_unknown = 0usize;
 
-    while board_pages < MAX_BOARD_PAGES {
-        board_pages += 1;
-        let (board, has_errors, err_reason) =
-            match fetch_board_raw(c, root, &target, expected_id, after.as_deref(), drift_error)? {
-                BoardPageRaw::Ok {
-                    board,
-                    has_errors,
-                    error_reason,
-                } => (board, has_errors, error_reason),
-                BoardPageRaw::Failed(reason) => {
-                    let resolved = reason.unwrap_or("unavailable");
-                    if board_pages == 1 {
-                        return Ok(drift_empty("unavailable", Some(resolved), observed_at));
-                    }
-                    record_reason(&mut board_reason, resolved);
-                    break;
-                }
-            };
-        if has_errors {
-            record_reason(&mut board_reason, err_reason.unwrap_or("partial_response"));
-        }
-        if board_pages == 1 {
-            let V::Bool(closed) = board.get("closed") else {
-                return Ok(drift_empty(
-                    "unavailable",
-                    Some("partial_response"),
-                    observed_at,
-                ));
-            };
-            board_meta = Some(obj([
-                ("id", expected_id.into()),
-                ("number", V::Num(target.number.to_string())),
-                (
-                    "title",
-                    display(board.get("title"), 120).unwrap_or_default().into(),
-                ),
-                ("url", target.canonical.as_str().into()),
-                ("state", if *closed { "CLOSED" } else { "OPEN" }.into()),
-                ("owner", target.login.as_str().into()),
-            ]));
-            if let Some((fid, opts)) = single_select_field(board.get("fields"), "Status") {
-                status_field_available = true;
-                status_field_id = fid;
-                for (oid, name) in opts {
-                    if DONE_STATUS_NAMES.contains(&name.as_str()) && !done_matched.contains(&name) {
-                        done_matched.push(name.clone());
-                    }
-                    status_options_ordered.push(name.clone());
-                    status_options_by_id.insert(oid, name);
-                }
-            } else {
-                record_reason(&mut board_reason, "status_field_unavailable");
-            }
-        }
-        let (V::Arr(nodes), V::Bool(more)) = (
-            board.get("items").get("nodes"),
-            board.get("items").get("pageInfo").get("hasNextPage"),
-        ) else {
-            if board_pages == 1 {
-                return Ok(drift_empty(
-                    "unavailable",
-                    Some("partial_response"),
-                    observed_at,
-                ));
-            }
-            record_reason(&mut board_reason, "partial_response");
-            break;
-        };
-        if nodes.len() > 20 {
-            record_reason(&mut board_reason, "partial_response");
-        }
-        for node in nodes.iter().take(20) {
-            board_items_read += 1;
+    for page_data in &walk.pages_data {
+        for node in &page_data.nodes {
             let &V::Bool(archived) = node.get("isArchived") else {
                 excluded_unknown += 1;
                 record_reason(&mut board_reason, "partial_response");
@@ -1165,30 +1693,8 @@ pub(super) fn drift(
                 status_drift_rows.push((Reverse(number), kind, row));
             }
         }
-        if !*more {
-            board_complete = board_reason.is_none();
-            break;
-        }
-        let next = board
-            .get("items")
-            .get("pageInfo")
-            .get("endCursor")
-            .text()
-            .filter(|s| valid_cursor(s));
-        let Some(cursor) = next else {
-            record_reason(&mut board_reason, "partial_response");
-            break;
-        };
-        if !seen_cursors.insert(cursor.to_owned()) {
-            record_reason(&mut board_reason, "partial_response");
-            break;
-        }
-        if board_pages >= MAX_BOARD_PAGES {
-            record_reason(&mut board_reason, "page_limit");
-            break;
-        }
-        after = Some(cursor.to_owned());
     }
+    let board_complete = walk.exhausted && board_reason.is_none();
 
     let (issues_walk, pulls_walk) =
         if let Some(stop_reason @ ("rate_limited" | "insufficient_scope" | "forbidden")) =
@@ -1288,7 +1794,7 @@ pub(super) fn drift(
     Ok(obj([
         ("status", "available".into()),
         ("observedAt", observed_at.into()),
-        ("board", board_meta.unwrap_or(V::Null)),
+        ("board", board_meta),
         ("incomplete", partial.into()),
         ("partial", partial.into()),
         ("reason", primary_reason.map(V::from).unwrap_or(V::Null)),

@@ -325,7 +325,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v22.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v25.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -334,7 +334,7 @@ fn cross_host_project_reads() {
             html.as_bytes(),
             include_bytes!("../src/conversation-panel.html")
         );
-        let legacy_uri = "ui://oms/conversation-panel/v21.html";
+        let legacy_uri = "ui://oms/conversation-panel/v24.html";
         let legacy = c.call("resources/read", json!({"uri":legacy_uri}));
         let legacy = &legacy["result"]["contents"][0];
         assert_eq!(legacy["uri"], legacy_uri);
@@ -1103,7 +1103,7 @@ fn desktop_lead_conversations() {
             child,
             if child { "1" } else { "0" }.as_ref(),
         );
-        for name in [open, read] {
+        for name in [open, read, "oms_send_lead_message"] {
             let denied = call(&mut blocked, name, &args, owner);
             if child {
                 bad(&denied, "parent app");
@@ -1241,6 +1241,195 @@ fn desktop_lead_conversations() {
         "unavailable"
     );
     assert_eq!(runs(), 3);
+    std::fs::write(dir.join("status"), "0\n").unwrap();
+    std::fs::write(
+        dir.join("answers/fixture.md"),
+        "## Output\nfixture answer\n## Exit\n0\n",
+    )
+    .unwrap();
+
+    let send = "oms_send_lead_message";
+    let tools = c.call("tools/list", json!({}));
+    let schema = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == send)
+        .unwrap();
+    assert_eq!(schema["_meta"]["ui"]["visibility"], json!(["app"]));
+    assert_eq!(schema["annotations"]["idempotentHint"], true);
+    let message = |seat: usize, n: usize| {
+        json!({"room":"lead-room","projectKey":key,"provider":initial["leads"][seat]["provider"],
+            "leadRequestId":initial["leads"][seat]["requestId"],"turnId":format!("10000000-0000-4000-8000-{n:012x}"),
+            "text":format!("Private fixture follow-up {n}")})
+    };
+    let lookup = |c: &mut Client, m: &Value| {
+        call(
+            c,
+            read,
+            &json!({"room":m["room"],"provider":m["provider"],"turnId":m["turnId"]}),
+            owner,
+        )
+    };
+    let await_reply = |c: &mut Client, m: &Value| {
+        until(|| {
+            let r = lookup(c, m);
+            good(&r);
+            let state = payload(&r)["turn"]["status"].clone();
+            assert!(
+                matches!(
+                    state.as_str(),
+                    Some("reserved" | "running" | "unconfirmed" | "replied")
+                ),
+                "{r}"
+            );
+            state == "replied"
+        });
+        let res = lookup(c, m);
+        assert!(
+            !res["result"]["structuredContent"]
+                .to_string()
+                .contains("Private fixture")
+        );
+        assert!(
+            !res["result"]["content"]
+                .to_string()
+                .contains("Private fixture")
+        );
+        let transcript = res["result"]["_meta"]["leadConversation"]["transcript"].clone();
+        let turns = transcript["turns"].as_array().unwrap();
+        let pair: Vec<_> = turns
+            .iter()
+            .filter(|t| t["turnId"] == m["turnId"])
+            .collect();
+        assert_eq!(pair.len(), 2);
+        assert_eq!(pair[0]["role"], "user");
+        assert_eq!(pair[0]["status"], "replied");
+        assert_eq!(pair[0]["text"], m["text"]);
+        let native = if m["provider"] == "agy" {
+            "antigravity"
+        } else {
+            m["provider"].as_str().unwrap()
+        };
+        assert_eq!(pair[1]["role"], native);
+        assert_eq!(
+            pair[1]["text"],
+            format!("{native} received {}", m["text"].as_str().unwrap())
+        );
+        transcript
+    };
+    for (k, v, error) in [
+        ("projectKey", json!("f".repeat(64)), "project changed"),
+        (
+            "leadRequestId",
+            initial["leads"][2]["requestId"].clone(),
+            "selected Lead changed",
+        ),
+        ("text", json!("invalid\u{0}message"), "bytes of text"),
+    ] {
+        let mut m = message(0, 1);
+        m[k] = v;
+        bad(&call(&mut c, send, &m, owner), error);
+    }
+    bad(
+        &call(
+            &mut c,
+            send,
+            &message(0, 1),
+            "01900000-0000-7000-8000-0000000000aa",
+        ),
+        "current Main",
+    );
+    assert_eq!(runs(), 3);
+
+    for seat in 0..3 {
+        let m = message(seat, seat + 1);
+        if seat == 0 {
+            fixture_settings(&source, json!({"leadRoom":true,"gate":true}));
+        }
+        let ack = call(&mut c, send, &m, owner);
+        good(&ack);
+        assert_eq!(payload(&ack)["turn"]["turnId"], m["turnId"]);
+        if seat == 0 {
+            until(|| payload(&lookup(&mut c, &m))["turn"]["status"] == "running");
+            let other = message(0, 9);
+            bad(&call(&mut c, send, &other, owner), "unresolved");
+            assert_eq!(
+                payload(&lookup(&mut c, &other))["turn"]["status"],
+                "not_found"
+            );
+            good(&call(&mut c, send, &m, owner));
+            std::fs::write(source.join("release"), "").unwrap();
+            setup(false);
+        }
+        await_reply(&mut c, &m);
+        good(&call(&mut c, send, &m, owner));
+        assert_eq!(
+            runs(),
+            4 + seat,
+            "exact replay or status relaunched a provider"
+        );
+        let mut changed = m.clone();
+        changed["text"] = json!("another body");
+        bad(&call(&mut c, send, &changed, owner), "different text");
+    }
+    let refused = message(1, 10);
+    let launch = dir.join("launch.json");
+    let saved = std::fs::read(&launch).unwrap();
+    std::fs::write(&launch, "{}").unwrap();
+    let no_launch = call(&mut c, send, &refused, owner);
+    good(&no_launch);
+    assert_eq!(payload(&no_launch)["turn"]["status"], "failed");
+    std::fs::write(&launch, saved).unwrap();
+    good(&call(&mut c, send, &refused, owner));
+    assert_eq!(runs(), 6);
+    for n in 11..=13 {
+        let m = message(1, n);
+        good(&call(&mut c, send, &m, owner));
+        let page = await_reply(&mut c, &m);
+        if n == 13 {
+            assert_eq!(page["hasMore"], true);
+            let older = call(
+                &mut c,
+                read,
+                &json!({"room":"lead-room","provider":"claude","before":page["cursor"]}),
+                owner,
+            );
+            good(&older);
+            let page = &older["result"]["_meta"]["leadConversation"]["transcript"];
+            assert_eq!(page["hasMore"], false);
+            assert_eq!(page["turns"][0]["text"], "fixture answer");
+            assert_eq!(page["turns"][1]["turnId"], message(1, 2)["turnId"]);
+            let foreign = call(
+                &mut c,
+                read,
+                &json!({"room":"lead-room","provider":"agy","before":message(1,2)["turnId"]}),
+                owner,
+            );
+            bad(&foreign, "Invalid Lead conversation page");
+        }
+    }
+    assert_eq!(runs(), 9);
+    // A partial, wrongly bound child cannot confirm delivery or license a relaunch.
+    let damaged = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            std::fs::read_to_string(p.join("prompt.txt"))
+                .ok()
+                .as_deref()
+                == Some("Private fixture follow-up 13\n")
+        })
+        .unwrap();
+    std::fs::write(damaged.join("meta.json"), "{}").unwrap();
+    let uncertain = message(1, 13);
+    assert_eq!(
+        payload(&lookup(&mut c, &uncertain))["turn"]["status"],
+        "unconfirmed"
+    );
+    good(&call(&mut c, send, &uncertain, owner));
+    bad(&call(&mut c, send, &message(1, 14), owner), "unresolved");
+    assert_eq!(runs(), 9);
 }
 
 // Provider assignment: the Room store is proven in room_contract; here the
@@ -1676,7 +1865,7 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 20);
+    assert_eq!(tools.as_array().unwrap().len(), 21);
     assert_eq!(tools[0]["name"], "oms_open_panel");
     assert_eq!(
         tools[0]["description"],
@@ -1687,7 +1876,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v22.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v25.html");
     // Codex uses the stdio transport configuration to decide whether to reuse a running server.
     for package in [
         include_str!("../../../plugins/oms/mcp.json"),
@@ -1746,6 +1935,9 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v19.html"),
         json!("ui://oms/conversation-panel/v20.html"),
         json!("ui://oms/conversation-panel/v21.html"),
+        json!("ui://oms/conversation-panel/v22.html"),
+        json!("ui://oms/conversation-panel/v23.html"),
+        json!("ui://oms/conversation-panel/v24.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -2043,11 +2235,69 @@ fn conversation_panel() {
             "abc.foo="
         ])
     );
+    let cand_fixture = json!({
+        "git": {},
+        "github": {
+            "repository": "example-org/example-repo",
+            "observedAt": "2026-11-26T00:00:00Z",
+            "candidates": {
+                "status": "available",
+                "source": "explicit_project",
+                "observed_at": "2026-11-26T00:00:00Z",
+                "items": [{"rank": 1, "issue": "example-org/example-repo#447", "number": 447}],
+                "recommendations": [{"issue": "example-org/example-repo#447", "number": 447, "class": "candidate", "state": "recommended", "reason": "ready_with_priority"}],
+                "incomplete": false,
+                "reason": null
+            }
+        }
+    });
+    fixture_settings(&source, json!({"stdout":cand_fixture.to_string()}));
+    let cand_reply = c.tool(
+        "oms_panel_git_status",
+        json!({"boardId":"PVT_fixture","candidates":true}),
+    );
+    assert_eq!(
+        cand_reply["result"]["structuredContent"]["github"]["candidates"]["source"],
+        "explicit_project"
+    );
+    assert_eq!(
+        record(&source)["argv"],
+        json!([
+            "github",
+            "panel-status",
+            "--repo",
+            repo,
+            "--json",
+            "--project-id",
+            "PVT_fixture",
+            "--candidates"
+        ])
+    );
+    let wide_title = "🧪".repeat(120);
+    let wide_items: Vec<_> = (1..=16)
+        .map(|n| json!({"rank": n, "issue": format!("example-org/example-repo#{n}"), "number": n, "title": wide_title}))
+        .collect();
+    let wide_cand = json!({"git": {}, "github": {"candidates": {"status": "available", "source": "explicit_project", "observed_at": "2026-11-26T00:00:00Z", "items": wide_items, "incomplete": true, "reason": "result_limit"}}});
+    fixture_settings(&source, json!({"stdout":wide_cand.to_string()}));
+    let wide_reply = c.tool(
+        "oms_panel_git_status",
+        json!({"boardId":"PVT_fixture","candidates":true}),
+    );
+    assert_eq!(wide_reply["result"]["isError"], false);
+    assert_eq!(
+        wide_reply["result"]["structuredContent"]["github"]["candidates"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        16
+    );
+    assert!(wide_reply.to_string().len() < 60_000);
     for args in [
         json!({"issuePreview":0}),
         json!({"issuePreview":10000000000i64}),
         json!({"issuePreview":"9"}),
         json!({"issuePreview":9,"cursor":null}),
+        json!({"issuePreview":9,"candidates":true}),
         json!({"issuePreview":9,"kind":"issue","number":9}),
         json!({"issuePreview":9,"inventory":"issues"}),
         json!({"issuePreview":9,"boardId":"PVT_1"}),
@@ -2060,6 +2310,12 @@ fn conversation_panel() {
         json!({"boardId":"https://example.invalid/x"}),
         json!({"boardId":"PVT_1","inventory":"issues"}),
         json!({"boardId":"PVT_1","kind":"issue","number":1}),
+        json!({"boardId":"PVT_1","candidates":"yes"}),
+        json!({"boardId":"PVT_1","candidates":true,"cursor":"abc.foo="}),
+        json!({"boardId":"PVT_1","candidates":true,"inventory":"issues"}),
+        json!({"boardId":"PVT_1","candidates":true,"kind":"issue","number":1}),
+        json!({"candidates":true}),
+        json!({"candidates":false}),
         json!({"cursor":"abc"}),
         json!({"inventory":"issues","cursor":"x y"}),
         json!({"inventory":"issues","kind":"issue","number":1}),
@@ -5105,7 +5361,38 @@ fn fake_oms() {
             }
         }
         let artifact = out.join("fixture.md");
-        std::fs::write(&artifact, "## Output\nfixture answer\n## Exit\n0\n").unwrap();
+        let reply = args
+            .iter()
+            .filter_map(|a| a.to_str())
+            .find_map(|a| a.strip_prefix("--prompt="))
+            .map_or_else(
+                || "fixture answer".to_owned(),
+                |prompt| {
+                    let field = |name: &str| {
+                        args.windows(2).find(|pair| pair[0] == name).unwrap()[1]
+                            .to_str()
+                            .unwrap()
+                    };
+                    let thread = field("--thread");
+                    let provider = field("--providers");
+                    let owner: Value = serde_json::from_slice(
+                        &std::fs::read(source.join(format!(
+                            "lead-fixture-{}",
+                            if provider == "antigravity" {
+                                "agy"
+                            } else {
+                                provider
+                            }
+                        )))
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(owner["operation"], thread);
+                    assert_ne!(run.file_name().unwrap(), thread);
+                    format!("{provider} received {prompt}")
+                },
+            );
+        std::fs::write(&artifact, format!("## Output\n{reply}\n## Exit\n0\n")).unwrap();
         if cfg["leadRoom"] == true {
             // Normal native peer-ask stdout prints the seat path before its response.
             let provider = args.windows(2).find(|a| a[0] == "--providers").unwrap()[1]

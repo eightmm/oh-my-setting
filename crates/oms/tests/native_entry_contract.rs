@@ -2760,7 +2760,7 @@ if provider == 'codex':
 elif 'Decompose remaining work into at most' in prompt:
     role='planner'
     prefix=json.loads(re.search(r'Ids start with ("[^"]*")\.',prompt).group(1))
-    answer=json.dumps({'tasks':[{'id':prefix+'t1','title':'repair the demonstrated source defect','allowed':['a.txt'],'verify':'bash tests/check.sh','depends':[]}]})
+    answer=json.dumps({'tasks':[{'id':prefix+'t1','title':'repair the demonstrated source defect','brief':'Repair the demonstrated defect in a.txt.','allowed':['a.txt'],'verify':'bash tests/check.sh','depends':[]}]})
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':answer}))
 else:
     role='worker'
@@ -3115,7 +3115,7 @@ elif 'Decompose remaining work into at most' in prompt:
     prefix=json.loads(re.search(r'Ids start with ("[^"]*")\.',prompt).group(1))
     first=prefix=='m1-'
     assert first or prefix=='m2-', prefix
-    answer=json.dumps({'tasks':[{'id':prefix+'t1','title':'implement the frozen milestone','allowed':['a.txt' if first else 'b.txt'],'verify':'bash tests/'+('first.sh' if first else 'second.sh'),'depends':[],'covers':['C1' if first else 'C2']}]})
+    answer=json.dumps({'tasks':[{'id':prefix+'t1','title':'implement the frozen milestone','brief':'Implement the frozen milestone file.','allowed':['a.txt' if first else 'b.txt'],'verify':'bash tests/'+('first.sh' if first else 'second.sh'),'depends':[],'covers':['C1' if first else 'C2']}]})
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':answer}))
 else:
     role='worker'
@@ -5473,6 +5473,18 @@ fn github_project_mode_activates_from_the_checked_in_declaration() {
         "GitHub project mode",
     );
     assert_eq!(std::fs::read(&tasks).unwrap(), before);
+    let brief = data.join(".oms/plan/brief-b.md");
+    {
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&brief)
+            .unwrap()
+            .write_all(b"Implement issue 12.")
+            .unwrap();
+    }
     ok(
         &data,
         &[
@@ -5484,6 +5496,8 @@ fn github_project_mode_activates_from_the_checked_in_declaration() {
             "t",
             "--issue",
             "12",
+            "--brief-file",
+            brief.to_str().unwrap(),
         ],
     );
 
