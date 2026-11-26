@@ -448,15 +448,19 @@ impl Drop for Worktree {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
-fn run_verify(argv: &[OsString], dir: &Path, interrupted: &AtomicBool) -> Result<Raw> {
+fn run_verify(argv: &[OsString], repo: &Path, dir: &Path, interrupted: &AtomicBool) -> Result<Raw> {
     use oms_supervisor::capture::{CaptureOptions, LimitAction};
     use oms_supervisor::process::{Progress, Reactor, Request, Scope, StopReason, Streams};
+    let mut environment = Vec::new();
+    let cargo_guard =
+        oms_command_operations::cargo_slot::cargo_env(repo, dir, "", &mut environment);
     let mut request = Request::new(argv.to_vec());
     request.cwd = Some(dir.to_owned());
     request.stdin = None;
     request.streams = Streams::Separate;
     request.scope = Scope::ProcessGroup;
     request.deadline = Instant::now().checked_add(COMBINED_WALL);
+    request.environment = environment;
     request.remove_environment = std::env::vars_os()
         .map(|(key, _)| key)
         .filter(|key| {
@@ -478,7 +482,7 @@ fn run_verify(argv: &[OsString], dir: &Path, interrupted: &AtomicBool) -> Result
         .start(request)
         .map_err(|e| Error::new(2, e.to_string()))?;
     let mut cancelled = false;
-    loop {
+    let done = loop {
         if interrupted.load(Ordering::Acquire) && !cancelled {
             reactor
                 .stop(id, StopReason::Cancelled)
@@ -490,31 +494,30 @@ fn run_verify(argv: &[OsString], dir: &Path, interrupted: &AtomicBool) -> Result
             .map_err(|e| Error::new(2, e))?
         {
             Progress::Pending(_) => {}
-            Progress::Complete(done) => {
-                require(
-                    done.cleanup_complete() && done.output_complete(),
-                    "combined verification supervision incomplete",
-                )?;
-                return match done.stop {
-                    Some(StopReason::Cancelled) => {
-                        Err(Error::new(130, "combined verification interrupted"))
-                    }
-                    Some(StopReason::Deadline) => Err(Error::new(
-                        124,
-                        "combined verification exceeded its wall deadline",
-                    )),
-                    Some(_) => Err(Error::new(
-                        125,
-                        "combined verification exceeded its output bound or was stopped",
-                    )),
-                    None => Ok(Raw {
-                        code: done.exit.map_or(125, |e| e.shell_code()),
-                        stdout: tail(&done.stdout.bytes),
-                        stderr: tail(&done.stderr.map_or_else(Vec::new, |s| s.bytes)),
-                    }),
-                };
-            }
+            Progress::Complete(done) => break done,
         }
+    };
+    drop(reactor);
+    drop(cargo_guard);
+    require(
+        done.cleanup_complete() && done.output_complete(),
+        "combined verification supervision incomplete",
+    )?;
+    match done.stop {
+        Some(StopReason::Cancelled) => Err(Error::new(130, "combined verification interrupted")),
+        Some(StopReason::Deadline) => Err(Error::new(
+            124,
+            "combined verification exceeded its wall deadline",
+        )),
+        Some(_) => Err(Error::new(
+            125,
+            "combined verification exceeded its output bound or was stopped",
+        )),
+        None => Ok(Raw {
+            code: done.exit.map_or(125, |e| e.shell_code()),
+            stdout: tail(&done.stdout.bytes),
+            stderr: tail(&done.stderr.map_or_else(Vec::new, |s| s.bytes)),
+        }),
     }
 }
 /// Merge `candidate_commits` on a detached scratch worktree at
@@ -581,7 +584,7 @@ pub fn verify_combined(
     }
     let combined = git_ok(&worktree.path, &["rev-parse", "HEAD"])?;
     if let Some(argv) = verify_argv.filter(|argv| !argv.is_empty()) {
-        let out = run_verify(argv, &worktree.path, interrupted)?;
+        let out = run_verify(argv, &repo, &worktree.path, interrupted)?;
         if out.code != 0 {
             return Ok(CombinedOutcome::VerificationFailed {
                 commit: combined,

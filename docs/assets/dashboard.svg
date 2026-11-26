@@ -1,20 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="850" height="320" viewBox="0 0 850 320" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, &quot;DejaVu Sans Mono&quot;, monospace">
+<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="500" viewBox="0 0 1300 500" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, &quot;DejaVu Sans Mono&quot;, monospace">
 <rect width="100%" height="100%" rx="14" fill="#11151c"/>
-<path d="M14 0h822a14 14 0 0 1 14 14v34H0V14A14 14 0 0 1 14 0z" fill="#252b36"/>
+<path d="M14 0h1272a14 14 0 0 1 14 14v34H0V14A14 14 0 0 1 14 0z" fill="#252b36"/>
 <circle cx="22" cy="23" r="5" fill="#f07178"/><circle cx="40" cy="23" r="5" fill="#ffcb6b"/><circle cx="58" cy="23" r="5" fill="#c3e88d"/>
-<text xml:space="preserve" x="325" y="28" fill="#c6d0e0" font-family="sans-serif" font-size="13" style="white-space: pre">Dashboard</text>
-<text xml:space="preserve" x="20" y="62" font-size="15px" style="white-space: pre" fill="#c6d0e0">OMS dashboard  repo=acme/webapp  feature/validation@abc1234  snapshot=2026-10-20T12:00:00Z</text>
-<text xml:space="preserve" x="20" y="80" font-size="15px" style="white-space: pre" fill="#c6d0e0">coverage: complete</text>
-<text xml:space="preserve" x="20" y="98" font-size="15px" style="white-space: pre" fill="#c6d0e0">goal: Ship reliable request validation (task)</text>
-<text xml:space="preserve" x="20" y="116" font-size="15px" style="white-space: pre" fill="#c6d0e0">scope: allowed=src/ (task)  forbidden=-</text>
-<text xml:space="preserve" x="20" y="134" font-size="15px" style="white-space: pre" fill="#c6d0e0">task: validation status=active verification=pending</text>
-<text xml:space="preserve" x="20" y="152" font-size="15px" style="white-space: pre" fill="#c6d0e0">plan: 3 task(s)  running=1 review=1 done=1</text>
-<text xml:space="preserve" x="20" y="170" font-size="15px" style="white-space: pre" fill="#c6d0e0">attempts (OMS lifecycle): 4 total, 2 active  working=1 review=1</text>
-<text xml:space="preserve" x="20" y="188" font-size="15px" style="white-space: pre" fill="#c6d0e0">operations (artifact index): none recorded</text>
-<text xml:space="preserve" x="20" y="206" font-size="15px" style="white-space: pre" fill="#c6d0e0">review gate: recorded window pass=2 fail=0 unknown=0</text>
-<text xml:space="preserve" x="20" y="224" font-size="15px" style="white-space: pre" fill="#c6d0e0">attention: 2 item(s)</text>
-<text xml:space="preserve" x="20" y="242" font-size="15px" style="white-space: pre" fill="#c6d0e0">  high worker_review: Review validation patch</text>
-<text xml:space="preserve" x="20" y="260" font-size="15px" style="white-space: pre" fill="#c6d0e0">     next: oms panel</text>
-<text xml:space="preserve" x="20" y="278" font-size="15px" style="white-space: pre" fill="#c6d0e0">  medium verification: Verify acceptance criteria</text>
-<text xml:space="preserve" x="20" y="296" font-size="15px" style="white-space: pre" fill="#c6d0e0">     next: oms panel</text>
+<text xml:space="preserve" x="614" y="28" fill="#c6d0e0" font-family="sans-serif" font-size="13" style="white-space: pre">Dashboard</text>
+<text xml:space="preserve" x="20" y="62" font-size="15px" style="white-space: pre" fill="#c6d0e0">OMS dashboard  repo=webapp  main@a5c899386d64  snapshot=2026-11-26T05:50:41Z</text>
+<text xml:space="preserve" x="20" y="80" font-size="15px" style="white-space: pre" fill="#c6d0e0">coverage: OMS-managed collaboration records only; native provider subagents that never touched OMS state are not observed</text>
+<text xml:space="preserve" x="20" y="98" font-size="15px" style="white-space: pre" fill="#c6d0e0">observation: obs-v1:032d59f9f33417d2e26a143e (multi-source, non-atomic, complete)  observed=2026-11-26T05:50:41Z</text>
+<text xml:space="preserve" x="20" y="116" font-size="15px" style="white-space: pre" fill="#c6d0e0">goal: Ship reliable request validation (plan)</text>
+<text xml:space="preserve" x="20" y="134" font-size="15px" style="white-space: pre" fill="#c6d0e0">scope: allowed=docs/,src/ (plan)  forbidden=</text>
+<text xml:space="preserve" x="20" y="152" font-size="15px" style="white-space: pre" fill="#c6d0e0">task: none active</text>
+<text xml:space="preserve" x="20" y="170" font-size="15px" style="white-space: pre" fill="#c6d0e0">plan: 4 task(s)  ready=3 running=1</text>
+<text xml:space="preserve" x="20" y="188" font-size="15px" style="white-space: pre" fill="#c6d0e0">attempts (OMS lifecycle): 5 total, 3 active  working=2 done=1 review=1 failed=1</text>
+<text xml:space="preserve" x="20" y="206" font-size="15px" style="white-space: pre" fill="#c6d0e0">  att_7f5ed1d0f30e4a99803a1f9b1b48b346 failed antigravity/call task=edge-cases tokens=1980 cost_microusd=unknown 2026-11-26T05:50:36Z</text>
+<text xml:space="preserve" x="20" y="224" font-size="15px" style="white-space: pre" fill="#c6d0e0">  att_0fcd73d16aea4294afea0804837077f1 review claude/review task=validation-review tokens=2640 cost_microusd=unknown 2026-11-26T05:50:36Z</text>
+<text xml:space="preserve" x="20" y="242" font-size="15px" style="white-space: pre" fill="#c6d0e0">  att_a8e7a65ea4b3410f880c78bcd13a6b65 working codex/delegate task=validation tokens=3150 cost_microusd=unknown 2026-11-26T05:50:36Z</text>
+<text xml:space="preserve" x="20" y="260" font-size="15px" style="white-space: pre" fill="#c6d0e0">  att_a20baaa20d114845b1efd4561b377d61 done codex/delegate task=schema-check tokens=4820 cost_microusd=unknown 2026-11-26T05:50:35Z</text>
+<text xml:space="preserve" x="20" y="278" font-size="15px" style="white-space: pre" fill="#c6d0e0">  att_300a1cad71554513a313d2e6967b1505 working codex/panel-main task=unknown tokens=unknown cost_microusd=unknown 2026-11-26T05:50:35Z</text>
+<text xml:space="preserve" x="20" y="296" font-size="15px" style="white-space: pre" fill="#c6d0e0">operations (artifact index, newest first):</text>
+<text xml:space="preserve" x="20" y="314" font-size="15px" style="white-space: pre" fill="#c6d0e0">  codex panel-result model=unknown route=unknown exit=0 unknown served=unknown tokens=unknown at=2026-11-26T05:50:37Z</text>
+<text xml:space="preserve" x="20" y="332" font-size="15px" style="white-space: pre" fill="#c6d0e0">  codex panel-result model=unknown route=unknown exit=0 unknown served=unknown tokens=unknown at=2026-11-26T05:50:36Z</text>
+<text xml:space="preserve" x="20" y="350" font-size="15px" style="white-space: pre" fill="#c6d0e0">review gate: none recorded in window (not a pass)</text>
+<text xml:space="preserve" x="20" y="368" font-size="15px" style="white-space: pre" fill="#c6d0e0">acceptance: unknown/5 verified  missing=5  (worker completion is not acceptance)</text>
+<text xml:space="preserve" x="20" y="386" font-size="15px" style="white-space: pre" fill="#c6d0e0">  missing criterion-plan-acceptance-0031fd18fe [plan] The plan-level acceptance command passes on the final tree.</text>
+<text xml:space="preserve" x="20" y="404" font-size="15px" style="white-space: pre" fill="#c6d0e0">  missing plan-task-schema-check [plan-task] Reject empty and oversized request IDs</text>
+<text xml:space="preserve" x="20" y="422" font-size="15px" style="white-space: pre" fill="#c6d0e0">  missing plan-task-validation [plan-task] Add request boundary validation</text>
+<text xml:space="preserve" x="20" y="440" font-size="15px" style="white-space: pre" fill="#c6d0e0">  missing plan-task-edge-cases [plan-task] Verify malformed identifier handling</text>
+<text xml:space="preserve" x="20" y="458" font-size="15px" style="white-space: pre" fill="#c6d0e0">  missing plan-task-docs [plan-task] Document validation error codes</text>
+<text xml:space="preserve" x="20" y="476" font-size="15px" style="white-space: pre" fill="#c6d0e0">attention: 0 item(s)</text>
 </svg>

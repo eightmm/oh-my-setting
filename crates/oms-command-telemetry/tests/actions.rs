@@ -293,13 +293,16 @@ fn migration_and_retention_are_consistent() {
     check_code(&root, &["validate"], 0);
     let local_reviews = concat!(
         "{\"schema\":1,\"kind\":\"review-outcome\",\"exit\":2,\"ts\":\"2026-07-01\"}\n",
-        "{\"schema\":1,\"kind\":\"review-verify\",\"exit\":1,\"ts\":\"2026-07-01\"}\n"
+        "{\"schema\":1,\"kind\":\"review-verify\",\"exit\":1,\"ts\":\"2026-07-01\"}\n",
+        "{\"schema\":1,\"kind\":\"patch-admit\",\"exit\":0,\"ts\":\"2026-07-01\"}\n",
+        "{\"schema\":1,\"kind\":\"patch-land\",\"exit\":0,\"ts\":\"2026-07-01\"}\n"
     );
     root.index(local_reviews);
     assert_ok(&native(&root, &["migrate"]));
     check_code(&root, &["validate"], 0);
     let migrated = std::fs::read_to_string(root.0.join(".oms/artifacts/index.jsonl")).unwrap();
-    for (line, exit) in migrated.lines().zip([2, 1]) {
+    assert_eq!(migrated.lines().count(), 4);
+    for (line, exit) in migrated.lines().zip([2, 1, 0, 0]) {
         let row = oms_context::parse_json(line.as_bytes()).unwrap();
         assert_eq!(support::text(support::field(&row, "provider")), "local");
         assert_eq!(
@@ -312,6 +315,35 @@ fn migration_and_retention_are_consistent() {
         std::fs::read_to_string(root.0.join(".oms/artifacts/index.jsonl")).unwrap(),
         migrated
     );
+    // A published landing patch is a hard link; migrate keeps its path and
+    // takes the recorded digest instead of rewriting it as external.
+    root.write(".oms/landing-patches/land-1.patch", b"diff");
+    std::fs::hard_link(
+        root.0.join(".oms/landing-patches/land-1.patch"),
+        root.0.join(".oms/landing-patches/anchor"),
+    )
+    .unwrap();
+    let digest = "ab".repeat(32);
+    root.index(format!(
+        "{{\"schema\":1,\"kind\":\"patch-land\",\"exit\":0,\"ts\":\"2026-07-01\",\"event_id\":\"evt_land\",\"patch\":\".oms/landing-patches/land-1.patch\",\"patch_sha256\":\"{digest}\"}}\n"
+    ));
+    assert_ok(&native(&root, &["migrate"]));
+    check_code(&root, &["validate"], 0);
+    let land = std::fs::read(root.0.join(".oms/artifacts/index.jsonl")).unwrap();
+    let land = oms_context::parse_json(&land).unwrap();
+    assert_eq!(
+        support::text(support::field(&land, "patch")),
+        ".oms/landing-patches/land-1.patch"
+    );
+    let Json::Object(keys) = &land else {
+        panic!("row")
+    };
+    assert!(!keys.iter().any(|(k, _)| k == b"patch_external"));
+    assert_eq!(
+        support::text(support::field(&land, "artifact_id")),
+        format!("sha256:{digest}")
+    );
+    assert_eq!(support::text(support::field(&land, "provider")), "local");
     root.index("{\"kind\":\"call\",\"exit\":0,\"ts\":\"2026-07-01\"}\n");
     assert_ok(&native(&root, &["migrate"]));
     check_code(&root, &["validate"], 1);
