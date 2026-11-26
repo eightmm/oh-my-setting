@@ -1143,6 +1143,25 @@ impl Plan<'_> {
     pub fn status_snapshot(&self) -> Result<Value> {
         self.status_value(&mut self.load()?)
     }
+
+    /// Project the expected Plan from its validated snapshot and revalidate the
+    /// current Plan before returning the result.
+    pub fn status_snapshot_for(&self, expected: &[u8]) -> Result<Value> {
+        let status = {
+            let mut snapshot = self.load()?;
+            require(
+                snapshot.raw.as_deref() == Some(expected),
+                "plan changed during projection",
+            )?;
+            self.status_value(&mut snapshot)?
+        };
+        require(
+            self.load()?.raw.as_deref() == Some(expected),
+            "plan changed during projection",
+        )?;
+        Ok(status)
+    }
+
     pub fn work_status_snapshot(&self, ids: &[&str]) -> Result<oms_context::Json> {
         let value = self.status_snapshot()?;
         oms_work_inspect::plan_status_snapshot(&json::canonical(&value)?, ids)

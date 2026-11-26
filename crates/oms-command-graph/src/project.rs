@@ -754,11 +754,7 @@ pub fn context_dependencies_with_groups(
     let paths: Vec<_> = names.iter().cloned().collect();
     let state = state_dir(repo)?;
     let graph = build::read_cached_graph(repo, &state, groups, cancel)?;
-    let mut index = Graph::new(
-        graph
-            .clone()
-            .unwrap_or_else(|| json!({"nodes":[], "edges":[]})),
-    )?;
+    let mut index = Graph::new(graph.unwrap_or_else(|| json!({"nodes":[], "edges":[]})))?;
     let mut blast = index.blast(&paths, Some(1), &["EXTRACTED"], &[])?;
     let unmatched: Vec<_> = array(&blast, "unmatched")
         .iter()
@@ -784,7 +780,7 @@ pub fn context_dependencies_with_groups(
         .map(str::to_owned)
         .collect();
     for path in &paths {
-        for node in index.nodes.values().filter(|n| s(n, "path") == path) {
+        for node in index.path_nodes(path) {
             for edge in index
                 .out
                 .get(s(node, "id"))
