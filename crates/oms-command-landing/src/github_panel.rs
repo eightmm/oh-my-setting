@@ -576,6 +576,10 @@ pub(super) fn status(c: &Context<'_>, o: &crate::cli::Options) -> crate::Result<
         crate::require(o.has("project-id"), "--drift requires --project-id NODE_ID")?;
         crate::require(!o.has("cursor"), "--drift cannot combine with --cursor")?;
         crate::require(
+            !o.has("candidates"),
+            "--drift cannot combine with --candidates",
+        )?;
+        crate::require(
             !look_up && !o.has("inventory"),
             "project cannot combine with issue, pull or inventory",
         )?;
@@ -609,6 +613,42 @@ pub(super) fn status(c: &Context<'_>, o: &crate::cli::Options) -> crate::Result<
                 o.get("project-id"),
             )))
         };
+    }
+    if o.has("candidates") {
+        crate::require(
+            o.has("project-id"),
+            "--candidates requires --project-id NODE_ID",
+        )?;
+        crate::require(
+            !o.has("cursor"),
+            "--candidates cannot combine with --cursor",
+        )?;
+        crate::require(
+            !look_up && !o.has("inventory"),
+            "project cannot combine with issue, pull or inventory",
+        )?;
+        let observed_at = now();
+        let report = board::candidates(
+            c,
+            git.repo,
+            slug.as_ref(),
+            o.get("project-id"),
+            &observed_at,
+        )?;
+        return Output::json(&obj([
+            ("git", checkout),
+            (
+                "github",
+                obj([
+                    (
+                        "repository",
+                        slug.map(|s| s.to_string().into()).unwrap_or(V::Null),
+                    ),
+                    ("observedAt", observed_at.into()),
+                    ("candidates", report),
+                ]),
+            ),
+        ]));
     }
     if look_up || o.has("inventory") || o.has("cursor") || o.has("project-id") {
         let (key, detail) = if o.has("project-id") {
