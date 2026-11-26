@@ -42,7 +42,7 @@ pub(super) fn guard_unbound(panel: &Panel<'_>, options: &Options) -> Result<()> 
         !crate::rows(&plan["tasks"])
             .iter()
             .any(|task| !matches!(task["state"].as_str(), Some("done" | "cancelled"))),
-        "canonical work is pending: use Codex --task-id, managed --dispatch --task-id, or explicitly --unbound for conversation without task credit",
+        "canonical work is pending. Use --orchestrator codex --task-id ID --task TEXT or oms plan-run --to PROVIDER --id TASK. Use --unbound for conversation without task credit.",
     )
 }
 

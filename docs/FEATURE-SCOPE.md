@@ -329,8 +329,11 @@ existing [tick wake](../crates/oms-panel-core/src/tick.rs) only notifies an elig
 idle Main. Main still chooses import, reconciliation and continuation; approved
 goal-drive/autopilot remains the existing bounded automatic executor. There is no
 new scheduler, permission default, native session control or completion authority.
-Other native providers use managed task dispatch until their bound adapters exist;
-explicit unbound conversations receive no canonical task credit. The practical
+Claude and AGY canonical tasks use the managed panel route backed by `plan-run`.
+Standalone canonical work uses `plan-run` directly. The
+[Plan execution guide](TERMINAL-PANEL.md#shared-plan-task-transitions) explains
+how to select a ready task and inspect its result.
+Explicit unbound conversations receive no canonical task credit. The practical
 [two-layer return workflow](TERMINAL-PANEL.md#retain-a-bound-native-report) documents
 the public result digest separately from the source digest and remaining limits.
 

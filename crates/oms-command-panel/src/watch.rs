@@ -100,6 +100,8 @@ fn run_with_source_writer(
     let mut agy_first_child_wake = crate::wakeup::FirstChildWake::default();
     #[cfg(target_os = "linux")]
     let mut codex_roster_wake = crate::wakeup::FirstChildWake::default();
+    #[cfg(target_os = "linux")]
+    let mut claude_roster_wake = crate::wakeup::FirstChildWake::default();
     let mut deadline = Instant::now();
     let mut scope_sample = None;
     let mut read = attention::load(repo, &room);
@@ -204,6 +206,7 @@ fn run_with_source_writer(
             {
                 agy_first_child_wake.replace(None);
                 codex_roster_wake.replace(None);
+                claude_roster_wake.replace(None);
             }
             let mut native_projection = None;
             if let Some(reading) = native {
@@ -211,6 +214,7 @@ fn run_with_source_writer(
                 {
                     agy_first_child_wake.replace(reading.observations.agy_first_child_watch());
                     codex_roster_wake.replace(reading.observations.codex_roster_watch());
+                    claude_roster_wake.replace(reading.observations.claude_roster_watch());
                 }
                 native_projection = Some(reading.projection);
                 if accepted_refresh {
@@ -500,9 +504,13 @@ fn run_with_source_writer(
             }
             if let Some(terminal) = &mut terminal {
                 #[cfg(target_os = "linux")]
-                let native_fd = [agy_first_child_wake.fd(), codex_roster_wake.fd()];
+                let native_fd = [
+                    agy_first_child_wake.fd(),
+                    codex_roster_wake.fd(),
+                    claude_roster_wake.fd(),
+                ];
                 #[cfg(not(target_os = "linux"))]
-                let native_fd = [None; 2];
+                let native_fd = [None; 3];
                 let (keys, woken, _native_ready) = terminal.wait_woken(
                     deadline
                         .saturating_duration_since(Instant::now())
@@ -518,7 +526,8 @@ fn run_with_source_writer(
                     let now = Instant::now();
                     let agy_woken = agy_first_child_wake.refresh(_native_ready[0], idle, now);
                     let codex_woken = codex_roster_wake.refresh(_native_ready[1], idle, now);
-                    woken || agy_woken || codex_woken
+                    let claude_woken = claude_roster_wake.refresh(_native_ready[2], idle, now);
+                    woken || agy_woken || codex_woken || claude_woken
                 };
                 let mut refresh = woken;
                 let mut collect_ready = false;
@@ -9848,10 +9857,20 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn claude_watch_wakes_on_child_transcript_and_skips_symlinked_directory() {
+        private_native_watch_fixture(
+            "watch::tests::claude_watch_wakes_on_child_transcript_and_skips_symlinked_directory",
+            Some(CodexWatchStimulus::Claude),
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     enum CodexWatchStimulus {
         Complete,
         Partial,
         Overview,
+        Claude,
     }
 
     #[cfg(target_os = "linux")]
@@ -9875,7 +9894,8 @@ mod tests {
             ["Codex archived A", "Codex archived B", "Codex archived C"];
         const OVERVIEW_CHILD: &str = "Codex new child fixture";
         const OVERVIEW_PARTIAL_MODEL: &str = "fixture/partial-frame:v2";
-        let codex = stimulus.is_some();
+        let claude = matches!(stimulus, Some(CodexWatchStimulus::Claude));
+        let codex = stimulus.is_some() && !claude;
         let overview = matches!(stimulus, Some(CodexWatchStimulus::Overview));
         let complete_overview_header = std::cell::Cell::new(false);
         let timing = matches!(stimulus, Some(CodexWatchStimulus::Complete))
@@ -10116,6 +10136,7 @@ mod tests {
             Some(CodexWatchStimulus::Complete) => "codex",
             Some(CodexWatchStimulus::Partial) => "partial",
             Some(CodexWatchStimulus::Overview) => "overview",
+            Some(CodexWatchStimulus::Claude) => "claude",
         };
         let tmp = Temp::new(label);
         // A long checkout selects the real five-second no-socket fallback
@@ -10142,6 +10163,10 @@ mod tests {
             mkdir_p(d);
         }
         let codex_home = home.join(".codex");
+        let claude_home = tmp.0.join("claude-home");
+        if claude {
+            mkdir_p(&claude_home);
+        }
         if codex {
             mkdir_p(&codex_home);
             let xdg = home.join(".config");
@@ -10231,7 +10256,8 @@ mod tests {
         std::fs::write(&lock_path, b"").unwrap();
         std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-        let mut holder = Command::new("flock")
+        let mut holder_cmd = Command::new("flock");
+        holder_cmd
             .arg("-n")
             .arg("-F")
             .arg(&lock_path)
@@ -10240,6 +10266,8 @@ mod tests {
                 "-c",
                 if codex {
                     "exec -a codex bash"
+                } else if claude {
+                    "exec -a claude bash"
                 } else {
                     "exec -a agy bash"
                 },
@@ -10250,9 +10278,11 @@ mod tests {
             .current_dir(&repo)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        if claude {
+            holder_cmd.env("CLAUDE_CONFIG_DIR", &claude_home);
+        }
+        let mut holder = holder_cmd.spawn().unwrap();
         let mut h_stdin = holder.stdin.take().unwrap();
         let mut h_reader = BufReader::new(holder.stdout.take().unwrap());
         writeln!(h_stdin, "echo \"READY:$$\"").unwrap();
@@ -10392,6 +10422,8 @@ elif is list-panes -s -t %2 -F "$SESSION"; then
   if [ "$window" != absent ]; then
     if [ -n "${OMS_TEST_CODEX_LEAD:-}" ]; then
       printf '$1\t%s\t%%3\t%s\t0\t0\t\t\t\t\t%s\tcodex\t%s\t0\t._1_\n' "$window" "$lead_pid" "$room" "$attempt"
+    elif [ -n "${OMS_TEST_CLAUDE_LEAD:-}" ]; then
+      printf '$1\t%s\t%%3\t%s\t0\t0\t\t\t\t\t%s\tclaude\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
     else
       printf '$1\t%s\t%%4\t%s\t0\t0\t\t\t\t\t%s\tantigravity\t%s\t0\t.__\n' "$window" "$lead_pid" "$room" "$attempt"
     fi
@@ -10427,7 +10459,7 @@ elif { [ "$stage" = dialog ] || [ "$stage" = confirm ]; } && is capture-pane -p 
   printf '%s\n' '└ Models & Quota' 'GEMINI MODELS' 'Weekly Limit Remaining' '[███] 94%' 'Five Hour Limit Remaining' '[███] 86%' 'CLAUDE AND GPT MODELS' 'Weekly Limit Remaining' '[███] 100%'
 elif is capture-pane -p -t %1; then
   printf '› \n\n  GPT-6.2-Sol high · Context 9%% left · weekly 13%% left · main · ~/fixture · Main [default]\n← for agents · ? for shortcuts\n'
-elif [ -n "${OMS_TEST_CODEX_LEAD:-}" ] && { is capture-pane -p -t %3 || is capture-pane -p -J -S -100 -t %3; }; then
+elif { [ -n "${OMS_TEST_CODEX_LEAD:-}" ] || [ -n "${OMS_TEST_CLAUDE_LEAD:-}" ]; } && { is capture-pane -p -t %3 || is capture-pane -p -J -S -100 -t %3; }; then
   /bin/cat "${OMS_FAKE_PROMPT_FILE?}"
 elif is capture-pane -p -t %4 || is capture-pane -p -J -S -100 -t %4; then
   if [ -n "$stall" ] && [ -e "$stall" ]; then
@@ -10623,6 +10655,9 @@ fi
                 .stderr(Stdio::inherit());
             if codex {
                 pty_cmd.env("OMS_TEST_CODEX_LEAD", "1");
+            }
+            if claude {
+                pty_cmd.env("OMS_TEST_CLAUDE_LEAD", "1");
             }
             let mut child = pty_cmd.spawn().unwrap();
             std::fs::write(&watch_pid, child.id().to_string()).unwrap();
@@ -10912,6 +10947,278 @@ fi
                     }
                 }
             }
+            let _ = holder.kill();
+            let _ = holder.wait();
+            return;
+        }
+
+        if claude {
+            std::fs::write(&lead_window, "@3").unwrap();
+            std::fs::write(&prompt_file, format!("❯ {prompt_line}\n")).unwrap();
+            let session_id = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+            let old_agent = "f0e1d2c3b4a59687";
+            let new_agent = "a1b2c3d4e5f60718";
+            let history = "Claude history fixture";
+            let next = "Claude child-only fixture";
+            let lead_owner = oms_panel_core::terminals::process(lead_pid).unwrap();
+            let proc_start = crate::claude_lead_usage::linux::start_time(&lead_owner.birth)
+                .unwrap()
+                .to_owned();
+            let key: String = repo
+                .to_str()
+                .unwrap()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let sessions_dir = claude_home.join("sessions");
+            let projects_dir = claude_home.join("projects");
+            let project_dir = projects_dir.join(key);
+            let session_dir = project_dir.join(session_id);
+            let subagents_dir = session_dir.join("subagents");
+            let elsewhere = tmp.0.join("claude-symlink-target");
+            for dir in [&sessions_dir, &projects_dir, &project_dir, &session_dir] {
+                mkdir_p(dir);
+            }
+            let record_file = sessions_dir.join(format!("{lead_pid}.json"));
+            std::fs::write(
+                &record_file,
+                json!({
+                    "pid": lead_pid,
+                    "procStart": proc_start,
+                    "sessionId": session_id,
+                    "cwd": repo.to_str().unwrap(),
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::set_permissions(&record_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let lead_transcript = project_dir.join(format!("{session_id}.jsonl"));
+            let lead_entries = [
+                json!({
+                    "type": "user",
+                    "sessionId": session_id,
+                    "isSidechain": false,
+                    "origin": {"kind": "human"},
+                    "promptSource": "typed",
+                    "message": {"role": "user", "content": prompt_line},
+                }),
+                json!({
+                    "type": "assistant",
+                    "sessionId": session_id,
+                    "isSidechain": false,
+                    "message": {"role": "assistant", "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_old",
+                        "name": "Agent",
+                        "input": {"prompt": "old child prompt", "description": history},
+                    }]},
+                }),
+                json!({
+                    "type": "user",
+                    "sessionId": session_id,
+                    "isSidechain": false,
+                    "toolUseResult": {"agentId": old_agent},
+                    "message": {"role": "user", "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_old",
+                        "content": "spawned",
+                    }]},
+                }),
+                json!({
+                    "type": "assistant",
+                    "sessionId": session_id,
+                    "isSidechain": false,
+                    "message": {"role": "assistant", "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_new",
+                        "name": "Agent",
+                        "input": {"prompt": "new child prompt", "description": next},
+                    }]},
+                }),
+                json!({
+                    "type": "user",
+                    "sessionId": session_id,
+                    "isSidechain": false,
+                    "toolUseResult": {"agentId": new_agent},
+                    "message": {"role": "user", "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_new",
+                        "content": "spawned",
+                    }]},
+                }),
+            ];
+            let mut lead_body = String::new();
+            for entry in &lead_entries {
+                lead_body.push_str(&entry.to_string());
+                lead_body.push('\n');
+            }
+            std::fs::write(&lead_transcript, lead_body).unwrap();
+            std::fs::set_permissions(&lead_transcript, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+
+            let primary_captures = || {
+                std::fs::read_to_string(&log)
+                    .unwrap()
+                    .lines()
+                    .filter(|line| *line == "capture-pane -p -t %3")
+                    .count()
+            };
+            let inotify_fds = || {
+                let pid = std::fs::read_to_string(&watch_pid).unwrap();
+                std::fs::read_dir(format!("/proc/{pid}/fd"))
+                    .unwrap()
+                    .flatten()
+                    .filter(|entry| {
+                        std::fs::read_link(entry.path())
+                            .is_ok_and(|target| target == Path::new("anon_inode:inotify"))
+                    })
+                    .count()
+            };
+            let claude_watching = |dir: &Path| {
+                use std::os::unix::fs::MetadataExt;
+                let Ok(meta) = std::fs::symlink_metadata(dir) else {
+                    return false;
+                };
+                let needle = format!(" ino:{:x} ", meta.ino());
+                let pid = std::fs::read_to_string(&watch_pid).unwrap();
+                std::fs::read_dir(format!("/proc/{pid}/fd"))
+                    .unwrap()
+                    .flatten()
+                    .filter(|entry| {
+                        std::fs::read_link(entry.path())
+                            .is_ok_and(|target| target == Path::new("anon_inode:inotify"))
+                    })
+                    .any(|entry| {
+                        let fd = entry.file_name();
+                        std::fs::read_to_string(Path::new(&format!("/proc/{pid}/fdinfo")).join(fd))
+                            .is_ok_and(|info| {
+                                info.lines().any(|line| {
+                                    line.starts_with("inotify ") && line.contains(&needle)
+                                })
+                            })
+                    })
+            };
+            let seed_subagents = |dir: &Path| {
+                let _ = std::fs::remove_dir_all(dir);
+                mkdir_p(dir);
+                for (name, body) in [
+                    (
+                        format!("agent-{old_agent}.meta.json"),
+                        json!({"toolUseId": "toolu_old", "spawnDepth": 1}).to_string(),
+                    ),
+                    (format!("agent-{old_agent}.jsonl"), String::new()),
+                    (
+                        format!("agent-{new_agent}.meta.json"),
+                        json!({"toolUseId": "toolu_new", "spawnDepth": 1}).to_string(),
+                    ),
+                ] {
+                    let file = dir.join(name);
+                    std::fs::write(&file, body).unwrap();
+                    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                }
+            };
+
+            let mut armed_fds = 0;
+            let (_, calls) = run_pty(false, false, &mut |input, stream, screen, rx| {
+                wait_for(stream, screen, rx, "Claude overview", &mut |lines| {
+                    lines.iter().any(|line| line.contains("[Overview]"))
+                        && claude_watching(&session_dir)
+                });
+                input.write_all(b"\t").unwrap();
+                input.flush().unwrap();
+                wait_for(stream, screen, rx, "Claude empty tasks", &mut |lines| {
+                    lines.iter().any(|line| line.contains("[All tasks]"))
+                        && lines.iter().any(|line| line.contains(WORKER))
+                        && lines
+                            .iter()
+                            .all(|line| !line.contains(history) && !line.contains(next))
+                });
+                assert!(claude_watching(&session_dir) && !claude_watching(&subagents_dir));
+                armed_fds = inotify_fds();
+
+                let prior = primary_captures();
+                let started = Instant::now();
+                seed_subagents(&subagents_dir);
+                loop {
+                    apply_frames(stream, screen);
+                    if screen.iter().any(|line| line.contains(history)) {
+                        break;
+                    }
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "Claude lazy subagents paint exceeded 5s; screen:\n{}",
+                        screen.join("\n")
+                    );
+                    if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(10)) {
+                        stream.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                }
+                assert!(screen.iter().all(|line| !line.contains(next)));
+                assert!(claude_watching(&subagents_dir) && !claude_watching(&session_dir));
+                assert_eq!(inotify_fds(), armed_fds);
+                assert_eq!(primary_captures(), prior + 1);
+
+                let prior = primary_captures();
+                let started = Instant::now();
+                let child = subagents_dir.join(format!("agent-{new_agent}.jsonl"));
+                std::fs::write(&child, b"").unwrap();
+                std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o600)).unwrap();
+                loop {
+                    apply_frames(stream, screen);
+                    if screen.iter().any(|line| line.contains(next)) {
+                        break;
+                    }
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "Claude child paint exceeded 5s; screen:\n{}",
+                        screen.join("\n")
+                    );
+                    if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(10)) {
+                        stream.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                }
+                assert_eq!(inotify_fds(), armed_fds);
+                assert_eq!(primary_captures(), prior + 1);
+            });
+            assert!(!calls.contains("UNEXPECTED:"), "{calls}");
+
+            std::fs::remove_dir_all(&subagents_dir).unwrap();
+            seed_subagents(&elsewhere);
+            std::os::unix::fs::symlink(&elsewhere, &subagents_dir).unwrap();
+            let (_, calls) = run_pty(false, false, &mut |input, stream, screen, rx| {
+                wait_for(
+                    stream,
+                    screen,
+                    rx,
+                    "Claude symlink overview",
+                    &mut |lines| lines.iter().any(|line| line.contains("[Overview]")),
+                );
+                input.write_all(b"\t").unwrap();
+                input.flush().unwrap();
+                wait_for(stream, screen, rx, "Claude symlink tasks", &mut |lines| {
+                    lines.iter().any(|line| line.contains("[All tasks]"))
+                        && lines.iter().any(|line| line.contains(WORKER))
+                });
+                let unarmed_fds = inotify_fds();
+                assert_eq!(unarmed_fds + 1, armed_fds);
+                assert!(!claude_watching(&elsewhere) && !claude_watching(&session_dir));
+                let prior = primary_captures();
+                let child = subagents_dir.join(format!("agent-{new_agent}.jsonl"));
+                std::fs::write(&child, b"").unwrap();
+                let wait_until = Instant::now() + Duration::from_millis(500);
+                while Instant::now() < wait_until {
+                    if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(25)) {
+                        stream.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                    apply_frames(stream, screen);
+                }
+                assert_eq!(inotify_fds(), unarmed_fds);
+                assert!(!claude_watching(&elsewhere) && !claude_watching(&session_dir));
+                assert_eq!(primary_captures(), prior);
+                assert!(screen.iter().all(|line| !line.contains(next)));
+            });
+            assert!(!calls.contains("UNEXPECTED:"), "{calls}");
             let _ = holder.kill();
             let _ = holder.wait();
             return;
