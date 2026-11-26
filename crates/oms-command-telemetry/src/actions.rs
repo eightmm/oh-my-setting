@@ -1164,7 +1164,10 @@ fn migrate(
         }
         r["schema"] = 1.into();
         if r.get("provider").is_none()
-            && matches!(text(&r, "kind"), "review-outcome" | "review-verify")
+            && matches!(
+                text(&r, "kind"),
+                "review-outcome" | "review-verify" | "patch-admit" | "patch-land"
+            )
         {
             // These receipts are produced by the owner, not a provider seat.
             r["provider"] = "local".into();

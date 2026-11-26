@@ -293,13 +293,16 @@ fn migration_and_retention_are_consistent() {
     check_code(&root, &["validate"], 0);
     let local_reviews = concat!(
         "{\"schema\":1,\"kind\":\"review-outcome\",\"exit\":2,\"ts\":\"2026-07-01\"}\n",
-        "{\"schema\":1,\"kind\":\"review-verify\",\"exit\":1,\"ts\":\"2026-07-01\"}\n"
+        "{\"schema\":1,\"kind\":\"review-verify\",\"exit\":1,\"ts\":\"2026-07-01\"}\n",
+        "{\"schema\":1,\"kind\":\"patch-admit\",\"exit\":0,\"ts\":\"2026-07-01\"}\n",
+        "{\"schema\":1,\"kind\":\"patch-land\",\"exit\":0,\"ts\":\"2026-07-01\"}\n"
     );
     root.index(local_reviews);
     assert_ok(&native(&root, &["migrate"]));
     check_code(&root, &["validate"], 0);
     let migrated = std::fs::read_to_string(root.0.join(".oms/artifacts/index.jsonl")).unwrap();
-    for (line, exit) in migrated.lines().zip([2, 1]) {
+    assert_eq!(migrated.lines().count(), 4);
+    for (line, exit) in migrated.lines().zip([2, 1, 0, 0]) {
         let row = oms_context::parse_json(line.as_bytes()).unwrap();
         assert_eq!(support::text(support::field(&row, "provider")), "local");
         assert_eq!(

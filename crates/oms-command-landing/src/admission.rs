@@ -803,6 +803,12 @@ pub(crate) fn admit(
         ("ts", now().into()),
         ("kind", "patch-admit".into()),
         ("operation_id", scope.attempt.clone().into()),
+        // Owner-produced receipt: index readers require a provider and artifact id.
+        ("provider", "local".into()),
+        (
+            "artifact_id",
+            format!("sha256:{}", digest(body.as_bytes())).into(),
+        ),
         ("exit", usize::from(!verdict).into()),
         ("artifact", report_rel.into()),
         ("artifact_sha256", digest(body.as_bytes()).into()),

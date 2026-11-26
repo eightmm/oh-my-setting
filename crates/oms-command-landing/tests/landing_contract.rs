@@ -936,6 +936,18 @@ fn landing_authorities_see_the_frozen_patch_and_recorded_coverage() {
     assert!(intent.get("verifier_change_consent").truth());
     let rows = fs::read(repo.join(".oms/artifacts/index.jsonl")).unwrap();
     let rows = oms_command_plan::storage::rows(&rows).unwrap();
+    // Index readers drop rows without these lineage fields (#589).
+    let owned: Vec<_> = rows
+        .iter()
+        .filter(|r| ["patch-admit", "patch-land"].contains(&r.text("kind")))
+        .collect();
+    assert_eq!(owned.len(), 3, "two admissions and one landing");
+    for row in owned {
+        for key in ["event_id", "operation_id", "artifact_id"] {
+            assert!(!row.text(key).is_empty(), "{} {key}", row.text("kind"));
+        }
+        assert_eq!(row.text("provider"), "local");
+    }
     let proof = oms_command_plan::panel_composition::verify_landing(
         &rows,
         &oms_command_plan::json::parse(&manifest_raw).unwrap(),
