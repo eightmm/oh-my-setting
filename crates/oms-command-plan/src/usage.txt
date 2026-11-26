@@ -68,7 +68,7 @@ Commands:
          [--resources CSV] [--contracts CSV] [--priority I32]
          [--assignment '{"provider":"claude","workload":"routine"}']
          [--verify CMD] [--role NAME] [--discovered-from TASK_ID]
-         [--issue N|#N|owner/repo#N]
+         [--issue N|#N|owner/repo#N] [--brief-file PATH]
                                      --discovered-from records work found while
                                      doing TASK_ID (must exist): the new task
                                      carries a discovered_from link, TASK_ID
@@ -142,8 +142,9 @@ Commands:
                                      review lacked. Typed patch-land remains
                                      the default for single patches.
   amend --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA
-        [--allowed "p1,p2"] [--verify CMD] --reason TEXT
+        [--allowed "p1,p2"] [--verify CMD] [--brief-file PATH] --reason TEXT
                                      Parent-only amendment of an inactive task.
+                                     Brief files must be UTF-8 and at most 65536 bytes.
   cancel --id ID --expected-plan-sha256 SHA --expected-task-sha256 SHA
          --expected-state ready|blocked --expected-lease-id TOKEN|none
          --operator-consent cancel --reason TEXT
