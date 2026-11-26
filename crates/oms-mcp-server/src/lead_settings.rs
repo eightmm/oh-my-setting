@@ -294,11 +294,14 @@ impl Conversation<'_> {
                 }
             }
         }
+        let (native, served) = self
+            .native_invocation(server)
+            .unwrap_or((Value::Null, Value::Null));
         self.bound()?;
         check()?;
         Ok(
             json!({"revision":saved["revision"],"selection":saved["selection"],"options":options,
-        "catalogAgeSeconds":age,"lastServed":Value::Null,"nativeTitle":Value::Null}),
+        "catalogAgeSeconds":age,"lastServed":served,"nativeSession":native,"nativeTitle":Value::Null}),
         )
     }
 }

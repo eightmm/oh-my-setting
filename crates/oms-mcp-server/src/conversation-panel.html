@@ -171,6 +171,7 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 #settings-fields label{font-weight:600}
 #settings-fields select{display:block;width:100%;margin-top:.2rem;text-overflow:ellipsis}
 #settings-saved,#settings-actual,#settings-hint,#settings-status{overflow-wrap:anywhere}
+#settings-actual{white-space:pre-line}
 #settings-controls{display:flex;align-items:center;gap:.6rem;justify-content:flex-end}
 #settings-status{margin-inline-end:auto}
 @media(max-width:24rem){
@@ -260,7 +261,7 @@ header{gap:.4rem;padding-bottom:.5rem}
 <button id="output-refresh" type="button" data-i18n="refresh">새로고침</button></div></dialog>
 <dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><div class="identity"><span id="chat-avatar" class="avatar" aria-hidden="true" hidden></span><h2 id="chat-title"></h2></div><span class="dialog-actions"><button id="settings-toggle" type="button" aria-controls="chat-settings" aria-expanded="false" data-i18n="prefs.title" hidden>대화 설정</button><button id="chat-refresh" type="button" aria-label="대화 새로고침">↻</button><button id="chat-back" type="button" data-i18n="close">닫기</button></span></div>
 <section id="chat-settings" tabindex="-1" aria-labelledby="settings-toggle" hidden>
-<p id="settings-saved"></p><p id="settings-actual" class="note" data-i18n="prefs.actual" hidden>최근 답변의 실제 모델은 보고되지 않았습니다.</p>
+<p id="settings-saved"></p><p id="settings-actual" class="note" hidden></p>
 <fieldset id="settings-fields" hidden><legend class="sr-only" data-i18n="prefs.next">다음 메시지 설정</legend>
 <label><span data-i18n="prefs.model">모델</span><select id="settings-model"></select></label>
 <label><span data-i18n="prefs.effort">추론 강도</span><select id="settings-effort"></select></label></fieldset>
@@ -331,7 +332,8 @@ const messages = {
   "prefs.model": ["모델", "Model"],
   "prefs.effort": ["추론 강도", "Reasoning effort"],
   "prefs.next": ["다음 메시지 설정", "Settings for the next message"],
-  "prefs.actual": ["최근 답변의 실제 모델은 보고되지 않았습니다.", "The model that produced the last reply was not reported."],
+  "prefs.actual": ["Claude가 보고한 응답 모델 · {v}", "Reply model reported by Claude · {v}"],
+  "prefs.session": ["이 요청에 사용된 {v} 세션 확인", "{v} session observed for this request"],
   "prefs.saved": ["다음 메시지의 저장된 설정 · {v}", "Saved for the next message · {v}"],
   "prefs.default": ["OMS 기본 라우팅", "OMS routing default"],
   "prefs.modelDefault": ["모델 기본값", "Model default"],
@@ -1232,7 +1234,7 @@ function clearSettings(){
   if(managedChat)managedChat.settings=null;
   el('settings-toggle').setAttribute('aria-expanded','false');
   el('chat-settings').hidden=true;
-  for(const id of ['settings-saved','settings-hint','settings-status']){
+  for(const id of ['settings-saved','settings-actual','settings-hint','settings-status']){
     const e=el(id);bindings.delete(e);e.textContent='';
   }
   for(const id of ['settings-model','settings-effort'])el(id).replaceChildren();
@@ -1263,8 +1265,17 @@ function effortChoices(c,value=''){
   select.value=value;select.disabled=!o || o.fixed || !o.efforts.length;
   put('settings-hint',()=>o?t(!o.fixed && !o.efforts.length?'prefs.unknown':'prefs.'+o.source):'');
 }
-function showSettings(c,data){
+function showSettings(c,data,observedTurn){
   c.settings.data=data;
+  c.settings.observedTurn=observedTurn;
+  const served=data.lastServed, session=data.nativeSession;
+  const modelReported=c.provider==='claude' && served?.effort===null && typeof served.model==='string' &&
+    /^[a-z0-9][a-z0-9._:/-]{0,159}$/i.test(served.model) && !served.model.includes('..') && !['auto','provider-default'].includes(served.model);
+  const sessionReported=['claude','agy'].includes(c.provider) && session?.source==='provider-result' &&
+    session.scope==='invocation' && session.resumable===false && typeof session.id==='string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(session.id);
+  put('settings-actual',()=>[modelReported && t('prefs.actual',{v:served.model}),
+    sessionReported && t('prefs.session',{v:names[c.provider]})].filter(Boolean).join('\n'));
   const select=el('settings-model'), {model,effort}=data.selection;
   select.replaceChildren();settingsOption(select,'',message('prefs.default'));
   for(const o of data.options)settingsOption(select,o.model,()=>o.model);
@@ -1279,7 +1290,9 @@ function paintSettings(c){
   const option=data?.options.find(o=>o.model===model);
   const allowed=model===null?!effort:option && (effort? !option.fixed && option.efforts.includes(effort):!option.requiresEffort);
   const changed=data && (model!==data.selection.model || effort!==data.selection.effort);
-  el('settings-fields').hidden=el('settings-actual').hidden=el('settings-save').hidden=!data;
+  el('settings-fields').hidden=el('settings-save').hidden=!data;
+  el('settings-actual').hidden=!data || !el('settings-actual').textContent || p.observedTurn!==c.latestTurn ||
+    !c.verified || !!c.session.pending || !!c.session.writing || !!c.previous;
   el('settings-fields').disabled=p.busy || c.session.settingsSaving;
   el('settings-save').disabled=!changed || !allowed || p.busy || c.session.settingsSaving || c.session.writing || !c.verified;
   el('settings-read').hidden=!!data || !!p.busy || c.session.settingsSaving;
@@ -1287,17 +1300,18 @@ function paintSettings(c){
 }
 async function loadSettings(c,p){
   if(!currentManaged(c) || c.settings!==p || p.busy || c.session.settingsSaving)return;
+  const observedTurn=c.latestTurn;
   p.busy=true;p.status='prefs.loading';paintSettings(c);
   try{
     const result=await tool('oms_lead_settings',settingsScope(c),c.ctl.generation);
-    if(currentManaged(c) && c.settings===p){showSettings(c,confirmedSettings(c,result));p.status='';}
+    if(currentManaged(c) && c.settings===p){showSettings(c,confirmedSettings(c,result),observedTurn);p.status='';}
   }catch{if(currentManaged(c) && c.settings===p)p.status='prefs.failed';}
   finally{if(currentManaged(c) && c.settings===p){p.busy=false;paintSettings(c);}}
 }
 async function saveSettings(){
   const c=managedChat,p=c?.settings;
   if(!currentManaged(c) || !p?.data || el('settings-save').disabled)return;
-  const s=c.session,model=el('settings-model').value || null,effort=el('settings-effort').value || null;
+  const s=c.session,observedTurn=c.latestTurn,model=el('settings-model').value || null,effort=el('settings-effort').value || null;
   const args={...settingsScope(c),revision:p.data.revision,model,effort};
   const active=()=>currentManaged(c) && c.settings===p;
   const matches=data=>data.revision!==args.revision && data.selection.model===model && data.selection.effort===effort;
@@ -1307,13 +1321,13 @@ async function saveSettings(){
     if(!active())return;
     const data=confirmedSettings(c,result);
     if(!matches(data))throw uiError('prefs.conflict');
-    showSettings(c,data);p.status='prefs.done';
+    showSettings(c,data,observedTurn);p.status='prefs.done';
   }catch{
     if(!active())return;
     try{
       const result=await tool('oms_lead_settings',settingsScope(c),c.ctl.generation);
       if(!active())return;
-      const data=confirmedSettings(c,result);showSettings(c,data);p.status=matches(data)?'prefs.confirmed':'prefs.conflict';
+      const data=confirmedSettings(c,result);showSettings(c,data,observedTurn);p.status=matches(data)?'prefs.confirmed':'prefs.conflict';
     }catch{if(active()){p.data=null;p.status='prefs.failed';put('settings-saved',()=>'');put('settings-hint',()=>'');}}
   }finally{
     s.settingsSaving=false;
@@ -1423,6 +1437,7 @@ async function readManaged(c,before=null){
     settleTurn(c,result,p);
     if(!before){
       const latest=page.transcript.turns.filter(r=>r.role==='user').at(-1);
+      c.latestTurn=latest?.turnId;
       c.previous=latest && latest.turnId!==p?.id && ['reserved','running','unconfirmed'].includes(latest.status)?latest.status:null;
     }
     if(before)c.visited.add(before);
@@ -1441,7 +1456,7 @@ async function sendManaged(c,retry=false){
   const s=c.session;
   if(retry ? s.pending?.status!=='not_found' : !!s.pending || !validText(s.draft))return;
   const p=retry?s.pending:{id:crypto.randomUUID(),text:s.draft,status:'unconfirmed'};
-  s.pending=p;s.outcome='';s.writing=true;c.until=Date.now()+120000;clearTimeout(c.timer);paintComposer(c);
+  c.latestTurn=p.id;s.pending=p;s.outcome='';s.writing=true;c.until=Date.now()+120000;clearTimeout(c.timer);paintComposer(c);
   try{
     const result=await tool('oms_send_lead_message',{room:c.ctl.room,projectKey:c.ctl.projectKey,provider:c.provider,
       leadRequestId:c.requestId,turnId:p.id,text:p.text},c.ctl.generation);

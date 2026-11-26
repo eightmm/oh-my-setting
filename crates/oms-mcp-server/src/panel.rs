@@ -15,7 +15,8 @@ use std::{
 #[path = "lead_turns.rs"]
 mod lead_turns;
 
-const URI: &str = "ui://oms/conversation-panel/v26.html";
+const URI: &str = "ui://oms/conversation-panel/v27.html";
+const V26: &str = "ui://oms/conversation-panel/v26.html";
 const V25: &str = "ui://oms/conversation-panel/v25.html";
 const V24: &str = "ui://oms/conversation-panel/v24.html";
 const V23: &str = "ui://oms/conversation-panel/v23.html";
@@ -85,7 +86,7 @@ const UPDATE_SETTINGS: &str = "oms_update_lead_settings";
 const SEND_LEAD: &str = "oms_send_lead_message";
 const LEAD_STATUS: &str = "oms_lead_conversation_status";
 const LEAD_PROVIDERS: [&str; 3] = ["codex", "claude", "agy"];
-const LEAD_PROMPT: &str = "Acknowledge availability as this Room's provider Lead, then wait for explicit work. Do not inspect or change the repository, use tools, or delegate.";
+pub(crate) const LEAD_PROMPT: &str = "Acknowledge availability as this Room's provider Lead, then wait for explicit work. Do not inspect or change the repository, use tools, or delegate.";
 const ASSIGN: &str = "oms_assign_provider";
 const ASSIGN_RESULT: &str = "oms_assign_result";
 const BINDING: &str = "Select a host-configured OMS project, or bind this connection to a project with OMS_PANEL_REPO.";
@@ -1214,6 +1215,7 @@ impl Server<'_> {
                             | V23
                             | V24
                             | V25
+                            | V26
                     )
                 ) =>
             {

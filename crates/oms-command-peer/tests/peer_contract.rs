@@ -8249,3 +8249,114 @@ fn peer_delegate_help_flags_parse_and_do_not_always_refuse_and_next_step_require
         },
     );
 }
+
+#[test]
+fn native_lead_observation_is_private_and_bound_to_published_answer() {
+    for provider in ["claude", "antigravity"] {
+        if std::env::var("TEST_LEAD_PROVIDER").is_ok_and(|selected| selected != provider) {
+            continue;
+        }
+        native_lead_answer_fixture(provider);
+    }
+}
+
+fn native_lead_answer_fixture(provider: &str) {
+    let fixture = provider_repo();
+    fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700)).unwrap();
+    let binding = "a".repeat(64);
+    let hash = |data: &[u8]| oms_command_peer::storage::hash(data);
+    let op = format!(
+        "ask-20261125T000000Z-{}",
+        hash(format!("assignment-operation/{binding}").as_bytes())
+    );
+    let path = fixture.0.join(".oms/artifacts/mcp").join(&op);
+    provider_isolated_with_env(
+        "native_lead_observation_is_private_and_bound_to_published_answer",
+        "private",
+        &[
+            ("OMS_PEER_LEAD_OBSERVATION", &op),
+            ("TEST_LEAD_PROVIDER", provider),
+            ("OMS_PEER_CANCEL_DIR", path.to_str().unwrap()),
+        ],
+        || {
+            let dir = PathBuf::from(std::env::var_os("OMS_PEER_CANCEL_DIR").unwrap());
+            let repo = std::mem::ManuallyDrop::new(Repo(dir.ancestors().nth(4).unwrap().into()));
+            let op = dir.file_name().unwrap().to_str().unwrap();
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            let run_peer = |artifact_dir: &Path| {
+                run(
+                    &repo,
+                    source,
+                    "peer-ask",
+                    &[
+                        "--providers",
+                        provider,
+                        "--thread",
+                        op,
+                        "--no-current",
+                        "--prompt",
+                        "Read this fixture",
+                        "--artifact-dir",
+                        artifact_dir.to_str().unwrap(),
+                        "--no-task",
+                        "--no-memory",
+                    ],
+                )
+            };
+            success(run(
+                &repo,
+                source,
+                "thread",
+                &["new", "--live", "--no-current", "--id", op],
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            let meta = serde_json::json!({"operation":op,"thread":op,"kind":"ask","targets":[provider],"answer_storage":"operation","panel_assignment":binding});
+            let launch = serde_json::json!({"thread":op,"kind":"ask","targets":[provider],"preserve_current":true});
+            fs::write(dir.join("meta.json"), meta.to_string()).unwrap();
+            fs::write(dir.join("launch.json"), launch.to_string()).unwrap();
+            let id = "12345678-1234-4234-8234-123456789abc";
+            let (bin, stream) = if provider == "claude" {
+                ("claude", [
+                    serde_json::json!({"type":"system","subtype":"init","session_id":id}),
+                    serde_json::json!({"type":"assistant","parent_tool_use_id":null,"session_id":id,"message":{"model":"claude-sonnet-5-5","content":[{"type":"text","text":"actual fixture answer"}]}}),
+                    serde_json::json!({"type":"result","subtype":"success","is_error":false,"session_id":id,"result":"actual fixture answer"})
+                ].map(|row|row.to_string()).join("\n"))
+            } else {
+                ("agy",serde_json::json!({"status":"SUCCESS","conversation_id":id,"response":"actual fixture answer"}).to_string())
+            };
+            let fixture_script = format!(
+                "#!/bin/sh\n[ -z \"$OMS_PEER_LEAD_OBSERVATION\" ] || exit 6\ncat >/dev/null\ncat <<'END'\n{stream}\nEND\n"
+            );
+            fs::write(
+                PathBuf::from(std::env::var_os("HOME").unwrap())
+                    .join("bin")
+                    .join(bin),
+                fixture_script,
+            )
+            .unwrap();
+            let generic = repo.0.join(".oms/artifacts/ask");
+            success(run_peer(&generic));
+            assert!(!generic.join("native-lead-observation.json").exists());
+            let answers = dir.join("answers");
+            success(run_peer(&answers));
+            let receipt = answers.join("native-lead-observation.json");
+            let bytes = fs::read(&receipt).unwrap();
+            let row: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(row["operation"], op);
+            assert_eq!(row["sessionId"], id);
+            assert_eq!(row["provider"], provider);
+            assert_eq!(
+                row["model"].as_str(),
+                (provider == "claude").then_some("claude-sonnet-5-5")
+            );
+            let artifact = fs::read(answers.join(row["artifact"].as_str().unwrap())).unwrap();
+            assert_eq!(row["artifactSha256"], hash(&artifact));
+            assert!(String::from_utf8_lossy(&artifact).contains("actual fixture answer"));
+            assert!(!String::from_utf8_lossy(&bytes).contains("actual fixture answer"));
+            assert_eq!(
+                fs::metadata(&receipt).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        },
+    )
+}

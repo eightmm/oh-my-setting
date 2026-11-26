@@ -325,7 +325,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v26.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v27.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -334,7 +334,7 @@ fn cross_host_project_reads() {
             html.as_bytes(),
             include_bytes!("../src/conversation-panel.html")
         );
-        let legacy_uri = "ui://oms/conversation-panel/v25.html";
+        let legacy_uri = "ui://oms/conversation-panel/v26.html";
         let legacy = c.call("resources/read", json!({"uri":legacy_uri}));
         let legacy = &legacy["result"]["contents"][0];
         assert_eq!(legacy["uri"], legacy_uri);
@@ -1495,7 +1495,58 @@ fn desktop_lead_conversations() {
         let settings = &view["result"]["_meta"]["leadSettings"];
         assert_eq!(settings["selection"], json!({"model":null,"effort":null}));
         assert_eq!(public["revision"], settings["revision"]);
-        assert!(settings["lastServed"].is_null() && settings["nativeTitle"].is_null());
+        assert!(settings["nativeTitle"].is_null());
+        assert_eq!(
+            settings["lastServed"],
+            if seat == 1 {
+                json!({"model":"claude-observed","effort":null})
+            } else {
+                Value::Null
+            }
+        );
+        if seat == 0 {
+            assert!(settings["nativeSession"].is_null());
+        } else {
+            assert_eq!(
+                settings["nativeSession"],
+                json!({"source":"provider-result","scope":"invocation","resumable":false,"id":"a1000000-0000-4000-8000-000000000001"})
+            );
+            for visible in [
+                &view["result"]["structuredContent"],
+                &view["result"]["content"],
+            ] {
+                assert!(
+                    !visible.to_string().contains("a1000000-")
+                        && !visible.to_string().contains("claude-observed")
+                );
+            }
+        }
+        if seat == 1 {
+            let proof_path = dir.join("answers/native-lead-observation.json");
+            let original = std::fs::read(&proof_path).unwrap();
+            for (k, v) in [
+                ("operation", "another-op"),
+                ("provider", "antigravity"),
+                ("sessionId", "../other"),
+                ("artifact", "../other.md"),
+                ("artifactSha256", "incorrect"),
+            ] {
+                let mut bad_proof: Value = serde_json::from_slice(&original).unwrap();
+                bad_proof[k] = json!(v);
+                std::fs::write(&proof_path, bad_proof.to_string()).unwrap();
+                let res = call(&mut c, preferences, &settings_address(seat), owner);
+                good(&res);
+                let detail = &res["result"]["_meta"]["leadSettings"];
+                assert!(detail["nativeSession"].is_null() && detail["lastServed"].is_null());
+            }
+            std::fs::remove_file(&proof_path).unwrap();
+            let historical = call(&mut c, preferences, &settings_address(seat), owner);
+            good(&historical);
+            assert!(historical["result"]["_meta"]["leadSettings"]["nativeSession"].is_null());
+            std::fs::write(&proof_path, original).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&proof_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let model = ["gpt-6-astra", "opus", "gemini-4-carbon"][seat];
         let row = settings["options"]
             .as_array()
@@ -1576,6 +1627,38 @@ fn desktop_lead_conversations() {
         );
         let restored = call(&mut c, change, &reset, owner);
         good(&restored);
+        if seat != 0 {
+            let observed = &restored["result"]["_meta"]["leadSettings"]["nativeSession"];
+            assert_eq!(observed["id"], "a2000000-0000-4000-8000-000000000002");
+            let parent: Value = serde_json::from_slice(
+                &std::fs::read(source.join(format!(
+                    "lead-fixture-{}",
+                    if seat == 1 { "claude" } else { "agy" }
+                )))
+                .unwrap(),
+            )
+            .unwrap();
+            let parent = parent["operation"].as_str().unwrap();
+            let child = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .find(|p| {
+                    let meta: Value =
+                        serde_json::from_slice(&std::fs::read(p.join("meta.json")).unwrap())
+                            .unwrap();
+                    meta["thread"] == parent && meta["lead_followup"] == true
+                })
+                .unwrap();
+            std::fs::remove_file(child.join("answers/native-lead-observation.json")).unwrap();
+            let latest = call(&mut c, preferences, &settings_address(seat), owner);
+            good(&latest);
+            let latest = &latest["result"]["_meta"]["leadSettings"];
+            assert!(
+                latest["nativeSession"].is_null() && latest["lastServed"].is_null(),
+                "missing child proof must not display the valid kickoff observation"
+            );
+        }
         assert_ne!(
             payload(&restored)["revision"],
             public["revision"],
@@ -2095,7 +2178,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v26.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v27.html");
     // Codex uses the stdio transport configuration to decide whether to reuse a running server.
     for package in [
         include_str!("../../../plugins/oms/mcp.json"),
@@ -2157,6 +2240,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v22.html"),
         json!("ui://oms/conversation-panel/v23.html"),
         json!("ui://oms/conversation-panel/v24.html"),
+        json!("ui://oms/conversation-panel/v26.html"),
         json!("ui://oms/conversation-panel/v25.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
@@ -5667,6 +5751,29 @@ fn fake_oms() {
             let provider = args.windows(2).find(|a| a[0] == "--providers").unwrap()[1]
                 .to_str()
                 .unwrap();
+            let operation = run.file_name().unwrap().to_str().unwrap();
+            let marker = std::env::var("OMS_PEER_LEAD_OBSERVATION").ok();
+            if matches!(provider, "claude" | "antigravity") {
+                use sha2::{Digest, Sha256};
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(marker.as_deref(), Some(operation));
+                let followup = args
+                    .iter()
+                    .any(|a| a.to_str().is_some_and(|s| s.starts_with("--prompt=")));
+                let id = if followup {
+                    "a2000000-0000-4000-8000-000000000002"
+                } else {
+                    "a1000000-0000-4000-8000-000000000001"
+                };
+                let proof = json!({"schema":1,"operation":operation,"provider":provider,
+                    "sessionId":id,"model":(provider=="claude").then_some("claude-observed"),
+                    "artifact":"fixture.md","artifactSha256":format!("{:x}",Sha256::digest(std::fs::read(&artifact).unwrap()))});
+                let observed = out.join("native-lead-observation.json");
+                std::fs::write(&observed, proof.to_string()).unwrap();
+                std::fs::set_permissions(observed, std::fs::Permissions::from_mode(0o600)).unwrap();
+            } else {
+                assert!(marker.is_none());
+            }
             println!(
                 "{}\n\n{provider}:\nfixture console text\npeer-ask: 1/1 target(s) answered, 1 independent model family(ies)",
                 artifact.display()

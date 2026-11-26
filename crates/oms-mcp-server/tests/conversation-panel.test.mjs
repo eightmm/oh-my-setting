@@ -664,6 +664,37 @@ test('Lead settings are private and lazy, with model-specific effort and explici
   assert.equal(p.host.messages.length,0);assert.equal(p.host.contexts.length,0);
 });
 
+test('Lead settings show only private provider evidence for the observed request',async()=>{
+  const id='531cb793-8e16-4761-82c8-064497585548',model='claude-opus-4-6';
+  const observed={lastServed:{model,effort:null},nativeSession:{id,source:'provider-result',scope:'invocation',resumable:false}};
+  let evidence=observed,turns=[];
+  const p=await panel(['one'],dashboard,{locale:'en',tools:{
+    [managedRead]:a=>{const v=leadStatus(a,'ready');if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns}};return v;},
+    oms_lead_settings:a=>{const {project,...scope}=a,data={...scope,revision:'b'.repeat(64)};
+      return {structuredContent:{...data,...observed},_meta:{leadSettings:{...data,options:[],selection:{model:null,effort:null},...evidence}}};}
+  }});
+  const details=p.get('settings-actual');
+  const open=async index=>{
+    const button=p.get('leads').children[index].children[1].children.find(e=>e.type==='button');
+    button.dispatchEvent(new Event('click'));await setImmediate();await p.event('settings-toggle','click');
+  };
+  await open(1);
+  assert.ok(!details.hidden);assert.match(details.textContent,/Reply model reported by Claude · claude-opus-4-6\nClaude session observed for this request/);
+  assert.ok(!p.get('chat-settings').textContent.includes(id));
+  await choose(p,'ko');assert.match(details.textContent,/보고한 응답 모델 · claude-opus-4-6\n이 요청에 사용된 Claude 세션 확인/);
+  turns=[{role:'user',turnId:id,text:'A later request',status:'failed'}];await p.event('chat-refresh','click');
+  assert.ok(details.hidden);assert.ok(!p.get('settings-fields').hidden);
+  await p.event('settings-toggle','click');
+  evidence={lastServed:{model:'provider-default',effort:null},nativeSession:{...observed.nativeSession,resumable:true}};
+  await p.event('settings-toggle','click');assert.ok(details.hidden);assert.equal(details.textContent,'');
+  await p.event('settings-toggle','click');evidence={};
+  await p.event('settings-toggle','click');assert.ok(details.hidden);assert.equal(details.textContent,'');
+  await p.event('chat-back','click');evidence=observed;await open(2);
+  assert.equal(details.textContent,'이 요청에 사용된 AGY 세션 확인');assert.ok(!details.hidden);
+  await p.event('chat-back','click');await open(0);assert.ok(details.hidden);assert.equal(details.textContent,'');
+  assert.equal(p.host.messages.length,0);assert.equal(p.host.contexts.length,0);
+});
+
 test('settings refuse foreign receipts and discard late reads on project changes',async()=>{
   const read='oms_lead_settings',write='oms_update_lead_settings';let spoof=true;
   const p=await panel(['one','two'],dashboard,{locale:'en',tools:{
