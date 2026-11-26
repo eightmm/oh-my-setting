@@ -70,6 +70,8 @@ attention `task`를 사용할 수 있다.
 byte 번호다. 문자열 중간을 자르지 않으므로 한도에 맞춘 실제 바이트 수는 4,000보다 작을 수 있다.
 `source`는 exact worker 쌍, Room attempt 또는 Lead의 Room·participant·operation·request·turn을
 보존하며, Lead 답변은 검증한 페이지 입력 cursor를 `pageCursor`로 포함한다.
+발췌문을 원문 범위에 결합하려고 선택 공유는 `projectKey`·`Room`·`owner`·`source`를 함께 보낸다.
+참조만 추가하는 `oms-followup-draft`는 이 식별자를 넣지 않는다.
 사용자가 아직 보지 않은 다음 페이지나 private transcript의 다른 메시지는 공유하지 않는다.
 
 공유는 읽기 전용·오래된 화면·문맥 기능이 없는 호스트에서 사용할 수 없다.
