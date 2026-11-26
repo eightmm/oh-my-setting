@@ -2190,6 +2190,29 @@ fn gc_landing_captures_native(
     let index = oms_reference::capture::CaptureIndex::load(&repo).map_err(|e| state_err(2, e))?;
     index.check().map_err(|e| state_err(2, e))?;
 
+    let lifecycle_dir = repo.join(".oms/lifecycle");
+    if let Some(meta) = no_symlink_metadata(&lifecycle_dir)?
+        && !meta.is_dir()
+    {
+        return Err(state_err(2, "refusing non-directory .oms/lifecycle"));
+    }
+    let lifecycle_path = lifecycle_dir.join("events.jsonl");
+    if let Some(meta) = no_symlink_metadata(&lifecycle_path)? {
+        if !meta.is_file() {
+            return Err(state_err(
+                2,
+                format!("refusing non-regular file: {}", lifecycle_path.display()),
+            ));
+        }
+        // An incomplete reference scan cannot authorize capture deletion.
+        // The planner's canonical lifecycle pass emits the file-specific advice.
+        if meta.len() > 32 * 1024 * 1024 {
+            return Ok(oms_command_state::GcHookResult::Deferred(
+                "landing capture retention deferred: lifecycle references exceed 32 MiB; captures retained".into(),
+            ));
+        }
+    }
+
     let mut reference_haystack = Vec::new();
     for rel in [
         ".oms/plan/tasks.json",
@@ -2818,7 +2841,7 @@ mod gc_host_tests {
             use std::io::Write as _;
             writeln!(
                 events_bytes,
-                r#"{{"schema":1,"event_id":"ev-live-oversized","attempt_id":"att-live-oversized","ts":"2026-11-20T00:00:02Z","seq":1,"event_type":"attempt.created","from_state":null,"to_state":"queued","task_id":"task-live-oversized"}}"#,
+                r#"{{"schema":1,"event_id":"ev-live-oversized","attempt_id":"att-live-oversized","ts":"2026-11-20T00:00:02Z","seq":1,"event_type":"attempt.created","from_state":null,"to_state":"queued","task_id":"task-live-oversized","refs":{{"patch":".oms/landing-patches/land-oversized.patch"}}}}"#,
             )
             .unwrap();
         }
@@ -2832,6 +2855,15 @@ mod gc_host_tests {
             std::fs::write(path, b"{}\n").unwrap();
             age_file(path, 60);
         }
+
+        // Landing state must not make the same oversized planner fail before
+        // it reaches dispatch projection and the lifecycle advisory.
+        std::fs::write(repo.join(".oms/landings.jsonl"), b"").unwrap();
+        let patch = repo.join(".oms/landing-patches/land-oversized.patch");
+        std::fs::create_dir_all(patch.parent().unwrap()).unwrap();
+        let patch_bytes = b"diff --git a/x b/x\n";
+        std::fs::write(&patch, patch_bytes).unwrap();
+        age_file(&patch, 60);
 
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -2911,6 +2943,18 @@ mod gc_host_tests {
         );
         assert!(term_attempt_log.exists());
         assert!(live_attempt_log.exists());
+        assert!(
+            gc_out
+                .contains("landing capture retention deferred: lifecycle references exceed 32 MiB")
+        );
+        assert_eq!(std::fs::read(&patch).unwrap(), patch_bytes);
+        for apply in [false, true] {
+            assert!(matches!(
+                host.gc_landing_captures(&repo, 30, apply).unwrap(),
+                GcHookResult::Deferred(reason) if reason.contains("lifecycle references exceed 32 MiB")
+            ));
+            assert_eq!(std::fs::read(&patch).unwrap(), patch_bytes);
+        }
 
         let oversized_plan = host.gc_dispatch_logs(&repo, 30, false).unwrap();
         assert_eq!(
@@ -2924,6 +2968,7 @@ mod gc_host_tests {
         assert_eq!(oversized_plan, oversized_applied);
         assert!(!term_attempt_log.exists());
         assert!(live_attempt_log.exists());
+        assert_eq!(std::fs::read(&patch).unwrap(), patch_bytes);
         assert_eq!(
             host.gc_dispatch_logs(&repo, 30, false).unwrap(),
             GcHookResult::Reclaimed(vec![])
