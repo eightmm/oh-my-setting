@@ -4226,16 +4226,21 @@ fn plan_task_terminal(task: &Value) -> bool {
 struct PlanProgress {
     goal: String,
     /// `None` means the task denominator is unknown (missing, invalid, or empty).
-    /// All-terminal plans (including all-cancelled plans) hide the Goal via `room_plan` returning `None`.
     total: Option<usize>,
     verified: usize,
     in_review: usize,
     claimed: usize,
     stale: usize,
+    failed: usize,
+    cancelled: usize,
+    terminal: bool,
 }
 
 impl PlanProgress {
     fn bar(&self) -> Option<String> {
+        if self.terminal {
+            return None;
+        }
         let total = self.total.filter(|total| *total > 0)?;
         let verified = self.verified.min(total);
         let filled = if verified == 0 {
@@ -4253,11 +4258,17 @@ impl PlanProgress {
     }
 
     fn counts_text(&self, include_stale: bool, include_stages: bool) -> String {
-        let Some(total) = self.total else {
-            return "progress unknown".to_owned();
+        let mut parts = match self.total {
+            Some(total) => vec![format!("{}/{total} tasks done", self.verified)],
+            None => vec!["task progress unknown".to_owned()],
         };
-        let mut parts = vec![format!("{}/{total} verified", self.verified)];
         if include_stages {
+            if self.failed > 0 {
+                parts.push(format!("{} failed", self.failed));
+            }
+            if self.cancelled > 0 {
+                parts.push(format!("{} cancelled", self.cancelled));
+            }
             if self.in_review > 0 {
                 parts.push(format!("{} in review", self.in_review));
             }
@@ -4267,6 +4278,9 @@ impl PlanProgress {
             if include_stale && self.stale > 0 {
                 parts.push(format!("{} stale", self.stale));
             }
+        }
+        if self.terminal {
+            parts.push("acceptance unconfirmed".to_owned());
         }
         parts.join(" · ")
     }
@@ -4282,7 +4296,7 @@ impl PlanProgress {
         candidates.push(self.counts_text(false, true));
         candidates.push(self.counts_text(false, false));
         if let Some(total) = self.total {
-            candidates.push(format!("{}/{total} ver", self.verified));
+            candidates.push(format!("{}/{total} tasks", self.verified));
             candidates.push(format!("{}/{total}", self.verified));
         } else {
             candidates.push("unknown".to_owned());
@@ -4299,7 +4313,8 @@ impl PlanProgress {
             vec![
                 self.counts_text(false, true),
                 self.counts_text(false, false),
-                format!("{}/{total} ver", self.verified),
+                format!("{}/{total} tasks", self.verified),
+                format!("{}/{total}", self.verified),
             ]
         } else {
             vec![
@@ -4323,10 +4338,9 @@ fn plan_task_cancelled(task: &Value) -> bool {
     matches!(plan_task_state(task), "cancelled" | "canceled")
 }
 
-/// Active plan explicitly bound to this Room via `room.plan_id`, `room.task_id`,
+/// Plan explicitly bound to this Room via `room.plan_id`, `room.task_id`,
 /// a Room call's `refs.plan_id`, or a joined Room participant's task claim.
-/// Unbound workspace plans and plans whose tasks are all terminal (including all
-/// cancelled) stay hidden.
+/// Unbound workspace plans stay hidden. Terminal task state is not goal acceptance.
 fn room_plan(
     report: &Value,
     calls: &[Value],
@@ -4404,9 +4418,7 @@ fn room_plan(
         return None;
     }
 
-    if !tasks.is_empty() && tasks.iter().all(|(_, task)| plan_task_terminal(task)) {
-        return None;
-    }
+    let terminal = !tasks.is_empty() && tasks.iter().all(|(_, task)| plan_task_terminal(task));
 
     let stale_tasks: BTreeSet<&str> = attention
         .iter()
@@ -4418,8 +4430,11 @@ fn room_plan(
     let mut in_review = 0usize;
     let mut claimed = 0usize;
     let mut stale = 0usize;
+    let mut failed = 0usize;
+    let mut cancelled = 0usize;
     for (id, task) in &tasks {
         if plan_task_cancelled(task) {
+            cancelled += 1;
             continue;
         }
         total_count += 1;
@@ -4427,6 +4442,7 @@ fn room_plan(
         let task_id = attention::plan_task_id(id, task);
         match st {
             "done" => verified += 1,
+            "failed" | "abandoned" | "timed_out" => failed += 1,
             "review" => {
                 if task["review_lease_abandoned"] == true || task["claim_expired"] == true {
                     stale += 1;
@@ -4455,6 +4471,9 @@ fn room_plan(
         in_review,
         claimed,
         stale,
+        failed,
+        cancelled,
+        terminal,
     })
 }
 
@@ -4492,7 +4511,9 @@ fn header_line(
                 width(&format!("!{}", attention.len())) + 1
             };
             let free = columns.saturating_sub(width(&left_text) + attn_w + 2);
-            let cap = if room_title_active { 9 } else { 16 };
+            // The full Goal row names this task count. Keep its narrow badge
+            // small enough to preserve the Room's distinguishing title.
+            let cap = if room_title_active { 7 } else { 16 };
             if let Some(label) = plan.header_label(free.min(cap)) {
                 right.push(Span::raw(label, columns, Some(SGR_CYAN)));
             }
@@ -4547,7 +4568,7 @@ fn header_line(
             .saturating_sub(
                 spans_width(&left) + width(&view_tag) + 4 + if room_title_active { 16 } else { 0 },
             )
-            .max(columns / 2);
+            .max(if room_title_active { 7 } else { columns / 2 });
         let summary = if let Some(plan) = plan {
             let join_with_status = |plan_part: String| {
                 if status_summary.is_empty() {
@@ -9313,7 +9334,11 @@ mod tests {
         ]}, "plan":{"plan_id":"plan-1", "goal":"長い目標長い目標長い目標長い目標長い目標長い目標", "tasks":{"a":{"state":"queued"},"b":{"state":"queued"}}},
         "provider_status":{"codex":{"weekly_used":18,"five_hour_used":11,"five_hour_resets_at":oms_panel_core::timestamp()+3600},"claude":{"weekly_used":30}}});
         let read = BTreeMap::new();
-        for columns in [19, 28, 40] {
+        for (columns, progress) in [
+            (19, "0/2 tasks"),
+            (28, "0/2 tasks done"),
+            (40, "0/2 tasks done"),
+        ] {
             let frame = frame(
                 &report,
                 &navigation::Navigation::default(),
@@ -9322,6 +9347,10 @@ mod tests {
                 &read,
             )
             .join("\n");
+            assert!(
+                frame.lines().all(|line| width(line) <= columns),
+                "{columns}: {frame}"
+            );
             assert!(
                 frame.contains(if columns < 28 { "L70%" } else { "Cld70%" })
                     && frame.contains("Main Codex")
@@ -9336,7 +9365,7 @@ mod tests {
             assert!(
                 frame
                     .lines()
-                    .any(|s| s.starts_with("Goal:") && s.contains("0/2 verified")),
+                    .any(|s| s.starts_with("Goal:") && s.contains(progress)),
                 "{frame}"
             );
             assert!(
@@ -11448,7 +11477,6 @@ mod tests {
         };
         // A reused task id binds only with this plan's exact id, in this Room.
         let unbound = [
-            all_closed,
             variant(&|r| worker_refs(r, json!({}))),
             variant(&|r| worker_refs(r, json!({"plan_id":"plan-old"}))),
             variant(&|r| {
@@ -11479,7 +11507,7 @@ mod tests {
                 for fill in [false, true] {
                     let lines = frame_styled(report, &nav, columns, 24, &read, false, fill);
                     assert!(lines[0].starts_with("OMS · canonical"), "{lines:#?}");
-                    assert!(lines[0].contains("2/5 verified"), "{lines:#?}");
+                    assert!(lines[0].contains("2/5 tasks"), "{lines:#?}");
                     assert_eq!(lines[1], usage, "{lines:#?}");
                     assert!(lines.iter().all(|line| !line.contains("Plan ")));
                     assert!(
@@ -11491,7 +11519,10 @@ mod tests {
                         "{lines:#?}"
                     );
                     assert!(
-                        lines.iter().any(|line| line.contains("2/5 verified") && line.contains("2 claimed")),
+                        lines
+                            .iter()
+                            .any(|line| line.contains("2/5 tasks done")
+                                && line.contains("2 claimed")),
                         "{lines:#?}"
                     );
                     assert!(!lines.join("\n").contains("Shared work"));
@@ -11500,6 +11531,12 @@ mod tests {
                     }
                 }
             }
+            let terminal = frame_styled(&all_closed, &nav, columns, 24, &read, false, true);
+            assert!(
+                terminal.iter().any(|line| line.contains("Goal:")),
+                "{terminal:#?}"
+            );
+            assert!(!terminal.join("\n").contains("verified"), "{terminal:#?}");
             for unrelated in &unbound {
                 let lines = frame_styled(unrelated, &nav, columns, 24, &read, false, true);
                 assert_eq!(lines.len(), 24);
@@ -11519,7 +11556,12 @@ mod tests {
             let before = board_frame(&bound, &nav, columns, height, &read, false, true);
             let after = board_frame(&titled, &nav, columns, height, &read, false, true);
             assert!(after.lines[0].starts_with("OMS · canonical"));
-            assert_eq!(after.lines[0].contains("Release prep"), show_room);
+            assert_eq!(
+                after.lines[0].contains("Release prep"),
+                show_room,
+                "{columns}: {:?}",
+                after.lines[0]
+            );
             assert_eq!(after.lines[1..], before.lines[1..]);
             assert_eq!(after.provider_rows, before.provider_rows);
             assert_eq!(after.worker_rows, before.worker_rows);
@@ -16074,7 +16116,7 @@ mod tests {
     }
 
     #[test]
-    fn ux07_goal_wraps_full_text_and_shows_verified_progress_and_unknown_denominator() {
+    fn ux07_goal_wraps_full_text_and_separates_task_progress_from_acceptance() {
         let now = 1_800_000_600u64;
         let report = json!({
             "generated_at": now,
@@ -16137,7 +16179,7 @@ mod tests {
             }
             let header = &plain[0];
             assert!(
-                header.contains("2/6 verified") || header.contains("2/6 ver"),
+                header.contains("2/6 tasks"),
                 "{columns}: header missing plan progress: {header}"
             );
             let joined = plain.join("\n");
@@ -16159,7 +16201,7 @@ mod tests {
                     "{columns}: 3rd wrapped line should cap with ellipsis\n{joined}"
                 );
             }
-            assert!(joined.contains("2/6 verified"), "{columns}: {joined}");
+            assert!(joined.contains("2/6 tasks done"), "{columns}: {joined}");
             assert!(
                 !joined.contains("2/7"),
                 "{columns}: cancelled task inflated denominator\n{joined}"
@@ -16217,19 +16259,26 @@ mod tests {
             );
         }
 
-        // All-cancelled bound plan is terminal and hides the Goal cleanly.
+        // Terminal tasks retain their goal; neither cancellation nor task success
+        // establishes goal acceptance in this terminal-only observation.
         let mut all_cancelled = report.clone();
         all_cancelled["plan"]["tasks"] = json!({
             "t1": {"state": "cancelled"},
             "t2": {"state": "canceled"}
         });
-        assert_eq!(
-            room_plan(
-                &all_cancelled,
-                &calls(&all_cancelled),
-                &attention::items(&all_cancelled, &read),
-            ),
-            None
+        let cancelled = room_plan(
+            &all_cancelled,
+            &calls(&all_cancelled),
+            &attention::items(&all_cancelled, &read),
+        )
+        .unwrap();
+        assert_eq!(cancelled.cancelled, 2);
+        assert!(cancelled.terminal);
+        assert_eq!(cancelled.bar(), None);
+        assert!(
+            cancelled
+                .counts_text(true, true)
+                .contains("acceptance unconfirmed")
         );
         let cancelled_joined = frame(
             &all_cancelled,
@@ -16240,9 +16289,26 @@ mod tests {
         )
         .join("\n");
         assert!(
-            !cancelled_joined.contains("Goal:") && !cancelled_joined.contains("progress unknown"),
+            cancelled_joined.contains("Goal:")
+                && cancelled_joined.contains("2 cancelled")
+                && cancelled_joined.contains("acceptance unconfirmed"),
             "{cancelled_joined}"
         );
+        for (state, failed, done) in [("failed", 2, 0), ("done", 0, 2)] {
+            let mut ended = report.clone();
+            ended["plan"]["tasks"] = json!({"t1":{"state":state},"t2":{"state":state}});
+            let progress =
+                room_plan(&ended, &calls(&ended), &attention::items(&ended, &read)).unwrap();
+            assert_eq!(progress.failed, failed);
+            assert_eq!(progress.verified, done);
+            assert!(progress.terminal);
+            assert_eq!(progress.bar(), None);
+            let summary = progress.counts_text(true, true);
+            assert!(
+                summary.contains("tasks done") && summary.contains("acceptance unconfirmed"),
+                "{summary}"
+            );
+        }
 
         // A Room call from an older plan reusing a task_id must not mark the current
         // plan's claimed/running task stale in room_plan, Goal row, or header.
@@ -16676,7 +16742,7 @@ mod tests {
         assert!(
             !rendered.contains("Goal:")
                 && !rendered.contains("Secret other room goal")
-                && !rendered.contains("1/2 verified"),
+                && !rendered.contains("1/2 tasks done"),
             "unrelated room leaked workspace plan without att_foreign:\n{rendered}"
         );
 

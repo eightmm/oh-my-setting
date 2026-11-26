@@ -1727,9 +1727,19 @@ fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
     } else {
         0
     };
+    let acceptance_omitted = nonneg(dashboard.get("acceptance").get("omitted"));
+    let evidence_omitted = dashboard
+        .get("acceptance")
+        .get("criteria")
+        .array()
+        .unwrap_or(&[])
+        .iter()
+        .map(|row| nonneg(row.get("evidenceOmitted")))
+        .sum::<u64>();
+    let readiness_omitted = nonneg(dashboard.get("planReadiness").get("omitted"));
     let omitted = nonneg(report.get("operations").get("omitted"))
         .saturating_add(nonneg(report.get("attention").get("omitted")))
-        .saturating_add(nonneg(report.get("acceptance").get("omitted")))
+        .saturating_add(acceptance_omitted)
         .saturating_add(nonneg(
             dashboard.get("conversationMain").get("participantsOmitted"),
         ))
@@ -1757,10 +1767,7 @@ fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
             nonneg(report.get("operations").get("omitted")) > 0
                 || nonneg(dashboard.get("operationsTrimmed")) > 0,
         ),
-        (
-            "acceptance",
-            nonneg(report.get("acceptance").get("omitted")) > 0,
-        ),
+        ("acceptance", acceptance_omitted > 0),
     ] {
         if bounded && sources.text(name) == "ok" {
             let _ = sources.set(name, string("partial"));
@@ -1799,6 +1806,8 @@ fn build_observation(repo: &Path, dashboard: &Value, report: &Value) -> Value {
         ("latestArtifact", latest_artifact),
         ("omitted", number(omitted)),
         ("trimmed", number(trimmed)),
+        ("readinessOmitted", number(readiness_omitted)),
+        ("evidenceOmitted", number(evidence_omitted)),
     ]);
     let revision = if completeness == "unknown" {
         Value::Null
@@ -1864,6 +1873,60 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
             .filter(|n| *n >= 0)
             .map(number)
             .unwrap_or(Value::Null)
+    }
+    fn reference(v: &Value) -> Value {
+        match v.str() {
+            Ok(s)
+                if !s.is_empty()
+                    && s.len() <= 192
+                    && s.bytes().any(|b| b.is_ascii_alphanumeric())
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b)) =>
+            {
+                string(s)
+            }
+            _ => Value::Null,
+        }
+    }
+    fn criterion(row: &Value) -> Value {
+        let evidence = row.get("evidence").array().unwrap_or(&[]);
+        object([
+            ("id", reference(row.get("id"))),
+            ("label", label(row.get("text"), 2000)),
+            ("status", label(row.get("status"), 64)),
+            ("source", label(row.get("source"), 48)),
+            (
+                "task",
+                reference(row.opt("plan_task_id").unwrap_or(row.get("active_task_id"))),
+            ),
+            (
+                "evidence",
+                // Canonical evidence is oldest first; keep the newest receipts
+                // visible without reclassifying the criterion's verdict.
+                Value::Array(
+                    evidence
+                        .iter()
+                        .rev()
+                        .take(3)
+                        .map(|v| {
+                            object([
+                                ("reference", reference(v.get("evidence_ref"))),
+                                ("kind", label(v.get("kind"), 80)),
+                                ("status", label(v.get("status"), 64)),
+                                (
+                                    "stale",
+                                    match v.get("stale") {
+                                        Value::Bool(stale) => Value::Bool(*stale),
+                                        _ => Value::Null,
+                                    },
+                                ),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            ("evidenceOmitted", number(evidence.len().saturating_sub(3))),
+        ])
     }
     fn attempt(row: &Value) -> Value {
         let refs = row.get("refs");
@@ -1946,6 +2009,26 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
     };
     let plan = report.get("plan");
     let acceptance = report.get("acceptance");
+    let acceptance_available = matches!(acceptance.get("available"), Value::Bool(true));
+    let criteria = acceptance.get("criteria").array().unwrap_or(&[]);
+    let omitted = |source: &Value, retained: usize, limit: usize| {
+        source
+            .int()
+            .ok()
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0)
+            .saturating_add(retained.saturating_sub(limit))
+    };
+    let readiness = plan.get("task_readiness");
+    let readiness_available =
+        matches!(plan.get("healthy"), Value::Bool(true)) && readiness.array().is_ok();
+    let next = report
+        .get("attention")
+        .get("next")
+        .array()
+        .ok()
+        .and_then(|items| items.first())
+        .filter(|_| acceptance_available);
     let operations = report.get("operations");
     let reviews = report.get("reviews");
     let operation_count = |key: &str| {
@@ -2017,6 +2100,48 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
             },
         ),
         ("planProgress", plan_progress),
+        (
+            "planReadiness",
+            object([
+                ("available", Value::Bool(readiness_available)),
+                ("scope", string("repository")),
+                (
+                    "tasks",
+                    if readiness_available {
+                        rows(readiness, 8, |v| {
+                            object([
+                                ("id", reference(v.get("id"))),
+                                ("title", label(v.get("title"), 512)),
+                                ("state", label(v.get("state"), 32)),
+                                ("issue", label(v.get("issue"), 160)),
+                                ("reason", label(v.get("reason"), 96)),
+                                (
+                                    "selectionEligible",
+                                    match v.get("selection_eligible") {
+                                        Value::Bool(eligible) => Value::Bool(*eligible),
+                                        _ => Value::Null,
+                                    },
+                                ),
+                            ])
+                        })
+                    } else {
+                        Value::Array(vec![])
+                    },
+                ),
+                (
+                    "omitted",
+                    if readiness_available {
+                        number(omitted(
+                            plan.get("task_readiness_omitted"),
+                            readiness.array().unwrap_or(&[]).len(),
+                            8,
+                        ))
+                    } else {
+                        Value::Null
+                    },
+                ),
+            ]),
+        ),
         ("tasks", plan_count("task_count")),
         ("tasksVerified", plan_count("verified_count")),
         ("taskStatus", label(report.get("task").get("status"), 96)),
@@ -2046,8 +2171,22 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
                     ("code", label(v.get("code"), 96)),
                     ("summary", label(v.get("summary"), 512)),
                     ("count", count(v.get("count"))),
+                    ("priority", label(v.get("priority"), 8)),
+                    ("scope", string("repository")),
                 ])
             }),
+        ),
+        (
+            "nextStep",
+            next.map(|v| {
+                object([
+                    ("id", reference(v.get("id"))),
+                    ("summary", label(v.get("reason"), 1200)),
+                    ("authority", label(v.get("authority"), 160)),
+                    ("scope", string("repository")),
+                ])
+            })
+            .unwrap_or(Value::Null),
         ),
         (
             "operations",
@@ -2088,10 +2227,48 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
         (
             "acceptance",
             object([
-                ("available", acceptance.get("available").clone()),
-                ("total", count(acceptance.get("total"))),
-                ("verified", count(acceptance.get("counts").get("verified"))),
-                ("complete", acceptance.get("complete").clone()),
+                ("available", Value::Bool(acceptance_available)),
+                ("scope", string("repository")),
+                (
+                    "total",
+                    if acceptance_available {
+                        count(acceptance.get("total"))
+                    } else {
+                        Value::Null
+                    },
+                ),
+                (
+                    "verified",
+                    if acceptance_available {
+                        count(acceptance.get("counts").get("verified"))
+                    } else {
+                        Value::Null
+                    },
+                ),
+                (
+                    "complete",
+                    if acceptance_available {
+                        acceptance.get("complete").clone()
+                    } else {
+                        Value::Null
+                    },
+                ),
+                (
+                    "criteria",
+                    if acceptance_available {
+                        rows(acceptance.get("criteria"), 8, criterion)
+                    } else {
+                        Value::Array(vec![])
+                    },
+                ),
+                (
+                    "omitted",
+                    if acceptance_available {
+                        number(omitted(acceptance.get("omitted"), criteria.len(), 8))
+                    } else {
+                        Value::Null
+                    },
+                ),
             ]),
         ),
     ]);
@@ -2139,6 +2316,18 @@ fn project_panel_dashboard(repo: &Path, report: &Value, conversation: &Value) ->
                 let _ = dashboard.set(&format!("{key}Trimmed"), number(count - saved.len()));
                 let _ = dashboard.set(key, Value::Array(saved));
             }
+        }
+    }
+    for (key, column) in [("acceptance", "criteria"), ("planReadiness", "tasks")] {
+        let mut section = dashboard.get(key).clone();
+        let mut saved = section.get(column).array().unwrap_or(&[]).to_vec();
+        let mut omitted = section.get("omitted").int().unwrap_or(0);
+        while bytes > 52_000 && saved.pop().is_some() {
+            omitted += 1;
+            let _ = section.set("omitted", number(omitted));
+            let _ = section.set(column, Value::Array(saved.clone()));
+            let _ = dashboard.set(key, section.clone());
+            bytes = crate::json::encoded(&dashboard).map_or(usize::MAX, |v| v.len());
         }
     }
     if let Some(scratch) = report.opt("managedScratch") {
@@ -2998,6 +3187,177 @@ mod panel_snapshot_tests {
 
     fn panel_snapshot(report: &Value, conversation: &Value) -> Value {
         super::panel_snapshot(Path::new("test-fixture"), report, conversation)
+    }
+
+    #[test]
+    fn goal_summary_bounds_evidence_and_readiness_without_granting_authority() {
+        let mut report = json::parse(br#"{
+            "goal":{"text":"Finish the project","source":"project"},
+            "plan":{"healthy":true,"task_count":2,"verified_count":2,"cancelled_count":0},
+            "acceptance":{"available":true,"total":12,"counts":{"verified":1},"complete":false,"omitted":2},
+            "attention":{"items":[{"code":"stale-plan-claims","summary":"Inspect retained work","priority":"P1","count":1,"command":"private-command"}],
+                "next":[{"id":"review-evidence","reason":"Review the remaining criteria","authority":"parent","command":"private-command"}]}
+        }"#).unwrap();
+        let criterion = json::parse(br#"{
+            "id":"criterion-a","text":"Check the integrated result","source":"project","status":"inconclusive","plan_task_id":"task-a",
+            "evidence":[
+                {"evidence_ref":"older-a"},{"evidence_ref":"older-b"},
+                {"evidence_ref":"/private-source","kind":"review","status":"inconclusive"},
+                {"evidence_ref":"task-verification:task-a","kind":"task-verification","status":"stale","stale":true},
+                {"evidence_ref":"evidence-a","kind":"acceptance","status":"verified","stale":false,"source":"private-source"}]
+        }"#).unwrap();
+        let mut acceptance = report.get("acceptance").clone();
+        acceptance
+            .set("criteria", Value::Array(vec![criterion.clone(); 10]))
+            .unwrap();
+        report.set("acceptance", acceptance).unwrap();
+        let task = json::parse(br#"{"id":"task-a","title":"Existing issue task","state":"ready","issue":"example/project#7","selection_eligible":false,"reason":"brief-required","brief":"private-brief"}"#).unwrap();
+        let mut plan = report.get("plan").clone();
+        plan.set("task_readiness", Value::Array(vec![task; 10]))
+            .unwrap();
+        plan.set("task_readiness_omitted", number(2)).unwrap();
+        report.set("plan", plan).unwrap();
+        let conversation = json::parse(br#"{"conversationBinding":"matched","conversationMain":{"room":"other-room","participant":"main","provider":"codex","state":"joined"}}"#).unwrap();
+        let snapshot = panel_snapshot(&report, &conversation);
+        let dashboard = snapshot.get("dashboard");
+        let acceptance = dashboard.get("acceptance");
+        assert_eq!(dashboard.get("planProgress").get("verified"), &number(2));
+        assert_eq!(acceptance.get("verified"), &number(1));
+        assert_eq!(acceptance.get("complete"), &Value::Bool(false));
+        assert_eq!(acceptance.text("scope"), "repository");
+        assert!(acceptance.opt("room").is_none());
+        let criteria = acceptance.get("criteria").array().unwrap();
+        assert_eq!(criteria.len(), 8);
+        assert_eq!(acceptance.get("omitted"), &number(4));
+        assert_eq!(criteria[0].text("task"), "task-a");
+        assert_eq!(criteria[0].get("evidenceOmitted"), &number(2));
+        let evidence = criteria[0].get("evidence").array().unwrap();
+        assert_eq!(evidence.len(), 3);
+        assert_eq!(evidence[0].text("reference"), "evidence-a");
+        assert_eq!(evidence[1].get("stale"), &Value::Bool(true));
+        assert_eq!(evidence[2].get("reference"), &Value::Null);
+        assert_eq!(evidence[2].get("stale"), &Value::Null);
+        let readiness = dashboard.get("planReadiness");
+        assert_eq!(readiness.text("scope"), "repository");
+        assert_eq!(readiness.get("omitted"), &number(4));
+        let tasks = readiness.get("tasks").array().unwrap();
+        assert_eq!(tasks.len(), 8);
+        assert_eq!(tasks[0].text("id"), "task-a");
+        assert_eq!(tasks[0].text("issue"), "example/project#7");
+        assert_eq!(tasks[0].text("reason"), "brief-required");
+        assert_eq!(tasks[0].get("selectionEligible"), &Value::Bool(false));
+        assert_eq!(
+            dashboard.get("nextStep").text("summary"),
+            "Review the remaining criteria"
+        );
+        assert_eq!(dashboard.get("nextStep").text("scope"), "repository");
+        let obs = dashboard.get("observation");
+        assert_eq!(obs.text("completeness"), "partial");
+        assert_eq!(obs.get("sources").text("plan"), "ok");
+        assert_eq!(obs.get("sources").text("acceptance"), "partial");
+        assert_eq!(obs.get("evidence").get("omitted"), &number(4));
+        assert_eq!(obs.get("evidence").get("readinessOmitted"), &number(4));
+        assert_eq!(obs.get("evidence").get("evidenceOmitted"), &number(16));
+        let wire = String::from_utf8(json::encoded(&snapshot).unwrap()).unwrap();
+        assert!(!wire.contains("private-") && wire.len() < 52_000, "{wire}");
+
+        // Display bounds (8 readiness rows, 3 evidence rows per criterion) do not mark a
+        // complete 9-task plan or complete acceptance source as partial.
+        let mut complete_report = json::parse(br#"{
+            "collection":{"ok":true,"sources":{"state":"ok","goal":"ok","artifacts":"ok","attempts":"ok"}},
+            "git":{"available":true,"head":"1234567890abcdef1234567890abcdef12345678"},
+            "goal":{"text":"Finish the project","source":"project"},
+            "task":{"healthy":true},
+            "plan":{"healthy":true,"task_count":9,"verified_count":9,"cancelled_count":0,"task_readiness_omitted":0},
+            "attempts":{"available":true,"total":0,"active":0,"executing":0,"by_state":{},"recent":[],"active_recent":[]},
+            "operations":{"available":true,"recent":[],"omitted":0},
+            "reviews":{"passed":0,"failed":0,"unknown":0},
+            "acceptance":{"available":true,"total":1,"counts":{"verified":1},"complete":true,"omitted":0},
+            "attention":{"items":[],"omitted":0}
+        }"#).unwrap();
+        let done_tasks: Vec<Value> = (0..9)
+            .map(|i| {
+                object([
+                    ("id", string(format!("task-{i}"))),
+                    ("title", string(format!("Completed task {i}"))),
+                    ("state", string("done")),
+                    ("issue", Value::Null),
+                    ("selection_eligible", Value::Bool(false)),
+                    ("reason", string("recorded-done")),
+                ])
+            })
+            .collect();
+        let mut complete_plan = complete_report.get("plan").clone();
+        complete_plan
+            .set("task_readiness", Value::Array(done_tasks))
+            .unwrap();
+        complete_report.set("plan", complete_plan).unwrap();
+        let mut complete_acceptance = complete_report.get("acceptance").clone();
+        let mut verified_criterion = criterion.clone();
+        verified_criterion
+            .set("status", string("verified"))
+            .unwrap();
+        complete_acceptance
+            .set("criteria", Value::Array(vec![verified_criterion]))
+            .unwrap();
+        complete_report
+            .set("acceptance", complete_acceptance)
+            .unwrap();
+        let complete_snapshot = panel_snapshot(&complete_report, &Value::Null);
+        let complete_dashboard = complete_snapshot.get("dashboard");
+        assert_eq!(complete_dashboard.get("degraded"), &Value::Bool(false));
+        assert_eq!(
+            complete_dashboard.get("planReadiness").get("omitted"),
+            &number(1)
+        );
+        let complete_obs = complete_dashboard.get("observation");
+        assert_eq!(complete_obs.text("completeness"), "complete");
+        assert_eq!(complete_obs.get("sources").text("plan"), "ok");
+        assert_eq!(complete_obs.get("sources").text("acceptance"), "ok");
+        assert_eq!(complete_obs.get("evidence").get("omitted"), &number(0));
+        assert_eq!(
+            complete_obs.get("evidence").get("readinessOmitted"),
+            &number(1)
+        );
+        assert_eq!(
+            complete_obs.get("evidence").get("evidenceOmitted"),
+            &number(2)
+        );
+
+        let mut unavailable = report.get("acceptance").clone();
+        unavailable.set("available", Value::Bool(false)).unwrap();
+        unavailable.set("complete", Value::Bool(true)).unwrap();
+        report.set("acceptance", unavailable).unwrap();
+        let mut unavailable = report.get("plan").clone();
+        unavailable.set("healthy", Value::Bool(false)).unwrap();
+        report.set("plan", unavailable).unwrap();
+        let snapshot = panel_snapshot(&report, &conversation);
+        let dashboard = snapshot.get("dashboard");
+        assert_eq!(dashboard.text("goal"), "Finish the project");
+        for key in ["complete", "total", "verified", "omitted"] {
+            assert_eq!(dashboard.get("acceptance").get(key), &Value::Null, "{key}");
+        }
+        assert!(
+            dashboard
+                .get("acceptance")
+                .get("criteria")
+                .array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(dashboard.get("nextStep"), &Value::Null);
+        assert_eq!(
+            dashboard.get("planReadiness").get("available"),
+            &Value::Bool(false)
+        );
+        assert!(
+            dashboard
+                .get("planReadiness")
+                .get("tasks")
+                .array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

@@ -301,7 +301,10 @@ impl Conversation<'_> {
         check()?;
         Ok(
             json!({"revision":saved["revision"],"selection":saved["selection"],"options":options,
-        "catalogAgeSeconds":age,"lastServed":served,"nativeSession":native,"nativeTitle":Value::Null}),
+        "catalogAgeSeconds":age,"lastServed":served,"nativeSession":native,"nativeTitle":Value::Null,
+        "scope":{"target":"lead-conversation","appliesTo":"next-message","inheritsToWorkers":false,
+            "mode":"read-only-consultation","continuity":"oms-thread"},
+        "account":Value::Null,"failover":Value::Null,"usage":Value::Null}),
         )
     }
 }
