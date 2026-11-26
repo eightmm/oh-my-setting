@@ -784,8 +784,10 @@ pub(crate) fn admit(
     }
     storage::write_external(&report, None, body.as_bytes(), c.interrupted)?;
     // An index row never records an absolute path: a report outside the state
-    // root is named by its digest, as other external receipts are.
-    let report_field = match report.strip_prefix(&state) {
+    // root is named by its digest, as other external receipts are. Compare
+    // physical paths, so `..` and symlink aliases cannot cross the boundary.
+    let physical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let report_field = match physical(&report).strip_prefix(physical(&state)) {
         Ok(rel) => ("artifact", rel.to_string_lossy().into_owned().into()),
         Err(_) => (
             "artifact_external",

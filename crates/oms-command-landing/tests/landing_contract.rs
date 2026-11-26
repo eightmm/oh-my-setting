@@ -979,8 +979,9 @@ fn patch_admit_runs_locally_without_services() {
     // the private capture lives outside the repository and must be readable
     let (code, out, err) = iso.run("patch-admit", &repo, &["--patch", patch]);
     assert_eq!((code, out.as_str()), (0, "ADMIT\n"), "{err}");
-    // A report outside the state root is named by digest, never by an absolute path.
-    let report = iso.tmp.join("outside-admission.md");
+    // A report outside the state root is named by digest, never by a path,
+    // even when the given path only leaves the root through `..`.
+    let report = repo.join("../outside-admission.md");
     let (code, _, err) = iso.run(
         "patch-admit",
         &repo,
