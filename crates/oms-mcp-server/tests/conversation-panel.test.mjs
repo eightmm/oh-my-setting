@@ -1119,6 +1119,10 @@ test('state badges carry a semantic tone and the progress bar follows the progre
   assert.equal(p.get('progress-track').hidden,false);assert.equal(p.get('progress-fill').style.width,'25%');
   assert.equal(p.get('progress').textContent,'1 of 4 planned tasks verified');
   d.planProgress={total:4,verified:4};await p.event('refresh','click');assert.equal(p.get('progress-fill').style.width,'100%');
+  d.planProgress={total:5,verified:2};await p.event('refresh','click');
+  const segments=p.get('progress-track').children.filter(e=>e.className?.startsWith('seg'));
+  assert.equal(segments.length,5);assert.equal(p.get('progress-track').getAttribute('data-segments'),'true');
+  assert.deepEqual(['seg done','seg current'].map(c=>segments.filter(e=>e.className===c).length),[2,1]);
   d.planProgress={total:0,verified:0};await p.event('refresh','click');
   assert.equal(p.get('progress').hidden,true);assert.equal(p.get('progress-track').hidden,true);
 });
