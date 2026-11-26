@@ -4419,7 +4419,16 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
         use oms_command_peer::process::{Completed, Executor, Invocation};
         use std::sync::Mutex;
 
-        struct EnvRecorder(Mutex<Vec<(String, Option<String>)>>);
+        struct ObservedCall {
+            prog: String,
+            cwd: PathBuf,
+            env_override: Option<PathBuf>,
+            effective_stdout: String,
+        }
+        struct EnvRecorder {
+            mutate: AtomicBool,
+            calls: Mutex<Vec<ObservedCall>>,
+        }
         impl Executor for EnvRecorder {
             fn execute(
                 &self,
@@ -4432,25 +4441,115 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                     .and_then(|s| s.to_str())
                     .unwrap_or("")
                     .to_owned();
-                if !prog.ends_with("git") {
-                    let found = request
-                        .environment
-                        .iter()
-                        .find(|(k, _)| k == "CARGO_TARGET_DIR")
-                        .map(|(_, v)| v.to_string_lossy().into_owned());
-                    self.0.lock().unwrap().push((prog, found));
-                    return Ok(Completed {
-                        code: 0,
-                        stdout: b"ok\n".to_vec(),
-                        stderr: Vec::new(),
-                        complete: true,
-                        cleanup_complete: Some(true),
-                        owned_cleanup: None,
-                        elapsed: std::time::Duration::ZERO,
-                    });
+                if prog.ends_with("git") {
+                    return oms_command_peer::process::Native.execute(request, interrupted);
                 }
-                oms_command_peer::process::Native.execute(request, interrupted)
+                let env_override = request
+                    .environment
+                    .iter()
+                    .rfind(|(k, _)| k == "CARGO_TARGET_DIR")
+                    .map(|(_, v)| PathBuf::from(v));
+                if prog == "bash" {
+                    let cwd = request.cwd.clone();
+                    let completed =
+                        oms_command_peer::process::Native.execute(request, interrupted)?;
+                    self.calls.lock().unwrap().push(ObservedCall {
+                        prog,
+                        cwd,
+                        env_override,
+                        effective_stdout: String::from_utf8_lossy(&completed.stdout)
+                            .trim_end_matches('\n')
+                            .to_owned(),
+                    });
+                    return Ok(completed);
+                }
+                if self.mutate.load(Ordering::SeqCst) {
+                    fs::write(
+                        request.cwd.join("Cargo.toml"),
+                        "[package]\nname = \"probe\"\nversion = \"0.1.1\"\n",
+                    )
+                    .unwrap();
+                }
+                self.calls.lock().unwrap().push(ObservedCall {
+                    prog,
+                    cwd: request.cwd,
+                    env_override,
+                    effective_stdout: String::new(),
+                });
+                Ok(Completed {
+                    code: 0,
+                    stdout: b"CONFIDENCE: 0.9\nGATE: pass\n".to_vec(),
+                    stderr: Vec::new(),
+                    complete: true,
+                    cleanup_complete: Some(true),
+                    owned_cleanup: None,
+                    elapsed: std::time::Duration::ZERO,
+                })
             }
+        }
+
+        let home = fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap();
+        let fake_codex = home.join(format!("fake-bin-{}/codex", std::process::id()));
+        fs::create_dir_all(fake_codex.parent().unwrap()).unwrap();
+        fs::write(&fake_codex, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let xdg_cache = home.join(".cache");
+        let caller_target = home.join("caller-target");
+        let path_val = format!(
+            "{}:{}",
+            fake_codex.parent().unwrap().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        if std::env::var_os("OMS_SLOT_INNER").is_none() {
+            for mode in ["slot", "optout", "empty", "caller-target"] {
+                let mut cmd = Command::new(std::env::current_exe().unwrap());
+                cmd.args([
+                    "--exact",
+                    "delegate_warm_cargo_slot_cache_and_opt_out",
+                    "--nocapture",
+                ])
+                .env(
+                    "CONTRACT_CHILD",
+                    "delegate_warm_cargo_slot_cache_and_opt_out",
+                )
+                .env("OMS_SLOT_INNER", mode)
+                .env("XDG_CACHE_HOME", &xdg_cache)
+                .env("PATH", &path_val)
+                .env_remove("OMS_DELEGATE_ISOLATED_BUILD")
+                .env_remove("OMS_CARGO_SLOT_CACHE");
+                match mode {
+                    "slot" => {
+                        cmd.env_remove("CARGO_TARGET_DIR");
+                    }
+                    "optout" => {
+                        cmd.env_remove("CARGO_TARGET_DIR")
+                            .env("OMS_DELEGATE_ISOLATED_BUILD", "1");
+                    }
+                    "empty" => {
+                        cmd.env("CARGO_TARGET_DIR", "");
+                    }
+                    "caller-target" => {
+                        cmd.env("CARGO_TARGET_DIR", &caller_target);
+                    }
+                    _ => unreachable!(),
+                }
+                let out = cmd.output().unwrap();
+                assert!(
+                    out.status.success(),
+                    "{mode}: {}\n{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                assert!(
+                    String::from_utf8_lossy(&out.stdout).contains("1 passed;"),
+                    "{mode}: child ran no test"
+                );
+            }
+            return;
         }
 
         let repo = Repo::new();
@@ -4468,97 +4567,142 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
             "-qm",
             "cargo repo",
         ]);
-        let fake_codex = repo.0.join(".fake-bin/codex");
-        fs::create_dir_all(fake_codex.parent().unwrap()).unwrap();
-        fs::write(&fake_codex, "#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let home = fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap();
-        let xdg_cache = home.join(".cache");
-        let path_val = format!(
-            "{}:{}",
-            fake_codex.parent().unwrap().display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        if std::env::var_os("OMS_SLOT_INNER").is_none() {
-            for mode in ["slot", "optout"] {
-                let mut cmd = Command::new(std::env::current_exe().unwrap());
-                cmd.args([
-                    "--exact",
-                    "delegate_warm_cargo_slot_cache_and_opt_out",
-                    "--nocapture",
-                ])
-                .env(
-                    "CONTRACT_CHILD",
-                    "delegate_warm_cargo_slot_cache_and_opt_out",
-                )
-                .env("OMS_SLOT_INNER", mode)
-                .env("XDG_CACHE_HOME", &xdg_cache)
-                .env("PATH", &path_val)
-                .env_remove("CARGO_TARGET_DIR");
-                if mode == "optout" {
-                    cmd.env("OMS_DELEGATE_ISOLATED_BUILD", "1");
-                } else {
-                    cmd.env_remove("OMS_DELEGATE_ISOLATED_BUILD");
-                }
-                let out = cmd.output().unwrap();
-                assert!(
-                    out.status.success(),
-                    "{mode}: {}\n{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-            return;
-        }
+
         let mode = std::env::var("OMS_SLOT_INNER").unwrap();
-        let recorder = EnvRecorder(Mutex::new(Vec::new()));
-        let values = args(&[
+        let recorder = EnvRecorder {
+            mutate: AtomicBool::new(true),
+            calls: Mutex::new(Vec::new()),
+        };
+        let verify_cmd = "printf '%s' \"${CARGO_TARGET_DIR-<unset>}\"";
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let stop = AtomicBool::new(false);
+
+        let delegate_values = args(&[
             "--repo",
             repo.0.to_str().unwrap(),
             "--to",
             "codex",
             "--model",
             "fixture",
+            "--no-task",
+            "--no-memory",
+            "--no-ml-context",
+            "--no-graph-context",
             "--verify",
-            "cargo test",
-            "--allow-no-change",
+            verify_cmd,
             "Build check",
         ]);
-        let stop = AtomicBool::new(false);
         let out = oms_command_peer::run_with_executor(
             "peer-delegate",
-            &values,
+            &delegate_values,
             &repo.0,
-            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+            source,
             &stop,
             &recorder,
         );
         assert_eq!(
             out.0,
             0,
-            "delegate failed: {}",
+            "delegate ({mode}) failed: {}",
             String::from_utf8_lossy(&out.2)
         );
-        let calls = recorder.0.lock().unwrap();
-        assert!(!calls.is_empty());
-        if mode == "optout" {
-            assert!(
-                calls[0].1.is_none(),
-                "OMS_DELEGATE_ISOLATED_BUILD=1 must omit CARGO_TARGET_DIR"
-            );
-        } else {
-            let first_dir = calls[0]
-                .1
-                .as_ref()
-                .expect("slot-0 CARGO_TARGET_DIR assigned");
-            assert!(
-                first_dir.contains("cargo-slots/") && first_dir.ends_with("/slot-0/target"),
-                "unexpected slot path: {first_dir}"
-            );
+
+        recorder.mutate.store(false, Ordering::SeqCst);
+        let review_values = args(&[
+            "--repo",
+            repo.0.to_str().unwrap(),
+            "--providers",
+            "codex",
+            "--model",
+            "fixture",
+            "--gate",
+            "--no-task",
+            "--no-memory",
+            "--no-ml-context",
+            "--no-graph-context",
+            "--verify",
+            verify_cmd,
+            "--prompt",
+            "Gate check",
+        ]);
+        let review_out = oms_command_peer::run_with_executor(
+            "peer-review",
+            &review_values,
+            &repo.0,
+            source,
+            &stop,
+            &recorder,
+        );
+        assert_eq!(
+            review_out.0,
+            0,
+            "review ({mode}) failed: {}{}",
+            String::from_utf8_lossy(&review_out.1),
+            String::from_utf8_lossy(&review_out.2)
+        );
+
+        let calls = recorder.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            4,
+            "{mode}: expected delegate+verify and review+verify"
+        );
+        assert_eq!(calls[1].prog, "bash");
+        assert_eq!(calls[3].prog, "bash");
+        assert!(
+            calls[1].cwd.starts_with(repo.0.join(".oms/tmp")) && calls[1].cwd.ends_with("tree"),
+            "unexpected temporary-tree verify cwd: {}",
+            calls[1].cwd.display()
+        );
+        assert_eq!(
+            calls[3].cwd, repo.0,
+            "real-repo verify cwd must be repo root"
+        );
+
+        match mode.as_str() {
+            "optout" => {
+                assert!(
+                    calls[0].env_override.is_none(),
+                    "OMS_DELEGATE_ISOLATED_BUILD=1 must omit CARGO_TARGET_DIR"
+                );
+                assert!(calls[1].env_override.is_none());
+                assert_eq!(calls[1].effective_stdout, "<unset>");
+                assert!(calls[3].env_override.is_none());
+                assert_eq!(calls[3].effective_stdout, "<unset>");
+            }
+            "slot" | "empty" => {
+                let first_dir = calls[0]
+                    .env_override
+                    .as_ref()
+                    .expect("slot-0 CARGO_TARGET_DIR assigned")
+                    .to_string_lossy()
+                    .into_owned();
+                assert!(
+                    first_dir.contains("cargo-slots/") && first_dir.ends_with("/slot-0/target"),
+                    "unexpected slot path ({mode}): {first_dir}"
+                );
+                assert_eq!(
+                    calls[1].env_override.as_deref(),
+                    calls[0].env_override.as_deref()
+                );
+                assert_eq!(calls[1].effective_stdout, first_dir);
+                assert!(calls[3].env_override.is_none());
+                assert_eq!(
+                    calls[3].effective_stdout,
+                    if mode == "empty" { "" } else { "<unset>" }
+                );
+            }
+            "caller-target" => {
+                let peer_tree_target = caller_target.join("oms-peer-tree");
+                assert_eq!(
+                    calls[1].env_override.as_deref(),
+                    Some(peer_tree_target.as_path())
+                );
+                assert_eq!(Path::new(&calls[1].effective_stdout), peer_tree_target);
+                assert!(calls[3].env_override.is_none());
+                assert_eq!(Path::new(&calls[3].effective_stdout), caller_target);
+            }
+            _ => unreachable!(),
         }
     });
 }

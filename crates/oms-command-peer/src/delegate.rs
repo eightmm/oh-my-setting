@@ -529,6 +529,23 @@ impl Worktree {
         drop(wrapper_fd);
         let _ = unlinkat(&oms, id, AtFlags::REMOVEDIR);
     }
+
+    pub(crate) fn verify_env(
+        &self,
+        command: &str,
+        environment: &[(OsString, OsString)],
+        context: &Context<'_>,
+    ) -> Result<process::Completed> {
+        let mut env = environment.to_vec();
+        if let Some(dir) = std::env::var_os("CARGO_TARGET_DIR").filter(|v| !v.is_empty()) {
+            env.retain(|(k, _)| k != "CARGO_TARGET_DIR");
+            env.push((
+                "CARGO_TARGET_DIR".into(),
+                PathBuf::from(dir).join("oms-peer-tree").into_os_string(),
+            ));
+        }
+        verify_env(command, &self.path, &env, context)
+    }
 }
 
 pub(crate) fn transition(
@@ -1378,7 +1395,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             && let Some(command) = &command
         {
             transition(&repo, &attempt, "verifying", obj([]), context)?;
-            let checked = verify_env(command, &worktree.path, &extra_env, context)?;
+            let checked = worktree.verify_env(command, &extra_env, context)?;
             code = checked.code;
             if !checked.complete && code == 0 {
                 code = 1;
