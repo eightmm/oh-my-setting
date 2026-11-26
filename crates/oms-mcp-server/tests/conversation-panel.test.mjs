@@ -1126,7 +1126,9 @@ test('progress and goal missing states are independent of repository acceptance 
   d.goalAvailability='absent';d.planProgress={total:0,verified:0};await p.event('refresh','click');
   assert.equal(p.get('goal').textContent,'No goal recorded');assert.equal(p.get('progress').hidden,true);
   d.planProgress={total:3,verified:2};await p.event('refresh','click');
-  assert.equal(p.get('progress').textContent,'2 of 3 planned tasks verified');
+  assert.equal(p.get('progress').textContent,'Plan tasks 2 / 3');
+  // Unconfirmed criteria leave the bar to the plan and say so instead of counting zero.
+  assert.equal(p.get('progress-track').hidden,false);assert.match(p.get('criteria-summary').textContent,/unconfirmed/);
   assert.equal(p.get('outcome').hidden,true);
 });
 test('language persists on reopen without fetching or replacing the focused draft',async()=>{
@@ -1153,14 +1155,14 @@ test('state badges carry a semantic tone and the progress bar follows the progre
   const [codex,claude,agy]=p.get('leads').children;
   const badge=entry=>entry.children.find(e=>e.className==='state');
   assert.equal(badge(codex.children[2]).getAttribute('data-tone'),'active');
-  assert.equal(badge(claude.children[2]).getAttribute('data-tone'),'attention');
+  assert.equal(badge(claude.children[2]).getAttribute('data-tone'),'decision');
   assert.equal(badge(claude.children[2]).textContent,'! Blocked');
   assert.equal(agy.children[1].children.find(e=>e.className==='state').getAttribute('data-tone'),'muted');
   const presence=slot=>slot.children.find(e=>e.className==='slot-heading').children.find(e=>e.className==='avatar').getAttribute('data-presence');
-  assert.deepEqual([codex,claude,agy].map(presence),['working','attention','idle']);
+  assert.deepEqual([codex,claude,agy].map(presence),['working','decision','idle']);
   assert.equal(p.get('avatar').getAttribute('data-presence'),'working');
   assert.equal(p.get('progress-track').hidden,false);assert.equal(p.get('progress-fill').style.width,'25%');
-  assert.equal(p.get('progress').textContent,'1 of 4 planned tasks verified');
+  assert.equal(p.get('progress').textContent,'Plan tasks 1 / 4');
   d.planProgress={total:4,verified:4};await p.event('refresh','click');assert.equal(p.get('progress-fill').style.width,'100%');
   d.planProgress={total:5,verified:2};await p.event('refresh','click');
   const segments=p.get('progress-track').children.filter(e=>e.className?.startsWith('seg'));
@@ -1170,6 +1172,38 @@ test('state badges carry a semantic tone and the progress bar follows the progre
   assert.equal(p.get('progress').hidden,true);assert.equal(p.get('progress-track').hidden,true);
   d.conversationMain=undefined;await p.event('refresh','click');
   assert.equal(p.get('avatar').textContent,'–');assert.equal(p.get('avatar').getAttribute('data-presence'),null);
+});
+test('v33 tones split decision from failure, rank the presence dot and keep the header to three groups',async()=>{
+  const p=await panel(['one'],dashboard,{locale:'en'});
+  const tone=state=>p.run('stateTone('+JSON.stringify(state)+')');
+  for(const state of ['waiting_for_input','waiting_for_review','waiting_approval','blocked'])assert.equal(tone(state),'decision',state);
+  for(const state of ['failed','timed_out','guard_stop','rejected','interrupted','orphaned'])assert.equal(tone(state),'failure',state);
+  for(const state of ['degraded','unconfirmed','unavailable','queued','',null])assert.equal(tone(state),'muted',String(state));
+  assert.equal(tone('running'),'active');assert.equal(tone('verified'),'done');
+  const rank=(...tones)=>p.run('presenceOf(new Set('+JSON.stringify(tones)+'),false,true)');
+  assert.deepEqual([rank('done','active','decision','failure'),rank('active','decision'),rank('done','active'),rank('done'),
+    p.run('presenceOf(new Set(["muted"]),false,false)')],['failure','decision','working','live','idle']);
+  assert.doesNotMatch(html,/data-(tone|presence)=attention/);
+  for(const name of ['decision','failure'])assert.match(html,new RegExp('\\.state\\[data-tone='+name+'\\]'));
+  // Project, language and the refresh segment; Inspect moved to the closing row of the view.
+  const tools=html.match(/<div class="tools">([\s\S]*?)<\/div><\/header>/)[1];
+  assert.deepEqual([...tools.matchAll(/<(select|button|span) id="([^"]+)"|<span class="([^"]+)"/g)].map(m=>m[2]||m[3]),['language-choice','refresh-group','refresh','auto-refresh','display-mode']);
+  assert.ok(html.indexOf('id="inspect-open"')>html.indexOf('id="outcome"'));
+  assert.equal(p.get('leads-heading').textContent,'Leads 3');
+  const ko=await panel(['one'],dashboard,{locale:'ko'});assert.equal(ko.get('leads-heading').textContent,'Lead 3');
+  assert.equal(ko.get('leads-help').textContent,'질문은 읽기 전용 상담 · 작업 배정은 Main에서');
+});
+test('criteria lead the bar when the whole list is projected, and the plan bar returns when none are recorded',async()=>{
+  const criterion=(id,status,stale=false)=>({id,label:'Criterion '+id,status,evidence:[{reference:'artifact:'+id,kind:'verification',status:'passed',stale}],evidenceOmitted:0});
+  const d={...dashboard,planProgress:{total:5,verified:2},acceptance:{available:true,scope:'repository',total:3,verified:1,complete:false,omitted:0,
+    criteria:[criterion('a','verified'),criterion('b','pending',true),criterion('c','pending')]}};
+  const p=await panel(['one'],d,{locale:'en'});
+  const segments=()=>p.get('progress-track').children.filter(e=>e.className?.startsWith('seg')).map(e=>e.className);
+  assert.deepEqual(segments(),['seg done','seg stale','seg']);
+  assert.equal(p.get('criteria-summary').textContent,'Criteria 1 / 3 verified');assert.equal(p.get('progress').textContent,'Plan tasks 2 / 5');
+  d.acceptance={available:true,scope:'repository',total:0,verified:0,complete:false,omitted:0,criteria:[]};await p.event('refresh','click');
+  assert.deepEqual(segments(),['seg done','seg done','seg current','seg','seg']);
+  assert.equal(p.get('criteria-summary').textContent,'No repository completion criteria recorded.');
 });
 test('the observed time localizes beside the goal while a clean status stays empty',async()=>{
   const stamp='2026-06-01T03:04:00Z', local=new Date(stamp);
@@ -1341,8 +1375,10 @@ test('goal evidence separates repository criteria, task readiness and a scoped c
   const copied=[],key='b'.repeat(64),p=await panel(['one','two'],d,{locale:'en',context:true,navigator:{clipboard:{writeText:async text=>copied.push(text)}},
     tools:{oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:key,two:'c'.repeat(64)}})}});
   await p.open('input',{arguments:{project:'one'}});
-  assert.match(p.get('progress').textContent,/4 of 7 planned tasks/);
-  assert.match(p.get('criteria-summary').textContent,/2 of 3 repository criteria/);assert.equal(p.get('outcome').hidden,true);
+  assert.equal(p.get('progress').textContent,'Plan tasks 4 / 7');
+  // One criterion is omitted, so the bar fills by ratio without segments and never adds the plan count.
+  assert.equal(p.get('criteria-summary').textContent,'Criteria 2 / 3 verified · partly shown');
+  assert.equal(p.get('progress-fill').style.width,'67%');assert.equal(p.get('progress-track').getAttribute('data-segments'),'false');assert.equal(p.get('outcome').hidden,true);
   assert.match(p.get('attention-summary').textContent,/Review error guidance.*Waiting for Main review/);
   assert.match(p.get('next-step').textContent,/Inspect the last criterion/);
   const mark=p.calls.length;await p.event('evidence-toggle','click');
@@ -1512,7 +1548,11 @@ test('recorded Lead answer pages are lazy, digest-bound and prepare only an exac
   assert.match(p.get('followup-text').value,/^Task: task-b$/m);assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
   open.dispatchEvent(new Event('click'));await setImmediate();
   p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button').dispatchEvent(new Event('click'));await setImmediate();
-  await p.event('answer-more','click');await p.event('answer-preview','click');
+  await p.event('answer-more','click');await p.event('answer-followup','click');
+  // Ask about this result prepares references only; the excerpt waits for Include.
+  assert.equal(p.get('finding-preview').hidden,true);assert.equal(p.get('finding-text').textContent,'');
+  assert.equal(p.get('followup-include').hidden,false);await p.event('followup-include','click');
+  assert.equal(p.get('followup-include').hidden,true);
   assert.equal(p.get('finding-text').textContent,'tail');assert.match(p.get('finding-range').textContent,/bytes 7–10 of 10.*partial/);
   assert.ok(!p.host.contexts.some(c=>c.structuredContent?.kind==='oms-selected-finding'));
   await p.event('finding-share','click');
@@ -1557,7 +1597,7 @@ test('Room result truncation links a bounded evidence read and keeps the reader 
   for(const internal of [key,digest,lead.participant,main.room])assert.ok(!JSON.stringify(p.host.contexts.at(-1)).includes(internal),internal);
   assert.match(p.get('followup-text').value,/^Task: task-b$/m);assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
   p.get('leads').children[1].children[2].dispatchEvent(new Event('click'));await setImmediate();
-  await p.event('chat-result-full','click');await p.event('answer-more','click');await p.event('answer-preview','click');
+  await p.event('chat-result-full','click');await p.event('answer-more','click');await p.event('answer-followup','click');await p.event('followup-include','click');
   assert.equal(p.get('finding-text').textContent,'last');await p.event('finding-share','click');
   const deliveredRoom=p.host.contexts.at(-1),shared=JSON.parse(JSON.stringify(deliveredRoom.structuredContent));
   assert.deepEqual(shared,{kind:'oms-selected-finding',authority:'context-only',project:'one',task:'task-b',
@@ -1617,7 +1657,9 @@ async function findingFixture(){
   await p.open('input',{arguments:{project:'one'}});
   const list=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul');
   const open=list.children.filter(e=>e.tagName==='li')[1].children.find(e=>e.className?.includes('worker-output-link'));
-  open.dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
+  open.dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');
+  assert.equal(p.get('finding-preview').hidden,true);assert.ok(!p.calls.some(c=>c.name==='oms_worker_output' && c.args.answerPage!==undefined));
+  await p.event('followup-include','click');
   assert.equal(p.get('finding-preview').hidden,false);assert.equal(p.get('worker-output').open,false);
   return {p,state,d,key,digest,displayed,tail};
 }
@@ -1712,7 +1754,7 @@ test('worker task attribution resolves Share rechecks only from the fresh snapsh
   assert.equal(p.host.contexts.at(-1).structuredContent.task,'task-member');
   assert.equal(Object.hasOwn(p.host.contexts.at(-1).structuredContent,'project'),false);
   // Fresh snapshot with member-parent workers resolves task-member from its own rows[].workers.
-  open(0).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
+  open(0).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');await p.event('followup-include','click');
   await p.event('finding-share','click');
   const sharedMember=p.host.contexts.at(-1);
   assert.equal(sharedMember.structuredContent.kind,'oms-selected-finding');
@@ -1720,7 +1762,7 @@ test('worker task attribution resolves Share rechecks only from the fresh snapsh
   assert.equal(Object.hasOwn(sharedMember.structuredContent,'project'),false);
   assertPrivateFindingOmitted(sharedMember,[key,digest,main.room,main.participant,'mw-0','member-worker-0','indexed-answer']);
   // Fresh snapshot confirms unattributed member-parent worker when present with task: null.
-  open(1).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
+  open(1).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');await p.event('followup-include','click');
   assert.doesNotMatch(p.get('followup-text').value,/^Task:|task-a|Review task A/m);
   await p.event('followup-add','click');
   assert.equal(Object.hasOwn(p.host.contexts.at(-1).structuredContent,'task'),false);
@@ -1739,7 +1781,7 @@ test('worker task attribution resolves Share rechecks only from the fresh snapsh
     [1,{...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='mw-1'?{...a,task:'task-a'}:a)}]
   ]){
     snapshot=d;await p.event('refresh','click');
-    open(index).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
+    open(index).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');await p.event('followup-include','click');
     snapshot=fresh;
     const sharedBefore=p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length;
     await p.event('finding-share','click');
@@ -1866,7 +1908,7 @@ test('Inspect graph distinguishes unavailable provenance from zero cached relati
   await choose(p,'ko');assert.match(p.get('inspect-status').textContent,/상태 미확인/);
 });
 
-test('finding preview controls stay hidden on hosts without updateModelContext',async()=>{
+test('Include stays hidden on hosts without updateModelContext',async()=>{
   const key='b'.repeat(64),id=randomUUID(),digest='d'.repeat(64);
   const claudeReq=leadStatus({provider:'claude'},'ready').leads[0].requestId,askParticipant='ask-'+claudeReq;
   const worker={id:'worker-0',parentAttempt:'l',provider:'codex',role:'worker',state:'done'};
@@ -1891,17 +1933,18 @@ test('finding preview controls stay hidden on hosts without updateModelContext',
   }});
   const group=p.get('leads').children[1].children[2],list=group.children.find(e=>e.tagName==='ul'),openWorker=list.children.find(e=>e.tagName==='li').children.find(e=>e.className?.includes('worker-output-link'));
   openWorker.dispatchEvent(new Event('click'));await setImmediate();
-  assert.equal(p.get('output-copy').hidden,false);assert.equal(p.get('output-followup').hidden,false);assert.equal(p.get('output-preview').hidden,true);
-  await p.event('output-close','click');
+  assert.equal(p.get('output-copy').hidden,false);assert.equal(p.get('output-followup').hidden,false);
+  await p.event('output-followup','click');assert.equal(p.get('followup-include').hidden,true);
   const openLead=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');openLead.dispatchEvent(new Event('click'));await setImmediate();
   p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button').dispatchEvent(new Event('click'));await setImmediate();
-  assert.equal(p.get('answer-copy').hidden,false);assert.equal(p.get('answer-followup').hidden,false);assert.equal(p.get('answer-preview').hidden,true);
-  await p.event('chat-back','click');
+  assert.equal(p.get('answer-copy').hidden,false);assert.equal(p.get('answer-followup').hidden,false);
+  await p.event('answer-followup','click');assert.equal(p.get('followup-include').hidden,true);
   group.children.find(e=>e.className==='person').dispatchEvent(new Event('click'));await setImmediate();await p.event('chat-result-full','click');
-  assert.equal(p.get('answer-copy').hidden,false);assert.equal(p.get('answer-followup').hidden,false);assert.equal(p.get('answer-preview').hidden,true);
+  assert.equal(p.get('answer-copy').hidden,false);assert.equal(p.get('answer-followup').hidden,false);
+  await p.event('answer-followup','click');assert.equal(p.get('followup-include').hidden,true);
 });
 
-test('worker output preview failure hides body and controls, and superseded loads leave newer controls disabled',async()=>{
+test('a failed Include keeps the excerpt private, and a superseded Include never fills a newer draft',async()=>{
   const key='b'.repeat(64),digest='d'.repeat(64);let failPage=true;
   const workers=[0,1].map(i=>({id:'worker-'+i,parentAttempt:'l',provider:'codex',role:'worker',state:'done'}));
   const d={...dashboard,conversationAttempts:[...dashboard.conversationAttempts,...workers]};
@@ -1916,23 +1959,17 @@ test('worker output preview failure hides body and controls, and superseded load
     }
   }});
   const items=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li');
-  const open=i=>items[i].children.find(e=>e.className?.includes('worker-output-link'));
-  open(0).dispatchEvent(new Event('click'));await setImmediate();
-  assert.equal(p.get('output-body').hidden,false);assert.equal(p.get('output-limited').hidden,false);assert.equal(p.get('output-more').hidden,false);
-  await p.event('output-preview','click');
-  for(const id of ['output-body','output-limited','output-first','output-more','output-copy','output-followup','output-preview'])
-    assert.equal(p.get(id).hidden,true,id);
-  assert.match(p.get('output-status').textContent,/changed/);assert.equal(p.get('output-refresh').disabled,false);
-  failPage=false;await p.event('output-refresh','click');
-  p.host.delayTool='oms_worker_output';await p.event('output-preview','click');
-  const firstRelease=p.host.release;assert.equal(p.get('output-preview').disabled,true);
-  await p.event('output-close','click');open(1).dispatchEvent(new Event('click'));await setImmediate();
-  p.host.delayTool='oms_worker_output';await p.event('output-preview','click');
-  const secondRelease=p.host.release;assert.equal(p.get('output-preview').disabled,true);assert.equal(p.get('output-refresh').disabled,true);
-  firstRelease();await setImmediate();
-  assert.equal(p.get('output-preview').disabled,true);assert.equal(p.get('output-refresh').disabled,true);
+  const open=async i=>{items[i].children.find(e=>e.className?.includes('worker-output-link')).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');};
+  await open(0);await p.event('followup-include','click');
+  assert.equal(p.get('finding-preview').hidden,true);assert.equal(p.get('followup-include').hidden,true);
+  assert.match(p.get('followup-status').textContent,/Nothing was shared/);
+  assert.ok(!p.host.contexts.some(c=>c.structuredContent?.kind==='oms-selected-finding'));
+  failPage=false;await open(0);p.host.delayTool='oms_worker_output';await p.event('followup-include','click');
+  const firstRelease=p.host.release;assert.equal(p.get('followup-include').disabled,true);
+  await open(1);p.host.delayTool='oms_worker_output';await p.event('followup-include','click');const secondRelease=p.host.release;
+  firstRelease();await setImmediate();assert.equal(p.get('finding-preview').hidden,true);
   secondRelease();await setImmediate();
-  assert.equal(p.get('worker-output').open,false);assert.equal(p.get('finding-preview').hidden,false);
+  assert.equal(p.get('finding-preview').hidden,false);assert.equal(p.get('finding-text').textContent,'Previewable output');
 });
 
 test('pending-turn polling pauses visibly and slot badges change only after a confirmed metadata read',async()=>{
@@ -1999,7 +2036,7 @@ test('auto-refresh pauses while the follow-up preview or finding Share is active
   const open=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.find(e=>e.tagName==='li')
     .children.find(e=>e.className?.includes('worker-output-link'));
   open.dispatchEvent(new Event('click'));await setImmediate();
-  await p.event('output-preview','click');
+  await p.event('output-followup','click');await p.event('followup-include','click');
   assert.equal(p.get('followup-panel').hidden,false);
   assert.equal(p.get('finding-preview').hidden,false);
   assert.equal(autos().length,0);

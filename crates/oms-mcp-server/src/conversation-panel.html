@@ -51,8 +51,8 @@ header h1{margin:0;font-size:1rem;font-weight:750;letter-spacing:-.02em}
 .tools{gap:4px}
 button,select,input,textarea{font:inherit;color:inherit}
 button,select{cursor:pointer;border:1px solid var(--line);border-radius:var(--r-sm);background-color:var(--raised);padding:4px 12px;min-height:var(--tap)}
-#start,#chat-send,#approvals .review{color:var(--on-primary);background-color:var(--primary);border-color:var(--primary);font-weight:620;min-height:var(--tap-lg);padding-inline:16px}
-#start:hover:not(:disabled),#chat-send:hover:not(:disabled),#approvals .review:hover:not(:disabled){border-color:var(--primary);opacity:.88}
+#start,#chat-send,#approvals .review,.actions .primary{color:var(--on-primary);background-color:var(--primary);border-color:var(--primary);font-weight:620;min-height:var(--tap-lg);padding-inline:16px}
+#start:hover:not(:disabled),#chat-send:hover:not(:disabled),#approvals .review:hover:not(:disabled),.actions .primary:hover:not(:disabled){border-color:var(--primary);opacity:.88}
 code,kbd,pre,samp{font-family:var(--mono)}
 button:hover:not(:disabled),select:hover{border-color:var(--soft)}
 button:disabled{opacity:.55;cursor:wait}
@@ -64,21 +64,19 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 #view{display:flex;flex-direction:column;gap:16px;margin-top:16px}
 #goal-section{--goal-lines:3;display:flex;flex-direction:column;padding:16px clamp(16px,2.5vw,20px);background-color:var(--surface);border-radius:var(--r)}
 #goal-expand{align-self:flex-start}
-/* The count reads under the track; order also applies to the grid's auto placement. */
-#progress{order:1;margin-top:4px}
 .goal-heading{display:flex;align-items:baseline;gap:.5rem;min-width:0;flex-wrap:wrap}
 @media(min-width:36rem){
   #goal-section{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:1.25rem;align-items:start}
   #goal-section .section-head{display:contents}
   .goal-heading{grid-column:1}
   #new-goal{grid-column:2;grid-row:1 / 3;align-self:center}
-  #goal,#goal-expand,#progress,#progress-track{grid-column:1}
+  #goal,#goal-expand,#progress-line,#progress-track{grid-column:1}
   #goal-journey{grid-column:1 / -1}
   #goal-expand{justify-self:start}
 }
 @media(min-width:64rem){
   #view{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px clamp(1.5rem,3vw,3rem);align-items:start}
-  #goal-section,#outcome{grid-column:1 / -1}
+  #goal-section,#outcome,#inspect-row{grid-column:1 / -1}
   #goal-section{--goal-lines:4}
 }
 #goal{max-inline-size:64ch;font-weight:650;font-size:clamp(1.1rem,2.6vw,1.15rem);line-height:1.45;letter-spacing:-.015em;margin:4px 0;word-break:keep-all;text-wrap:pretty;overflow-wrap:anywhere}
@@ -86,33 +84,47 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 .subtle,.note,.state,small{color:var(--soft);font-size:.83rem}
 .subtle,#new-goal{background:transparent;border:0;min-height:var(--tap);padding:4px 8px}
 #new-goal{color:var(--ink);font-size:.86rem;font-weight:620}
-#progress{font-size:.82rem;color:var(--soft)}
+/* One line under the bar: criteria on the left, plan tasks as a separate count on the right; never summed. */
+#progress-line{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 12px;margin-top:6px;font-variant-numeric:tabular-nums}
+#progress-line:not(:has(:not([hidden]))){display:none}
+#criteria-summary{font-size:.86rem;font-weight:620}
+#progress{font-size:.8rem;color:var(--soft)}
 #main-card{--dot-ring:var(--surface);background-color:var(--surface);border:1px solid var(--main-line);border-radius:var(--r);padding:16px}
 /* The wrapper keeps DOM order while the approval card reads directly under the goal. */
 #view>div{display:flex;flex-direction:column;gap:12px;min-width:0}
 .identity{margin:8px 0 4px;min-width:0}
 #main-name,#main-status{overflow-wrap:anywhere}
-@media(min-width:24rem){#main-card{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:.85rem}#main-card :is(h2,.identity,#main-status){grid-column:1}#main-card #header-main{grid-column:2;grid-row:1 / 4;align-self:center;margin:0}}
-#main-name{font-size:1rem;font-weight:680}
+/* Main · provider · state on one line; the continue link wraps under it when the card is narrow. */
+#main-card .identity{flex-wrap:wrap;margin:0;column-gap:10px}
+.main-line{flex:1 1 12rem;min-width:0;margin:0}
+#main-status{color:var(--soft);font-size:.86rem}
+#main-status:not(:empty)::before{content:" · ";content:" · "/""}
+#main-name{font-size:.95rem;font-weight:680}
 .avatar{position:relative;width:36px;height:36px;display:grid;place-items:center;flex:none;background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm);color:var(--soft);font-size:.95rem;font-weight:650}
 .avatar:is([data-provider=codex],[data-provider=claude],[data-provider=agy])::before{content:"";width:100%;height:100%;background:var(--mark) center / var(--mark-size,100%) no-repeat}
 /* The official SVG artboards have different insets; each visible mark is about 21px. */
 .avatar[data-provider=codex]{--mark:var(--blossom);--mark-size:135%}
 .avatar[data-provider=claude]{--mark-size:71%;--mark:url("data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQ4IiBoZWlnaHQ9IjI0OCIgdmlld0JveD0iMCAwIDI0OCAyNDgiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik01Mi40Mjg1IDE2Mi44NzNMOTguNzg0NCAxMzYuODc5TDk5LjU0ODUgMTM0LjYwMkw5OC43ODQ0IDEzMy4zMzRIOTYuNDkyMUw4OC43MjM3IDEzMi44NjJMNjIuMjM0NiAxMzIuMTUzTDM5LjMxMTMgMTMxLjIwN0wxNy4wMjQ5IDEzMC4wMjZMMTEuNDIxNCAxMjguODQ0TDYuMiAxMjEuODczTDYuNzA5NCAxMTguNDQ3TDExLjQyMTQgMTE1LjI1N0wxOC4xNzEgMTE1Ljg0N0wzMy4wNzExIDExNi45MTFMNTUuNDg1IDExOC40NDdMNzEuNjU4NiAxMTkuMzkyTDk1LjcyOCAxMjEuODczSDk5LjU0ODVMMTAwLjA1OCAxMjAuMzM3TDk4Ljc4NDQgMTE5LjM5Mkw5Ny43NjU2IDExOC40NDdMNzQuNTg3NyAxMDIuNzMyTDQ5LjQ5OTUgODYuMTkwNUwzNi4zODIzIDc2LjYyTDI5LjM3NzkgNzEuNzc1N0wyNS44MTIxIDY3LjI4NThMMjQuMjgzOSA1Ny4zNjA4TDMwLjY1MTUgNTAuMjcxNkwzOS4zMTEzIDUwLjg2MjNMNDEuNDc2MyA1MS40NTMxTDUwLjI2MzYgNTguMTg3OUw2OC45ODQyIDcyLjcyMDlMOTMuNDM1NyA5MC42ODA0TDk3LjAwMTUgOTMuNjM0M0w5OC40Mzc0IDkyLjY2NTJMOTguNjU3MSA5MS45ODAxTDk3LjAwMTUgODkuMjYyNUw4My43NTcgNjUuMjc3Mkw2OS42MjEgNDAuODE5Mkw2My4yNTM0IDMwLjY1NzlMNjEuNTk3OCAyNC42MzJDNjAuOTU2NSAyMi4xMDMyIDYwLjU3OSAyMC4wMTExIDYwLjU3OSAxNy40MjQ2TDY3LjgzODEgNy40OTk2NUw3MS45MTMzIDYuMTk5OTVMODEuNzE5MyA3LjQ5OTY1TDg1Ljc5NDYgMTEuMDQ0M0w5MS45MDc0IDI0Ljk4NjVMMTAxLjcxNCA0Ni44NDUxTDExNi45OTYgNzYuNjJMMTIxLjQ1MyA4NS40ODE2TDEyMy44NzMgOTMuNjM0M0wxMjQuNzY0IDk2LjExNTVIMTI2LjI5MlY5NC42OTc2TDEyNy41NjYgNzcuOTE5N0wxMjkuODU4IDU3LjM2MDhMMTMyLjE1IDMwLjg5NDJMMTMyLjkxNSAyMy40NTA1TDEzNi42MDggMTQuNDcwOEwxNDMuOTk0IDkuNjI2NDNMMTQ5LjcyNSAxMi4zNDRMMTU0LjQzNyAxOS4wNzg4TDE1My44IDIzLjQ1MDVMMTUwLjk5OCA0MS42NDYzTDE0NS41MjIgNzAuMTIxNUwxNDEuOTU3IDg5LjI2MjVIMTQzLjk5NEwxNDYuNDE0IDg2Ljc4MTNMMTU2LjA5MyA3NC4wMjA2TDE3Mi4yNjYgNTMuNjk4TDE3OS4zOTggNDUuNjYzNUwxODcuODAzIDM2LjgwMkwxOTMuMTUyIDMyLjU0ODRIMjAzLjM0TDIxMC43MjYgNDMuNjU0OUwyMDcuNDE1IDU1LjExNTlMMTk2Ljk3MiA2OC4zNDkyTDE4OC4zMTIgNzkuNTczOUwxNzUuODk2IDk2LjIwOTVMMTY4LjE5MSAxMDkuNTg1TDE2OC44ODIgMTEwLjY4OUwxNzAuNzM4IDExMC41M0wxOTguNzU1IDEwNC41MDRMMjEzLjkxIDEwMS43ODdMMjMxLjk5NCA5OC43MTQ5TDI0MC4xNDQgMTAyLjQ5NkwyNDEuMDM2IDEwNi4zOTVMMjM3Ljg1MiAxMTQuMzExTDIxOC40OTUgMTE5LjAzN0wxOTUuODI2IDEyMy42NDVMMTYyLjA3IDEzMS41OTJMMTYxLjY5NiAxMzEuODkzTDE2Mi4xMzcgMTMyLjU0N0wxNzcuMzYgMTMzLjkyNUwxODMuODU1IDEzNC4yNzlIMTk5Ljc3NEwyMjkuNDQ3IDEzNi41MjRMMjM3LjIxNSAxNDEuNjA1TDI0MS44IDE0Ny44NjdMMjQxLjAzNiAxNTIuNzExTDIyOS4wNjUgMTU4LjczN0wyMTMuMDE5IDE1NC45NTZMMTc1LjQ1IDE0NS45NzdMMTYyLjU4NyAxNDIuNzg3SDE2MC44MDVWMTQzLjg1TDE3MS41MDIgMTU0LjM2NkwxOTEuMjQyIDE3Mi4wODlMMjE1LjgyIDE5NS4wMTFMMjE3LjA5NCAyMDAuNjgyTDIxMy45MSAyMDUuMTcyTDIxMC41OTkgMjA0LjY5OUwxODguOTQ5IDE4OC4zOTRMMTgwLjU0NCAxODEuMDY5TDE2MS42OTYgMTY1LjExOEgxNjAuNDIyVjE2Ni43NzJMMTY0Ljc1MiAxNzMuMTUyTDE4Ny44MDMgMjA3Ljc3MUwxODguOTQ5IDIxOC40MDVMMTg3LjI5NCAyMjEuODMyTDE4MS4zMDggMjIzLjk1OUwxNzQuODEzIDIyMi43NzdMMTYxLjE4NyAyMDMuNzU0TDE0Ny4zMDUgMTgyLjQ4NkwxMzYuMDk4IDE2My4zNDVMMTM0Ljc0NSAxNjQuMkwxMjguMDc1IDIzNS40MkwxMjUuMDE5IDIzOS4wODJMMTE3Ljg4NyAyNDEuOEwxMTEuOTAyIDIzNy4zMUwxMDguNzE4IDIyOS45ODRMMTExLjkwMiAyMTUuNDUyTDExNS43MjIgMTk2LjU0N0wxMTguNzc5IDE4MS41NDFMMTIxLjU4IDE2Mi44NzNMMTIzLjI5MSAxNTYuNjM2TDEyMy4xNCAxNTYuMjE5TDEyMS43NzMgMTU2LjQ0OUwxMDcuNjk5IDE3NS43NTJMODYuMzA0IDIwNC42OTlMNjkuMzY2MyAyMjIuNzc3TDY1LjI5MSAyMjQuNDMxTDU4LjI4NjcgMjIwLjc2OEw1OC45MjM1IDIxNC4yN0w2Mi44NzEzIDIwOC40OEw4Ni4zMDQgMTc4LjcwNUwxMDAuNDQgMTYwLjE1NUwxMDkuNTUxIDE0OS41MDdMMTA5LjQ2MiAxNDcuOTY3TDEwOC45NTkgMTQ3LjkyNEw0Ni42OTc3IDE4OC41MTJMMzUuNjE4MiAxODkuOTNMMzAuNzc4OCAxODUuNDRMMzEuNDE1NiAxNzguMTE1TDMzLjcwNzkgMTc1Ljc1Mkw1Mi40Mjg1IDE2Mi44NzNaIiBmaWxsPSIjRDk3NzU3Ii8+Cjwvc3ZnPgo=")}
 .avatar[data-provider=agy]{--mark-size:90%;--mark:url("data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTgwIiBoZWlnaHQ9IjE4MCIgdmlld0JveD0iMCAwIDE4MCAxODAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xNDQuMjQ4IDE0OS4wNjJDMTUxLjc0OCAxNTQuNjg4IDE2Mi45OTggMTUwLjkzOCAxNTIuNjg1IDE0MC42MjVDMTIxLjc0OCAxMTAuNjI1IDEyOC4zMSAyOC4xMjUgODkuODcyNyAyOC4xMjVDNTEuNDM1MiAyOC4xMjUgNTcuOTk3NyAxMTAuNjI1IDI3LjA2MDIgMTQwLjYyNUMxNS44MTAyIDE1MS44NzUgMjcuOTk3NyAxNTQuNjg4IDM1LjQ5NzcgMTQ5LjA2MkM2NC41NjAyIDEyOS4zNzUgNjIuNjg1MiA5NC42ODc1IDg5Ljg3MjcgOTQuNjg3NUMxMTcuMDYgOTQuNjg3NSAxMTUuMTg1IDEyOS4zNzUgMTQ0LjI0OCAxNDkuMDYyWiIgZmlsbD0iIzMxODZGRiIvPgo8bWFzayBpZD0ibWFzazBfNjAwMV80MDkiIHN0eWxlPSJtYXNrLXR5cGU6YWxwaGEiIG1hc2tVbml0cz0idXNlclNwYWNlT25Vc2UiIHg9IjIyIiB5PSIyOCIgd2lkdGg9IjEzNiIgaGVpZ2h0PSIxMjUiPgo8cGF0aCBkPSJNMTQ0LjI0OCAxNDkuMDYyQzE1MS43NDggMTU0LjY4OCAxNjIuOTk4IDE1MC45MzggMTUyLjY4NSAxNDAuNjI1QzEyMS43NDggMTEwLjYyNSAxMjguMzEgMjguMTI1IDg5Ljg3MjcgMjguMTI1QzUxLjQzNTIgMjguMTI1IDU3Ljk5NzcgMTEwLjYyNSAyNy4wNjAyIDE0MC42MjVDMTUuODEwMiAxNTEuODc1IDI3Ljk5NzcgMTU0LjY4OCAzNS40OTc3IDE0OS4wNjJDNjQuNTYwMiAxMjkuMzc1IDYyLjY4NTIgOTQuNjg3NSA4OS44NzI3IDk0LjY4NzVDMTE3LjA2IDk0LjY4NzUgMTE1LjE4NSAxMjkuMzc1IDE0NC4yNDggMTQ5LjA2MloiIGZpbGw9IndoaXRlIi8+CjwvbWFzaz4KPGcgbWFzaz0idXJsKCNtYXNrMF82MDAxXzQwOSkiPgo8ZyBmaWx0ZXI9InVybCgjZmlsdGVyMF9mXzYwMDFfNDA5KSI+CjxlbGxpcHNlIGN4PSIzNi42MjI1IiBjeT0iNDMuMDg3MiIgcng9IjM2LjYyMjUiIHJ5PSI0My4wODcyIiB0cmFuc2Zvcm09Im1hdHJpeCgtMC4xMTI3ODQgMC45OTM2MiAtMC45OTM2MiAtMC4xMTI3ODEgMTA2LjU1NyAtMjYuNDg0NykiIGZpbGw9IiNGRkU0MzIiLz4KPC9nPgo8ZyBmaWx0ZXI9InVybCgjZmlsdGVyMV9mXzYwMDFfNDA5KSI+CjxlbGxpcHNlIGN4PSIxNTUuMTYzIiBjeT0iNTQuOTI5MiIgcng9IjQ3LjQxMTgiIHJ5PSI0OC40NTQxIiB0cmFuc2Zvcm09InJvdGF0ZSg3Ni45MjQzIDE1NS4xNjMgNTQuOTI5MikiIGZpbGw9IiNGQzQxM0QiLz4KPC9nPgo8ZyBmaWx0ZXI9InVybCgjZmlsdGVyMl9mXzYwMDFfNDA5KSI+CjxlbGxpcHNlIGN4PSIxNC42MDA2IiBjeT0iNjUuNDQyNSIgcng9IjQ5LjU1MTUiIHJ5PSI2NC4xOTIiIHRyYW5zZm9ybT0icm90YXRlKDc0LjEyNTcgMTQuNjAwNiA2NS40NDI1KSIgZmlsbD0iIzAwQjk1QyIvPgo8L2c+CjxnIGZpbHRlcj0idXJsKCNmaWx0ZXIzX2ZfNjAwMV80MDkpIj4KPGVsbGlwc2UgY3g9IjE0LjYwMDYiIGN5PSI2NS40NDI1IiByeD0iNDkuNTUxNSIgcnk9IjY0LjE5MiIgdHJhbnNmb3JtPSJyb3RhdGUoNzQuMTI1NyAxNC42MDA2IDY1LjQ0MjUpIiBmaWxsPSIjMDBCOTVDIi8+CjwvZz4KPGcgZmlsdGVyPSJ1cmwoI2ZpbHRlcjRfZl82MDAxXzQwOSkiPgo8ZWxsaXBzZSBjeD0iMTguMTIyNiIgY3k9IjY3LjQxNCIgcng9IjQ4LjU2NzkiIHJ5PSI1My40Njg4IiB0cmFuc2Zvcm09InJvdGF0ZSg0NS42MDY1IDE4LjEyMjYgNjcuNDE0KSIgZmlsbD0iIzAwQjk1QyIvPgo8L2c+CjxnIGZpbHRlcj0idXJsKCNmaWx0ZXI1X2ZfNjAwMV80MDkpIj4KPGVsbGlwc2UgY3g9IjEyMS44MzciIGN5PSIxNjYuOTQ1IiByeD0iNDYuNjM1NiIgcnk9IjQ0LjkwODQiIHRyYW5zZm9ybT0icm90YXRlKDc2LjkyNDMgMTIxLjgzNyAxNjYuOTQ1KSIgZmlsbD0iIzMxODZGRiIvPgo8L2c+CjxnIGZpbHRlcj0idXJsKCNmaWx0ZXI2X2ZfNjAwMV80MDkpIj4KPGVsbGlwc2UgY3g9IjUzLjk0NTYiIGN5PSI1Ni44OTk3IiByeD0iNTMuOTQ1NiIgcnk9IjU2Ljg5OTciIHRyYW5zZm9ybT0ibWF0cml4KC0wLjQwOTUzOSAwLjkxMjI5MyAtMC45MTIyOTQgLTAuNDA5NTM3IDE2Mi44MTEgLTI1Ljg5NSkiIGZpbGw9IiNGQkJDMDQiLz4KPC9nPgo8ZyBmaWx0ZXI9InVybCgjZmlsdGVyN19mXzYwMDFfNDA5KSI+CjxwYXRoIGQ9Ik00LjIxNTU3IDIzOS4wNjNDLTI1LjMyMzEgMjI3LjQ2NyAyNS4xNTc3IDEzMi4wNjEgMzcuNzEwNSAxMDAuMDg1QzUwLjI2MzQgNjguMTA5NyA4NC4zODUzIDUxLjU4ODggMTEzLjkyNCA2My4xODQ4QzE0My40NjMgNzQuNzgwOSAxNzguNDc0IDEzOC42NSAxNjUuOTIxIDE3MC42MjZDMTUzLjM2OCAyMDIuNjAxIDMzLjc1NDMgMjUwLjY1OSA0LjIxNTU3IDIzOS4wNjNaIiBmaWxsPSIjMzE4NkZGIi8+CjwvZz4KPGcgZmlsdGVyPSJ1cmwoI2ZpbHRlcjhfZl82MDAxXzQwOSkiPgo8cGF0aCBkPSJNMTgzLjE5NyAxMjAuMzE1QzE3NS4yODkgMTI5LjU0NSAxNTQuNjUyIDEyNC44MzkgMTM3LjEwMiAxMDkuODAzQzExOS41NTMgOTQuNzY2OCAxMTEuNzM4IDc1LjA5NTUgMTE5LjY0NiA2NS44NjU2QzEyNy41NTQgNTYuNjM1NyAxNDguMTkxIDYxLjM0MjMgMTY1Ljc0IDc2LjM3ODJDMTgzLjI4OSA5MS40MTQgMTkxLjEwNSAxMTEuMDg1IDE4My4xOTcgMTIwLjMxNVoiIGZpbGw9IiM3NDlCRkYiLz4KPC9nPgo8ZyBmaWx0ZXI9InVybCgjZmlsdGVyOV9mXzYwMDFfNDA5KSI+CjxlbGxpcHNlIGN4PSIxNDguOTI4IiBjeT0iMzYuNzI1MiIgcng9IjcxLjEwMTgiIHJ5PSI0NC4xOTkiIHRyYW5zZm9ybT0icm90YXRlKDM0LjA3NjMgMTQ4LjkyOCAzNi43MjUyKSIgZmlsbD0iI0ZDNDEzRCIvPgo8L2c+CjxnIGZpbHRlcj0idXJsKCNmaWx0ZXIxMF9mXzYwMDFfNDA5KSI+CjxlbGxpcHNlIGN4PSIzNy44NDgiIGN5PSI0Ni4wMzQ2IiByeD0iMzguMTAwOCIgcnk9IjIyLjE1NzUiIHRyYW5zZm9ybT0icm90YXRlKDExMi41MTYgMzcuODQ4IDQ2LjAzNDYpIiBmaWxsPSIjRkZFRTQ4Ii8+CjwvZz4KPC9nPgo8ZGVmcz4KPGZpbHRlciBpZD0iZmlsdGVyMF9mXzYwMDFfNDA5IiB4PSI0LjA5NTkxIiB5PSItNDQuMTc2MSIgd2lkdGg9IjExMS4wMzciIGhlaWdodD0iOTguNDQxNiIgZmlsdGVyVW5pdHM9InVzZXJTcGFjZU9uVXNlIiBjb2xvci1pbnRlcnBvbGF0aW9uLWZpbHRlcnM9InNSR0IiPgo8ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSI2LjI1MjM0Ii8+CjwvZmlsdGVyPgo8ZmlsdGVyIGlkPSJmaWx0ZXIxX2ZfNjAwMV80MDkiIHg9IjQ2LjI5NzQiIHk9Ii01My4wMDA5IiB3aWR0aD0iMjE3LjczMSIgaGVpZ2h0PSIyMTUuODYiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMzAuMjI2OCIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyMl9mXzYwMDFfNDA5IiB4PSItMTAwLjAxOCIgeT0iLTM2Ljc1NTgiIHdpZHRoPSIyMjkuMjM4IiBoZWlnaHQ9IjIwNC4zOTciIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMjUuNjk1NyIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyM19mXzYwMDFfNDA5IiB4PSItMTAwLjAxOCIgeT0iLTM2Ljc1NTgiIHdpZHRoPSIyMjkuMjM4IiBoZWlnaHQ9IjIwNC4zOTciIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMjUuNjk1NyIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyNF9mXzYwMDFfNDA5IiB4PSItODQuMzk4NSIgeT0iLTM1LjAwMyIgd2lkdGg9IjIwNS4wNDIiIGhlaWdodD0iMjA0LjgzNCIgZmlsdGVyVW5pdHM9InVzZXJTcGFjZU9uVXNlIiBjb2xvci1pbnRlcnBvbGF0aW9uLWZpbHRlcnM9InNSR0IiPgo8ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSIyNS42OTU3Ii8+CjwvZmlsdGVyPgo8ZmlsdGVyIGlkPSJmaWx0ZXI1X2ZfNjAwMV80MDkiIHg9IjI3Ljk5MTUiIHk9IjcxLjU0OTMiIHdpZHRoPSIxODcuNjkxIiBoZWlnaHQ9IjE5MC43OTEiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMjQuNDE4NCIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyNl9mXzYwMDFfNDA5IiB4PSItMTEuODgwOCIgeT0iLTk4LjcwODUiIHdpZHRoPSIyMDEuMzgiIGhlaWdodD0iMTk3LjQ1IiBmaWx0ZXJVbml0cz0idXNlclNwYWNlT25Vc2UiIGNvbG9yLWludGVycG9sYXRpb24tZmlsdGVycz0ic1JHQiI+CjxmZUdhdXNzaWFuQmx1ciBzdGREZXZpYXRpb249IjIyLjEzMDEiLz4KPC9maWx0ZXI+CjxmaWx0ZXIgaWQ9ImZpbHRlcjdfZl82MDAxXzQwOSIgeD0iLTQ0LjQ0MzIiIHk9IjE5Ljk1MjIiIHdpZHRoPSIyNTIuNTEzIiBoZWlnaHQ9IjI2MC40MDQiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMTkuNzYzMSIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyOF9mXzYwMDFfNDA5IiB4PSI4MS4xOTE1IiB5PSIyNS43NzIyIiB3aWR0aD0iMTQwLjQ2IiBoZWlnaHQ9IjEzNC42MzciIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMTcuNjg0MyIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyOV9mXzYwMDFfNDA5IiB4PSI1NS4xNDk5IiB5PSItNDcuMjUzMSIgd2lkdGg9IjE4Ny41NTUiIGhlaWdodD0iMTY3Ljk1NyIgZmlsdGVyVW5pdHM9InVzZXJTcGFjZU9uVXNlIiBjb2xvci1pbnRlcnBvbGF0aW9uLWZpbHRlcnM9InNSR0IiPgo8ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSIxNC45MzY1Ii8+CjwvZmlsdGVyPgo8ZmlsdGVyIGlkPSJmaWx0ZXIxMF9mXzYwMDFfNDA5IiB4PSItMjQuMjYzMyIgeT0iLTI3LjE1MTUiIHdpZHRoPSIxMjQuMjIzIiBoZWlnaHQ9IjE0Ni4zNzIiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMTguNDg2NSIvPgo8L2ZpbHRlcj4KPC9kZWZzPgo8L3N2Zz4K")}
-/* Provider identity lives only in the mark and this presence dot: ok = live, info = working, warm = attention, muted = idle. */
+/* Provider identity lives only in the mark and this presence dot: ok = live, info = working, warm = decision, danger = failure, muted = idle. */
 .avatar[data-presence]::after{content:"";position:absolute;inset-inline-end:-3px;bottom:-3px;width:10px;height:10px;border-radius:50%;border:2px solid var(--dot-ring);background-color:var(--soft)}
 .avatar[data-presence=live]::after{background-color:var(--ok)}
 .avatar[data-presence=working]::after{background-color:var(--info)}
-.avatar[data-presence=attention]::after{background-color:var(--warm)}
-#header-main{margin-top:12px;min-height:var(--tap-lg)}
+.avatar[data-presence=decision]::after{background-color:var(--warm)}
+.avatar[data-presence=failure]::after{background-color:var(--danger)}
+#header-main{min-height:44px;margin-inline-start:auto;color:var(--ink);font-weight:620}
 #leads{margin-top:8px;display:grid;background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r)}
 #leads:empty{display:none}
 #leads>*+*{border-top:1px solid var(--line)}
 #leads>:is(.person,.lead-group){padding-inline:14px}
 .lead-slot{padding:10px 14px}
 .slot-heading{display:flex;align-items:center;gap:8px}
-.slot-heading h3{font-size:.92rem;font-weight:650;flex:1;min-width:0}
+.slot-heading{flex-wrap:wrap}
+.slot-heading h3{font-size:.92rem;font-weight:650;flex:0 1 auto;min-width:0;overflow-wrap:anywhere}
+/* Connect and Chat are never shown together, so whichever is visible takes the one slot at the end of the title row. */
+.slot-heading>button{margin-inline-start:auto;flex:none;min-height:44px}
+.slot-heading .lead-turn{flex-basis:100%;padding-inline-start:44px}
+.slot-heading .lead-turn:empty{display:none}
 .slot-heading .subtle{color:var(--ink);background-color:var(--raised);border:1px solid var(--line);border-radius:999px;font-weight:600;text-align:center;padding-inline:12px}
 .slot-heading .subtle:hover{text-decoration:none;border-color:var(--soft)}
 /* The task title is the strong line without a member label and the small line with one; both stay one line. */
@@ -135,7 +147,8 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 #output-worker{font-weight:650;overflow-wrap:anywhere;margin-top:.65rem}
 #output-body{margin:12px 0 0;padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere;font:.82rem/1.55 var(--mono);background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm)}
 #output-status:not(:empty),#output-limited:not([hidden]){margin-top:.4rem}
-#output-refresh{margin-top:.65rem}
+#output-refresh{font:1.1rem/1 system-ui,sans-serif;width:var(--tap);padding:0}
+#followup-include{margin-top:10px}
 .slot-heading .state[data-tone]{flex:none;max-width:60%}
 .person{width:100%;background:none;text-align:start;border:0;border-radius:0;padding:10px 0;cursor:default}
 button.person{cursor:pointer;border-radius:var(--r-xs)}
@@ -145,10 +158,16 @@ button.person{cursor:pointer;border-radius:var(--r-xs)}
 .arrow{color:var(--soft);font-size:1.2rem}
 .state{white-space:normal;font-weight:600;max-width:35%;text-align:end}
 .state[data-tone]{border:1px solid var(--line);border-radius:999px;padding:1px 10px;font-size:.75rem;line-height:1.5;overflow-wrap:anywhere}
-.state[data-tone=attention]{color:var(--warm);background-color:var(--warm-bg);border-color:currentColor}
+/* Each tone also has a shape: decision a ring, failure ×, active a dot, done a square, muted a dashed edge. */
+.state[data-tone=decision]{color:var(--warm);background-color:var(--warm-bg);border-color:currentColor}
+.state[data-tone=failure]{color:var(--danger);background-color:var(--danger-bg);border-color:currentColor}
 .state[data-tone=active]{color:var(--info);background-color:var(--info-bg)}
 .state[data-tone=done]{color:var(--ok);background-color:var(--ok-bg)}
-.state[data-tone=muted]{color:var(--soft);background-color:transparent}
+.state[data-tone=muted]{color:var(--soft);background-color:transparent;border-style:dashed}
+.state:is([data-tone=failure],[data-tone=active],[data-tone=done])::before{margin-inline-end:.3em;font-weight:700}
+.state[data-tone=failure]::before{content:"×";content:"×"/""}
+.state[data-tone=active]::before{content:"●";content:"●"/"";font-size:.7em;vertical-align:.1em}
+.state[data-tone=done]::before{content:"■";content:"■"/"";font-size:.65em;vertical-align:.15em}
 button.person:hover:not(:disabled),button.person:active:not(:disabled){background-color:var(--surface)}
 button.person:hover .arrow,button.person:active .arrow{transform:translateX(3px)}
 .muted{color:var(--soft)}
@@ -165,8 +184,19 @@ button.person:hover .arrow,button.person:active .arrow{transform:translateX(3px)
 .seg{border-radius:999px;background-color:var(--line)}
 .seg.done{background-color:var(--ok)}
 .seg.current{background-color:var(--info)}
+.seg.stale{background-color:var(--warm)}
 .observed{margin-inline-start:0;color:var(--soft);font-size:.75rem;font-variant-numeric:tabular-nums}
 #auto-refresh[aria-pressed=true]{color:var(--info);background-color:var(--info-bg);border-color:currentColor}
+/* Refresh and Auto read as one segmented control; Auto on puts a dot on the refresh mark. */
+.refresh-group{display:inline-flex}
+.refresh-group>button{border-radius:0}
+.refresh-group>button:first-child{border-start-start-radius:var(--r-sm);border-end-start-radius:var(--r-sm)}
+.refresh-group>button:last-child{border-start-end-radius:var(--r-sm);border-end-end-radius:var(--r-sm);margin-inline-start:-1px}
+#refresh{position:relative}
+.refresh-group:has(#auto-refresh[aria-pressed=true]) #refresh::after{content:"";position:absolute;top:6px;inset-inline-end:6px;width:6px;height:6px;border-radius:50%;background-color:var(--info)}
+#inspect-row{border-top:1px solid var(--line);padding-top:4px}
+#inspect-open{color:var(--ink);font-weight:620}
+#inspect-open::after{content:" ›";content:" ›"/""}
 @media(prefers-reduced-motion:no-preference){.arrow{transition:transform .12s ease}#refresh[aria-busy=true]{animation:spin 1.6s linear infinite}}
 @keyframes spin{to{transform:rotate(360deg)}}
 .note:not(:empty),#receipt:not(:empty){margin-top:12px}
@@ -236,7 +266,14 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 #issue-evidence:not(:empty){padding:10px 12px;background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm)}
 #chat-messages p,#chat-result,#issue-evidence{white-space:pre-wrap;overflow-wrap:anywhere}
 #goal-journey{margin-top:.7rem;min-width:0}
-#criteria-summary{font-size:.9rem}
+.journey-line{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;width:100%;margin-top:10px;padding:8px 12px;text-align:start;font-size:.84rem;background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm)}
+.journey-line[data-tone=warn]{color:var(--warm);background-color:var(--warm-bg);border-color:currentColor}
+.journey-line:not([data-tone]){width:auto;margin-top:6px;padding:4px 0;background:transparent;border:0;color:var(--soft)}
+.journey-line:not([data-tone]):hover{color:var(--ink);text-decoration:underline;text-underline-offset:.2em}
+#attention-summary{font-weight:650}
+#attention-summary:empty,#next-step:empty{display:none}
+.journey-line[data-tone] #evidence-label{margin-inline-start:auto;font-weight:620;white-space:nowrap}
+.journey-line[data-tone] #evidence-label::after{content:" ›";content:" ›"/""}
 #goal-evidence{padding-top:.7rem}
 #criteria-list{list-style:none;margin:0;padding:0}
 #criteria-list li{padding:.55rem 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
@@ -257,6 +294,12 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 #inspect-kind{max-width:100%}.inspect-nodes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 #inspect-graph-form{align-items:center}
 #lead-auto-label{display:flex;align-items:center;gap:.4rem;margin-top:.5rem;color:var(--soft)}
+#lead-settings{position:relative}
+#lead-settings summary{font-size:.8rem;color:var(--soft);padding-inline:8px;border-radius:var(--r-xs);list-style-position:inside}
+#lead-settings[open] summary{color:var(--ink)}
+.lead-settings-body{position:absolute;inset-inline-end:0;z-index:2;width:min(19rem,calc(100vw - 2.5rem));padding:12px;background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm);box-shadow:0 6px 24px #0002}
+.lead-settings-body>*:first-child{margin-top:0}
+#leads-help:not(:empty){margin-top:2px}
 .lead-turn{display:block;color:var(--soft);font-size:.78rem}
 #full-answer{margin-top:.7rem;padding-top:.6rem;border-top:1px solid var(--line)}
 #full-answer-body{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
@@ -299,23 +342,23 @@ header{gap:8px;padding-bottom:8px}
 <body><main>
 <header><div class="scope"><h1>OMS</h1><strong id="project"></strong><label id="scope" hidden><span class="sr-only" data-i18n="project">프로젝트</span><select id="project-choice"></select></label></div><div class="tools">
 <select id="language-choice" aria-label="언어 / Language"><option value="ko">한국어</option><option value="en">English</option></select>
-<button id="inspect-open" type="button" aria-haspopup="dialog" data-i18n="inspect.open" disabled>더 살펴보기</button>
-<button id="auto-refresh" type="button" aria-pressed="false" data-i18n="auto">자동</button><button id="refresh" type="button" aria-keyshortcuts="Alt+R" aria-label="새로고침" disabled>↻</button><button id="display-mode" type="button" hidden></button></div></header>
+<span class="refresh-group"><button id="refresh" type="button" aria-keyshortcuts="Alt+R" aria-label="새로고침" disabled>↻</button><button id="auto-refresh" type="button" aria-pressed="false" data-i18n="auto">자동</button></span><button id="display-mode" type="button" hidden></button></div></header>
 <p id="status" class="note" role="status"></p><button id="host-retry" type="button" data-i18n="retry" hidden>다시 시도</button><p id="receipt" class="note" role="status"></p>
 <noscript><p lang="ko">대화에서 OMS에 프로젝트 상태를 물어보세요.</p><p lang="en">Ask OMS for project status in the conversation.</p></noscript>
 <div id="view" hidden>
 <section id="goal-section" aria-labelledby="goal-label"><div class="section-head"><div class="goal-heading"><h2 id="goal-label" data-i18n="goalLabel">프로젝트 목표</h2><span id="observed-at" class="observed" hidden></span></div><button id="new-goal" type="button" data-i18n="newGoal">새 목표</button></div>
-<p id="goal" tabindex="-1" class="clamp"></p><button id="goal-expand" class="subtle" aria-controls="goal" aria-expanded="false" hidden></button><p id="progress" hidden></p><div id="progress-track" class="progress-track" aria-hidden="true" hidden><span id="progress-fill"></span></div>
-<div id="goal-journey"><p id="criteria-summary" hidden></p><p id="attention-summary" class="note"></p><p id="next-step" class="note"></p><div class="actions"><button id="evidence-toggle" type="button" aria-expanded="false" aria-controls="goal-evidence" data-i18n="evidence.open">결과 근거 보기</button><button id="followup-open" type="button" data-i18n="followup.prepare" hidden>현재 Main에 요청할 초안 준비</button></div>
-<section id="goal-evidence" hidden><h3 data-i18n="evidence.title">프로젝트 완료 기준과 근거</h3><ul id="criteria-list"></ul><p id="evidence-note" class="note"></p><ul id="readiness-list"></ul></section>
-<section id="followup-panel" hidden><label for="followup-text" data-i18n="followup.label">현재 대화에 추가할 요청 초안</label><textarea id="followup-text" rows="3" maxlength="4000"></textarea><p class="note" data-i18n="followup.note">초안 추가는 작업 배정이나 실행 시작이 아닙니다.</p><section id="finding-preview" hidden><h3 data-i18n="finding.title">공유할 선택 결과 미리보기</h3><p id="finding-scope" class="note"></p><p id="finding-range" class="note"></p><pre id="finding-text"></pre><p class="note" data-i18n="finding.note">아래 공유 버튼을 누를 때만 이 발췌문과 요청 초안을 현재 대화 문맥에 추가합니다. 전체 대화는 공유하지 않습니다.</p><button id="finding-share" type="button" data-i18n="finding.share">이 발췌문과 초안을 Main 문맥에 공유</button></section><div class="actions"><button id="followup-add" type="button" data-i18n="followup.add">대화 문맥에 추가</button><button id="followup-copy" type="button" data-i18n="copy">복사</button><button id="followup-main" type="button" data-i18n="main.continue">Main 대화에서 이어가기</button><button id="followup-close" type="button" data-i18n="close">닫기</button></div><p id="followup-status" class="note" role="status"></p></section></div></section>
+<p id="goal" tabindex="-1" class="clamp"></p><button id="goal-expand" class="subtle" aria-controls="goal" aria-expanded="false" hidden></button><div id="progress-track" class="progress-track" aria-hidden="true" hidden><span id="progress-fill"></span></div><p id="progress-line"><span id="criteria-summary" hidden></span><span id="progress" hidden></span></p>
+<div id="goal-journey"><button id="evidence-toggle" class="journey-line" type="button" aria-expanded="false" aria-controls="goal-evidence"><span id="attention-summary"></span><span id="next-step"></span><span id="evidence-label" data-i18n="evidence.open">근거 보기</span></button>
+<section id="goal-evidence" hidden><h3 data-i18n="evidence.title">프로젝트 완료 기준과 근거</h3><ul id="criteria-list"></ul><p id="evidence-note" class="note"></p><ul id="readiness-list"></ul><div class="actions"><button id="followup-open" type="button" data-i18n="followup.prepare" hidden>현재 Main에 요청할 초안 준비</button></div></section>
+<section id="followup-panel" hidden><label for="followup-text" data-i18n="followup.label">현재 대화에 추가할 요청 초안</label><textarea id="followup-text" rows="3" maxlength="4000"></textarea><p class="note" data-i18n="followup.note">초안 추가는 작업 배정이나 실행 시작이 아닙니다.</p><button id="followup-include" type="button" data-i18n="finding.include" hidden>발췌문 포함</button><section id="finding-preview" hidden><h3 data-i18n="finding.title">공유할 선택 결과 미리보기</h3><p id="finding-scope" class="note"></p><p id="finding-range" class="note"></p><pre id="finding-text"></pre><p class="note" data-i18n="finding.note">아래 공유 버튼을 누를 때만 이 발췌문과 요청 초안을 현재 대화 문맥에 추가합니다. 전체 대화는 공유하지 않습니다.</p><button id="finding-share" type="button" data-i18n="finding.share">이 발췌문과 초안을 Main 문맥에 공유</button></section><div class="actions"><button id="followup-add" type="button" data-i18n="followup.add">대화 문맥에 추가</button><button id="followup-copy" type="button" data-i18n="copy">복사</button><button id="followup-main" type="button" data-i18n="main.continue">Main 대화에서 이어가기</button><button id="followup-close" type="button" data-i18n="close">닫기</button></div><p id="followup-status" class="note" role="status"></p></section></div></section>
 <div>
-<section id="main-card" aria-labelledby="main-name"><h2 id="main-scope" class="label"></h2><div class="identity"><span id="avatar" class="avatar" aria-hidden="true"></span><strong id="main-name" tabindex="-1"></strong></div><p id="main-status" class="note"></p><button id="header-main" type="button" data-i18n="main.continue" hidden>Main 대화에서 이어가기</button></section>
+<section id="main-card" aria-labelledby="main-name"><h2 id="main-scope" class="sr-only"></h2><div class="identity"><span id="avatar" class="avatar" aria-hidden="true"></span><p class="main-line"><strong id="main-name" tabindex="-1"></strong><span id="main-status"></span></p><button id="header-main" class="subtle" type="button" data-i18n="main.continue" hidden>Main 대화에서 이어가기</button></div></section>
 <section id="approval-card" aria-labelledby="approvals-heading" hidden><h2 id="approvals-heading" tabindex="-1"></h2><div id="approvals"></div></section>
 </div>
-<section id="leads-section" aria-labelledby="leads-heading"><div class="section-head"><h2 id="leads-heading">Leads</h2><button id="open-leads" type="button" aria-describedby="lead-opt-in-note" data-i18n="openLeads" hidden>세 Lead 연결</button></div><p id="lead-opt-in-note" class="note" data-i18n="leadOptIn" hidden></p><label id="lead-auto-label" hidden><input id="lead-auto" type="checkbox"><span data-i18n="autoLeads">다음에도 세 Lead 자동 연결</span></label><p id="lead-control-status" class="note" role="status"></p><button id="lead-refresh" type="button" class="subtle" data-i18n="turn.check" hidden>상태 확인</button><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
+<section id="leads-section" aria-labelledby="leads-heading"><div class="section-head"><h2 id="leads-heading">Lead</h2><details id="lead-settings" hidden><summary data-i18n="leads.settings">연결 설정</summary><div class="lead-settings-body"><button id="open-leads" type="button" aria-describedby="lead-opt-in-note" data-i18n="openLeads" hidden>세 Lead 연결</button><p id="lead-opt-in-note" class="note" data-i18n="leadOptIn" hidden></p><label id="lead-auto-label" hidden><input id="lead-auto" type="checkbox"><span data-i18n="autoLeads">다음에도 세 Lead 자동 연결</span></label><button id="lead-refresh" type="button" class="subtle" data-i18n="turn.check" hidden>상태 확인</button></div></details></div><p id="leads-help" class="note" data-i18n="leads.help">질문은 읽기 전용 상담 · 작업 배정은 Main에서</p><p id="lead-control-status" class="note" role="status"></p><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
 
 <p id="outcome" hidden></p>
+<p id="inspect-row"><button id="inspect-open" class="subtle" type="button" aria-haspopup="dialog" data-i18n="inspect.open" disabled>더 살펴보기</button></p>
 </div>
 <dialog id="launcher" aria-labelledby="launch-title"><div class="dialog-body"><div class="section-head"><h2 id="launch-title" data-i18n="newGoal">새 목표</h2><button id="close-launch" type="button" data-i18n="close">닫기</button></div><form id="launch"><fieldset id="controls">
 <label class="field" for="brief" data-i18n="briefLabel">작업 목표</label><input id="brief" required aria-describedby="brief-count" placeholder="예: Auth 모듈 테스트 추가 또는 GitHub 이슈 URL"><span id="brief-count" class="count">0 / 2,000</span>
@@ -325,9 +368,9 @@ header{gap:8px;padding-bottom:8px}
 <p id="launch-status" class="note" role="status"></p>
 <button id="issue-review" type="button" hidden data-i18n="reviewIssue">현재 Main에 전달할 이슈 확인</button><p id="issue-evidence" class="note" role="status"></p><button id="issue-record" type="button" hidden></button>
 </div></dialog>
-<dialog id="worker-output" aria-labelledby="output-title"><div class="dialog-body"><div class="section-head"><h2 id="output-title" data-i18n="out.title">워커 출력</h2><button id="output-close" type="button" data-i18n="close">닫기</button></div>
+<dialog id="worker-output" aria-labelledby="output-title"><div class="dialog-body"><div class="section-head"><h2 id="output-title" data-i18n="out.title">워커 출력</h2><div class="dialog-actions"><button id="output-refresh" type="button" aria-label="새로고침">↻</button><button id="output-close" type="button" data-i18n="close">닫기</button></div></div>
 <p id="output-worker"></p><p id="output-status" class="note" role="status"></p><pre id="output-body" hidden></pre><p id="output-limited" class="note" data-i18n="out.limited" hidden>기록된 출력의 일부입니다.</p>
-<div class="actions"><button id="output-refresh" type="button" data-i18n="refresh">새로고침</button><button id="output-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="output-more" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button><button id="output-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="output-preview" type="button" data-i18n="finding.preview" hidden>Main에 공유할 부분 미리보기</button><button id="output-followup" type="button" data-i18n="followup.result" hidden>이 결과로 요청 초안 준비</button></div><p id="output-copy-status" class="note" role="status"></p></div></dialog>
+<div class="actions"><button id="output-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="output-more" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button><button id="output-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="output-followup" class="primary" type="button" data-i18n="followup.result" hidden>이 결과로 요청</button></div><p id="output-copy-status" class="note" role="status"></p></div></dialog>
 <dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><div class="identity"><span id="chat-avatar" class="avatar" aria-hidden="true" hidden></span><h2 id="chat-title"></h2></div><span class="dialog-actions"><button id="settings-toggle" type="button" aria-controls="chat-settings" aria-expanded="false" data-i18n="prefs.title" hidden>대화 설정</button><button id="chat-refresh" type="button" aria-label="대화 새로고침">↻</button><button id="chat-back" type="button" data-i18n="close">닫기</button></span></div>
 <section id="chat-settings" tabindex="-1" aria-labelledby="settings-toggle" hidden>
 <p id="settings-scope" class="note"></p><p id="settings-saved"></p><p id="settings-actual" class="note" hidden></p><p id="settings-catalog" class="note"></p>
@@ -336,7 +379,7 @@ header{gap:8px;padding-bottom:8px}
 <label><span data-i18n="prefs.effort">추론 강도</span><select id="settings-effort"></select></label></fieldset>
 <p id="settings-hint" class="note"></p><div id="settings-controls"><p id="settings-status" class="note" role="status"></p><button id="settings-read" type="button" data-i18n="refresh" hidden>새로고침</button><button id="settings-save" type="button" data-i18n="prefs.save" hidden>저장</button></div></section>
 <p id="chat-status" class="note" role="status"></p><button id="chat-new" type="button" class="subtle" data-i18n="chat.new" hidden>새 메시지 보기</button><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-result"></p><p id="chat-result-limited" class="note" data-i18n="turn.partial" hidden>부분 답변</p><button id="chat-result-full" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button>
-<section id="full-answer" hidden><div class="section-head"><h3 data-i18n="answer.title">기록된 출력</h3><button id="answer-close" type="button" data-i18n="close">닫기</button></div><pre id="full-answer-body"></pre><p id="answer-status" class="note" role="status"></p><div class="actions"><button id="answer-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="answer-more" type="button" data-i18n="answer.more" hidden>다음 부분 읽기</button><button id="answer-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="answer-preview" type="button" data-i18n="finding.preview" hidden>Main에 공유할 부분 미리보기</button><button id="answer-followup" type="button" data-i18n="followup.result" hidden>이 결과로 요청 초안 준비</button></div></section></div>
+<section id="full-answer" hidden><div class="section-head"><h3 data-i18n="answer.title">기록된 출력</h3><button id="answer-close" type="button" data-i18n="close">닫기</button></div><pre id="full-answer-body"></pre><p id="answer-status" class="note" role="status"></p><div class="actions"><button id="answer-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="answer-more" type="button" data-i18n="answer.more" hidden>다음 부분 읽기</button><button id="answer-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="answer-followup" class="primary" type="button" data-i18n="followup.result" hidden>이 결과로 요청</button></div></section></div>
 <form id="chat-compose" hidden><label for="chat-text" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000" aria-describedby="chat-count chat-delivery"></textarea><span id="chat-count" class="count"></span>
 <div class="actions"><span id="chat-delivery" role="status"></span><button id="chat-check" type="button" hidden></button><button id="chat-send" type="submit" data-i18n="chatSend">보내기</button></div></form></dialog>
 <dialog id="inspection" aria-labelledby="inspect-title"><div class="dialog-body"><div class="section-head"><h2 id="inspect-title" data-i18n="inspect.title">프로젝트 더 살펴보기</h2><button id="inspect-close" type="button" data-i18n="close">닫기</button></div><div class="actions"><label for="inspect-kind" class="sr-only" data-i18n="inspect.choose">살펴볼 항목</label><select id="inspect-kind"><option value="usage" data-i18n="inspect.usage">사용량과 쿼터</option><option value="graph" data-i18n="inspect.graph">프로젝트 관계</option><option value="routes" data-i18n="inspect.routes">예상 라우팅</option><option value="modelcatalog" data-i18n="inspect.modelcatalog">모델 카탈로그</option></select><button id="inspect-refresh" type="button" data-i18n="refresh">새로고침</button></div><form id="inspect-graph-form" class="actions" hidden><label for="inspect-query" class="sr-only" data-i18n="inspect.searchLabel">이름 또는 경로</label><input id="inspect-query" maxlength="256" placeholder="이름 또는 경로"><button id="inspect-search" type="submit" data-i18n="inspect.search">찾기</button><button id="inspect-root" type="button" data-i18n="inspect.root">전체 범위</button></form><p id="inspect-note" class="note"></p><p id="inspect-status" class="note" role="status"></p><div id="inspect-content"></div><div class="actions"><button id="inspect-prev" type="button" data-i18n="inspect.prev" hidden>이전 페이지</button><button id="inspect-next" type="button" data-i18n="inspect.next" hidden>다음 페이지</button></div></div></dialog>
@@ -453,6 +496,9 @@ const messages = {
   "observedAt": ["관측 {time}", "Updated {time}"],
   "refreshChat": ["대화 새로고침", "Refresh conversation"],
   "autoLeads": ["다음에도 이 프로젝트의 세 Lead 자동 연결", "Automatically connect all three on future project visits"],
+  "leads.heading": ["Lead {n}", "Leads {n}"],
+  "leads.help": ["질문은 읽기 전용 상담 · 작업 배정은 Main에서", "Questions are read-only consultations · assign work in Main"],
+  "leads.settings": ["연결 설정", "Connection settings"],
   "leadOptIn": ["Lead 질문은 읽기 전용 상담입니다. 작업 배정은 현재 Main에서 이어가세요.", "Lead questions are read-only consultations. Continue work assignment in the current Main."],
   "transcriptPartial": ["최근 대화 일부입니다.", "Showing part of the recorded conversation."],
   "startingLeads": ["Lead 대화를 여는 중…", "Opening Lead conversations…"],
@@ -465,7 +511,7 @@ const messages = {
   "waitingAssignment": ["배정 대기", "Waiting for assignment"],
   "unknownAssignment": ["배정 미확인", "Assignment unknown"],
   "partialLeads": ["조회된 담당 기록이 일부입니다.", "Only part of the assignment history is available."],
-  "progress": ["계획 작업 {total}개 중 {verified}개 검증 완료", "{verified} of {total} planned tasks verified"],
+  "progress": ["계획 작업 {verified} / {total}", "Plan tasks {verified} / {total}"],
   "projChanged": ["프로젝트가 변경되었습니다.", "The project changed."],
   "project": ["프로젝트", "Project"],
   "project.choose": ["OMS를 사용할 프로젝트를 선택하세요.", "Select a project to use with OMS."],
@@ -557,20 +603,22 @@ const messages = {
   "answer.first": ["처음부터 읽기", "Read from the start"],
   "answer.copy": ["표시된 부분 복사", "Copy displayed part"],
   "answer.changed": ["출력 또는 범위가 변경되어 읽기를 중단했습니다. 다시 열어 확인하세요.", "Output or scope changed. Reopen it to read again."],
-  "evidence.open": ["결과 근거 보기", "View result evidence"],
-  "evidence.close": ["결과 근거 접기", "Hide result evidence"],
+  "evidence.open": ["근거 보기", "View evidence"],
+  "evidence.close": ["근거 접기", "Hide evidence"],
   "evidence.title": ["프로젝트 완료 기준과 근거", "Repository completion criteria and evidence"],
-  "evidence.count": ["프로젝트 완료 기준 {total}개 중 {verified}개 검증 · 작업 수와 별도", "{verified} of {total} repository criteria verified · separate from task count"],
+  "evidence.count": ["완료 기준 {verified} / {total} 검증", "Criteria {verified} / {total} verified"],
+  "evidence.partialShort": ["일부만 표시", "partly shown"],
   "evidence.none": ["기록된 프로젝트 완료 기준이 없습니다.", "No repository completion criteria recorded."],
   "evidence.unknown": ["프로젝트 완료 기준을 확인할 수 없습니다.", "Repository completion criteria are unconfirmed."],
   "evidence.partial": ["일부 기준 또는 근거만 표시합니다. 생략된 항목은 미확인입니다.", "Only part of the criteria or evidence is shown. Omitted items remain unknown."],
   "evidence.reference": ["근거 · {v}", "Evidence · {v}"],
   "evidence.stale": ["오래된 근거", "Stale evidence"],
   "evidence.noRef": ["근거 미확인", "Evidence unconfirmed"],
-  "journey.attention": ["프로젝트 확인 필요 · {v}", "Repository needs attention · {v}"],
-  "journey.next": ["다음 확인 · {v}", "Next check · {v}"],
+  "journey.attention": ["확인 필요 · {v}", "Needs attention · {v}"],
+  "journey.next": ["다음: {v}", "Next: {v}"],
   "followup.prepare": ["현재 Main에 요청할 초안 준비", "Prepare a follow-up for Main"],
-  "followup.result": ["이 결과로 요청 초안 준비", "Prepare a follow-up on this result"],
+  "followup.result": ["이 결과로 요청", "Ask Main about this result"],
+  "finding.include": ["발췌문 포함", "Include an excerpt"],
   "followup.reference": ["선택한 결과 참조: {v}", "Selected result reference: {v}"],
   "followup.label": ["현재 대화에 추가할 요청 초안", "Request draft for the current conversation"],
   "followup.note": ["초안 추가는 작업 배정이나 실행 시작이 아닙니다.", "Adding a draft does not assign a task or start execution."],
@@ -579,7 +627,6 @@ const messages = {
   "followup.done": ["현재 대화의 문맥에 요청 초안을 추가했습니다. Main 수신이나 실행은 확인되지 않았습니다.", "Added the request draft to this conversation's context. Main receipt and execution are unconfirmed."],
   "followup.failed": ["대화 문맥 추가를 확인하지 못했습니다. 초안을 복사해 현재 Main 대화에서 이어가세요.", "Context update is unconfirmed. Copy the draft and continue in Main's conversation."],
   "followup.text": ["프로젝트 목표: {goal}\n확인할 항목: {item}\n현재 범위에서 근거와 미완료 기준을 확인하고 다음 조치를 제안해 주세요.", "Project goal: {goal}\nItem to check: {item}\nCheck the evidence and unmet criteria within the current scope, then propose the next action."],
-  "finding.preview": ["Main에 공유할 부분 미리보기", "Preview excerpt for Main"],
   "finding.title": ["공유할 선택 결과 미리보기", "Selected finding to share"],
   "finding.note": ["공유 버튼을 누를 때만 이 발췌문과 요청 초안을 현재 대화 문맥에 추가합니다. 전체 대화는 공유하지 않습니다.", "Only Share adds this excerpt and your draft to the current conversation context. The rest of the private conversation stays private."],
   "finding.share": ["이 발췌문과 초안을 Main 문맥에 공유", "Share this excerpt and draft with Main context"],
@@ -653,12 +700,16 @@ function paintObserved() {
 function setStatus(value,tone='info') {
   el('status').setAttribute('data-tone',tone);put('status',value);
 }
+// Observation quality (degraded, unconfirmed, unavailable) is not a work outcome, so it falls through to muted.
 const TONES={
-  attention:['blocked','waiting_for_input','waiting_for_review','waiting_approval','failed','timed_out','guard_stop','rejected','interrupted','orphaned','degraded','unconfirmed','unavailable'],
+  decision:['blocked','waiting_for_input','waiting_for_review','waiting_approval'],
+  failure:['failed','timed_out','guard_stop','rejected','interrupted','orphaned'],
   active:['working','running','verifying','review','in_review','in_progress','active','claimed','landing','starting'],
   done:['completed','done','accepted','passed','verified'],
 };
 const stateTone=state=>Object.keys(TONES).find(tone=>TONES[tone].includes(state))||'muted';
+// The presence dot ranks failure › decision › working › live › idle.
+const presenceOf=(tones,working,live)=>tones.has('failure')?'failure':tones.has('decision')?'decision':working || tones.has('active')?'working':live?'live':'idle';
 function syncBriefCount() {
   const count=el('brief-count'), length=Array.from(launchDraft().goal).length;
   count.textContent=String(length).replace(/\B(?=(\d{3})+$)/g,',')+' / 2,000';
@@ -675,6 +726,7 @@ function localize() {
   el('refresh').setAttribute('aria-label',t('refresh'));
   el('auto-refresh').setAttribute('aria-label',t('autoLabel'));
   el('chat-refresh').setAttribute('aria-label',t('refreshChat'));
+  el('output-refresh').setAttribute('aria-label',t('refresh'));
   el('brief').setAttribute('placeholder',t('briefPlaceholder'));
   el('inspect-query').setAttribute('placeholder',t('inspect.searchLabel'));
   if(followupDraft)paintFollowup();
@@ -1237,9 +1289,8 @@ function personEntry({attempt,member},kind) {
   const title=typeof attempt.taskTitle==='string'?attempt.taskTitle.trim():'';
   const body=node('span','','body');
   if(kind==='slot' && attempt.role==='lead'){
-    if(member)body.append(node('span',()=>assignmentLabel(attempt)+' · ','sr-only'));
-    body.append(node('strong',label || title || 'Lead'));
-    if(label && title)body.append(node('small',title));
+    if(member)body.append(node('span',()=>[assignmentLabel(attempt),title && label].filter(Boolean).join(' · ')+' · ','sr-only'));
+    body.append(node('strong',title || label || 'Lead'));
   }else{
     body.append(node('strong',identity));
     if(title)body.append(node('small',title));
@@ -1284,7 +1335,7 @@ function clearWorkerOutput(){
   selectedOutput=undefined;
   for(const id of ['output-worker','output-status','output-body']){const e=el(id);bindings.delete(e);e.textContent='';}
   el('output-body').hidden=true;el('output-limited').hidden=true;
-  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=el('output-preview').hidden=true;el('output-preview').disabled=false;put('output-copy-status',()=>'');
+  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=true;put('output-copy-status',()=>'');
 }
 function closeWorkerOutput(){
   if(el('worker-output').open)el('worker-output').close();
@@ -1307,7 +1358,7 @@ async function readWorkerOutput(s,paged=false){
   el('output-body').hidden=true;el('output-body').textContent='';el('output-limited').hidden=true;
   if(!currentWorkerOutput(s)){put('output-status','out.unavailable');return;}
   s.loading=true;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=true;put('output-status','out.loading');
-  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=el('output-preview').hidden=true;put('output-copy-status',()=>'');
+  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=true;put('output-copy-status',()=>'');
   try{
     const result=await tool('oms_worker_output',args,s.ctl.generation);
     if(!currentWorkerOutput(s))return;
@@ -1321,12 +1372,11 @@ async function readWorkerOutput(s,paged=false){
     el('output-body').textContent=out.text||'';el('output-body').hidden=!out.text;
     el('output-limited').hidden=!(out.text && out.truncated);
     el('output-copy').hidden=el('output-followup').hidden=!out.text;
-    el('output-preview').hidden=!out.text?.trim() || !findingScope();
     el('output-more').hidden=!out.text || (paged?!s.cursor:!out.truncated);
     el('output-first').hidden=!paged || !s.start;
     put('output-more',paged?'answer.more':'answer.full');
   }catch{if(currentWorkerOutput(s)){s.text='';s.cursor=null;put('output-status',paged?'answer.changed':'out.unavailable');}}
-  finally{if(selectedOutput===s){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=el('output-preview').disabled=blocked;}}
+  finally{if(selectedOutput===s){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=blocked;}}
 }
 function openWorkerOutput(lead,worker,origin){
   if(hostToolsUnavailable || !currentLeadControl(leadControl) || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
@@ -1342,8 +1392,10 @@ onClick('output-first',()=>{const s=selectedOutput;if(currentWorkerOutput(s) && 
 onClick('output-copy',()=>{const s=selectedOutput;copyDisplayed(s?.text,'output-copy-status',()=>currentWorkerOutput(s) && !s.loading);});
 onClick('output-followup',()=>{
   const s=selectedOutput;if(!currentWorkerOutput(s) || s.loading || !s.text)return;
-  const source={kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,summary:[s.label(),t('out.title')].filter(Boolean).join(' · '),...(s.digest?{digest:s.digest}:{})};
-  closeWorkerOutput();prepareFollowup(source);
+  const summary=[s.label(),t('out.title')].filter(Boolean).join(' · ');
+  const source={kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,summary,...(s.digest?{digest:s.digest}:{})};
+  const candidate=s.text.trim()?{...readerState(s),ref:{kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,format:s.format},summary}:null;
+  closeWorkerOutput();prepareFollowup(source,candidate);
 });
 onClick('output-close',()=>el('worker-output').close());
 on('worker-output','close',()=>{
@@ -1363,7 +1415,7 @@ function acceptChunk(reader,page){
 }
 function clearFullAnswer(){
   fullAnswer=null;el('full-answer').hidden=true;el('full-answer-body').textContent='';
-  el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=el('answer-preview').hidden=true;put('answer-status',()=>'');
+  el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=true;put('answer-status',()=>'');
 }
 function currentFullAnswer(s){
   return s && s===fullAnswer && s.generation===generation && !el('full-answer').hidden && (s.kind==='lead'?currentManaged(s.c):
@@ -1412,10 +1464,9 @@ async function readFullAnswer(s){
     acceptChunk(s,page);s.pageCursor=cursor;s.source=source;el('full-answer-body').textContent=s.text;
     put('answer-status',()=>t('answer.loaded',{start:s.text?s.start+1:0,n:s.end,total:s.total}));
     el('answer-first').hidden=!s.start;el('answer-more').hidden=!s.cursor;el('answer-copy').hidden=!s.text;el('answer-followup').hidden=!source || !joinedMain();
-    el('answer-preview').hidden=!source || !s.text.trim() || !findingScope();
   }catch{
-    if(currentFullAnswer(s)){s.text='';s.cursor=null;s.source=null;el('full-answer-body').textContent='';el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=el('answer-preview').hidden=true;put('answer-status','answer.changed');}
-  }finally{if(currentFullAnswer(s)){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('answer-more').disabled=el('answer-first').disabled=el('answer-preview').disabled=blocked;}}
+    if(currentFullAnswer(s)){s.text='';s.cursor=null;s.source=null;el('full-answer-body').textContent='';el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=true;put('answer-status','answer.changed');}
+  }finally{if(currentFullAnswer(s)){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('answer-more').disabled=el('answer-first').disabled=blocked;}}
 }
 function openFullAnswer(selection){
   if(hostToolsUnavailable || (selection.kind==='lead'?!currentManaged(selection.c):!canChat(selection.member) || !/^[a-f0-9]{64}$/.test(bindingKey)))return;
@@ -1428,7 +1479,8 @@ onClick('answer-first',()=>{const s=fullAnswer;if(!hostToolsUnavailable && curre
 onClick('answer-copy',()=>{const s=fullAnswer;copyDisplayed(s?.text,'answer-status',()=>currentFullAnswer(s));});
 onClick('answer-followup',()=>{
   const s=fullAnswer;if(!currentFullAnswer(s) || !s.source)return;
-  const source={...s.source,digest:s.digest};el('conversation').close();clearChat();prepareFollowup(source);
+  const source={...s.source,digest:s.digest},candidate=s.text?.trim()?readerState(s):null;
+  el('conversation').close();clearChat();prepareFollowup(source,candidate);
 });
 onClick('chat-result-full',()=>{
   if(!hostToolsUnavailable && selectedChat && roomResult?.attempt)openFullAnswer({kind:'room',member:selectedChat,attempt:roomResult.attempt,origin:el('chat-result-full')});
@@ -1449,12 +1501,13 @@ function renderLeadSlots(leads,complete) {
     open.addEventListener('click',()=>openManagedChat(ctl,provider,open));
     connect.addEventListener('click',()=>writeLeads(ctl,[provider]));
     heading.append(status,open,connect,turn);
-    leadSlots.set(provider,{status,open,connect,turn,avatar,working:entries.some(e=>stateTone(e.attempt.state)==='active'),attention:entries.some(e=>stateTone(e.attempt.state)==='attention'),placeholder:entries.length?null:(complete?'waitingAssignment':'unknownAssignment')});
+    leadSlots.set(provider,{status,open,connect,turn,avatar,tones:new Set(entries.map(e=>stateTone(e.attempt.state))),placeholder:entries.length?null:(complete?'waitingAssignment':'unknownAssignment')});
     slot.append(heading);
     for(const entry of entries)slot.append(leadEntry(entry,true));
     list.append(slot);
   }
   for(const entry of leads)if(!providers.includes(providerOf(entry)))list.append(leadEntry(entry,false));
+  const n=list.children.length;put('leads-heading',()=>t('leads.heading',{n}));
   paintLeadControls();
 }
 function currentLeadControl(ctl) {
@@ -1480,7 +1533,7 @@ function paintLeadControls(){
   const auto=known && autoLeads(ctl);
   el('lead-auto-label').hidden=!known;el('lead-auto').checked=Boolean(auto);
   el('lead-auto').disabled=blocked || !known || !ctl.observed;
-  el('lead-opt-in-note').hidden=!known;
+  el('lead-opt-in-note').hidden=!known;el('lead-settings').hidden=!known;
   const pendingTurn=known && [...ctl.items.values()].some(r=>['reserved','running','unconfirmed'].includes(r.latestTurn?.status) || r.turnState);
   el('lead-refresh').hidden=!known || !(ctl.failed || ctl.pollPaused || pendingTurn);
   el('lead-refresh').disabled=blocked || !known || ctl.reading || ctl.writing;
@@ -1495,7 +1548,7 @@ function paintLeadControls(){
     slot.status.hidden=!key;
     slot.status.setAttribute('data-tone',stateTone(row && key==='lead.'+row.status?row.status:''));
     if(key)put(slot.status,key);else slot.status.textContent='';
-    slot.avatar.setAttribute('data-presence',slot.attention || stateTone(row?.status)==='attention'?'attention':slot.working || row?.status==='starting'?'working':ready?'live':'idle');
+    slot.avatar.setAttribute('data-presence',presenceOf(new Set([...slot.tones,stateTone(row?.status)]),row?.status==='starting',ready));
     slot.open.hidden=!ready;
     slot.open.disabled=blocked || !known || !ctl.observed || ctl.writing;
     if(ready)put(slot.open,()=>t('lead.ready',{provider:names[provider]}));else slot.open.textContent='';
@@ -1968,13 +2021,43 @@ function paintEvidence(){
   const readiness=el('readiness-list');readiness.replaceChildren();
   for(const task of readinessTasks(d))readiness.append(node('li',()=>task.title+' · '+readinessLabel(task),'note'));
 }
+function validCriteria(c){
+  return c?.available===true && c.scope==='repository' && Number.isSafeInteger(c.total) && c.total>=0 &&
+    Number.isSafeInteger(c.verified) && c.verified>=0 && c.verified<=c.total;
+}
+// Segments need the whole list: every criterion projected, none omitted, each readable.
+function criteriaListed(c){
+  const items=Array.isArray(c?.criteria)?c.criteria:[];
+  return validCriteria(c) && !(Number(c.omitted)>0) && c.total<=8 && items.length===c.total &&
+    items.every(r=>displayText(r?.id,160) && displayText(r.label,2000) && displayText(r.status,96) && !(Number(r.evidenceOmitted)>0));
+}
+// One bar: repository criteria when any are recorded, otherwise the plan's tasks. The two counts are never summed.
+function paintProgress(d){
+  const {verified,total}=d.planProgress||{},c=d.acceptance;
+  const planned=Number.isSafeInteger(total) && total>0 && Number.isSafeInteger(verified) && verified>=0 && verified<=total;
+  const criteria=validCriteria(c) && c.total>0,track=el('progress-track');
+  el('progress').hidden=!planned;put('progress',()=>planned?t('progress',{verified,total}):'');
+  track.hidden=!criteria && !planned;
+  const [done,all]=criteria?[c.verified,c.total]:planned?[verified,total]:[0,1];
+  el('progress-fill').style.width=Math.round(done/all*100)+'%';
+  let segments=[];
+  if(criteria && criteriaListed(c))segments=c.criteria.map(r=>node('span','',stateTone(r.status)==='done'?'seg done':
+    Array.isArray(r.evidence) && r.evidence.slice(0,3).some(e=>e?.stale===true)?'seg stale':'seg'));
+  // A short plan reads as one segment per task: verified, the next one, then the rest.
+  else if(!criteria && planned && total<=12)segments=Array.from({length:total},(_,i)=>node('span','',i<verified?'seg done':i===verified?'seg current':'seg'));
+  track.setAttribute('data-segments',String(segments.length>0));track.replaceChildren(el('progress-fill'),...segments);
+}
 function paintJourney(d){
-  const c=d.acceptance, valid=c?.available===true && c.scope==='repository' && Number.isSafeInteger(c.total) && c.total>=0 && Number.isSafeInteger(c.verified) && c.verified>=0 && c.verified<=c.total;
+  const c=d.acceptance, valid=validCriteria(c);
   el('criteria-summary').hidden=false;
-  put('criteria-summary',()=>!valid?t('evidence.unknown'):c.total?t('evidence.count',{total:c.total,verified:c.verified}):t('evidence.none'));
+  put('criteria-summary',()=>!valid?t('evidence.unknown'):c.total?t('evidence.count',{total:c.total,verified:c.verified})+(criteriaListed(c)?'':' · '+t('evidence.partialShort')):t('evidence.none'));
   const focus=journeyFocus(d),next=d.nextStep?.scope==='repository'?displayText(d.nextStep.summary,1200):'';
   put('attention-summary',()=>focus.summary?t('journey.attention',{v:focus.summary}):'');
   put('next-step',()=>next?t('journey.next',{v:next}):'');
+  // With nothing to check the line falls back to a plain text button that only opens the evidence.
+  if(focus.summary)el('evidence-toggle').setAttribute('data-tone','warn');
+  else if(next)el('evidence-toggle').setAttribute('data-tone','plain');
+  else el('evidence-toggle').removeAttribute('data-tone');
   el('followup-open').hidden=!joinedMain();el('followup-open').disabled=staleView || busy;
   if(!el('goal-evidence').hidden)paintEvidence();
 }
@@ -1991,6 +2074,8 @@ function paintFollowup(){
   const current=currentFollowup(followupDraft),valid=validText(el('followup-text').value),blocked=disposed || hostToolsUnavailable;
   el('followup-add').hidden=!hasContext();el('followup-add').disabled=!current || !valid || followupDraft?.pending;
   put('followup-add',followupDraft?.finding?'followup.referencesOnly':'followup.add');
+  el('followup-include').hidden=!followupDraft?.candidate || !!followupDraft.finding || !hasContext() || !findingScope();
+  el('followup-include').disabled=blocked || !current || followupDraft?.pending;
   el('finding-share').hidden=!hasContext();el('finding-share').disabled=blocked || !current || !valid || !findingScope() || !followupDraft?.finding || followupDraft.pending;
   el('followup-copy').disabled=!current || !valid;el('followup-main').disabled=blocked || !current;
   if(current && !valid)put('followup-status','turn.limit');
@@ -2006,7 +2091,7 @@ async function copyDisplayed(text,target,current=()=>true){
 }
 onClick('evidence-toggle',()=>{
   const show=el('goal-evidence').hidden;el('goal-evidence').hidden=!show;
-  el('evidence-toggle').setAttribute('aria-expanded',String(show));put('evidence-toggle',show?'evidence.close':'evidence.open');
+  el('evidence-toggle').setAttribute('aria-expanded',String(show));put('evidence-label',show?'evidence.close':'evidence.open');
   if(show)paintEvidence();
 });
 const validTaskId=v=>typeof v==='string' && /^[A-Za-z0-9._-]{1,160}$/.test(v)?v:null;
@@ -2041,7 +2126,9 @@ function resolveResultTask(source,d=dashboardData){
 }
 function resultTask(source,d=dashboardData){return resolveResultTask(source,d).task;}
 const resultSourceFields=['kind','projectKey','room','provider','participant','leadRequestId','turnId','operation','leadAttempt','workerAttempt','attempt','format','digest','pageCursor'];
-function prepareFollowup(source=null,finding=null){
+const cleanSource=source=>source?Object.fromEntries(resultSourceFields.filter(k=>source[k]!==undefined).map(k=>[k,source[k]])):null;
+// A result follow-up keeps the displayed page as a candidate; no excerpt is selected until Include is pressed.
+function prepareFollowup(source=null,candidate=null){
   const main=joinedMain();if(!main || staleView || busy)return;
   clearFinding();
   const excerpt=(value,max)=>Array.from(value).length>max?Array.from(value).slice(0,max).join('')+'…':value;
@@ -2049,21 +2136,21 @@ function prepareFollowup(source=null,finding=null){
   const goal=excerpt(displayText(dashboardData.goal,2000)||t('goalUnknown'),400);
   const summary=excerpt(displayText(source?source.summary:focus.summary,512)||(source?t('answer.title'):t('evidence.title')),200);
   const turnId=source && turnUuid(source.turnId)?source.turnId:null;
-  const cleanSource=source?Object.fromEntries(resultSourceFields.filter(k=>source[k]!==undefined).map(k=>[k,source[k]])):null;
-  followupDraft={project,projectKey:bindingKey,generation,room:main.room,owner:main.participant,mainProvider:main.provider,task,goal,summary,turnId,source:cleanSource,finding};
+  followupDraft={project,projectKey:bindingKey,generation,room:main.room,owner:main.participant,mainProvider:main.provider,task,goal,summary,turnId,source:cleanSource(source),finding:null,candidate};
   el('followup-text').value=[turnId&&t('followup.reference',{v:'Turn: '+turnId}),task&&'Task: '+task,
     t('followup.text',{goal,item:summary})].filter(Boolean).join('\n');
-  if(finding){
-    const selected=finding.selection,reference=cleanSource && [['Kind',cleanSource.kind],['Provider',cleanSource.provider],
-      ['Participant',cleanSource.participant],['Lead request',cleanSource.leadRequestId],['Turn',cleanSource.turnId],
-      ['Operation',cleanSource.operation],['Lead attempt',cleanSource.leadAttempt],['Worker attempt',cleanSource.workerAttempt],
-      ['Attempt',cleanSource.attempt],['Digest',cleanSource.digest]].filter(([,value])=>value).map(([label,value])=>label+': '+value).join(' · ');
-    el('finding-preview').hidden=false;el('finding-text').textContent=selected.text;
-    put('finding-scope',()=>[t('project')+': '+(project||displayText(dashboardData.project,255)||'OMS'),'Room: '+main.room,reference].filter(Boolean).join(' · '));
-    put('finding-range',()=>t('finding.range',{start:selected.offset+1,end:selected.offset+selected.bytes,total:selected.totalBytes,
-      extent:t(selected.truncated?'finding.partial':'finding.complete')})+(selected.bytes<selected.displayedBytes?' · '+t('finding.limit',{n:selected.bytes}):''));
-  }
   el('followup-panel').hidden=false;armAuto();put('followup-status',()=>'');paintFollowup();el('followup-text').focus();
+}
+function showFinding(draft){
+  const selected=draft.finding.selection,src=draft.source;
+  el('finding-preview').hidden=false;el('finding-text').textContent=selected.text;
+  const reference=[['Kind',src.kind],['Provider',src.provider],['Participant',src.participant],
+    ['Lead request',src.leadRequestId],['Turn',src.turnId],['Operation',src.operation],['Lead attempt',src.leadAttempt],
+    ['Worker attempt',src.workerAttempt],['Attempt',src.attempt],['Digest',src.digest]]
+    .filter(([,value])=>value).map(([label,value])=>label+': '+value).join(' · ');
+  put('finding-scope',()=>[t('project')+': '+(project||displayText(dashboardData.project,255)||'OMS'),'Room: '+draft.room,reference].filter(Boolean).join(' · '));
+  put('finding-range',()=>t('finding.range',{start:selected.offset+1,end:selected.offset+selected.bytes,total:selected.totalBytes,
+    extent:t(selected.truncated?'finding.partial':'finding.complete')})+(selected.bytes<selected.displayedBytes?' · '+t('finding.limit',{n:selected.bytes}):''));
 }
 const FINDING_BYTES=4000;
 function findingScope(){return hasContext() && !disposed && !hostToolsUnavailable && !busy && !readOnly && !staleView && !!joinedMain() && /^[a-f0-9]{64}$/.test(bindingKey);}
@@ -2083,33 +2170,26 @@ function selectedFinding(reader,displayed=reader.text){
   return {cursor:reader.pageCursor||'',selection:{text,offset:reader.start,bytes,totalBytes:reader.total,digest:reader.digest,
     truncated:reader.start>0 || reader.start+bytes<reader.total,displayedBytes}};
 }
-onClick('output-preview',async()=>{
-  const s=selectedOutput;if(!currentWorkerOutput(s) || s.loading || !s.text?.trim() || !findingScope())return;
-  const displayed=s.text,ref={kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,
-    format:s.format,summary:[s.label(),t('out.title')].filter(Boolean).join(' · ')};
-  s.loading=true;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=el('output-preview').disabled=true;
+function readerState(r){return {text:r.text,digest:r.digest,start:r.start,total:r.total,end:r.end,pageCursor:r.pageCursor};}
+onClick('followup-include',async()=>{
+  const draft=followupDraft,c=draft?.candidate;
+  if(!currentFollowup(draft) || !c || draft.finding || draft.pending || !findingScope())return;
+  draft.pending=true;paintFollowup();
   try{
-    let reader=s,source=ref;
-    if(!s.digest){
-      const result=await loadResultPage(ref,'',s.ctl.generation);
-      if(!currentWorkerOutput(s))return;
-      if(result.source.format!==s.format || !result.page.text.startsWith(utf8Prefix(displayed,FINDING_BYTES)))throw uiError('answer.changed');
-      reader={end:0,pageCursor:''};acceptChunk(reader,result.page);source=result.source;
+    let reader=c,source=draft.source;
+    if(c.ref){
+      source={...c.ref,summary:c.summary};
+      if(!c.digest){
+        const result=await loadResultPage(c.ref,'',draft.generation);
+        if(!currentFollowup(draft))return;
+        if(result.source.format!==c.ref.format || !result.page.text.startsWith(utf8Prefix(c.text,FINDING_BYTES)))throw uiError('answer.changed');
+        reader={end:0,pageCursor:''};acceptChunk(reader,result.page);
+      }
     }
-    if(!currentWorkerOutput(s) || !findingScope())return;
-    const finding=selectedFinding(reader,displayed);source={...source,digest:reader.digest};
-    closeWorkerOutput();prepareFollowup(source,finding);
-  }catch{if(currentWorkerOutput(s)){
-    s.text='';s.cursor=null;s.digest=null;s.end=0;s.pageCursor=null;
-    el('output-body').hidden=true;el('output-body').textContent='';el('output-limited').hidden=true;
-    el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=el('output-preview').hidden=true;
-    put('output-copy-status',()=>'');put('output-status','answer.changed');
-  }}finally{if(selectedOutput===s){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=el('output-preview').disabled=blocked;}}
-});
-onClick('answer-preview',()=>{
-  const s=fullAnswer;if(!currentFullAnswer(s) || s.loading || !s.source || !s.text?.trim() || !findingScope())return;
-  const finding=selectedFinding(s),source={...s.source,digest:s.digest};
-  el('conversation').close();clearChat();prepareFollowup(source,finding);
+    if(!currentFollowup(draft) || !findingScope())return;
+    draft.finding=selectedFinding(reader,c.text);draft.source=cleanSource({...source,digest:reader.digest});draft.candidate=null;showFinding(draft);
+  }catch{if(currentFollowup(draft)){draft.candidate=null;put('followup-status','finding.changed');}}
+  finally{if(currentFollowup(draft)){draft.pending=false;paintFollowup();}}
 });
 async function verifiedFindingScope(draft){
   if(!currentFollowup(draft) || !findingScope())throw uiError('finding.changed');
@@ -2317,14 +2397,7 @@ function render(d) {
   const goal=(!Object.hasOwn(d,'goalAvailability') || d.goalAvailability==='available') && typeof d.goal==='string' && d.goal.trim()?d.goal:'';
   put('goal',()=>goal || t(d.goalAvailability==='absent' && d.goal==null?'goalNone':'goalUnknown'));
 
-  const {verified,total}=d.planProgress||{};
-  const counted=Number.isSafeInteger(total) && total>0 && Number.isSafeInteger(verified) && verified>=0 && verified<=total;
-  el('progress').hidden=el('progress-track').hidden=!counted;
-  el('progress-fill').style.width=(counted?Math.round(verified/total*100):0)+'%';
-  // A short plan reads as one segment per task: verified, the next one, then the rest.
-  const segmented=counted && total<=12;el('progress-track').setAttribute('data-segments',String(segmented));
-  el('progress-track').replaceChildren(el('progress-fill'),...(segmented?Array.from({length:total},(_,i)=>node('span','',i<verified?'seg done':i===verified?'seg current':'seg')):[]));
-  put('progress',()=>t('progress',{verified,total}));
+  paintProgress(d);
   el('project').textContent=d.project || project || 'OMS';el('new-goal').hidden=readOnly;
   const owner=main || (readOnly?d.main:null);
   put('main-scope',main?'currentMain':readOnly?'repositoryMain':'currentMain');
@@ -2337,7 +2410,7 @@ function render(d) {
   const mainTone=stateTone((main?ownerRun:owner)?.state);
   // An unknown Main shows the '–' placeholder and no presence; a joined Main with an unrecognised harness stays present.
   if(!main && !owner?.provider)el('avatar').removeAttribute('data-presence');
-  else el('avatar').setAttribute('data-presence',mainTone==='attention'?'attention':mainTone==='active'?'working':main?'live':'idle');
+  else el('avatar').setAttribute('data-presence',presenceOf(new Set([mainTone]),false,Boolean(main)));
   put('main-status',()=>main ? [ownerRun?.state?stateLabel(ownerRun.state):t('joined'),ownerRun?.taskTitle].filter(Boolean).join(' · ') :
     owner?stateLabel(owner.state):t(readOnly?'noRecordedMain':'noJoinedMain'));
   rows=leads;
@@ -2532,9 +2605,9 @@ function syncHostTools() {
   el('issue-review').disabled=blocked || issueReviewBusy;
   if(reviewedIssue)paintIssue(reviewedIssue);else el('issue-record').disabled=blocked;
   const outBusy=blocked || Boolean(selectedOutput?.loading);
-  for(const id of ['output-refresh','output-more','output-first','output-preview'])el(id).disabled=outBusy;
+  for(const id of ['output-refresh','output-more','output-first'])el(id).disabled=outBusy;
   const ansBusy=blocked || Boolean(fullAnswer?.loading);
-  for(const id of ['answer-more','answer-first','answer-preview'])el(id).disabled=ansBusy;
+  for(const id of ['answer-more','answer-first'])el(id).disabled=ansBusy;
   el('chat-result-full').disabled=blocked;
   for(const b of turnAnswerButtons)b.disabled=blocked;
   el('chat-refresh').disabled=blocked;
