@@ -801,13 +801,19 @@ remains available, labeled as stale in the synthesis.
 ### Live council threads
 
 Councils with `--thread ID` publish every completed turn without waiting for slower
-seats. Opening answers and rebuttal rounds remain parallel, with one prior-round
+seats. Native OMS opening answers and rebuttal rounds run with at most four active seats,
+with one prior-round
 evidence/notes snapshot and all-seat budget preflight per round. Coordinator
 notes/decisions use `thread context --notes-only` (2 KiB, eight turns); answers and
 provider failure notes are not duplicated there. Notes arriving during a round apply
 only if another configured round runs. MCP `kind=ask` returns a ready thread and accepts
 `debate_rounds=0..3` (default zero); its suggested operation wait is zero while
 exchanging messages.
+
+On Linux the native host gives each concurrent provider call an isolated
+whole-tree supervisor and waits for its descendant cleanup. Embedded executors
+retain serial seats unless they explicitly support concurrent cleanup; one
+seat runs inline. Both paths use the same round snapshots and publication rules.
 
 Threads stay open for authorized focused follow-up through `consult`; neither notes nor
 reads start new calls. CLI export-only does not create/publish turns. Closing a council
@@ -2025,8 +2031,13 @@ task-state contradictions, residual intents, and active/retired lineage conflict
 
 With explicit `--collaboration auto`, initial planning and the one bounded
 remainder proposal call the existing Codex, Claude and Antigravity council with
-one rebuttal round. These are the current fixed native seats; this mode does not
-adopt panel council customization. Registry and transport checks run before
+one rebuttal round by default. `--council-providers claude,codex` explicitly
+selects unique required seats from these native-output transports, and
+`--council-rounds 0..3` selects rebuttals. Zero uses initial judgments and
+synthesis. The schema-1 composition is retained in the proposal and frozen
+autopilot contract, including continuation and remainder planning. Legacy
+records without it retain the three-seat, one-rebuttal default. This mode does
+not adopt panel council customization. Registry and transport checks run before
 provider execution. Every required seat and declared round must finish with a
 usable response. Nonempty alternatives, evidence, counterargument and
 verification sections are required, with explicit deltas and disagreements in

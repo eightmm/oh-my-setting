@@ -2359,6 +2359,20 @@ fn child_input_runs_natively_with_child_restrictions() {
 #[cfg(target_os = "linux")]
 #[test]
 fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
+    native_peer_cancellation_reaps_setsid_descendants("codex:model=gpt-5.4", &["codex"]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigterm_on_concurrent_native_council_reaps_every_setsid_descendant() {
+    native_peer_cancellation_reaps_setsid_descendants(
+        "codex:model=gpt-5.4,claude:model=claude-sonnet-4-6",
+        &["codex", "claude"],
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn native_peer_cancellation_reaps_setsid_descendants(providers: &str, seats: &[&str]) {
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::os::unix::process::CommandExt;
     use std::time::{Duration, Instant};
@@ -2399,33 +2413,48 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
     }
     let grand_pid_file = f.0.join("grand.pid");
     let grand_ready_file = f.0.join("grand.ready");
-    std::fs::write(
-        bin.join("codex"),
-        "#!/bin/sh\nsetsid /bin/sh -c 'trap \"\" TERM; exec sleep 30' </dev/null >/dev/null 2>&1 & printf '%s\\n' \"$!\" > \"$OMS_GRAND_PID\"; : > \"$OMS_GRAND_READY\"; exec sleep 30\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(bin.join("codex"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    for seat in seats {
+        std::fs::write(
+            bin.join(seat),
+            "#!/bin/sh\nOMS_CANCEL_SEAT=${0##*/}; export OMS_CANCEL_SEAT\nsetsid /bin/sh -c 'trap \"\" TERM; printf \"%s\\n\" \"$$\" > \"$OMS_GRAND_PID.$OMS_CANCEL_SEAT\"; : > \"$OMS_GRAND_READY.$OMS_CANCEL_SEAT\"; exec sleep 30' </dev/null >/dev/null 2>&1 &\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join(seat), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let seat_file = |base: &std::path::Path, seat: &str| {
+        base.with_file_name(format!(
+            "{}.{seat}",
+            base.file_name().unwrap().to_string_lossy()
+        ))
+    };
+    let ready = |base: &std::path::Path| seats.iter().all(|seat| seat_file(base, seat).exists());
+    let pids = |base: &std::path::Path| {
+        seats
+            .iter()
+            .map(|seat| {
+                std::fs::read_to_string(seat_file(base, seat))
+                    .unwrap()
+                    .trim()
+                    .parse::<i32>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
 
     let mut cmd = f.private(&bin, "--oms-dispatch");
-    cmd.args([
-        "peer-ask",
-        "--providers",
-        "codex",
-        "--model",
-        "gpt-5.4",
-        "--prompt",
-        "ping",
-    ])
-    .env("OMS_GRAND_PID", &grand_pid_file)
-    .env("OMS_GRAND_READY", &grand_ready_file)
-    .stdin(std::process::Stdio::null())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .process_group(0);
+    cmd.args(["peer-ask", "--providers", providers, "--prompt", "ping"])
+        .env("OMS_GRAND_PID", &grand_pid_file)
+        .env("OMS_GRAND_READY", &grand_ready_file)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0);
 
     let mut child = cmd.spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !grand_ready_file.exists() {
+    // Every seat must be running before cancellation. A serial implementation
+    // cannot reach this barrier while the first fixture provider sleeps.
+    while !ready(&grand_ready_file) {
         if let Some(status) = child.try_wait().unwrap() {
             let out = child.wait_with_output().unwrap();
             panic!(
@@ -2434,14 +2463,13 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
                 String::from_utf8_lossy(&out.stderr),
             );
         }
-        assert!(Instant::now() < deadline, "codex fixture did not start");
+        assert!(
+            Instant::now() < deadline,
+            "all Council fixture seats did not start concurrently"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let grand_pid: i32 = std::fs::read_to_string(&grand_pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let grand_pids = pids(&grand_pid_file);
 
     nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(child.id() as i32),
@@ -2463,17 +2491,19 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
     };
     assert_eq!(status.code(), Some(130));
     std::thread::sleep(Duration::from_millis(50));
-    let alive = Command::new("kill")
-        .args(["-0", &grand_pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap()
-        .success();
-    assert!(
-        !alive,
-        "setsid TERM-ignoring grandchild {grand_pid} survived SIGTERM on native oms"
-    );
+    for grand_pid in grand_pids {
+        let alive = Command::new("kill")
+            .args(["-0", &grand_pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(
+            !alive,
+            "setsid TERM-ignoring grandchild {grand_pid} survived SIGTERM on native oms"
+        );
+    }
 
     // Also verify nested `Scope::ProcessGroup` supervision (`5s` grace, matching
     // `ControlServices::invoke_with_scope`) cleanly cancels and reaps the child `oms`
@@ -2488,9 +2518,7 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
         "--".into(),
         "peer-ask".into(),
         "--providers".into(),
-        "codex".into(),
-        "--model".into(),
-        "gpt-5.4".into(),
+        providers.into(),
         "--prompt".into(),
         "ping".into(),
     ]);
@@ -2545,7 +2573,7 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
     let mut reactor = oms_supervisor::process::Reactor::new();
     let job = reactor.start(request).unwrap();
     let ready2_deadline = Instant::now() + Duration::from_secs(10);
-    while !grand2_ready_file.exists() {
+    while !ready(&grand2_ready_file) {
         match reactor.poll(job, Duration::from_millis(20)).unwrap() {
             oms_supervisor::process::Progress::Pending(_) => {}
             oms_supervisor::process::Progress::Complete(done) => {
@@ -2559,14 +2587,10 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
         }
         assert!(
             Instant::now() < ready2_deadline,
-            "nested codex fixture did not start"
+            "all nested Council fixture seats did not start concurrently"
         );
     }
-    let grand2_pid: i32 = std::fs::read_to_string(&grand2_pid_file)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let grand2_pids = pids(&grand2_pid_file);
     reactor
         .stop(job, oms_supervisor::process::StopReason::Cancelled)
         .unwrap();
@@ -2588,17 +2612,19 @@ fn sigterm_on_native_peer_command_reaps_setsid_descendants() {
     );
     assert!(done.cleanup_complete());
     std::thread::sleep(Duration::from_millis(50));
-    let alive2 = Command::new("kill")
-        .args(["-0", &grand2_pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap()
-        .success();
-    assert!(
-        !alive2,
-        "setsid TERM-ignoring grandchild {grand2_pid} survived nested ProcessGroup cancellation"
-    );
+    for grand2_pid in grand2_pids {
+        let alive2 = Command::new("kill")
+            .args(["-0", &grand2_pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        assert!(
+            !alive2,
+            "setsid TERM-ignoring grandchild {grand2_pid} survived nested ProcessGroup cancellation"
+        );
+    }
 }
 
 // ---- native landing services through the real binary -----------------------

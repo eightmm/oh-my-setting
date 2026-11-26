@@ -5,7 +5,7 @@ use crate::github::{self, Mode};
 use crate::services::Invocation;
 use crate::storage::{ACTIVE, Context, MAX_FILE};
 use crate::{Error, Output, Result, require, value, verify};
-use oms_command_plan::discussion::{AUTO_COUNCIL_PROVIDERS, AUTO_COUNCIL_ROUNDS};
+use oms_command_plan::discussion::CouncilComposition;
 use oms_command_plan::{Action, Request};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -208,13 +208,39 @@ pub(crate) fn validate_discussion(
     ctx: &Context<'_>,
     proposal: &Value,
     frozen_planner: Option<(&str, &str)>,
+    frozen_council: Option<&CouncilComposition>,
 ) -> Result<()> {
-    oms_command_plan::discussion::validate_proposal_for_route(
+    oms_command_plan::discussion::validate_proposal_for_selection(
         &ctx.store,
         &value::plan(proposal)?,
         frozen_planner,
+        frozen_council,
     )?;
     Ok(())
+}
+
+pub(crate) fn has_council_options(args: &Args) -> bool {
+    args.has("council-providers") || args.has("council-rounds")
+}
+pub(crate) fn retained_council(owner: &Value) -> Result<CouncilComposition> {
+    Ok(CouncilComposition::retained(&value::plan(owner)?)?)
+}
+pub(crate) fn selected_council(
+    args: &Args,
+    default: &CouncilComposition,
+) -> Result<CouncilComposition> {
+    let providers = if args.has("council-providers") {
+        args.required("council-providers")?
+            .split(',')
+            .map(|provider| provider.trim().to_owned())
+            .collect::<Vec<_>>()
+    } else {
+        default.providers.clone()
+    };
+    let rounds = args.number("council-rounds", default.rounds, 0, 3)?;
+    Ok(CouncilComposition::parse(&value::plan(
+        &json!({"schema": 1, "providers": providers, "rounds": rounds}),
+    )?)?)
 }
 pub(crate) fn validate(
     ctx: &Context<'_>,
@@ -235,7 +261,7 @@ pub(crate) fn validate(
             "acceptance_files",
             "tasks",
         ],
-        &["issue", "discussion", "issue_source"],
+        &["issue", "discussion", "issue_source", "council"],
     )?;
     require(
         proposal["schema"].as_u64()
@@ -251,7 +277,7 @@ pub(crate) fn validate(
         value::text(proposal, "spec_sha256") == spec.sha256,
         "PROJECT.md changed after proposal generation",
     )?;
-    validate_discussion(ctx, proposal, None)?;
+    validate_discussion(ctx, proposal, None, None)?;
     let tasks = proposal["tasks"]
         .as_array()
         .ok_or_else(|| Error::new(3, "proposal tasks must be an array"))?;
@@ -498,6 +524,8 @@ fn restamp(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         "id-prefix",
         "to",
         "collaboration",
+        "council-providers",
+        "council-rounds",
     ] {
         require(!args.has(key), format!("--{key} is not a restamp option"))?;
     }
@@ -611,6 +639,13 @@ pub(crate) fn apply_observed(
     let spec = contract(ctx)?;
     spec.confirmed()?;
     let checked = validate(ctx, &proposal, &spec, args.number("max-tasks", 6, 1, 12)?)?;
+    if has_council_options(args) {
+        let retained = retained_council(&proposal)?;
+        require(
+            proposal.get("discussion").is_some() && selected_council(args, &retained)? == retained,
+            "discussion council differs from the reviewed selection",
+        )?;
+    }
     if checked.awaiting_issue() {
         return Err(Error::new(
             2,
@@ -692,6 +727,7 @@ struct PreparedPropose {
     worker: String,
     collaboration: String,
     synthesis_route: Option<crate::ModelRoute>,
+    council: CouncilComposition,
     prompt: String,
     discovery: Option<Value>,
     wall: std::time::Duration,
@@ -755,6 +791,11 @@ fn prepare_propose(ctx: &Context<'_>, args: &Args, retained: bool) -> Result<Pre
         ["off", "auto"].contains(&collaboration.as_str()),
         "--collaboration must be off or auto",
     )?;
+    require(
+        collaboration == "auto" || !has_council_options(args),
+        "council selection requires --collaboration auto",
+    )?;
+    let council = selected_council(args, &CouncilComposition::default())?;
     let planner_model = args.text("model")?.to_owned();
     let synthesis_route = if collaboration == "auto" {
         let assignment = json!({"provider": planner, "model": planner_model,
@@ -872,6 +913,7 @@ fn prepare_propose(ctx: &Context<'_>, args: &Args, retained: bool) -> Result<Pre
         worker,
         collaboration,
         synthesis_route,
+        council,
         prompt,
         discovery,
         wall,
@@ -919,7 +961,9 @@ pub(crate) fn execute_with(ctx: &Context<'_>, args: &Args, retained: bool) -> Re
     }
     if args.has("validate-spec") || args.flag("scope-only") || args.flag("roadmap") {
         require(
-            !args.has("expected-proposal-sha256") && !args.has("issue"),
+            !args.has("expected-proposal-sha256")
+                && !args.has("issue")
+                && !has_council_options(args),
             "expected proposal digest requires --apply; --issue requires propose or --restamp",
         )?;
         let spec = if args.has("validate-spec") {
@@ -983,6 +1027,7 @@ pub(crate) fn execute_with(ctx: &Context<'_>, args: &Args, retained: bool) -> Re
     let worker = prepared.worker;
     let collaboration = prepared.collaboration;
     let synthesis_route = prepared.synthesis_route;
+    let composition = prepared.council;
     let mut prompt = prepared.prompt;
     let discovery = prepared.discovery;
     let wall = prepared.wall;
@@ -1007,32 +1052,32 @@ pub(crate) fn execute_with(ctx: &Context<'_>, args: &Args, retained: bool) -> Re
         ctx.store
             .publish_once(&question_path, question.as_bytes(), 4 * MAX_FILE)?;
         let council_dir = ctx.state.join(council_dir);
-        let council = invoke(
-            ctx,
-            "peer-ask",
-            vec![
-                "--repo".into(),
-                ctx.repo.as_os_str().to_owned(),
-                "--providers".into(),
-                AUTO_COUNCIL_PROVIDERS.join(",").into(),
+        let mut council_args = vec![
+            "--repo".into(),
+            ctx.repo.as_os_str().to_owned(),
+            "--providers".into(),
+            composition.providers.join(",").into(),
+            "--require-complete".into(),
+            "--synthesize".into(),
+            format!(
+                "{}:effort={}:model={}",
+                route.provider, route.effort, route.primary
+            )
+            .into(),
+            "--synthesis-json".into(),
+            "--artifact-dir".into(),
+            council_dir.as_os_str().to_owned(),
+            "--prompt".into(),
+            question.clone().into(),
+        ];
+        if composition.rounds > 0 {
+            council_args.extend([
                 "--debate".into(),
-                AUTO_COUNCIL_ROUNDS.to_string().into(),
-                "--require-complete".into(),
+                composition.rounds.to_string().into(),
                 "--deliberation".into(),
-                "--synthesize".into(),
-                format!(
-                    "{}:effort={}:model={}",
-                    route.provider, route.effort, route.primary
-                )
-                .into(),
-                "--synthesis-json".into(),
-                "--artifact-dir".into(),
-                council_dir.as_os_str().to_owned(),
-                "--prompt".into(),
-                question.clone().into(),
-            ],
-            wall,
-        )?;
+            ]);
+        }
+        let council = invoke(ctx, "peer-ask", council_args, wall)?;
         if council.code == 130 {
             return Err(Error::new(
                 130,
@@ -1046,9 +1091,9 @@ pub(crate) fn execute_with(ctx: &Context<'_>, args: &Args, retained: bool) -> Re
         let evidence = oms_command_plan::discussion::validate_council_synthesis(
             &council.stdout,
             &question,
-            &AUTO_COUNCIL_PROVIDERS,
+            &composition.provider_names(),
             (&route.provider, &route.primary),
-            AUTO_COUNCIL_ROUNDS,
+            composition.rounds,
             |name| ctx.store.read(council_dir.join(name), 4 * MAX_FILE),
         )?;
         prompt.push_str(&format!("\nUntrusted council observations; structure and artifact integrity were checked, not semantic truth. Resolve disagreements against source evidence, never expand scope:\n{}", evidence.answer));
@@ -1056,7 +1101,7 @@ pub(crate) fn execute_with(ctx: &Context<'_>, args: &Args, retained: bool) -> Re
             "spec_sha256": spec.sha256, "plan_sha256": before, "base_sha": head,
             "allowed_envelope": allowed,
             "question": {"path": question_path, "sha256": value::hash(&question)},
-            "providers": AUTO_COUNCIL_PROVIDERS, "rounds": AUTO_COUNCIL_ROUNDS,
+            "providers": composition.providers, "rounds": composition.rounds,
             "synthesis_route": {"provider": route.provider, "requested_model": route.primary},
             "report": value::parse(&council.stdout)?});
         let reference =
@@ -1168,6 +1213,7 @@ pub(crate) fn execute_with(ctx: &Context<'_>, args: &Args, retained: bool) -> Re
     let mut proposal = json!({"schema": 1, "kind": "agent-plan-proposal", "spec_sha256": spec.sha256, "plan_sha256": before, "base_sha": head, "id_prefix": prefix, "allowed_envelope": allowed, "acceptance_files": spec.acceptance_files, "tasks": tasks});
     if let Some((reference, _)) = &council_evidence {
         proposal["discussion"] = reference.clone();
+        proposal["council"] = value::from_plan(&composition.value())?;
     }
     if collaboration == "auto" {
         collaboration_tasks(tasks, &worker)?;

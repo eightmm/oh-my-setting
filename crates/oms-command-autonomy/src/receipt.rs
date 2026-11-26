@@ -191,8 +191,15 @@ pub fn validate(row: &Value) -> Result<()> {
             "allow_floor_change",
             "collaboration",
         ],
-        &["milestones", "issue_requirements"],
+        &["milestones", "issue_requirements", "council"],
     )?;
+    if contract.get("council").is_some() {
+        require(
+            contract["collaboration"] == "auto",
+            "council selection requires auto collaboration",
+        )?;
+        planning::retained_council(contract)?;
+    }
     if let Some(binding) = contract.get("issue_requirements") {
         value::keys(binding, &["issue", "sha256"], &[])?;
         require(
@@ -414,8 +421,9 @@ fn validate_bound_proposal(ctx: &Context<'_>, row: &Value, proposal: &Value) -> 
     }
     let contract = &row["contract"];
     if contract["collaboration"] != "auto" {
-        return planning::validate_discussion(ctx, proposal, None);
+        return planning::validate_discussion(ctx, proposal, None, None);
     }
+    let council = planning::retained_council(contract)?;
     planning::validate_discussion(
         ctx,
         proposal,
@@ -423,6 +431,7 @@ fn validate_bound_proposal(ctx: &Context<'_>, row: &Value, proposal: &Value) -> 
             value::text(&row["providers"], "planner"),
             value::text(&row["routing"]["planner"], "model"),
         )),
+        Some(&council),
     )?;
     let allowed = envelope(value::text(contract, "allowed"))?;
     require(
@@ -673,6 +682,19 @@ pub fn continuation_argv(row: &Value) -> Vec<String> {
     }
     put("review-mode", text(contract, "review_mode"));
     put("collaboration", text(contract, "collaboration"));
+    if let Some(council) = contract.get("council") {
+        put(
+            "council-providers",
+            council["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|provider| provider.as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        put("council-rounds", council["rounds"].to_string());
+    }
     for role in ["planner", "worker", "reviewer"] {
         if !value::text(&routing[role], "model").is_empty() {
             put(&format!("{role}-model"), text(&routing[role], "model"));
@@ -1127,6 +1149,11 @@ fn park(
 fn fresh(ctx: &Context<'_>, args: &Args) -> Result<Value> {
     let spec = planning::contract(ctx)?;
     spec.confirmed()?;
+    require(
+        args.get("collaboration", "off")? == "auto" || !planning::has_council_options(args),
+        "council selection requires --collaboration auto",
+    )?;
+    let council = planning::selected_council(args, &Default::default())?;
     let planner = ctx
         .services
         .normalize_provider(args.get("planner", "claude")?)?;
@@ -1192,6 +1219,9 @@ fn fresh(ctx: &Context<'_>, args: &Args) -> Result<Value> {
         },
     )?;
     let mut row = json!({"schema": 1, "kind": "autopilot-run", "stage": "proposing", "repo": ctx.repo, "spec_sha256": spec.sha256, "providers": {"planner": planner, "worker": worker, "reviewer": reviewer}, "routing": routing, "contract": {"allowed": allowed.join(","), "base": branch, "base_sha": base(ctx, remote, &branch)?, "remote": remote, "max_cycles": args.number("max-cycles", 10, 1, 10)?, "initial_tasks": args.number("initial-tasks", 6, 1, 12)?, "replan_tasks": args.number("replan-tasks", 2, 1, 2)?, "auto_repair": args.flag("auto-repair"), "retry_known": args.flag("retry-known"), "review_mode": review_mode, "draft_pr": args.flag("draft-pr"), "allow_verifier_change": args.flag("allow-verifier-change"), "allow_floor_change": args.text("allow-floor-change")?, "collaboration": args.get("collaboration", "off")?}, "proposal": {"path": "", "sha256": ""}, "branch": format!("oms/autopilot-{}", &spec.sha256[..12]), "owner_id": value::random("owner_")?, "updated": value::now()});
+    if row["contract"]["collaboration"] == "auto" {
+        row["contract"]["council"] = value::from_plan(&council.value())?;
+    }
     if args.has("milestones") {
         let ids = args.required("milestones")?.split(',').collect::<Vec<_>>();
         require(
@@ -1213,6 +1243,14 @@ fn fresh(ctx: &Context<'_>, args: &Args) -> Result<Value> {
     Ok(row)
 }
 fn options_match(args: &Args, row: &Value) -> Result<()> {
+    if planning::has_council_options(args) {
+        let council = planning::retained_council(&row["contract"])?;
+        require(
+            row["contract"]["collaboration"] == "auto"
+                && planning::selected_council(args, &council)? == council,
+            "frozen council selection differs",
+        )?;
+    }
     if args.has("milestones") {
         let ids = row["contract"]["milestones"]
             .as_array()
@@ -1309,6 +1347,19 @@ fn propose_args(args: &Args, row: &Value, remainder: bool) -> Args {
         "collaboration",
         value::text(&row["contract"], "collaboration"),
     );
+    if let Some(council) = row["contract"].get("council") {
+        planning.set(
+            "council-providers",
+            council["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|provider| provider.as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        planning.set("council-rounds", council["rounds"].to_string());
+    }
     planning.set("allowed", value::text(&row["contract"], "allowed"));
     planning.set(
         "max-tasks",
@@ -3897,6 +3948,31 @@ mod tests {
             args.required("expected-proposal-sha256").unwrap(),
             "c".repeat(64)
         );
+        let legacy_digest = contract_digest(&row);
+        row["contract"]["collaboration"] = "auto".into();
+        row["contract"]["review_mode"] = "gate".into();
+        row["contract"]["council"] = json!({"schema":1,"providers":["claude","codex"],"rounds":0});
+        for role in ["planner", "reviewer"] {
+            row["routing"][role]["model"] = "fixture-model".into();
+        }
+        validate(&row).unwrap();
+        assert_ne!(contract_digest(&row), legacy_digest);
+        let selected_digest = contract_digest(&row);
+        for remainder in [false, true] {
+            let planning = propose_args(&Args::default(), &row, remainder);
+            assert_eq!(
+                planning.required("council-providers").unwrap(),
+                "claude,codex"
+            );
+            assert_eq!(planning.required("council-rounds").unwrap(), "0");
+        }
+        let argv = approved_continuation(&row).unwrap();
+        let raw: Vec<_> = argv[2..].iter().map(std::ffi::OsString::from).collect();
+        let selected = Args::parse("autopilot", &raw).unwrap();
+        options_match(&selected, &row).unwrap();
+        row["contract"]["council"]["rounds"] = 1.into();
+        assert_ne!(contract_digest(&row), selected_digest);
+        assert!(options_match(&selected, &row).is_err());
         row["stage"] = "proposing".into();
         row["proposal"] = json!({"path": "", "sha256": ""});
         assert!(approved_continuation(&row).is_none());
