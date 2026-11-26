@@ -34,7 +34,7 @@ struct Retained {
 
 /// Output without an explicit answer boundary can include prompts or tool logs.
 pub(super) fn indexed_answer(store: &Store, row: &Value) -> Option<String> {
-    let answer = results::indexed_answer(store, row).ok()?;
+    let answer = results::unredacted_indexed_answer(store, row).ok()?;
     matches!(answer.lines().next(), Some("## Answer" | "## Findings")).then_some(answer)
 }
 
@@ -405,6 +405,32 @@ pub(super) fn read(
                         }
                     }
                 } else {
+                    if section == "diff" && kept.raw_patch_withheld {
+                        return Ok(
+                            json!({"attempt":id,"section":section,"status":"outbound_withheld"}),
+                        );
+                    }
+                    let raw_body = if section == "diff" {
+                        kept.raw_patch
+                    } else {
+                        kept.raw_answer
+                    }
+                    .ok_or_else(|| Error::new("Verified retained evidence unavailable"))?;
+                    match oms_scrub::outbound_page(
+                        &raw_body.text,
+                        raw_body.bound,
+                        oms_scrub::PageSelector::Offset(0),
+                    ) {
+                        Ok(_) => {}
+                        Err(oms_scrub::PageError::OutboundWithheld) => {
+                            return Ok(
+                                json!({"attempt":id,"section":section,"status":"outbound_withheld"}),
+                            );
+                        }
+                        Err(oms_scrub::PageError::InvalidRange) => {
+                            return Err(Error::new("Evidence page unavailable"));
+                        }
+                    }
                     let body = if section == "diff" {
                         kept.patch
                     } else {

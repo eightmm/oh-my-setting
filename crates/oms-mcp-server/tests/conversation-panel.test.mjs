@@ -1562,6 +1562,7 @@ test('pending-turn polling pauses visibly and slot badges change only after a co
   await choose(p,'ko');assert.match(p.get('leads').children[2].textContent,/안전 검사로 답변이 보류되었습니다/);
   await choose(p,'en');
   for(const [turnState,enRe,koRe] of [
+    [{status:'unavailable',reason:'invalid_answer_range'},/Answer size or range unavailable/,/답변 크기 또는 범위를 읽을 수 없습니다/],
     [{status:'unavailable',reason:'invalid_turn_record'},/Turn record unreadable/,/전달 기록을 읽을 수 없습니다/],
     [{status:'unconfirmed',reason:'receipt_changed'},/Receipt changed · delivery unconfirmed/,/접수 상태가 변경되어 전달을 확인할 수 없습니다/]
   ]){

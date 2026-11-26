@@ -1888,8 +1888,60 @@ fn desktop_lead_conversations() {
                 status_row["leads"][0]["turnState"],
                 json!({"status":"unavailable","reason":"outbound_withheld"})
             );
+
+            // An answer exceeding MAX_ANSWER fails closed with invalid_answer_range, not outbound_withheld.
+            let oversized = "b".repeat(8 * 1024 * 1024 + 64);
+            std::fs::write(&artifact, format!("## Output\n{oversized}\n## Exit\n0\n")).unwrap();
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let oversized_row = payload(&call(&mut c, read, &args, owner));
+            assert_eq!(oversized_row["leads"][0]["latestTurn"], Value::Null);
+            assert_eq!(
+                oversized_row["leads"][0]["turnState"],
+                json!({"status":"unavailable","reason":"invalid_answer_range"})
+            );
+            let mut oversized_page = full.clone();
+            oversized_page["answerPage"] = json!("");
+            bad(
+                &call(&mut c, read, &oversized_page, owner),
+                "exceeds the size limit",
+            );
+
             std::fs::write(&artifact, original).unwrap();
             std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+            // A secret straddling the 4000-byte Lead kickoff cut withholds leadConversation.
+            let kickoff_receipt: Value =
+                serde_json::from_slice(&std::fs::read(source.join("lead-fixture-codex")).unwrap())
+                    .unwrap();
+            let kickoff_artifact = repo
+                .join(".oms/artifacts/mcp")
+                .join(kickoff_receipt["operation"].as_str().unwrap())
+                .join("answers/fixture.md");
+            let kickoff_original = std::fs::read(&kickoff_artifact).unwrap();
+            let kickoff_straddling = format!(
+                "{} {left}{right} {}",
+                "k".repeat(4000 - 1 - left.len()),
+                "q".repeat(300)
+            );
+            std::fs::write(
+                &kickoff_artifact,
+                format!("## Output\n{kickoff_straddling}\n## Exit\n0\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&kickoff_artifact, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let refused_kickoff = call(
+                &mut c,
+                read,
+                &json!({"room":"lead-room","provider":"codex"}),
+                owner,
+            );
+            bad(&refused_kickoff, "withheld");
+            let kickoff_wire = refused_kickoff.to_string();
+            assert!(!kickoff_wire.contains(&left) && !kickoff_wire.contains(right));
+            std::fs::write(&kickoff_artifact, kickoff_original).unwrap();
+            std::fs::set_permissions(&kickoff_artifact, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
         }
         let reset = change_to(
             seat,
@@ -2485,6 +2537,123 @@ fn desktop_assignment() {
             .as_str()
             .unwrap()
             .contains("fixture answer")
+    );
+
+    // Whole-body scan before the 6000-char assignment preview cut: a secret straddling
+    // char 6000 or a machine path in bytes omitted by storage::bounded withholds the preview.
+    let assign_artifact = opdir.join("answers/fixture.md");
+    let assign_original = std::fs::read(&assign_artifact).unwrap();
+    let clean_long = format!("{}{}", "a".repeat(6000), "b".repeat(400));
+    std::fs::write(
+        &assign_artifact,
+        format!("## Output\n{clean_long}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    let long_page = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    good(&long_page);
+    assert_eq!(
+        long_page["result"]["_meta"]["chat"]["result"]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        6000
+    );
+    assert_eq!(
+        long_page["result"]["_meta"]["chat"]["result"]["truncated"],
+        true
+    );
+
+    let left = ["gh", "p_LeftHalf012345"].concat();
+    let right = "RightHalf67890abcdef01";
+    let straddling = format!(
+        "{} {left}{right} {}",
+        "a".repeat(6000 - 1 - left.chars().count()),
+        "z".repeat(400)
+    );
+    std::fs::write(
+        &assign_artifact,
+        format!("## Output\n{straddling}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    let withheld_cut = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    bad(
+        &withheld_cut,
+        "OMS withheld this conversation during its outbound scan.",
+    );
+    let cut_wire = withheld_cut.to_string();
+    assert!(
+        !cut_wire.contains(&left)
+            && !cut_wire.contains(right)
+            && !cut_wire.contains(&"a".repeat(32))
+            && !cut_wire.contains(&"z".repeat(32))
+    );
+
+    let machine = ["/", "ho", "me/fixture_account/work"].concat();
+    let omitted_middle = format!("{} {machine} {}", "m".repeat(45_000), "n".repeat(25_000));
+    std::fs::write(
+        &assign_artifact,
+        format!("## Output\n{omitted_middle}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    let withheld_omitted = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    bad(
+        &withheld_omitted,
+        "OMS withheld this conversation during its outbound scan.",
+    );
+    assert!(!withheld_omitted.to_string().contains(&machine));
+    std::fs::write(&assign_artifact, assign_original).unwrap();
+
+    // Fallback transcript turns also scan the whole joined body before cutting 6000 chars.
+    let role_prefix = "claude: ";
+    let turn_straddling = format!(
+        "{} {left}{right} {}",
+        "t".repeat(6000 - role_prefix.chars().count() - 1 - left.chars().count()),
+        "u".repeat(200)
+    );
+    let straddling_updates = json!({
+        "schema":1,
+        "thread":operation,
+        "turns":[{"role":"answer","provider":"claude","quality":"ok","text":turn_straddling}],
+        "cursor":"c1",
+        "has_more":false
+    });
+    std::fs::write(&exitpath, "7\n").unwrap();
+    fixture_settings(
+        &source,
+        json!({"stdout":chat.to_string(),"updates":straddling_updates.to_string(),"room":{"desktop-assign-status":record_for("started",None,json!(operation))}}),
+    );
+    let withheld_turns = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    bad(
+        &withheld_turns,
+        "OMS withheld this conversation during its outbound scan.",
+    );
+    let turns_wire = withheld_turns.to_string();
+    assert!(!turns_wire.contains(&left) && !turns_wire.contains(right));
+    std::fs::write(&exitpath, "0\n").unwrap();
+    fixture_settings(
+        &source,
+        json!({"stdout":chat.to_string(),"updates":updates.to_string(),"room":{"desktop-assign-status":record_for("started",None,json!(operation))}}),
     );
     bad(
         &call(

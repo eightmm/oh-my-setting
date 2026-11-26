@@ -25,6 +25,7 @@ const PAGE: usize = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TurnLookupError {
     OutboundWithheld,
+    InvalidAnswerRange,
     InvalidRecord,
     ReceiptChanged,
 }
@@ -33,10 +34,75 @@ impl TurnLookupError {
     pub fn marker(self) -> Value {
         let (status, reason) = match self {
             Self::OutboundWithheld => ("unavailable", "outbound_withheld"),
+            Self::InvalidAnswerRange => ("unavailable", "invalid_answer_range"),
             Self::InvalidRecord => ("unavailable", "invalid_turn_record"),
             Self::ReceiptChanged => ("unconfirmed", "receipt_changed"),
         };
         json!({"status":status,"reason":reason})
+    }
+}
+
+const INVALID_ANSWER_RANGE: &str =
+    "The Lead answer exceeds the size limit or has an invalid byte range.";
+
+fn check_lead_answer(
+    answer: &str,
+) -> Result<oms_scrub::ClearedPage<'_>, (TurnLookupError, String)> {
+    oms_scrub::outbound_page(
+        answer,
+        crate::MAX_ANSWER,
+        oms_scrub::PageSelector::Offset(0),
+    )
+    .map_err(|err| match err {
+        oms_scrub::PageError::OutboundWithheld => (
+            TurnLookupError::OutboundWithheld,
+            "OMS withheld this Lead answer during its outbound scan.".to_owned(),
+        ),
+        oms_scrub::PageError::InvalidRange => (
+            TurnLookupError::InvalidAnswerRange,
+            INVALID_ANSWER_RANGE.to_owned(),
+        ),
+    })
+}
+
+fn oversized_lead_answer(repo: &Path, op: &str, artifact: &str) -> bool {
+    let Some(name) = Path::new(artifact)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|n| crate::answer_name(n))
+    else {
+        return false;
+    };
+    let Ok(answers) = Directory::open(repo, &format!("{RUN_ROOT}/{op}/answers"), false, true)
+    else {
+        return false;
+    };
+    if Path::new(artifact).parent() != Some(answers.path.as_path()) {
+        return false;
+    }
+    let Ok(st) = fs::statat(&answers.fd, name, AtFlags::SYMLINK_NOFOLLOW) else {
+        return false;
+    };
+    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile || st.st_mode & 0o077 != 0 {
+        return false;
+    }
+    if st.st_size < 0 {
+        return false;
+    }
+    let Ok(root) = oms_safe_fs::Root::open(repo) else {
+        return false;
+    };
+    match root.read(
+        &format!("{RUN_ROOT}/{op}/answers/{name}"),
+        crate::MAX_ANSWER + 64 * 1024,
+        oms_safe_fs::Policy::manifest(),
+    ) {
+        Ok(bytes) => {
+            let (text, exit) = crate::storage::sections(&bytes);
+            exit == "0" && text.len() > crate::MAX_ANSWER
+        }
+        Err(oms_safe_fs::Error::Oversize) => true,
+        Err(_) => false,
     }
 }
 
@@ -346,10 +412,31 @@ impl<'a> Conversation<'a> {
         match (state, exit) {
             ("running", _) => Ok(("running", None)),
             ("done", Some(0)) => {
-                let proof = server
-                    .peer_result(&json!({"repo":self.repo,"operation":op}))
-                    .ok()
-                    .and_then(|r| r.as_str().and_then(|s| crate::value::from_str(s).ok()));
+                let raw_result = server.peer_result(&json!({"repo":self.repo,"operation":op}));
+                let proof = match &raw_result {
+                    Ok(r) => r.as_str().and_then(|s| crate::value::from_str(s).ok()),
+                    Err(crate::ToolError::Text(r)) => {
+                        if let Some(err_payload) =
+                            r.as_str().and_then(|s| crate::value::from_str(s).ok())
+                            && err_payload["operation"] == op
+                            && err_payload["exit"] == 0
+                            && err_payload["answer_errors"]
+                                .as_array()
+                                .is_some_and(|e| !e.is_empty())
+                            && let Some([artifact]) =
+                                err_payload["artifacts"].as_array().map(Vec::as_slice)
+                            && let Some(path) = artifact.as_str()
+                            && oversized_lead_answer(self.repo, &op, path)
+                        {
+                            return Err((
+                                TurnLookupError::InvalidAnswerRange,
+                                INVALID_ANSWER_RANGE.to_owned(),
+                            ));
+                        }
+                        None
+                    }
+                    Err(_) => None,
+                };
                 let answer = proof
                     .as_ref()
                     .filter(|v| v["operation"] == op && v["exit"] == 0)
@@ -373,17 +460,7 @@ impl<'a> Conversation<'a> {
                         .then_some(text)
                     });
                 if let Some(answer) = answer {
-                    oms_scrub::outbound_page(
-                        &answer,
-                        crate::MAX_ANSWER,
-                        oms_scrub::PageSelector::Offset(0),
-                    )
-                    .map_err(|_| {
-                        (
-                            TurnLookupError::OutboundWithheld,
-                            "OMS withheld this Lead answer during its outbound scan.".to_owned(),
-                        )
-                    })?;
+                    check_lead_answer(&answer)?;
                     Ok((
                         "replied",
                         Some(
@@ -667,7 +744,7 @@ impl<'a> Conversation<'a> {
             oms_scrub::PageError::OutboundWithheld => {
                 "OMS withheld this Lead answer during its outbound scan."
             }
-            oms_scrub::PageError::InvalidRange => INVALID,
+            oms_scrub::PageError::InvalidRange => INVALID_ANSWER_RANGE,
         })?;
         self.bound()?;
         check()?;
@@ -767,5 +844,31 @@ impl<'a> Conversation<'a> {
         self.bound()?;
         check()?;
         Ok(selected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lead_answer_range_errors_are_distinct_from_outbound_withheld() {
+        let oversized = "a".repeat(crate::MAX_ANSWER + 1);
+        for invalid in ["", oversized.as_str()] {
+            let err = check_lead_answer(invalid).unwrap_err();
+            assert_eq!(err.0, TurnLookupError::InvalidAnswerRange);
+            assert_eq!(
+                err.0.marker(),
+                json!({"status":"unavailable","reason":"invalid_answer_range"})
+            );
+            assert!(err.1.contains("size limit") || err.1.contains("byte range"));
+        }
+        let planted = ["gh", "p_0123456789abcdef0123456789abcdef0123"].concat();
+        let err = check_lead_answer(&planted).unwrap_err();
+        assert_eq!(err.0, TurnLookupError::OutboundWithheld);
+        assert_eq!(
+            err.0.marker(),
+            json!({"status":"unavailable","reason":"outbound_withheld"})
+        );
     }
 }

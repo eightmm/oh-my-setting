@@ -504,13 +504,13 @@ fn recorded_result(repo: &Path, attempts: &[&Value]) -> Option<Value> {
                 .is_some_and(|id| matches.contains(id))
     }) && let Ok(Some(report)) = oms_panel_core::native_results::read(&store, attempt)
         && let Some(summary) = report["summary"].as_str()
-        && let Ok(full) = oms_panel_core::redact(summary.as_bytes())
     {
         return result_excerpt(
             attempt["attempt_id"].clone(),
             "native-report".into(),
             attempt["updated_at"].clone(),
-            &full,
+            summary,
+            results::MAX_DRAFT,
         );
     }
     let index = results::index_rows(repo).ok()?;
@@ -531,13 +531,18 @@ fn recorded_result(repo: &Path, attempts: &[&Value]) -> Option<Value> {
         row["kind"].clone(),
         row["ts"].clone(),
         &full,
+        results::MAX_RESULT,
     )
 }
 
-fn result_excerpt(attempt: Value, kind: Value, at: Value, full: &str) -> Option<Value> {
-    if full.is_empty() {
-        return None;
-    }
+fn result_excerpt(
+    attempt: Value,
+    kind: Value,
+    at: Value,
+    full: &str,
+    max_bytes: usize,
+) -> Option<Value> {
+    oms_scrub::outbound_page(full, max_bytes, oms_scrub::PageSelector::Offset(0)).ok()?;
     let text: String = full.chars().take(2000).collect();
     Some(
         json!({"attempt":attempt,"kind":kind,"at":at,"truncated":text.len()!=full.len(),"text":text}),
@@ -615,5 +620,79 @@ mod tests {
         assert!(v["attempts"][1]["costMicrousd"].is_null());
         assert!(v["attempts"][2]["tokens"].is_null());
         assert_eq!(v["providers"][0]["contextUsed"], 0);
+    }
+
+    #[test]
+    fn recorded_result_scans_whole_body_before_cutting_excerpt() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("oms-detail-excerpt-{}-{nonce}", std::process::id()));
+        let _cleanup = {
+            struct Guard(std::path::PathBuf);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
+            Guard(root.clone())
+        };
+        let index = root.join(".oms/artifacts/index.jsonl");
+        std::fs::create_dir_all(index.parent().unwrap()).unwrap();
+        let attempt = json!({"attempt_id":"bound","tool":"peer-ask","state":"done"});
+        let write_indexed = |body: &str| {
+            let raw = format!("## Output\n{body}\n## Exit\n0\n");
+            std::fs::write(root.join(".oms/artifacts/answer.md"), raw.as_bytes()).unwrap();
+            let row = json!({
+                "kind":"ask",
+                "attempt_id":"bound",
+                "ts":"2026-11-26T00:00:00Z",
+                "artifact":".oms/artifacts/answer.md",
+                "artifact_sha256":oms_panel_core::digest(raw.as_bytes())
+            });
+            std::fs::write(&index, format!("{row}\n")).unwrap();
+        };
+
+        let clean = format!("## Answer\n{}{}", "c".repeat(2100), "d".repeat(300));
+        write_indexed(&clean);
+        let ok = recorded_result(&root, &[&attempt]).expect("clean excerpt");
+        assert_eq!(ok["truncated"], true);
+        assert_eq!(ok["text"].as_str().unwrap().chars().count(), 2000);
+
+        let left = ["gh", "p_LeftHalf012345"].concat();
+        let right = "RightHalf67890abcdef01";
+        let header = "## Answer\n";
+        let straddling = format!(
+            "{header}{} {left}{right} {}",
+            "a".repeat(2000 - header.chars().count() - 1 - left.chars().count()),
+            "z".repeat(300)
+        );
+        write_indexed(&straddling);
+        assert_eq!(recorded_result(&root, &[&attempt]), None);
+
+        let machine = ["/", "ho", "me/fixture_account/work"].concat();
+        let machine_straddling = format!(
+            "{header}{} {machine} {}",
+            "m".repeat(2000 - header.chars().count() - 4),
+            "n".repeat(300)
+        );
+        write_indexed(&machine_straddling);
+        assert_eq!(recorded_result(&root, &[&attempt]), None);
+
+        let machine_beyond = format!("{header}{} {machine}", "m".repeat(2200));
+        write_indexed(&machine_beyond);
+        assert_eq!(recorded_result(&root, &[&attempt]), None);
+        assert_eq!(
+            result_excerpt(
+                json!("native"),
+                json!("native-report"),
+                Value::Null,
+                &machine_beyond,
+                results::MAX_DRAFT
+            ),
+            None
+        );
     }
 }
