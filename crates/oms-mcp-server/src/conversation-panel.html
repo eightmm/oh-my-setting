@@ -86,6 +86,12 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 .subtle:hover{color:var(--ink);text-decoration:underline;text-underline-offset:.2em}
 .lead-slot .person{padding:.4rem 0 .15rem 2.8rem}
 .lead-slot .state{max-width:44%}
+.workers{list-style:none;margin:.2rem 0 .35rem clamp(.75rem,5vw,2.8rem);padding:0 0 0 .8rem;border-inline-start:1px solid var(--line)}
+.workers li{position:relative}
+.workers li::before{position:absolute;content:"";inset-inline-start:-.8rem;top:1.15rem;width:.48rem;border-top:1px solid var(--line)}
+.workers .person{padding:.35rem .1rem;gap:.4rem}
+.workers strong{font-size:.84rem;font-weight:620}
+.workers small,.workers .state{font-size:.77rem}
 .person{width:100%;background:none;text-align:start;border:0;border-radius:0;padding:.72rem .05rem;cursor:default}
 .lead-children>.person{border-top:1px solid var(--line)}
 button.person{cursor:pointer}
@@ -111,8 +117,23 @@ label,legend{font-size:.86rem} .field{display:block;margin:.85rem 0 .25rem}
 #brief{width:100%;padding:.55rem;background-color:var(--bg);border:1px solid var(--line);border-radius:.5rem}
 .checks{display:flex;flex-wrap:wrap;gap:.65rem}
 #start{background-color:var(--ink);color:var(--bg);margin-top:.9rem}
-#chat-messages{list-style:none;padding:0;margin:.8rem 0}
-#chat-messages li{padding:.6rem 0;border-bottom:1px solid var(--line)}
+#conversation[open]{display:flex;flex-direction:column;width:min(46rem,calc(100% - 1.5rem));max-width:none;height:min(44rem,88dvh);padding:0;overflow:hidden}
+#conversation>.section-head{padding:.7rem 1rem;border-bottom:1px solid var(--line)}
+#conversation>.section-head .identity{margin:0}
+#chat-status:not(:empty){padding:0 1rem}
+#chat-scroll{flex:1;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;padding:.7rem 1rem;scrollbar-gutter:stable}
+#chat-messages{list-style:none;padding:0;margin:0}
+#chat-messages li{width:fit-content;max-width:100%;padding:.55rem 0}
+#chat-messages small{font-weight:650}
+#chat-messages p{margin-top:.18rem}
+#chat-messages li.user{max-width:90%;margin-inline-start:auto;background-color:var(--bg);border:1px solid var(--line);border-radius:.85rem;padding:.45rem .75rem}
+#chat-compose{padding:.65rem 1rem;border-top:1px solid var(--line)}
+#chat-compose label{font-weight:620}
+#chat-text{width:100%;min-height:2.8rem;max-height:6rem;resize:vertical;background-color:var(--bg);border:1px solid var(--line);border-radius:.55rem;padding:.47rem .62rem}
+#chat-compose .actions{margin-top:.3rem;align-items:center;justify-content:flex-end}
+#chat-delivery:not(:empty){margin-inline-end:auto;font-size:.79rem;color:var(--soft)}
+#chat-send{color:var(--bg);background:var(--ink)}
+@media(max-width:25rem){#conversation[open]{width:100%;max-height:100dvh;height:100dvh;margin:0;border:0;border-radius:0}}
 #chat-messages p,#chat-result,#issue-evidence{white-space:pre-wrap;overflow-wrap:anywhere}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
 [hidden]{display:none!important}
@@ -142,7 +163,10 @@ label,legend{font-size:.86rem} .field{display:block;margin:.85rem 0 .25rem}
 <p id="launch-status" class="note" role="status"></p>
 <button id="issue-review" type="button" hidden data-i18n="reviewIssue">현재 Main에 전달할 이슈 확인</button><p id="issue-evidence" class="note" role="status"></p><button id="issue-record" type="button" hidden></button>
 </dialog>
-<dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><h2 id="chat-title"></h2><button id="chat-back" type="button" data-i18n="close">닫기</button></div><p id="chat-status" class="note" role="status"></p><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-result"></p></dialog>
+<dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><div class="identity"><span id="chat-avatar" class="avatar" aria-hidden="true" hidden></span><h2 id="chat-title"></h2></div><button id="chat-back" type="button" data-i18n="close">닫기</button></div>
+<p id="chat-status" class="note" role="status"></p><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-result"></p></div>
+<form id="chat-compose" hidden><label for="chat-text" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000"></textarea>
+<div class="actions"><span id="chat-delivery" role="status"></span><button id="chat-check" type="button" hidden></button><button id="chat-send" type="submit" data-i18n="chatSend">보내기</button></div></form></dialog>
 </main><script>
 'use strict';
 const el=id=>document.getElementById(id);
@@ -168,6 +192,21 @@ const messages = {
   "appr.target": ["대상 · {v}", "Target · {v}"],
   "briefLabel": ["작업 목표", "Goal"],
   "chatLoading": ["대화 여는 중…", "Opening conversation…"],
+  "chatMessage": ["메시지", "Message"],
+  "chatSend": ["보내기", "Send"],
+  "chatYou": ["나", "You"],
+  "turn.partial": ["답변 일부", "Partial reply"],
+  "turn.previous": ["이전 메시지의 전달 상태를 확인 중입니다.", "A previous message is awaiting confirmation."],
+  "turn.sending": ["보내는 중…", "Sending…"],
+  "turn.reserved": ["메시지 기록됨 · 실행 확인 대기", "Message recorded · awaiting execution"],
+  "turn.running": ["답변 작성 중…", "Waiting for the reply…"],
+  "turn.replied": ["답변 도착", "Reply received"],
+  "turn.failed": ["답변을 받지 못했습니다.", "The request ended without a reply."],
+  "turn.unconfirmed": ["전달 상태를 확인할 수 없습니다.", "Delivery is unconfirmed."],
+  "turn.not_found": ["이전 전송 기록을 찾을 수 없습니다.", "The previous send was not found."],
+  "turn.check": ["전달 상태 확인", "Check delivery"],
+  "turn.retry": ["원래 메시지 다시 보내기", "Retry original message"],
+  "turn.limit": ["메시지를 4,000바이트 이내로 입력하세요.", "Enter a message within 4,000 bytes."],
   "chatMismatch": ["이 작업방의 대화를 불러올 수 없습니다.", "Could not load this conversation."],
   "checkReceipt": ["전달 상태 확인", "Check handoff"],
   "chooseLeads": ["함께 요청할 Lead", "Request these Leads"],
@@ -672,7 +711,8 @@ function attemptMember(row) {
 }
 
 function clearChat() {
-  selectedChat=undefined;managedChat=undefined;chatCursor=null;chatPage++;
+  clearTimeout(managedChat?.timer);selectedChat=undefined;managedChat=undefined;chatCursor=null;chatPage++;
+  el('chat-compose').hidden=true;el('chat-avatar').hidden=true;el('chat-text').value='';el('chat-delivery').textContent='';
   el('chat-messages').replaceChildren();el('chat-result').textContent='';
   el('chat-older').hidden=true;
 }
@@ -733,17 +773,42 @@ function verifiedLeads(main,d) {
   return {leads,ownerRun:ownerRecords[0],partial:(source!=null && source!=='ok') || main.incomplete!==false || !Array.isArray(main.participants) || main.participantsOmitted>0 ||
     (scoped?d.conversationAttemptsOmitted>0 || d.conversationAttemptsTrimmed>0:!Array.isArray(d.activeAttempts)||d.activeAttemptsTrimmed>0 || d.active!==active.length)};
 }
+function workersForLead(lead,records) {
+  const workers=[], seen=new Set();
+  const parent=lead.member?.participant;
+  const add=(attempt,member)=>{
+    const key=member?.participant || attempt.participant || attempt.id;
+    if(key && !seen.has(key)){seen.add(key);workers.push({attempt,member});}
+  };
+  for(const r of records){
+    if(!r?.id || r.id===lead.attempt.id || r.role && r.role!=='worker' || isMain(r) || isLead(r))continue;
+    if(r.room!=null && r.room!==lead.attempt.room)continue;
+    const member=r.participant && members.find(m=>m.participant===r.participant);
+    const memberParent=Boolean(parent && member?.parent===parent);
+    if(r.parentAttempt ? r.parentAttempt!==lead.attempt.id : !memberParent || !r.room)continue;
+    if(member && (member.role!=='worker' || member.joined!==true && !r.parentAttempt || member.parent && !memberParent ||
+      r.provider && member.provider && (r.provider==='antigravity'?'agy':r.provider)!==(member.provider==='antigravity'?'agy':member.provider)))continue;
+    if(r.role==='worker' || member?.role==='worker')add(r,memberParent && member.joined===true?member:null);
+  }
+  // A joined member proves membership even before an attempt records its state.
+  for(const m of members){
+    if(parent && m.parent===parent && m.role==='worker' && m.joined===true &&
+      !records.some(r=>r?.participant===m.participant || r?.id===m.participant))add({provider:m.provider},m);
+  }
+  return workers;
+}
 function paintAvatar(element,provider) {
   element.setAttribute('data-provider',provider==='antigravity'?'agy':provider||'');
   element.textContent=provider==='pi'?'P':Object.hasOwn(names,provider)?'':'–';
 }
-function leadEntry({attempt,member},inSlot) {
+function personEntry({attempt,member},kind) {
   const entry=node(member?'button':'article','','person');
   const label=typeof member?.label==='string' && member.label.trim()!==member.participant ? member.label.trim() : '';
-  const identity=()=>label?label+' · '+assignmentLabel(attempt):assignmentLabel(attempt);
+  const role=()=>kind==='worker'?providerName(attempt.provider || member?.provider)+choice(' 워커',' Worker'):assignmentLabel(attempt);
+  const identity=()=>label?label+' · '+role():role();
   const title=typeof attempt.taskTitle==='string'?attempt.taskTitle.trim():'';
   const body=node('span','','body');
-  if(inSlot && attempt.role==='lead'){
+  if(kind==='slot' && attempt.role==='lead'){
     if(member)body.append(node('span',()=>assignmentLabel(attempt)+' · ','sr-only'));
     body.append(node('strong',label || title || 'Lead'));
     if(label && title)body.append(node('small',title));
@@ -751,13 +816,24 @@ function leadEntry({attempt,member},inSlot) {
     body.append(node('strong',identity));
     if(title)body.append(node('small',title));
   }
-  entry.append(body,node('span',()=>(attempt.state==='blocked'?'! ':'')+stateLabel(attempt.state),'state'));
+  entry.append(body,node('span',()=>(attempt.state==='blocked'?'! ':'')+(kind==='worker' && !attempt.state && member?t('joined'):stateLabel(attempt.state)),'state'));
   if(member){
+    if(selectedChat?.room===member.room && selectedChat.participant===member.participant &&
+       selectedChat.parent===member.parent && selectedChat.provider===member.provider)chatOrigin=entry;
     entry.type='button';const arrow=node('span','›','arrow');arrow.setAttribute('aria-hidden','true');entry.append(arrow);
     entry.append(node('span',message('openChat'),'sr-only'));
     entry.addEventListener('click',()=>openConversation(member,identity,entry));
   }
   return entry;
+}
+function leadEntry(entry,inSlot){
+  const row=personEntry(entry,inSlot?'slot':'lead');
+  if(!entry.workers.length)return row;
+  const group=node('div','','lead-group'), list=node('ul','','workers');
+  for(const worker of entry.workers){
+    const item=node('li','');item.append(personEntry(worker,'worker'));list.append(item);
+  }
+  group.append(row,list);return group;
 }
 function renderLeadSlots(leads,complete) {
   const list=el('leads');list.replaceChildren();leadSlots.clear();
@@ -890,27 +966,149 @@ onClick('open-leads',()=>{
   }
 });
 onClick('lead-auto-off',()=>{if(currentLeadControl(leadControl)){rememberLeads(leadControl,false);paintLeadControls();}});
+const turnUuid=v=>typeof v==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v);
+function currentManaged(c){
+  return c && c===managedChat && currentLeadControl(c.ctl) && el('conversation').open &&
+    c.ctl.items.get(c.provider)?.requestId===c.requestId && c.ctl.items.get(c.provider)?.status==='ready';
+}
+function validText(text){
+  return typeof text==='string' && text.trim().length>0 && !/\p{Cc}/u.test(text.replace(/[\n\t]/g,'')) && new TextEncoder().encode(text).length<=4000;
+}
+function paintComposer(c){
+  if(!currentManaged(c))return;
+  const s=c.session,p=s.pending;
+  el('chat-compose').hidden=!c.verified && !p && !c.failed;
+  el('chat-send').disabled=!c.verified || c.reading || s.writing || !!p || !!c.previous || !validText(s.draft);
+  const state=s.writing?'sending':c.previous?'previous':p?.status || s.outcome;
+  put('chat-delivery',()=>state?t('turn.'+state):s.draft && !validText(s.draft)?t('turn.limit'):'');
+  const check=el('chat-check');check.hidden=!p && !c.failed && !c.previous || s.writing;check.disabled=c.reading;
+  put(check,p?.status==='not_found' && !c.previous?'turn.retry':p || c.previous?'turn.check':'refresh');
+}
+function settleTurn(c,result,p){
+  if(!p)return;
+  const turn=result.structuredContent?.turn;
+  if(turn?.turnId!==p.id || !['not_found','reserved','running','replied','unconfirmed','failed'].includes(turn.status))throw uiError('chatMismatch');
+  const s=c.session;
+  if(s.pending!==p)return;
+  p.status=turn.status;
+  if(['reserved','running','replied'].includes(p.status) && !p.accepted){
+    p.accepted=true;
+    if(s.draft===p.text){p.restore=true;s.draft='';el('chat-text').value='';}
+  }
+  if(p.status==='failed' && p.restore){s.draft=p.text;el('chat-text').value=p.text;}
+  if(p.status==='replied' || p.status==='failed'){s.outcome=p.status;s.pending=null;}
+}
+function paintTurns(c,page,before){
+  const scroll=el('chat-scroll'),list=el('chat-messages'),height=scroll.scrollHeight,top=scroll.scrollTop;
+  const nearEnd=height-top-scroll.clientHeight<36;
+  const incoming=page.turns;
+  const key=r=>r.turnId?r.turnId+':'+r.role:JSON.stringify([r.at,r.role,r.text]);
+  const fresh=incoming.filter(r=>!c.keys.has(key(r)));
+  const overlap=fresh.length<incoming.length;
+  const replace=!before && (!c.keys.size || !overlap && fresh.length>0);
+  if(replace){list.replaceChildren();c.keys.clear();c.visited.clear();}
+  const add=replace?incoming:fresh, nodes=[];
+  for(const r of add){
+    if(c.keys.has(key(r)))continue;
+    const user=r.role==='user', row=node('li','',user?'user':'');
+    const stamp=typeof r.at==='string'?Date.parse(r.at):NaN;
+    row.append(node('small',()=>{
+      const who=user?t('chatYou'):names[c.provider];
+      return Number.isFinite(stamp)?who+' · '+new Intl.DateTimeFormat(lang,{hour:'numeric',minute:'2-digit'}).format(stamp):who;
+    }),node('p',r.text));
+    const failure=user?node('small',''):null;
+    if(failure)row.append(failure);
+    c.keys.set(key(r),failure);
+    if(r.truncated===true)row.append(node('small',message('turn.partial')));
+    nodes.push(row);
+  }
+  for(const r of incoming){
+    const failure=c.keys.get(key(r));
+    if(failure){failure.hidden=r.status!=='failed';put(failure,()=>r.status==='failed'?t('turn.failed'):'');}
+  }
+  if(before)list.prepend(...nodes);else list.append(...nodes);
+  if(before || replace || !c.cursor)c.cursor=page.hasMore===true && turnUuid(page.cursor) && !c.visited.has(page.cursor)?page.cursor:null;
+  const older=el('chat-older');
+  if(!c.cursor && document.activeElement===older)scroll.focus({preventScroll:true});
+  older.hidden=!c.cursor;
+  if(before)scroll.scrollTop=top+scroll.scrollHeight-height;
+  else if(c.first || nearEnd)scroll.scrollTop=scroll.scrollHeight;
+  c.first=false;
+  put('chat-status',()=>page.hasMore && !c.cursor && !c.visited.size?t('transcriptPartial'):!c.keys.size?t('emptyChat'):'');
+}
+async function readManaged(c,before=null){
+  if(!currentManaged(c) || c.reading || c.session.writing)return;
+  clearTimeout(c.timer);
+  c.reading=true;el('chat-older').disabled=true;paintComposer(c);
+  const p=before?null:c.session.pending;
+  try{
+    const result=await tool('oms_lead_conversation_status',{room:c.ctl.room,provider:c.provider,...(before?{before}:{}),...(p?{turnId:p.id}:{})},c.ctl.generation);
+    if(!currentManaged(c))return;
+    const item=validatedTeam(result,c.ctl,c.provider).items.get(c.provider), page=result._meta?.leadConversation;
+    if(item.status!=='ready' || item.requestId!==c.requestId || page?.status!=='ready' || page.room!==c.ctl.room ||
+      page.provider!==c.provider || page.requestId!==c.requestId || !Array.isArray(page.transcript?.turns) ||
+      !page.transcript.turns.every(r=>typeof r?.text==='string' && (r.role==='user' || r.role===(c.provider==='agy'?'antigravity':c.provider)) &&
+        (r.turnId==null || turnUuid(r.turnId))))throw uiError('chatMismatch');
+    settleTurn(c,result,p);
+    if(!before){
+      const latest=page.transcript.turns.filter(r=>r.role==='user').at(-1);
+      c.previous=latest && latest.turnId!==p?.id && ['reserved','running','unconfirmed'].includes(latest.status)?latest.status:null;
+    }
+    if(before)c.visited.add(before);
+    c.verified=true;c.failed=false;paintTurns(c,page.transcript,before);
+  }catch{
+    if(currentManaged(c)){c.verified=false;c.failed=true;if(p)p.status='unconfirmed';put('chat-status','chatMismatch');}
+  }finally{
+    if(currentManaged(c)){
+      c.reading=false;el('chat-older').disabled=false;paintComposer(c);
+      if(['reserved','running'].includes(c.previous || c.session.pending?.status) && Date.now()<c.until)c.timer=setTimeout(()=>readManaged(c),8000);
+    }
+  }
+}
+async function sendManaged(c,retry=false){
+  if(!currentManaged(c) || !c.verified || c.reading || c.session.writing || c.previous)return;
+  const s=c.session;
+  if(retry ? s.pending?.status!=='not_found' : !!s.pending || !validText(s.draft))return;
+  const p=retry?s.pending:{id:crypto.randomUUID(),text:s.draft,status:'unconfirmed'};
+  s.pending=p;s.outcome='';s.writing=true;c.until=Date.now()+120000;clearTimeout(c.timer);paintComposer(c);
+  try{
+    const result=await tool('oms_send_lead_message',{room:c.ctl.room,projectKey:c.ctl.projectKey,provider:c.provider,
+      leadRequestId:c.requestId,turnId:p.id,text:p.text},c.ctl.generation);
+    if(!currentManaged(c))return;
+    const item=validatedTeam(result,c.ctl,c.provider).items.get(c.provider);
+    if(item.status!=='ready' || item.requestId!==c.requestId)throw uiError('chatMismatch');
+    settleTurn(c,result,p);
+  }catch{if(s.pending===p)p.status='unconfirmed';}
+  finally{
+    s.writing=false;
+    const current=managedChat;
+    if(currentManaged(current) && current.session===s)await readManaged(current);
+  }
+}
 async function openManagedChat(ctl,provider,origin){
   if(!currentLeadControl(ctl) || ctl.items.get(provider)?.status!=='ready')return;
   const requestId=ctl.items.get(provider).requestId;
-  clearChat();managedChat={provider,requestId};chatOrigin=origin;const ticket=chatPage;
-  put('chat-title',()=>names[provider]+' Lead');put('chat-status','chatLoading');
-  el('conversation').showModal();el('chat-back').focus();
-  const current=()=>ticket===chatPage && currentLeadControl(ctl) && el('conversation').open &&
-    ctl.items.get(provider)?.requestId===requestId;
-  try{
-    const result=await tool('oms_lead_conversation_status',{room:ctl.room,provider},ctl.generation);
-    if(!current())return;
-    const item=validatedTeam(result,ctl,provider).items.get(provider), page=result._meta?.leadConversation;
-    if(item.status!=='ready' || item.requestId!==requestId || page?.status!=='ready' || page.room!==ctl.room ||
-      page.provider!==provider || page.requestId!==requestId || !Array.isArray(page.transcript?.turns) ||
-      !page.transcript.turns.every(r=>typeof r?.text==='string' && r.role===(provider==='agy'?'antigravity':provider)))throw uiError('chatMismatch');
-    const turns=page.transcript.turns.map(turn=>{
-      const row=node('li','');row.append(node('small',names[provider]),node('p',turn.text));return row;
-    });
-    el('chat-messages').replaceChildren(...turns);put('chat-status',()=>page.transcript.hasMore?t('transcriptPartial'):turns.length?'':t('emptyChat'));
-  }catch{if(current())put('chat-status','chatMismatch');}
+  ctl.sessions??=new Map();
+  if(ctl.sessions.get(provider)?.requestId!==requestId)ctl.sessions.set(provider,{requestId,draft:'',pending:null});
+  clearChat();
+  const c={ctl,provider,requestId,session:ctl.sessions.get(provider),keys:new Map(),visited:new Set(),first:true,until:Date.now()+120000};
+  managedChat=c;chatOrigin=origin;paintAvatar(el('chat-avatar'),provider);el('chat-avatar').hidden=false;put('chat-title',()=>names[provider]+' Lead');put('chat-status','chatLoading');
+  el('conversation').showModal();el('chat-back').focus();el('chat-text').value=c.session.draft;paintComposer(c);
+  await readManaged(c);
 }
+on('chat-text','input',()=>{const c=managedChat;if(currentManaged(c)){
+  c.session.draft=el('chat-text').value;c.session.outcome='';
+  if(c.session.pending)c.session.pending.restore=false;
+  paintComposer(c);
+}});
+on('chat-compose','submit',e=>{e.preventDefault();sendManaged(managedChat);});
+on('chat-text','keydown',e=>{if(e.key==='Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing){e.preventDefault();sendManaged(managedChat);}});
+onClick('chat-check',()=>{
+  const c=managedChat;if(!currentManaged(c))return;
+  if(c.session.pending?.status==='not_found' && !c.previous)sendManaged(c,true);
+  else{c.until=Date.now()+120000;readManaged(c);}
+});
+
 function snapshotNotice(d) {
   const completeness=d.observation?(d.observation.completeness||'unknown'):'';
   if(d.degraded || completeness==='unknown')return 'snapshot.degraded';
@@ -945,6 +1143,8 @@ function render(d) {
   const {leads,partial,ownerRun}=main?verifiedLeads(main,d):{leads:[],partial:false};
   put('main-status',()=>main ? [ownerRun?.state?stateLabel(ownerRun.state):t('joined'),ownerRun?.taskTitle].filter(Boolean).join(' · ') :
     owner?stateLabel(owner.state):t(readOnly?'noRecordedMain':'noJoinedMain'));
+  const records=Array.isArray(d.conversationAttempts)?d.conversationAttempts:[];
+  for(const lead of leads)lead.workers=workersForLead(lead,records);
   rows=leads;
   renderLeadSlots(leads,Boolean(main) && !partial);
   if(managedChat)chatOrigin=leadSlots.get(managedChat.provider)?.open;
@@ -960,7 +1160,8 @@ function render(d) {
 function canChat(member) {
   const m=joinedMain();
   return Boolean(m && member && m.room===member.room && (m.participant===member.participant ||
-    rows.some(r=>r.member?.participant===member.participant)));
+    rows.some(r=>[r,...r.workers].some(entry=>entry.member?.participant===member.participant &&
+      entry.member.parent===member.parent && entry.member.provider===member.provider))));
 }
 async function openConversation(member,label,origin) {
   if(!canChat(member) || disposed)return;
@@ -987,16 +1188,18 @@ async function readChat(before,openNative=false) {
     const messages=page.messages.map(msg=>{
       const row=node('li','');row.append(node('small',msg.from||''),node('p',msg.text||''));return row;
     });
-    const list=el('chat-messages');
+    const list=el('chat-messages'),scroll=el('chat-scroll'),top=scroll.scrollTop,height=scroll.scrollHeight;
     if(before==null){list.replaceChildren(...messages);el('chat-result').textContent=page.result?.text||'';}else list.prepend(...messages);
     chatCursor=Number.isSafeInteger(page.nextBefore) && page.messages.length && page.nextBefore<=page.messages[0].seq && (before==null || page.nextBefore<before)?page.nextBefore:null;
+    if(chatCursor==null && document.activeElement===el('chat-older'))scroll.focus({preventScroll:true});
     el('chat-older').hidden=chatCursor==null;
+    scroll.scrollTop=before==null?scroll.scrollHeight:top+scroll.scrollHeight-height;
     put('chat-status',()=>!list.children.length && !el('chat-result').textContent?t('emptyChat'):'');
   } catch {if(current())put('chat-status','chatMismatch');}
   finally {if(current())el('chat-older').disabled=false;}
 }
 onClick('header-main',()=>{const m=joinedMain();if(m)openConversation(m,()=>conversationMainName(m),el('header-main'));});
-onClick('chat-older',()=>{if(chatCursor!=null)readChat(chatCursor);});
+onClick('chat-older',()=>{if(managedChat?.cursor)readManaged(managedChat,managedChat.cursor);else if(chatCursor!=null)readChat(chatCursor);});
 onClick('chat-back',()=>{el('conversation').close();(chatOrigin?.isConnected===false?el('main-name'):chatOrigin)?.focus();});
 on('conversation','close',()=>{
   if(el('conversation').open)return;
