@@ -1268,9 +1268,10 @@ fn incomplete_stop(reason: &str) -> bool {
     ) || reason.starts_with("max_")
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutputMode {
+#[derive(Clone, Copy)]
+pub(crate) enum OutputMode<'a> {
     Legacy,
+    Observed(&'a std::cell::Cell<Option<crate::lead_observation::Observation>>),
     Native,
 }
 
@@ -1288,7 +1289,7 @@ fn native_text(row: &oms_json::Value, key: &str) -> Option<String> {
     row.get(key)?.as_string()?.to_str_checked()
 }
 
-fn native_stopped_early(row: &oms_json::Value) -> bool {
+pub(crate) fn native_stopped_early(row: &oms_json::Value) -> bool {
     [
         native_text(row, "stop_reason"),
         native_text(row, "finish_reason"),
@@ -1365,7 +1366,7 @@ pub(crate) fn decode_output(provider: &str, raw: &[u8]) -> (String, bool) {
     decode_provider_events(provider, &input, false).unwrap_or_else(|| (input.into_owned(), true))
 }
 
-fn native_result_footer(provider: &str, kind: &str, row: &V) -> bool {
+pub(crate) fn native_result_footer(provider: &str, kind: &str, row: &V) -> bool {
     match (provider, kind) {
         ("codex" | "claude", "usage") => ["input_tokens", "output_tokens", "total_tokens"]
             .iter()
@@ -2281,12 +2282,12 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
     timeout: u64,
     account_repo: &Path,
     extra_env: &[(OsString, OsString)],
-    output_mode: OutputMode,
+    output_mode: OutputMode<'_>,
     context: &Context<'_>,
 ) -> Result<Completed> {
     prompt.validate()?;
     crate::safety::outbound(prompt.bytes())?;
-    if output_mode == OutputMode::Native {
+    if matches!(output_mode, OutputMode::Native) {
         require_native_output(&route.provider)?;
     } else if !discovered(&route.provider) {
         return Err(Error::new(127, "provider command not found"));
@@ -2336,7 +2337,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
         if write {
             return fail("Team request channels are read-only");
         }
-        if output_mode == OutputMode::Native {
+        if matches!(output_mode, OutputMode::Native) {
             return fail("Team request channels do not emit typed native output");
         }
         Some(team_protocol(route, &transport.argv)?)
@@ -2361,6 +2362,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                     || s.starts_with("OMS_APPROVAL_")
                     || s.starts_with("OMS_LANDING_")
                     || s.starts_with("OMS_LEASE_")
+                    || s == "OMS_PEER_LEAD_OBSERVATION"
             })
         })
         .collect();
@@ -2609,7 +2611,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                 String::from_utf8_lossy(&result.stdout).into_owned(),
                 result.complete,
             )
-        } else if output_mode == OutputMode::Native {
+        } else if matches!(output_mode, OutputMode::Native) {
             match decode_native_output(&route.provider, &result.stdout) {
                 Some(answer) => (answer, result.code == 0),
                 None => {
@@ -2682,8 +2684,19 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
         if !account_observed {
             result.stderr.extend_from_slice(b"\nwarning: account-home continuity unavailable; usage attribution remains unknown\n");
         }
+        if let OutputMode::Observed(slot) = output_mode {
+            let observation = (result.code == 0
+                && result.complete
+                && terminal
+                && account_observed
+                && team_protocol.is_none()
+                && !write)
+                .then(|| crate::lead_observation::observe(&route.provider, &result.stdout))
+                .flatten();
+            slot.set(observation);
+        }
         result.stdout = decoded.into_bytes();
-        if output_mode == OutputMode::Legacy
+        if !matches!(output_mode, OutputMode::Native)
             && !result.stdout.is_empty()
             && let Some(model) = configured
         {
@@ -2765,7 +2778,7 @@ pub(crate) fn execute_with_fallback_output<P: crate::request_context::Input + ?S
     timeout: u64,
     account_repo: &Path,
     extra_env: &[(OsString, OsString)],
-    output_mode: OutputMode,
+    output_mode: OutputMode<'_>,
     context: &Context<'_>,
 ) -> Result<Completed> {
     let extra_env = crate::usage::operation_env(extra_env)?;

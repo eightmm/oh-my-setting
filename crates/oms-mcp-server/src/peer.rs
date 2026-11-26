@@ -1537,6 +1537,30 @@ fn owner_run(
     } else if protected && thread != op {
         return Err(fail("missing protected Lead follow-up"));
     }
+    // Only the detached owner of a single fixed Lead seat may request a
+    // result observation. Other consultations can have the same provider.
+    let observe_lead = protected
+        && launch["preserve_current"] == true
+        && matches!(selected.as_slice(), [p] if matches!(p.as_str(), "claude" | "antigravity"))
+        && (followup.is_some()
+            || (prompt == crate::panel::LEAD_PROMPT
+                && thread == op
+                && kind == "ask"
+                && !new
+                && rounds == 0
+                && launch["context_options"]
+                    == json!({"include_memory":false,"include_task":false})
+                && meta.as_ref().is_some_and(|m| {
+                    m["operation"] == op
+                        && m["thread"] == op
+                        && m["kind"] == kind
+                        && m["targets"] == launch["targets"]
+                        && m["answer_storage"] == "operation"
+                        && m["context_options"] == launch["context_options"]
+                        && m["panel_assignment"]
+                            .as_str()
+                            .is_some_and(|b| assignment_op(op, b))
+                })));
     if let Some(field) = launch.get("preserve_current") {
         let preserve = field
             .as_bool()
@@ -1596,6 +1620,10 @@ fn owner_run(
     dir.atomic("pid", format!("{}\n", std::process::id()).as_bytes())
         .map_err(fail)?;
     let mut cmd = Command::new(&program);
+    cmd.env_remove("OMS_PEER_LEAD_OBSERVATION");
+    if observe_lead {
+        cmd.env("OMS_PEER_LEAD_OBSERVATION", op);
+    }
     if protected && launch["preserve_current"] == true {
         // This dialog continues the original OMS thread. A supervisor's ambient
         // native session selector could otherwise send its text to another chat.
