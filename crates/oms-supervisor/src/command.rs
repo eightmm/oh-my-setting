@@ -944,22 +944,36 @@ fn recorded(
     Ok(process_matches(raw, expected, host, interrupted)?
         && rustix::process::getpgid(Some(pid)).ok() == Some(pid))
 }
-fn owner_cancelled(repo: &Path, id: &str, job: &V) -> Result<bool> {
+fn owner_cancelled(repo: &Path, id: &str, job: &V, interrupted: &AtomicBool) -> Result<bool> {
     let attempts = life::projection(repo)?;
     let attempt = attempts.get(id);
-    if job.get("finish") != &V::Null {
-        Ok(finish_facts(job).is_ok_and(|facts| {
-            text(&facts, "state") == "cancelled"
-                && text(&facts, "reason_code") == "cancelled_by_owner"
-        }) && attempt.is_none_or(|a| {
-            !life::terminal(text(a, "state"))
-                || text(a, "state") == "cancelled" && text(a, "reason_code") == "cancelled_by_owner"
-        }))
-    } else {
-        Ok(attempt.is_some_and(|a| {
-            text(a, "state") == "cancelled" && text(a, "reason_code") == "cancelled_by_owner"
-        }))
+    let settled = attempt.is_some_and(|a| {
+        text(a, "state") == "cancelled" && text(a, "reason_code") == "cancelled_by_owner"
+    });
+    if job.get("finish") == &V::Null {
+        return Ok(settled);
     }
+    let Ok(facts) = finish_facts(job) else {
+        return Ok(false);
+    };
+    if text(&facts, "state") != "cancelled" || text(&facts, "reason_code") != "cancelled_by_owner" {
+        return Ok(false);
+    }
+    if settled {
+        return Ok(true);
+    }
+    if attempt.is_some_and(|a| life::terminal(text(a, "state"))) {
+        return Ok(false);
+    }
+    life::transition(
+        repo,
+        id,
+        "cancelled",
+        "cancelled_by_owner",
+        text(&facts, "idempotency_key"),
+        interrupted,
+    )?;
+    Ok(true)
 }
 fn cancel(
     repo: &Path,
@@ -1024,7 +1038,7 @@ fn cancel(
                 store.save(&mut job)?;
                 ("cancel_requested", "dispatched", false)
             }
-        } else if state == "cancelled" && owner_cancelled(repo, &id, &job)? {
+        } else if state == "cancelled" && owner_cancelled(repo, &id, &job, interrupted)? {
             ("cancelled", "confirmed", true)
         } else if ["finished", "cancelled", "abandoned", "interrupted"].contains(&state.as_str()) {
             return Err(format!("attempt is no longer cancellable: {state}"));

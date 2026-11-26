@@ -418,3 +418,113 @@ fn cancellation_identity_mismatch_never_signals_an_unrelated_process() {
     unrelated.kill().unwrap();
     unrelated.wait().unwrap();
 }
+
+#[test]
+fn owner_cancelled_replay_completes_interrupted_lifecycle_transition() {
+    for restored in ["queued", "working", "blocked", "review"] {
+        let f = Fixture::new();
+        let id = f.ok(&["submit", "--", "/bin/true"]);
+        assert_eq!(
+            V::parse(f.ok(&["cancel", "--attempt", &id, "--json"]).as_bytes()).unwrap(),
+            obj([
+                ("schema", 1usize.into()),
+                ("attempt", id.as_str().into()),
+                ("runtime_state", "cancelled".into()),
+                ("delivery", "confirmed".into()),
+                ("replayed", false.into()),
+            ])
+        );
+        let saved_job = std::fs::read(f.job_path(&id)).unwrap();
+        f.restore_lifecycle_before("cancelled");
+        match restored {
+            "queued" => {}
+            "working" => {
+                f.transition(&id, "starting", "", "probe-starting");
+                f.transition(&id, "working", "", "probe-working");
+            }
+            "blocked" => f.transition(&id, "blocked", "runner_lost", "probe-blocked"),
+            "review" => {
+                f.transition(&id, "starting", "", "probe-starting");
+                f.transition(&id, "working", "", "probe-working");
+                f.transition(&id, "review", "", "probe-review");
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(f.status(&id).get("state").text(), Some(restored));
+        assert_eq!(
+            V::parse(f.ok(&["cancel", "--attempt", &id, "--json"]).as_bytes()).unwrap(),
+            obj([
+                ("schema", 1usize.into()),
+                ("attempt", id.as_str().into()),
+                ("runtime_state", "cancelled".into()),
+                ("delivery", "confirmed".into()),
+                ("replayed", true.into()),
+            ])
+        );
+        assert_eq!(std::fs::read(f.job_path(&id)).unwrap(), saved_job);
+        let status = f.status(&id);
+        assert_eq!(status.get("state").text(), Some("cancelled"), "{status:?}");
+        assert_eq!(
+            status.get("reason_code").text(),
+            Some("cancelled_by_owner"),
+            "{status:?}"
+        );
+        let settled_events = std::fs::read(ops::event_path(&f.0)).unwrap();
+        assert_eq!(
+            V::parse(f.ok(&["cancel", "--attempt", &id, "--json"]).as_bytes()).unwrap(),
+            obj([
+                ("schema", 1usize.into()),
+                ("attempt", id.as_str().into()),
+                ("runtime_state", "cancelled".into()),
+                ("delivery", "confirmed".into()),
+                ("replayed", true.into()),
+            ])
+        );
+        assert_eq!(std::fs::read(f.job_path(&id)).unwrap(), saved_job);
+        assert_eq!(
+            std::fs::read(ops::event_path(&f.0)).unwrap(),
+            settled_events
+        );
+    }
+}
+
+#[test]
+fn owner_cancelled_replay_refuses_mismatched_terminal_or_missing_lifecycle() {
+    for (state, reason) in [
+        ("failed", "command_failed"),
+        ("done", ""),
+        ("cancelled", "external_abort"),
+        ("cancelled", ""),
+    ] {
+        let f = Fixture::new();
+        let id = f.ok(&["submit", "--", "/bin/true"]);
+        f.ok(&["cancel", "--attempt", &id, "--json"]);
+        f.restore_lifecycle_before("cancelled");
+        if state == "done" {
+            f.transition(&id, "starting", "", "probe-starting");
+            f.transition(&id, "working", "", "probe-working");
+            f.transition(&id, "review", "", "probe-review");
+        }
+        f.transition(&id, state, reason, "probe-terminal");
+        let saved_job = std::fs::read(f.job_path(&id)).unwrap();
+        let saved_events = std::fs::read(ops::event_path(&f.0)).unwrap();
+        let refused = f.call(&["cancel", "--attempt", &id, "--json"]);
+        assert_eq!(refused.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&refused.stderr)
+                .contains("attempt is no longer cancellable: cancelled")
+        );
+        assert_eq!(std::fs::read(f.job_path(&id)).unwrap(), saved_job);
+        assert_eq!(std::fs::read(ops::event_path(&f.0)).unwrap(), saved_events);
+    }
+
+    let f = Fixture::new();
+    let id = f.ok(&["submit", "--", "/bin/true"]);
+    f.ok(&["cancel", "--attempt", &id, "--json"]);
+    let saved_job = std::fs::read(f.job_path(&id)).unwrap();
+    std::fs::write(ops::event_path(&f.0), b"").unwrap();
+    let refused = f.call(&["cancel", "--attempt", &id, "--json"]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert_eq!(std::fs::read(f.job_path(&id)).unwrap(), saved_job);
+    assert_eq!(std::fs::read(ops::event_path(&f.0)).unwrap(), b"");
+}
