@@ -6434,7 +6434,9 @@ pub(crate) fn claude_usage_field(usage: &crate::claude_child_chat::ClaudeChildUs
            "spawned_at": usage.spawned_at, "delivered_at": usage.delivered_at})
 }
 
-fn claude_response_field(response: &crate::claude_child_chat::ClaudeResponse) -> Option<Value> {
+pub(crate) fn claude_response_field(
+    response: &crate::claude_child_chat::ClaudeResponse,
+) -> Option<Value> {
     let total = response
         .usage
         .iter()
@@ -18561,7 +18563,7 @@ pub(crate) mod tests {
                 .chars()
                 .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
                 .collect();
-            let claude_project = private_dir(&claude_projects.join(claude_project_key));
+            let claude_project = private_dir(&claude_projects.join(&claude_project_key));
             let claude_session = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
             let claude_subagents =
                 private_dir(&private_dir(&claude_project.join(claude_session)).join("subagents"));
@@ -18579,9 +18581,47 @@ pub(crate) mod tests {
                 })
                 .to_string(),
             );
+            let stale_turn = "abcdef1234567890abcd";
+            let stale_prompt_line =
+                format!("{TASK_PREFIX} Turn {stale_turn}. You own this provider's work. Earlier");
+            let claude_agent_evicted = "0001020304050607";
+            let claude_agent_earlier = "1122334455667788";
             let claude_agent_a = "a1b2c3d4e5f60718";
             let claude_agent_b = "b2c3d4e5f6071829";
+            let claude_spawn_result = |tool: &str, agent: &str, desc: &str| {
+                json!({
+                    "type": "user",
+                    "sessionId": claude_session,
+                    "isSidechain": false,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool, "content": "spawned"}]},
+                    "toolUseResult": {
+                        "agentId": agent,
+                        "description": desc,
+                        "content": [{"type": "text", "text": "inherited result hidden"}]
+                    }
+                })
+            };
             let claude_lead_lines = [
+                json!({
+                    "type": "user",
+                    "sessionId": claude_session,
+                    "isSidechain": false,
+                    "promptSource": "typed",
+                    "origin": {"kind": "human"},
+                    "message": {"role": "user", "content": stale_prompt_line}
+                }),
+                json!({
+                    "type": "assistant",
+                    "sessionId": claude_session,
+                    "isSidechain": false,
+                    "timestamp": "2026-11-18T17:55:00Z",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "name": "Agent", "id": "toolu_ce", "input": {"prompt": "inspect evicted", "description": "Claude Evicted"}},
+                        {"type": "tool_use", "name": "Agent", "id": "toolu_cp", "input": {"prompt": "inspect earlier", "description": "Claude Earlier"}}
+                    ]}
+                }),
+                claude_spawn_result("toolu_ce", claude_agent_evicted, "Claude Evicted"),
+                claude_spawn_result("toolu_cp", claude_agent_earlier, "Claude Earlier"),
                 json!({
                     "type": "user",
                     "sessionId": claude_session,
@@ -18597,23 +18637,11 @@ pub(crate) mod tests {
                     "timestamp": "2026-11-18T18:00:02Z",
                     "message": {"role": "assistant", "content": [
                         {"type": "tool_use", "name": "Agent", "id": "toolu_ca", "input": {"prompt": "inspect a", "description": "Claude Researcher"}},
-                        {"type": "tool_use", "name": "Agent", "id": "toolu_cb", "input": {"prompt": "inspect b", "description": "Claude Sibling"}}
+                        {"type": "tool_use", "name": "Agent", "id": "toolu_cb", "input": {"prompt": "inspect b", "description": "Claude Custody Failing"}}
                     ]}
                 }),
-                json!({
-                    "type": "user",
-                    "sessionId": claude_session,
-                    "isSidechain": false,
-                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_ca", "content": "spawned"}]},
-                    "toolUseResult": {"agentId": claude_agent_a, "description": "Claude Researcher"}
-                }),
-                json!({
-                    "type": "user",
-                    "sessionId": claude_session,
-                    "isSidechain": false,
-                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_cb", "content": "spawned"}]},
-                    "toolUseResult": {"agentId": claude_agent_b, "description": "Claude Sibling"}
-                }),
+                claude_spawn_result("toolu_ca", claude_agent_a, "Claude Researcher"),
+                claude_spawn_result("toolu_cb", claude_agent_b, "Claude Custody Failing"),
             ];
             write_strict_file(
                 &claude_project.join(format!("{claude_session}.jsonl")),
@@ -18622,14 +18650,61 @@ pub(crate) mod tests {
                     .map(|row| format!("{row}\n"))
                     .collect::<String>(),
             );
-            for (agent, tool, prompt, msg_id, input_tokens) in [
-                (claude_agent_a, "toolu_ca", "inspect a", "msg_ca", 19u64),
-                (claude_agent_b, "toolu_cb", "inspect b", "msg_cb", 29u64),
+            for (agent, tool, prompt, msg_id, input_tokens, handback, meta_mode) in [
+                (
+                    claude_agent_evicted,
+                    "toolu_ce",
+                    "inspect evicted",
+                    "msg_ce",
+                    9u64,
+                    Some("EVICTED_HANDBACK"),
+                    0o600,
+                ),
+                (
+                    claude_agent_earlier,
+                    "toolu_cp",
+                    "inspect earlier",
+                    "msg_cp",
+                    13u64,
+                    Some("EARLIER_TURN_HANDBACK"),
+                    0o600,
+                ),
+                (
+                    claude_agent_a,
+                    "toolu_ca",
+                    "inspect a",
+                    "msg_ca",
+                    19u64,
+                    None,
+                    0o600,
+                ),
+                (
+                    claude_agent_b,
+                    "toolu_cb",
+                    "inspect b",
+                    "msg_cb",
+                    29u64,
+                    Some("CUSTODY_FAILING_HANDBACK"),
+                    0o664,
+                ),
             ] {
-                write_strict_file(
-                    &claude_subagents.join(format!("agent-{agent}.meta.json")),
-                    &json!({"toolUseId": tool, "spawnDepth": 1}).to_string(),
-                );
+                let meta_path = claude_subagents.join(format!("agent-{agent}.meta.json"));
+                std::fs::write(
+                    &meta_path,
+                    json!({"toolUseId": tool, "spawnDepth": 1}).to_string(),
+                )
+                .unwrap();
+                std::fs::set_permissions(&meta_path, std::fs::Permissions::from_mode(meta_mode))
+                    .unwrap();
+                let mut content = vec![json!({"type": "text", "text": "claude child reply"})];
+                if let Some(note) = handback {
+                    content.push(json!({
+                        "type": "tool_use",
+                        "name": "SubagentHandback",
+                        "id": format!("toolu_hb_{agent}"),
+                        "input": {"message": note}
+                    }));
+                }
                 let child_lines = [
                     json!({
                         "type": "user",
@@ -18648,7 +18723,7 @@ pub(crate) mod tests {
                             "id": msg_id,
                             "model": "claude-sonnet-4-6",
                             "role": "assistant",
-                            "content": [{"type": "text", "text": "claude child reply"}],
+                            "content": content,
                             "usage": {
                                 "input_tokens": input_tokens,
                                 "output_tokens": 5,
@@ -18679,8 +18754,23 @@ pub(crate) mod tests {
             let claude_capture: Vec<String> = ["tmux", "capture-pane", "-p", "-t", "%5"]
                 .map(str::to_owned)
                 .into();
+            let claude_participant_earlier =
+                crate::native_children::participant_id("claude", claude_agent_earlier);
             let claude_participant_a =
                 crate::native_children::participant_id("claude", claude_agent_a);
+            let claude_participant_b =
+                crate::native_children::participant_id("claude", claude_agent_b);
+            let expected_claude_handback_paths: Vec<PathBuf> =
+                [claude_agent_b, claude_agent_a, claude_agent_earlier]
+                    .into_iter()
+                    .map(|agent| {
+                        Path::new("projects")
+                            .join(&claude_project_key)
+                            .join(claude_session)
+                            .join("subagents")
+                            .join(format!("agent-{agent}.jsonl"))
+                    })
+                    .collect();
             let mut both_obs = obs.clone();
             for (expected, fence) in [(None, vec![]), (Some(&current), census.clone())] {
                 crate::agy_child_chat::reset_all_agy_counters();
@@ -18702,16 +18792,49 @@ pub(crate) mod tests {
                     .is_none()
                 );
                 assert_eq!(crate::agy_child_chat::transcript_opens(), 0);
-                assert_eq!(crate::claude_child_chat::transcript_opens(), 0);
-                assert_eq!(crate::claude_child_chat::lead_roster_opens(), 1);
+                assert_eq!(crate::claude_child_chat::usage_reads(), 0);
                 assert_eq!(crate::native_children::codex_transcript_opens(), 0);
-                assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
                 assert!(
-                    both_report["native_children"]
-                        .as_array()
-                        .unwrap()
+                    crate::claude_child_chat::handback_reads()
+                        <= crate::native_children::CLAUDE_ROSTER_LIMIT
+                );
+                assert_eq!(
+                    crate::claude_child_chat::handback_paths(),
+                    expected_claude_handback_paths
+                );
+                assert_eq!(crate::claude_child_chat::lead_roster_opens(), 1);
+                assert_eq!(crate::claude_child_chat::roster_reads(), 7);
+                assert_eq!(crate::agy_child_chat::test_counters(), (0, 0, 0));
+                let claude_rows = both_report["native_children"].as_array().unwrap();
+                let find_claude = |participant: &str| {
+                    claude_rows
                         .iter()
-                        .any(|row| row["participant"] == claude_participant_a)
+                        .find(|row| row["participant"] == participant)
+                        .unwrap()
+                };
+                assert_eq!(
+                    find_claude(&claude_participant_a)["native_answer"],
+                    "claude child reply"
+                );
+                assert!(both_obs.chat_binding(&claude_participant_earlier).is_none());
+                assert_eq!(
+                    find_claude(&claude_participant_earlier)["native_answer"],
+                    "EARLIER_TURN_HANDBACK"
+                );
+                assert!(both_obs.chat_binding(&claude_participant_b).is_none());
+                assert_eq!(
+                    find_claude(&claude_participant_b)["native_answer"],
+                    "CUSTODY_FAILING_HANDBACK"
+                );
+                assert!(
+                    !both_report["native_children"]
+                        .to_string()
+                        .contains("inherited result hidden")
+                );
+                assert!(
+                    !both_report["native_children"]
+                        .to_string()
+                        .contains("EVICTED_HANDBACK")
                 );
                 assert!(
                     !both_report["native_children"]
@@ -18747,7 +18870,11 @@ pub(crate) mod tests {
                     },
                 )
                 .expect("selected Claude child should return attributable usage");
-            assert_eq!(crate::claude_child_chat::transcript_opens(), 1);
+            assert_eq!(crate::claude_child_chat::usage_reads(), 1);
+            assert_eq!(
+                crate::claude_child_chat::handback_paths(),
+                expected_claude_handback_paths
+            );
             assert_eq!(claude_selected.response["input_tokens"], 19);
             assert!(claude_selected.claude_version.is_some());
             crate::claude_child_chat::reset_test_counters();
@@ -18766,7 +18893,7 @@ pub(crate) mod tests {
                 )
                 .is_none()
             );
-            assert_eq!(crate::claude_child_chat::transcript_opens(), 0);
+            assert_eq!(crate::claude_child_chat::usage_reads(), 0);
             let _ = claude_holder.kill();
             let _ = claude_holder.wait();
             spy.leads.borrow_mut().pop();

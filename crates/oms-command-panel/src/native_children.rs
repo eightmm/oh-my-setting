@@ -182,6 +182,35 @@ pub(crate) fn codex_child_body_bytes() -> usize {
     CODEX_CHILD_BODY_BYTES.with(|n| n.get())
 }
 
+#[cfg(test)]
+thread_local!(static CLAUDE_ROSTER_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+#[cfg(test)]
+thread_local!(static CLAUDE_HANDBACK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+#[cfg(test)]
+thread_local!(static CLAUDE_HANDBACK_PATHS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) });
+
+#[cfg(test)]
+pub(crate) fn reset_claude_test_counters() {
+    CLAUDE_ROSTER_READS.with(|n| n.set(0));
+    CLAUDE_HANDBACK_READS.with(|n| n.set(0));
+    CLAUDE_HANDBACK_PATHS.with(|paths| paths.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn claude_roster_reads() -> usize {
+    CLAUDE_ROSTER_READS.with(|n| n.get())
+}
+
+#[cfg(test)]
+pub(crate) fn claude_handback_reads() -> usize {
+    CLAUDE_HANDBACK_READS.with(|n| n.get())
+}
+
+#[cfg(test)]
+pub(crate) fn claude_handback_paths() -> Vec<PathBuf> {
+    CLAUDE_HANDBACK_PATHS.with(|paths| paths.borrow().clone())
+}
+
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) fn reset_agy_legacy_reads() {
     LEGACY_CUSTODY_CALLS.with(|n| n.set(0));
@@ -393,6 +422,8 @@ pub(crate) fn claude_in(home: &Path, pid: u32, repo: &Path) -> Option<Vec<Value>
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     let folder = Path::new("projects").join(project_key);
+    #[cfg(test)]
+    CLAUDE_ROSTER_READS.with(|n| n.set(n.get() + 1));
     let rows = jsonl(&store, &folder.join(format!("{session}.jsonl")))?;
     if rows.is_empty() {
         return None;
@@ -430,6 +461,36 @@ pub(crate) fn claude_in(home: &Path, pid: u32, repo: &Path) -> Option<Vec<Value>
             .rev()
             .take(CLAUDE_ROSTER_LIMIT)
             .map(|(id, result, started, tool_id)| {
+                let path = folder
+                    .join(session)
+                    .join("subagents")
+                    .join(format!("agent-{id}.jsonl"));
+                #[cfg(test)]
+                {
+                    CLAUDE_HANDBACK_READS.with(|n| n.set(n.get() + 1));
+                    CLAUDE_HANDBACK_PATHS.with(|paths| paths.borrow_mut().push(path.clone()));
+                }
+                let child = jsonl(&store, &path).unwrap_or_default();
+                let blocks = || {
+                    child
+                        .iter()
+                        .rev()
+                        .filter(|msg| {
+                            msg["type"] == "assistant"
+                                && msg["agentId"] == id
+                                && msg["sessionId"] == session
+                        })
+                        .flat_map(|msg| crate::rows(&msg["message"]["content"]).iter().rev())
+                };
+                let handback = blocks()
+                    .find(|block| {
+                        block["type"] == "tool_use" && block["name"] == "SubagentHandback"
+                    })
+                    .and_then(|block| block["input"]["message"].as_str())
+                    .filter(|message| !message.is_empty());
+                let answer = blocks()
+                    .find(|block| block["type"] == "text" && !text(block, "text").is_empty())
+                    .map(|block| text(block, "text"));
                 let finished = rows.iter().rev().find(|msg| {
                     msg["sessionId"] == session
                         && msg["type"] == "user"
@@ -443,11 +504,6 @@ pub(crate) fn claude_in(home: &Path, pid: u32, repo: &Path) -> Option<Vec<Value>
                     .and_then(|(_, result)| result.split_once("</result>"))
                     .map(|(result, _)| result.trim())
                     .filter(|result| !result.is_empty());
-                let spawn_answer = crate::rows(&result["content"])
-                    .iter()
-                    .rev()
-                    .find(|block| block["type"] == "text" && !text(block, "text").is_empty())
-                    .map(|block| text(block, "text"));
                 row(
                     "claude",
                     id,
@@ -456,7 +512,7 @@ pub(crate) fn claude_in(home: &Path, pid: u32, repo: &Path) -> Option<Vec<Value>
                     finished
                         .map(|msg| text(msg, "timestamp"))
                         .unwrap_or(started),
-                    delivered.or(spawn_answer).unwrap_or(""),
+                    handback.or(delivered).or(answer).unwrap_or(""),
                     if finished.is_some() {
                         "done"
                     } else {
@@ -3881,6 +3937,142 @@ mod tests {
         assert!(!claude_completion(other, "aa", "tt"));
     }
 
+    #[test]
+    fn claude_in_restores_bounded_handbacks_and_replies_and_ignores_spawn_content() {
+        let base = std::env::temp_dir().join(format!("oms-claude-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let config = base.join("config");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        let pid = 4242u32;
+        let session = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+        let project_key: String = repo
+            .to_str()
+            .unwrap()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let folder = Path::new("projects").join(&project_key);
+        let subagents = config.join(&folder).join(session).join("subagents");
+        std::fs::create_dir_all(config.join("sessions")).unwrap();
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::write(
+            config.join(format!("sessions/{pid}.json")),
+            json!({"pid": pid, "sessionId": session, "cwd": repo.to_str().unwrap()}).to_string(),
+        )
+        .unwrap();
+
+        let evicted = "0001020304050607";
+        let earlier_handback = "1122334455667788";
+        let reply_only = "2233445566778899";
+        let silent = "33445566778899aa";
+        let spawned_entry = |tool: &str, agent: &str, desc: &str| {
+            json!({
+                "type": "user",
+                "sessionId": session,
+                "timestamp": "2026-11-26T10:00:00Z",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": tool, "content": "tool result hidden"}
+                ]},
+                "toolUseResult": {
+                    "agentId": agent,
+                    "description": desc,
+                    "content": [{"type": "text", "text": "inherited result hidden"}]
+                }
+            })
+        };
+        let lead_rows = [
+            json!({"type": "user", "sessionId": session, "message": {"role": "user", "content": format!("{TASK_PREFIX} Turn {STALE_TURN}. You own this provider's work. Earlier")}}),
+            json!({"type": "assistant", "sessionId": session, "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Agent", "id": "toolu_0", "input": {"prompt": "p0"}},
+                {"type": "tool_use", "name": "Agent", "id": "toolu_1", "input": {"prompt": "p1"}}
+            ]}}),
+            spawned_entry("toolu_0", evicted, "Evicted"),
+            spawned_entry("toolu_1", earlier_handback, "Earlier Handback"),
+            json!({"type": "user", "sessionId": session, "message": {"role": "user", "content": format!("{TASK_PREFIX} Turn {TURN}. You own this provider's work. Current")}}),
+            json!({"type": "assistant", "sessionId": session, "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Agent", "id": "toolu_2", "input": {"prompt": "p2"}},
+                {"type": "tool_use", "name": "Agent", "id": "toolu_3", "input": {"prompt": "p3"}}
+            ]}}),
+            spawned_entry("toolu_2", reply_only, "Reply Only"),
+            spawned_entry("toolu_3", silent, "Silent"),
+        ];
+        let write_lines = |path: &Path, entries: &[Value]| {
+            let body: String = entries.iter().map(|e| format!("{e}\n")).collect();
+            std::fs::write(path, body).unwrap();
+        };
+        write_lines(
+            &config.join(&folder).join(format!("{session}.jsonl")),
+            &lead_rows,
+        );
+        write_lines(
+            &subagents.join(format!("agent-{evicted}.jsonl")),
+            &[json!({
+                "type": "assistant",
+                "sessionId": session,
+                "agentId": evicted,
+                "message": {"content": [{"type": "text", "text": "evicted reply"}]}
+            })],
+        );
+        write_lines(
+            &subagents.join(format!("agent-{earlier_handback}.jsonl")),
+            &[json!({
+                "type": "assistant",
+                "sessionId": session,
+                "agentId": earlier_handback,
+                "message": {"content": [
+                    {"type": "text", "text": "earlier plain reply"},
+                    {"type": "tool_use", "name": "SubagentHandback", "id": "toolu_hb", "input": {"message": "earlier turn handback"}}
+                ]}
+            })],
+        );
+        write_lines(
+            &subagents.join(format!("agent-{reply_only}.jsonl")),
+            &[json!({
+                "type": "assistant",
+                "sessionId": session,
+                "agentId": reply_only,
+                "message": {"content": [{"type": "text", "text": "latest child reply"}]}
+            })],
+        );
+
+        reset_claude_test_counters();
+        let rows = claude_in(&config, pid, &repo).unwrap();
+        assert_eq!(claude_roster_reads(), 1);
+        assert_eq!(claude_handback_reads(), CLAUDE_ROSTER_LIMIT);
+        assert_eq!(
+            claude_handback_paths(),
+            vec![
+                folder
+                    .join(session)
+                    .join("subagents")
+                    .join(format!("agent-{silent}.jsonl")),
+                folder
+                    .join(session)
+                    .join("subagents")
+                    .join(format!("agent-{reply_only}.jsonl")),
+                folder
+                    .join(session)
+                    .join("subagents")
+                    .join(format!("agent-{earlier_handback}.jsonl")),
+            ]
+        );
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["title"], "Silent");
+        assert_eq!(rows[0]["native_answer"], "");
+        assert_eq!(rows[1]["title"], "Reply Only");
+        assert_eq!(rows[1]["native_answer"], "latest child reply");
+        assert_eq!(rows[2]["title"], "Earlier Handback");
+        assert_eq!(rows[2]["native_answer"], "earlier turn handback");
+        assert!(
+            rows.iter()
+                .all(|row| !row.to_string().contains("inherited result hidden"))
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     struct RolloutFixture {
         root: PathBuf,
         store: Store,
@@ -4668,7 +4860,8 @@ mod tests {
                 .set_modified(base_mtime - std::time::Duration::from_secs(age_secs))
                 .unwrap();
         }
-        // Candidate order is newest mtime first: c4_unlisted is oldest (40s? Wait: set c1..c3 newer than c4).
+        // Candidate order is newest mtime first: [c1, c2, c3, c4_unlisted], so c1..c3 fill
+        // the 3-row roster and c4_unlisted stays unlisted.
         for (offset, id) in [c1, c2, c3].into_iter().enumerate() {
             File::open(fixture.path(fixture.date, id))
                 .unwrap()

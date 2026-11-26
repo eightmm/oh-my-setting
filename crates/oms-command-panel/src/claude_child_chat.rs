@@ -134,13 +134,16 @@ pub(crate) fn claude_board_children(
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{claude_board_children, claude_child_chat, claude_current_children};
 #[cfg(all(test, target_os = "linux"))]
-pub(crate) use linux::{lead_roster_opens, reset_test_counters, transcript_opens};
+pub(crate) use linux::{
+    handback_paths, handback_reads, lead_roster_opens, reset_test_counters, roster_reads,
+    usage_reads,
+};
 
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{
-        ClaudeBoardChildren, ClaudeChild, ClaudeChildLocator, ClaudeChildUsage, ClaudeChildVersion,
-        ClaudeResponse, ClaudeSelection, USAGE_KEYS,
+        ClaudeBoardChildren, ClaudeChild, ClaudeChildLocator, ClaudeChildVersion, ClaudeResponse,
+        ClaudeSelection, USAGE_KEYS,
     };
     use crate::claude_lead_usage::linux::{
         DIR, FILE, config_root, environ, open_dir, start_time, unchanged,
@@ -163,36 +166,51 @@ mod linux {
     pub(super) const LEAD_WINDOW: u64 = 4 * 1024 * 1024;
     pub(super) const CHILD_WINDOW: u64 = 1024 * 1024;
     pub(super) const LINE_LIMIT: usize = 256 * 1024;
-    /// Child tails a test sample may read for usage, newest spawns first: at
-    /// most `USAGE_TAILS * (CHILD_WINDOW + 1)` bytes beyond the lead's window.
-    #[cfg(test)]
-    pub(super) const USAGE_TAILS: usize = 2;
 
     #[cfg(test)]
     thread_local! {
-        // Record metadata, open and suffix attempts independently of which are accepted.
+        // Record roster/metadata and selected-usage read attempts independently.
         pub(super) static LEAD_ROSTER_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-        pub(super) static TRANSCRIPT_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        pub(super) static USAGE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static META_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
         pub(super) static CHILD_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     #[cfg(test)]
     pub(crate) fn reset_test_counters() {
+        crate::native_children::reset_claude_test_counters();
         LEAD_ROSTER_OPENS.with(|n| n.set(0));
-        TRANSCRIPT_OPENS.with(|n| n.set(0));
+        USAGE_READS.with(|n| n.set(0));
         META_READS.with(|n| n.set(0));
         CHILD_READS.with(|n| n.set(0));
     }
 
     #[cfg(test)]
-    pub(crate) fn transcript_opens() -> usize {
-        TRANSCRIPT_OPENS.with(|n| n.get())
+    pub(crate) fn usage_reads() -> usize {
+        USAGE_READS.with(|n| n.get())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handback_reads() -> usize {
+        crate::native_children::claude_handback_reads()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handback_paths() -> Vec<PathBuf> {
+        crate::native_children::claude_handback_paths()
     }
 
     #[cfg(test)]
     pub(crate) fn lead_roster_opens() -> usize {
         LEAD_ROSTER_OPENS.with(|n| n.get())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn roster_reads() -> usize {
+        crate::native_children::claude_roster_reads()
+            + crate::native_children::claude_handback_reads()
+            + LEAD_ROSTER_OPENS.with(|n| n.get())
+            + META_READS.with(|n| n.get())
     }
 
     impl ClaudeChildVersion {
@@ -221,14 +239,14 @@ mod linux {
     ) -> Option<(String, Vec<ClaudeChild>)> {
         proven(pid, |birth| {
             let config = lead_config(pid)?;
-            let board = board_children(&Lead::new(pid, birth, &config), repo, 0, None, || {})?;
+            let board = board_children(&Lead::new(pid, birth, &config), repo, None, || {})?;
             Ok((board.turn, board.children))
         })
         .ok()
     }
 
     /// The ordinary roster, plus one exact selected child when requested.
-    /// Ordinary refreshes read zero child transcripts; the selected response
+    /// Ordinary refreshes read zero usage transcripts; the selected response
     /// stays out of the roster.
     pub(crate) fn claude_board_children(
         pid: u32,
@@ -238,52 +256,24 @@ mod linux {
     ) -> Option<ClaudeBoardChildren> {
         proven(pid, |birth| {
             let config = lead_config(pid)?;
-            board_children(
-                &Lead::new(pid, birth, &config),
-                repo,
-                0,
-                selected,
-                after_read,
-            )
+            board_children(&Lead::new(pid, birth, &config), repo, selected, after_read)
         })
         .ok()
-    }
-
-    /// A failed usage read withholds that child's usage, never its row.
-    /// `between` runs after the usage reads and before their recheck (a test seam).
-    #[cfg(test)]
-    pub(super) fn current(
-        lead: &Lead,
-        repo: &Path,
-        tails: usize,
-        between: impl FnOnce(),
-    ) -> Stage<(String, Vec<ClaudeChild>)> {
-        let board = board_children(lead, repo, tails, None, between)?;
-        Ok((board.turn, board.children))
     }
 
     pub(super) fn board_children(
         lead: &Lead,
         repo: &Path,
-        tails: usize,
         selected: Option<ClaudeSelection<'_>>,
         between: impl FnOnce(),
     ) -> Stage<ClaudeBoardChildren> {
         let mut scan = scan(lead, repo, None)?;
         scan.confirm()?;
-        let skip = scan.children.len().saturating_sub(tails);
-        let read: Vec<_> = scan
-            .children
-            .iter()
-            .enumerate()
-            .map(|(at, child)| (at >= skip).then(|| usage(&scan, &child.locator).ok())?)
-            .collect();
         let selected_index = selected.and_then(|selection| {
-            let (locator, end) = match selection {
-                ClaudeSelection::Read(locator) => (locator, skip),
-                ClaudeSelection::Recheck(locator) => (locator, scan.children.len()),
+            let locator = match selection {
+                ClaudeSelection::Read(locator) | ClaudeSelection::Recheck(locator) => locator,
             };
-            scan.children[..end]
+            scan.children
                 .iter()
                 .position(|child| child.locator == *locator)
         });
@@ -295,6 +285,8 @@ mod linux {
             let child = &scan.children[index];
             let (checked, stat) = match selected? {
                 ClaudeSelection::Read(_) => {
+                    #[cfg(test)]
+                    USAGE_READS.with(|n| n.set(n.get() + 1));
                     let read = read_child(&scan, &child.locator, || {}).ok()?;
                     let stat = read.stat;
                     (CheckedChild::Read(read.file, stat, read.response?), stat)
@@ -310,13 +302,10 @@ mod linux {
         if !scan.children.is_empty() {
             between();
         }
-        // The usage reads widened the window, so the scan must still hold after them.
-        let confirmed = (read.iter().all(Option::is_none) && selected_index.is_none())
-            || scan.confirm().is_ok();
-        for (child, usage) in scan.children.iter_mut().zip(read) {
-            if confirmed {
-                child.usage = usage;
-            } else {
+        // A selected check or read widened the window, so the scan must still hold after it.
+        let confirmed = selected_index.is_none() || scan.confirm().is_ok();
+        if !confirmed {
+            for child in &mut scan.children {
                 // Rows were proven before reading. They cannot renew retained usage.
                 child.version = None;
             }
@@ -472,10 +461,8 @@ mod linux {
         fn file(&self, name: &str, limit: u64, stage: &'static str) -> Stage<(File, Stat)> {
             let fd = fs::openat(&self.fd, name, FILE, Mode::empty()).map_err(|_| stage)?;
             #[cfg(test)]
-            match stage {
-                "lead-transcript" => LEAD_ROSTER_OPENS.with(|n| n.set(n.get() + 1)),
-                "child-transcript" => TRANSCRIPT_OPENS.with(|n| n.set(n.get() + 1)),
-                _ => {}
+            if stage == "lead-transcript" {
+                LEAD_ROSTER_OPENS.with(|n| n.set(n.get() + 1));
             }
             let stat = fs::fstat(&fd).map_err(|_| stage)?;
             gate(
@@ -685,32 +672,9 @@ mod linux {
         Some((raw, chrono::DateTime::parse_from_rfc3339(raw).ok()?))
     }
 
-    /// Lead-observed spawn and completion clocks of one child; `None` is unknown.
-    type Clocks = (Option<String>, Option<String>);
-
-    /// The spawn is the `Agent` call's row; the completion is the exact notice
-    /// that makes the state "done", known only when every such notice comes
-    /// after the call and names one instant no earlier than a known spawn.
-    fn clocks(call: Option<&Value>, called: usize, done: &[(usize, &Value)]) -> Clocks {
-        let spawned = call.and_then(stamp);
-        let mut ends = done.iter().map(|&(at, entry)| {
-            stamp(entry)
-                .filter(|(_, end)| at > called && spawned.is_none_or(|(_, start)| *end >= start))
-        });
-        let first = ends.next().flatten();
-        let completed =
-            first.filter(|(_, end)| ends.all(|other| other.is_some_and(|(_, e)| e == *end)));
-        (
-            spawned.map(|(raw, _)| raw.to_owned()),
-            completed.map(|(raw, _)| raw.to_owned()),
-        )
-    }
-
     pub(super) struct Scan {
         pub(super) turn: String,
         pub(super) children: Vec<ClaudeChild>,
-        /// agentId -> clocks, for exactly the children above.
-        clocks: BTreeMap<String, Clocks>,
         transcript: (File, Stat),
         sessions: Dir,
         record_name: String,
@@ -879,7 +843,6 @@ mod linux {
             .collect();
 
         let mut children = Vec::new();
-        let mut times = BTreeMap::new();
         let subagents = if found.is_empty() {
             None
         } else {
@@ -890,7 +853,7 @@ mod linux {
             )
         };
         if let Some(dir) = &subagents {
-            for (_, called, agent, tool, prompt, title) in found {
+            for (_, _, agent, tool, prompt, title) in found {
                 #[cfg(test)]
                 META_READS.with(|n| n.set(n.get() + 1));
                 // A child whose metadata cannot be proven is left out, not shown.
@@ -913,13 +876,9 @@ mod linux {
                 ) else {
                     continue;
                 };
-                let done: Vec<_> = notices
+                let done = notices
                     .iter()
-                    .filter(|(_, _, notice)| claude_completion(notice, agent, tool))
-                    .map(|&(at, entry, _)| (at, entry))
-                    .collect();
-                let call = entries[called].as_ref();
-                times.insert(agent.to_owned(), clocks(call, called, &done));
+                    .any(|(_, _, notice)| claude_completion(notice, agent, tool));
                 children.push(ClaudeChild {
                     locator: ClaudeChildLocator {
                         pid: lead.pid,
@@ -933,7 +892,7 @@ mod linux {
                         child: (stat.st_dev, stat.st_ino),
                     },
                     title: title.chars().take(80).collect(),
-                    state: if done.is_empty() { "unknown" } else { "done" },
+                    state: if done { "done" } else { "unknown" },
                     usage: None,
                     version: Some(ClaudeChildVersion::from_stat(&stat)),
                 });
@@ -942,7 +901,6 @@ mod linux {
         Ok(Scan {
             turn: turn.to_owned(),
             children,
-            clocks: times,
             transcript,
             sessions,
             record_name,
@@ -973,19 +931,6 @@ mod linux {
         let read = read_child(&scan, expected, between)?;
         scan.confirm()?;
         chat_tail(&read.history).ok_or("no-reply")
-    }
-
-    /// One child's usage from its own tail and the scan's lead clocks; the
-    /// caller confirms the scan after it.
-    fn usage(scan: &Scan, expected: &ClaudeChildLocator) -> Stage<ClaudeChildUsage> {
-        let response = read_child(scan, expected, || {})?.response;
-        let (spawned_at, delivered_at) =
-            scan.clocks.get(&expected.agent).cloned().ok_or("locator")?;
-        Ok(ClaudeChildUsage {
-            response,
-            spawned_at,
-            delivered_at,
-        })
     }
 
     struct ChildRead {
@@ -1207,8 +1152,8 @@ mod linux {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::linux::{
-        CHILD_READS, CHILD_WINDOW, LEAD_WINDOW, LINE_LIMIT, Lead, META_READS, Stage, USAGE_TAILS,
-        board_children, chat, current, managed_turn, proven, scan,
+        CHILD_READS, CHILD_WINDOW, LEAD_WINDOW, LINE_LIMIT, Lead, META_READS, Stage,
+        board_children, chat, managed_turn, proven, scan,
     };
     use super::{
         ClaudeChild, ClaudeChildLocator, ClaudeSelection, claude_board_children, claude_child_chat,
@@ -1216,7 +1161,7 @@ mod tests {
     };
     use crate::claude_lead_usage::linux::start_time;
     use crate::native_children::TASK_PREFIX;
-    use crate::orchestrator::claude_usage_field;
+    use crate::orchestrator::claude_response_field;
     use oms_panel_core::digest;
     use serde_json::{Value, json};
     use std::fs;
@@ -1494,13 +1439,21 @@ mod tests {
             chat(&self.lead(), &self.repo, TURN, expected, || {})
         }
 
-        /// The Board's usage field for `expected`, through the Board's own read.
-        fn telemetry(&self, expected: &ClaudeChildLocator) -> Stage<Value> {
-            let (_, children) = current(&self.lead(), &self.repo, USAGE_TAILS, || {})?;
-            let child = children.into_iter().find(|c| c.locator == *expected);
-            Ok(claude_usage_field(
-                &child.ok_or("locator")?.usage.ok_or("withheld")?,
-            ))
+        /// Selected Detail's response usage for `expected`, through `board_children`.
+        fn selected_response(&self, expected: &ClaudeChildLocator) -> Stage<Value> {
+            let board = board_children(
+                &self.lead(),
+                &self.repo,
+                Some(ClaudeSelection::Read(expected)),
+                || {},
+            )?;
+            if !board.children.iter().any(|c| c.locator == *expected) {
+                return Err("locator");
+            }
+            Ok(board
+                .selected
+                .and_then(|(_, response)| claude_response_field(&response))
+                .unwrap_or(Value::Null))
         }
     }
 
@@ -1831,6 +1784,13 @@ mod tests {
         ];
         for (label, mutate, expected) in cases {
             let mut fixture = Fixture::new(label);
+            fixture.child[3] = billed(
+                fixture.child[3].clone(),
+                "msg_fixture",
+                "2026-11-22T01:00:00Z",
+                [1, 2, 3, 4],
+            );
+            fixture.save();
             let locator = fixture.locator(AGENT);
             mutate(&mut fixture);
             let got = fixture.chat(&locator);
@@ -1842,7 +1802,10 @@ mod tests {
             );
             // Usage rides the same proof and rows: whatever refuses the chat withholds it.
             assert!(
-                fixture.telemetry(&locator).is_ok() == got.is_ok(),
+                fixture
+                    .selected_response(&locator)
+                    .is_ok_and(|value| !value.is_null())
+                    == got.is_ok(),
                 "{label} usage"
             );
         }
@@ -2170,11 +2133,6 @@ mod tests {
         let (spawn, end) = ("2026-11-22T01:00:00.000Z", "2026-11-22T01:05:00.000Z");
         fixture.lead[5] = stamped(fixture.lead[5].clone(), spawn);
         fixture.save();
-        let locator = fixture.locator(AGENT);
-        let clocks = |f: &Fixture| {
-            let told = f.telemetry(&locator).unwrap();
-            (told["spawned_at"].clone(), told["delivered_at"].clone())
-        };
         let state = |f: &Fixture| {
             let children = f.rows(None).unwrap();
             assert!(children.len() == 1);
@@ -2184,8 +2142,6 @@ mod tests {
             children[0].state
         };
         assert_eq!(state(&fixture), "unknown");
-        // No done notice: the completion is unknown, never guessed.
-        assert_eq!(clocks(&fixture), (json!(spawn), Value::Null));
         let cases = [
             notice(AGENT, "toolu_other", "completed"),
             notice(OLD_AGENT, TOOL, "completed"),
@@ -2195,7 +2151,6 @@ mod tests {
             fixture.lead.push(stamped(wrong, end));
             fixture.save();
             assert_eq!(state(&fixture), "unknown");
-            assert_eq!(clocks(&fixture), (json!(spawn), Value::Null));
             fixture.lead.pop();
         }
         // Tags quoted inside another child's summary or result are not a header.
@@ -2228,39 +2183,18 @@ mod tests {
         fixture.lead.push(notice(AGENT, TOOL, "completed"));
         fixture.save();
         assert_eq!(state(&fixture), "done");
-        // Done without a clock on the notice: done, completion still unknown.
-        assert_eq!(clocks(&fixture), (json!(spawn), Value::Null));
         let done = fixture.lead.len() - 1;
         let exact = stamped(notice(AGENT, TOOL, "completed"), end);
-        for (label, at, want) in [
-            ("exact", end, json!(end)),
-            ("before-spawn", "2026-11-22T00:59:59.999Z", Value::Null),
-            ("not-rfc3339", "2026-11-22 01:05", Value::Null),
-            ("garbage", "not a clock", Value::Null),
+        for (label, at) in [
+            ("exact", end),
+            ("before-spawn", "2026-11-22T00:59:59.999Z"),
+            ("not-rfc3339", "2026-11-22 01:05"),
+            ("garbage", "not a clock"),
         ] {
             fixture.lead[done] = stamped(exact.clone(), at);
             fixture.save();
             assert_eq!(state(&fixture), "done", "{label}");
-            assert_eq!(clocks(&fixture), (json!(spawn), want), "{label}");
         }
-        fixture.lead[done] = exact.clone();
-        // A second exact notice must name the same instant, whatever its spelling.
-        for (other, want) in [
-            ("2026-11-22T10:05:00+09:00", json!(end)),
-            ("2026-11-22T01:06:00.000Z", Value::Null),
-        ] {
-            fixture.lead.push(stamped(exact.clone(), other));
-            fixture.save();
-            assert_eq!(clocks(&fixture), (json!(spawn), want), "{other}");
-            fixture.lead.pop();
-        }
-        // An unparsable spawn is unknown; the exact notice after the call still counts.
-        fixture.lead[5] = stamped(fixture.lead[5].clone(), "yesterday");
-        fixture.save();
-        assert_eq!(clocks(&fixture), (Value::Null, json!(end)));
-        fixture.lead[5] = stamped(fixture.lead[5].clone(), spawn);
-        fixture.lead[done] = notice(AGENT, TOOL, "completed");
-        fixture.save();
         // The legacy header without an output file still counts.
         fixture.lead.pop();
         fixture.lead.push(raw_notice(&format!(
@@ -2364,90 +2298,65 @@ mod tests {
         let agents: Vec<_> = children.iter().map(|c| c.locator.agent.clone()).collect();
         assert_eq!(agents, [id(0), id(1), id(2)]);
         assert!(children.iter().all(|c| c.state == "unknown"));
-        // Usage is read for the USAGE_TAILS newest spawns only; the oldest keeps its row.
-        let board = |tails| {
-            current(&fixture.lead(), &fixture.repo, tails, || {})
-                .unwrap()
-                .1
-        };
-        let read = |tails| {
-            board(tails)
-                .iter()
-                .map(|c| c.usage.is_some())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            (USAGE_TAILS, read(USAGE_TAILS)),
-            (2, vec![false, true, true])
-        );
-        assert_eq!(read(0), [false; 3]);
+        // Plain board_children performs zero usage reads; only explicit selection reads one child.
+        let selected =
+            |locator| board_children(&fixture.lead(), &fixture.repo, locator, || {}).unwrap();
         super::reset_test_counters();
-        let plain = board_children(&fixture.lead(), &fixture.repo, 0, None, || {}).unwrap();
-        assert_eq!(super::transcript_opens(), 0);
+        let plain = selected(None);
+        assert_eq!(super::usage_reads(), 0);
         assert_eq!(super::lead_roster_opens(), 1);
+        assert_eq!(super::roster_reads(), 4);
         assert_eq!(CHILD_READS.with(|n| n.get()), 0);
         assert!(plain.selected.is_none());
+        assert!(plain.checked.is_none());
         assert!(plain.children.iter().all(|c| c.usage.is_none()));
+
         let newest = fixture.locator(&id(2));
         super::reset_test_counters();
-        let on_demand = board_children(
-            &fixture.lead(),
-            &fixture.repo,
-            0,
-            Some(ClaudeSelection::Read(&newest)),
-            || {},
-        )
-        .unwrap();
-        assert_eq!(super::transcript_opens(), 1);
+        let on_demand = selected(Some(ClaudeSelection::Read(&newest)));
+        assert_eq!(super::usage_reads(), 1);
         assert_eq!(CHILD_READS.with(|n| n.get()), 1);
         assert_eq!(on_demand.selected.as_ref().unwrap().1.id, "msg_2");
+
         super::reset_test_counters();
-        let rechecked = board_children(
-            &fixture.lead(),
-            &fixture.repo,
-            0,
-            Some(ClaudeSelection::Recheck(&newest)),
-            || {},
-        )
-        .unwrap();
-        assert_eq!(super::transcript_opens(), 0);
+        let rechecked = selected(Some(ClaudeSelection::Recheck(&newest)));
+        assert_eq!(super::usage_reads(), 0);
         assert_eq!(CHILD_READS.with(|n| n.get()), 0);
         assert!(rechecked.checked.is_some());
 
         let oldest = fixture.locator(&id(0));
-        let selected = |locator| {
-            board_children(&fixture.lead(), &fixture.repo, USAGE_TAILS, locator, || {}).unwrap()
-        };
-        CHILD_READS.with(|n| n.set(0));
-        let baseline = selected(None);
-        assert_eq!(CHILD_READS.with(|n| n.get()), 2);
-        assert!(baseline.selected.is_none());
+        super::reset_test_counters();
         let read = selected(Some(ClaudeSelection::Read(&oldest)));
-        assert_eq!(CHILD_READS.with(|n| n.get()), 5);
+        assert_eq!(super::usage_reads(), 1);
+        assert_eq!(CHILD_READS.with(|n| n.get()), 1);
         let (version, response) = read.selected.unwrap();
         assert_eq!(response.id, "msg_0");
         assert_eq!(response.usage, [7, 2, 0, 0]);
         assert!(read.checked == Some((oldest.clone(), version)));
         assert_eq!(read.children[0].version, Some(version));
         assert!(read.children[0].usage.is_none());
-        CHILD_READS.with(|n| n.set(0));
+
+        super::reset_test_counters();
         for _ in 0..3 {
             let stable = selected(Some(ClaudeSelection::Recheck(&oldest)));
             assert_eq!(stable.children[0].version, Some(version));
             assert!(stable.selected.is_none());
             assert!(stable.checked == Some((oldest.clone(), version)));
         }
-        assert_eq!(CHILD_READS.with(|n| n.get()), 6);
+        assert_eq!(super::usage_reads(), 0);
+        assert_eq!(CHILD_READS.with(|n| n.get()), 0);
 
         let mut foreign = oldest.clone();
         foreign.tool_use = "toolu_other".into();
-        let already_sampled = fixture.locator(&id(1));
-        for locator in [&foreign, &already_sampled] {
-            CHILD_READS.with(|n| n.set(0));
+        let mut unlisted = oldest.clone();
+        (unlisted.agent, unlisted.tool_use) = (id(3), tool(3));
+        for locator in [&foreign, &unlisted] {
+            super::reset_test_counters();
             let inactive = selected(Some(ClaudeSelection::Read(locator)));
             assert!(inactive.selected.is_none());
             assert!(inactive.checked.is_none());
-            assert_eq!(CHILD_READS.with(|n| n.get()), 2);
+            assert_eq!(super::usage_reads(), 0);
+            assert_eq!(CHILD_READS.with(|n| n.get()), 0);
         }
 
         // A child can append while its parent and known locator stay identical.
@@ -2455,23 +2364,20 @@ mod tests {
         let incomplete = child_reply(&id(0), json!([{"type":"text","text":"new reply"}]));
         let original_body = fs::read_to_string(&child_file).unwrap();
         for (selection, expected_reads) in [
-            (ClaudeSelection::Recheck(&oldest), 2),
-            (ClaudeSelection::Read(&oldest), 3),
+            (ClaudeSelection::Recheck(&oldest), 0),
+            (ClaudeSelection::Read(&oldest), 1),
         ] {
-            CHILD_READS.with(|n| n.set(0));
-            let lost = board_children(
-                &fixture.lead(),
-                &fixture.repo,
-                USAGE_TAILS,
-                Some(selection),
-                || append(&child_file, &incomplete),
-            )
+            super::reset_test_counters();
+            let lost = board_children(&fixture.lead(), &fixture.repo, Some(selection), || {
+                append(&child_file, &incomplete)
+            })
             .unwrap();
+            assert_eq!(super::usage_reads(), expected_reads);
             assert_eq!(CHILD_READS.with(|n| n.get()), expected_reads);
             assert!(lost.selected.is_none());
             assert!(lost.checked.is_none());
             assert!(lost.children[0].version.is_none());
-            assert!(lost.children[1..].iter().all(|child| child.usage.is_some()));
+            assert!(lost.children.iter().all(|child| child.usage.is_none()));
             fs::write(&child_file, &original_body).unwrap();
         }
         append(&child_file, &incomplete);
@@ -2556,7 +2462,7 @@ mod tests {
         let (turn, children) = current(&fixture).unwrap();
         assert!(turn == NEWER && children.is_empty());
         assert!(fixture.chat(&stale).err() == Some("stale-turn"));
-        assert!(fixture.telemetry(&stale).err() == Some("locator"));
+        assert!(fixture.selected_response(&stale).err() == Some("locator"));
 
         fixture.lead.retain(|entry| managed_turn(entry).is_none());
         fixture.save();
@@ -2582,11 +2488,17 @@ mod tests {
         const AT: &str = "2026-11-22T01:01:00.000Z";
         let mut fixture = Fixture::new("model");
         let locator = fixture.locator(AGENT);
-        let seen = |f: &Fixture| {
-            let (_, children) = current(&f.lead(), &f.repo, USAGE_TAILS, || {}).unwrap();
-            let child = children.into_iter().find(|c| c.locator == locator).unwrap();
-            child.usage.unwrap().response.and_then(|r| r.observed_model)
+        let selected_entry = |f: &Fixture| {
+            board_children(
+                &f.lead(),
+                &f.repo,
+                Some(ClaudeSelection::Read(&locator)),
+                || {},
+            )
+            .unwrap()
+            .selected
         };
+        let seen = |f: &Fixture| selected_entry(f).and_then(|(_, r)| r.observed_model);
         let modeled = |row: &Value, model: Value| {
             let mut row = row.clone();
             row["message"]["model"] = model;
@@ -2639,10 +2551,7 @@ mod tests {
             fixture.child[3] = modeled(&billed_as(&second, "msg_b"), json!(bad));
             fixture.save();
             assert_eq!(seen(&fixture), None, "{bad:?}");
-            let (_, children) =
-                current(&fixture.lead(), &fixture.repo, USAGE_TAILS, || {}).unwrap();
-            let child = children.into_iter().find(|c| c.locator == locator).unwrap();
-            assert!(child.usage.unwrap().response.is_some(), "{bad:?}");
+            assert!(selected_entry(&fixture).is_some(), "{bad:?}");
         }
         let exact = json!("m".repeat(80));
         fixture.child[1] = modeled(&billed_as(&first, "msg_a"), exact.clone());
@@ -2658,18 +2567,14 @@ mod tests {
         const T3: &str = "2026-11-22T01:03:00.000Z";
         let mut fixture = Fixture::new("telemetry");
         let locator = fixture.locator(AGENT);
-        let latest = |f: &Fixture| f.telemetry(&locator).unwrap()["response"].clone();
+        let latest = |f: &Fixture| f.selected_response(&locator).unwrap();
         let response = |id: &str, at: &str, n: [u64; 4]| {
             json!({"message_id": id, "timestamp": at, "input_tokens": n[0],
                    "output_tokens": n[1], "cache_creation_input_tokens": n[2],
                    "cache_read_input_tokens": n[3], "total_tokens": n.iter().sum::<u64>()})
         };
-        // Rows without usage, and nothing from the lead: every field is unknown.
-        assert_eq!(
-            fixture.telemetry(&locator).unwrap(),
-            json!({"scope": "latest_child_response", "response": null,
-                   "spawned_at": null, "delivered_at": null})
-        );
+        // Rows without usage: the selected response is unknown.
+        assert_eq!(latest(&fixture), Value::Null);
         // A billed row before the spawn prompt belongs to no response of this spawn.
         fixture.child.insert(
             0,
@@ -2855,7 +2760,7 @@ mod tests {
         // Usage ends with the segment: a valid response past it answers the later
         // message, so the latest is the segment's own newest response or unknown.
         let at = "2026-11-22T01:00:00Z";
-        let response = |f: &Fixture| f.telemetry(&locator).unwrap()["response"].clone();
+        let response = |f: &Fixture| f.selected_response(&locator).unwrap();
         let last = fixture.child.pop().unwrap();
         fixture
             .child
@@ -2973,21 +2878,39 @@ mod tests {
                 got.err()
             );
         }
-        // After the Board's usage reads, a lead change or session switch withholds
-        // usage only: the rows were proven before those reads.
-        let fixture = Fixture::new("rewrite-board");
+        // After a selected usage read, a lead change or session switch withholds
+        // the selected usage and clears versions only: rows were proven before reading.
+        let mut fixture = Fixture::new("rewrite-board");
+        fixture.child[3] = billed(
+            fixture.child[3].clone(),
+            "msg_rw",
+            "2026-11-22T01:00:00Z",
+            [1, 2, 3, 4],
+        );
+        fixture.save();
+        let rw_locator = fixture.locator(AGENT);
         let board = |between: &dyn Fn()| {
-            current(&fixture.lead(), &fixture.repo, USAGE_TAILS, between)
-                .unwrap()
-                .1
+            board_children(
+                &fixture.lead(),
+                &fixture.repo,
+                Some(ClaudeSelection::Read(&rw_locator)),
+                between,
+            )
+            .unwrap()
         };
-        assert!(board(&|| {})[0].usage.is_some());
+        assert!(board(&|| {}).selected.is_some());
         let cases: [&dyn Fn(); 2] = [&|| append(&fixture.lead_path(), &lead_reply), &|| {
             fs::write(fixture.record_path(), switched.to_string()).unwrap()
         }];
         for (case, between) in cases.into_iter().enumerate() {
-            let children = board(between);
-            assert!(children.len() == 1 && children[0].usage.is_none(), "{case}");
+            let sampled = board(between);
+            assert!(
+                sampled.children.len() == 1
+                    && sampled.selected.is_none()
+                    && sampled.checked.is_none()
+                    && sampled.children[0].version.is_none(),
+                "{case}"
+            );
         }
         // The re-walk also proves type, owner/mode and link count of what it reached.
         let fixture = Fixture::new("rewalk-attributes");
@@ -3030,17 +2953,18 @@ mod tests {
         assert!(fs::metadata(fixture.lead_path()).unwrap().len() > LEAD_WINDOW);
         let locator = fixture.locator(AGENT);
         assert!(fixture.chat(&locator).as_deref() == Ok(OWN));
-        // Usage reads only the same windows: the spawn row lies inside the lead's.
-        let told = fixture.telemetry(&locator).unwrap();
-        assert!(told["spawned_at"] == spawn && told["response"]["message_id"] == "msg_w");
+        // Selected usage reads only the same windows.
+        let told = fixture.selected_response(&locator).unwrap();
+        assert!(told["message_id"] == "msg_w");
         // A boundary that left the child window is not guessed.
         let mut child = fixture.child.clone();
         child.extend((0..(CHILD_WINDOW as usize / 65_536 + 2)).map(|_| filler(65_536)));
         fixture.child = child;
         fixture.save();
         assert!(fixture.chat(&locator).err() == Some("no-boundary"));
-        // The child keeps its row; only its usage is withheld.
-        assert!(fixture.telemetry(&locator).err() == Some("withheld"));
+        // The child keeps its row; only its selected usage is withheld.
+        assert_eq!(fixture.rows(None).unwrap().len(), 1);
+        assert_eq!(fixture.selected_response(&locator).unwrap(), Value::Null);
     }
 
     #[test]

@@ -8277,6 +8277,90 @@ mod tests {
             assert!(dock.history.ends_with("parent summary text"));
             assert!(dock.title.contains("parent summary"));
         }
+        // An unbound Claude row from claude_in (earlier Turn or failing strict custody)
+        // opens its SubagentHandback in the parent-summary dock instead of "Transcript unavailable".
+        {
+            let tmp = std::env::temp_dir()
+                .join(format!("oms-watch-claude-handback-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            let cfg = tmp.join("config");
+            let repo_dir = tmp.join("repo");
+            std::fs::create_dir_all(&repo_dir).unwrap();
+            let repo_dir = repo_dir.canonicalize().unwrap();
+            let sess = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+            let key: String = repo_dir
+                .to_str()
+                .unwrap()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            let sub = cfg.join("projects").join(&key).join(sess).join("subagents");
+            std::fs::create_dir_all(cfg.join("sessions")).unwrap();
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(
+                cfg.join("sessions/7777.json"),
+                serde_json::json!({"pid": 7777, "sessionId": sess, "cwd": repo_dir.to_str().unwrap()})
+                    .to_string(),
+            )
+            .unwrap();
+            let agent = "a1b2c3d4e5f60718";
+            let lead_body = [
+                serde_json::json!({"type": "assistant", "sessionId": sess, "message": {"content": [
+                    {"type": "tool_use", "name": "Agent", "id": "toolu_hb", "input": {"prompt": "p"}}
+                ]}}),
+                serde_json::json!({"type": "user", "sessionId": sess, "timestamp": "2026-11-26T10:00:00Z",
+                    "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_hb", "content": "ok"}]},
+                    "toolUseResult": {"agentId": agent, "description": "Earlier Turn Worker",
+                        "content": [{"type": "text", "text": "inherited result hidden"}]}}),
+            ]
+            .iter()
+            .map(|r| format!("{r}\n"))
+            .collect::<String>();
+            std::fs::write(
+                cfg.join("projects")
+                    .join(&key)
+                    .join(format!("{sess}.jsonl")),
+                lead_body,
+            )
+            .unwrap();
+            std::fs::write(
+                sub.join(format!("agent-{agent}.jsonl")),
+                format!(
+                    "{}\n",
+                    serde_json::json!({"type": "assistant", "sessionId": sess, "agentId": agent,
+                        "message": {"content": [{"type": "tool_use", "name": "SubagentHandback",
+                            "id": "toolu_out", "input": {"message": "Restored handback message"}}]}})
+                ),
+            )
+            .unwrap();
+            let collected = crate::native_children::claude_in(&cfg, 7777, &repo_dir).unwrap();
+            assert_eq!(collected.len(), 1);
+            let handback_report = serde_json::json!({
+                "collection": {"ok": true},
+                "provider_sessions": ["claude"],
+                "room": {"participants": []},
+                "native_children": collected,
+            });
+            let handback_calls = render::visible(&handback_report, &nav);
+            chat = None;
+            nav.notice = None;
+            nav.selected = 0;
+            assert!(route_chat_open(
+                &input::Key::Enter,
+                None,
+                &handback_calls,
+                &mut nav,
+                &mut fence,
+                &mut chat,
+                |call| unbound(call, &Default::default()),
+            ));
+            let dock = chat.as_ref().unwrap();
+            assert!(nav.notice.is_none());
+            assert!(dock.history.starts_with(super::PARENT_SUMMARY));
+            assert!(dock.history.ends_with("Restored handback message"));
+            assert!(!dock.history.contains("inherited result hidden"));
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
         // A bound child whose read failed shows no parent text in its place.
         chat = None;
         assert!(route_chat_open(
