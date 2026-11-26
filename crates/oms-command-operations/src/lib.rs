@@ -2,6 +2,7 @@
 //! See README.md for routing, streaming, child guards, and parent integration.
 #![forbid(unsafe_code)]
 mod approvals;
+pub mod cargo_slot;
 mod cli;
 mod diagnostic;
 mod events;
