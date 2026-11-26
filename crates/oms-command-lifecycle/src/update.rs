@@ -980,8 +980,7 @@ fn gate(
 fn authored_lines(stderr: &[u8]) -> String {
     use std::os::unix::ffi::OsStringExt;
     let text = String::from_utf8_lossy(stderr);
-    let mut lines: Vec<_> = text
-        .lines()
+    let mut lines: Vec<_> = r::plain_lines(&text)
         .rev()
         .filter(|line| line.starts_with("error: ") || line.starts_with("hint: "))
         .take(4)

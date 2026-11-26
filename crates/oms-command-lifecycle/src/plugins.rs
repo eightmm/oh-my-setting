@@ -35,7 +35,7 @@ struct Inventory {
 /// four-line bound together with the error line.
 fn inventory_failure(stderr: &[u8]) -> r::Error {
     let mut names: Vec<String> = Vec::new();
-    for line in String::from_utf8_lossy(stderr).lines() {
+    for line in r::plain_lines(&String::from_utf8_lossy(stderr)) {
         if let Some((name, _)) = line
             .trim()
             .strip_prefix("- `")

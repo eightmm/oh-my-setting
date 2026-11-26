@@ -326,7 +326,8 @@ impl Services for ColdUpdateHost {
             let stderr = format!(
                 "error: superseded\nError: private-provider-output\nhint: kept hint\n\
                  - private-provider-output\n  error: private-provider-output\n\
-                 error: {}\nerror: shaped {sample}\nerror: kept cause\n",
+                 error: {}\nerror: shaped {sample}\nerror: ctl\x1bcontrol-marker\n\
+                 error: kept cause\rprivate-provider-output\n",
                 "x".repeat(400)
             );
             return (
@@ -2115,7 +2116,13 @@ echo build >> "$root/flow"
                 "{error}"
             );
             assert!(error.contains("]\nerror: kept cause\n"), "{error}");
-            for hidden in ["private-provider-output", "superseded", "ghp_"] {
+            for hidden in [
+                "private-provider-output",
+                "superseded",
+                "ghp_",
+                "control-marker",
+                "\u{1b}",
+            ] {
                 assert!(!error.contains(hidden), "{error}");
             }
         }
