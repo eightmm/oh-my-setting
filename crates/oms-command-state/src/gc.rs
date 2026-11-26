@@ -403,6 +403,33 @@ fn has_panel_call_artifacts(repo: &Path) -> Result<bool> {
     }
     Ok(false)
 }
+fn lifecycle_events_len(repo: &Path) -> Result<Option<u64>> {
+    let dir = repo.join(".oms/lifecycle");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(m) => require(
+            m.is_dir() && !m.is_symlink(),
+            "refusing non-directory .oms/lifecycle",
+        )?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(error(2, e)),
+    }
+    let events = dir.join("events.jsonl");
+    match std::fs::symlink_metadata(&events) {
+        Ok(m) => {
+            require(
+                !m.is_symlink(),
+                format!("refusing symlinked path: {}", events.display()),
+            )?;
+            require(
+                m.is_file(),
+                format!("refusing non-regular file: {}", events.display()),
+            )?;
+            Ok(Some(m.len()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(error(2, e)),
+    }
+}
 pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices) -> Result<Output> {
     let opts = Options::parse(
         args,
@@ -885,32 +912,36 @@ pub(crate) fn run(args: &[OsString], ctx: &Context<'_>, host: &dyn HostServices)
             deferred.push(string("malformed usage rows retained"));
         }
     }
-    for operation in ["reconcile", "compact"] {
-        if !ctx.repo.join(".oms/lifecycle/events.jsonl").exists() {
-            break;
+    if lifecycle_events_len(&ctx.repo)?.is_some() {
+        for operation in ["reconcile", "compact"] {
+            let mut args = vec![operation.into()];
+            if operation == "compact" {
+                args.extend(["--days".into(), days.to_string().into()]);
+            } else {
+                let stale =
+                    std::env::var("OMS_ATTEMPT_STALE_SECONDS").unwrap_or_else(|_| "86400".into());
+                require(
+                    stale.parse::<u64>().is_ok(),
+                    "invalid OMS_ATTEMPT_STALE_SECONDS",
+                )?;
+                args.extend(["--stale-seconds".into(), stale.into()]);
+            }
+            if apply {
+                args.push("--apply".into());
+            }
+            let result = oms_command_operations::run(
+                oms_command_operations::App::Events,
+                &args,
+                &ctx.repo,
+                ctx.interrupted,
+            );
+            require(result.0 == 0, String::from_utf8_lossy(&result.2))?;
         }
-        let mut args = vec![operation.into()];
-        if operation == "compact" {
-            args.extend(["--days".into(), days.to_string().into()]);
-        } else {
-            let stale =
-                std::env::var("OMS_ATTEMPT_STALE_SECONDS").unwrap_or_else(|_| "86400".into());
-            require(
-                stale.parse::<u64>().is_ok(),
-                "invalid OMS_ATTEMPT_STALE_SECONDS",
-            )?;
-            args.extend(["--stale-seconds".into(), stale.into()]);
+        if lifecycle_events_len(&ctx.repo)?.is_some_and(|len| len > 32 * 1024 * 1024) {
+            deferred.push(string(
+                ".oms/lifecycle/events.jsonl exceeds 32 MiB; run `oms agent-events compact` (dry run by default, `--apply` to drop events)",
+            ));
         }
-        if apply {
-            args.push("--apply".into());
-        }
-        let result = oms_command_operations::run(
-            oms_command_operations::App::Events,
-            &args,
-            &ctx.repo,
-            ctx.interrupted,
-        );
-        require(result.0 == 0, String::from_utf8_lossy(&result.2))?;
     }
     for path in helpers::files(&ctx, &ctx.repo.join(".oms/threads"), ".jsonl", 50000)? {
         if !age(&path, cutoff) {
