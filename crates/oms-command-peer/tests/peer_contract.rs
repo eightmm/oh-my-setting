@@ -7961,6 +7961,7 @@ fn native_lead_observation_is_private_and_bound_to_published_answer() {
 
 fn native_lead_answer_fixture(provider: &str) {
     let fixture = provider_repo();
+    fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700)).unwrap();
     let binding = "a".repeat(64);
     let hash = |data: &[u8]| oms_command_peer::storage::hash(data);
     let op = format!(
