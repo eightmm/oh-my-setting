@@ -313,6 +313,13 @@ pub(crate) fn validate(
                 format!("proposal task {name} must be nonempty single-line text"),
             )?;
         }
+        require(
+            replay || task.get("brief").is_some(),
+            format!(
+                "proposal task {} has no work brief",
+                value::text(task, "id")
+            ),
+        )?;
         if let Some(brief) = task.get("brief") {
             let brief = brief
                 .as_str()

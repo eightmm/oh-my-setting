@@ -317,7 +317,10 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     } else if failed > 0 {
         1
     } else if started == 0 {
-        return Err(Error::new(2, "no actionable task"));
+        return Err(Error::new(
+            2,
+            "no actionable task (ready tasks without a work brief are skipped; agent-plan next counts them)",
+        ));
     } else {
         0
     };

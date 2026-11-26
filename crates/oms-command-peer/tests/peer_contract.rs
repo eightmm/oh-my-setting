@@ -578,7 +578,7 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                     let planner = prompt.contains("Decompose remaining work into");
                     let synthesis = prompt.contains("Synthesize these independent answers.");
                     result.stdout = if planner {
-                        b"artifact: /fixture/foreign.md\n{\"tasks\":[{\"id\":\"t1\",\"title\":\"inspect ## Output fixture\",\"allowed\":[\"src\"],\"verify\":\"bash tests/check.sh\",\"depends\":[]}]}".to_vec()
+                        b"artifact: /fixture/foreign.md\n{\"tasks\":[{\"id\":\"t1\",\"title\":\"inspect ## Output fixture\",\"brief\":\"Inspect the fixture output.\",\"allowed\":[\"src\"],\"verify\":\"bash tests/check.sh\",\"depends\":[]}]}".to_vec()
                     } else if synthesis {
                         SYNTHESIS.as_bytes().to_vec()
                     } else {

@@ -89,6 +89,7 @@ impl Plan<'_> {
                     "contracts",
                     "priority",
                     "issue",
+                    "brief",
                 ],
             )?;
             let id = row.get("id").str()?;
@@ -157,6 +158,14 @@ impl Plan<'_> {
                     i32::try_from(priority).map_err(|_| error("batch priority must be an i32"))?,
                 )?;
             }
+            if let Some(brief) = row.opt("brief") {
+                let brief = brief.str()?;
+                require(
+                    !brief.trim().is_empty() && brief.len() <= crate::engine::MAX_BRIEF,
+                    "batch task brief must be nonempty and at most 65536 bytes",
+                )?;
+                task.set("brief", string(brief))?;
+            }
             match row.opt("issue") {
                 Some(issue) => task.set("issue", string(issues.canonical(self, issue.str()?)?))?,
                 None => bare = true,
@@ -200,11 +209,12 @@ impl Plan<'_> {
                     "contracts",
                     "priority",
                     "issue",
+                    "brief",
                 ] {
                     let default = match field {
                         "priority" => number(0),
                         "assignment" => empty(),
-                        "verify" | "role" | "discovered_from" | "issue" => string(""),
+                        "verify" | "role" | "discovered_from" | "issue" | "brief" => string(""),
                         _ => Value::Array(vec![]),
                     };
                     require(

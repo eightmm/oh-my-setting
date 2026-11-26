@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use unicode_general_category::{GeneralCategory, get_general_category};
 
-const MAX_BRIEF: usize = 64 * 1024;
+pub(crate) const MAX_BRIEF: usize = 64 * 1024;
 pub const STATES: &[&str] = &[
     "ready",
     "claimed",

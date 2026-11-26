@@ -267,6 +267,36 @@ fn brief_file_round_trip_and_bounds() {
             .text("id"),
         "a"
     );
+    // Batch rows carry a brief, and a replay with a different brief is not "already applied".
+    let batch = |brief: &str| {
+        let body = format!(
+            r#"{{"schema":1,"kind":"agent-plan-batch","tasks":[{{"id":"bt","title":"batch work","brief":"{brief}"}}]}}"#
+        );
+        let file = tmp.0.join("batch.json");
+        fs::write(&file, &body).unwrap();
+        let plan = oms_command_plan::json::sha(fs::read(r.join(".oms/plan/tasks.json")).unwrap());
+        go(
+            &r,
+            &[
+                "add-batch",
+                "--tasks",
+                file.to_str().unwrap(),
+                "--expected-tasks-sha256",
+                &oms_command_plan::json::sha(body.as_bytes()),
+                "--expected-plan-sha256",
+                &plan,
+            ],
+        )
+    };
+    let added = batch("batch brief");
+    assert_eq!(added.0, 0, "{added:?}");
+    assert!(go(&r, &["brief", "--id", "bt"]).1.contains("batch brief"));
+    let replay = batch("batch brief");
+    assert_eq!(replay.0, 0, "{replay:?}");
+    assert!(replay.1.contains("already applied"), "{replay:?}");
+    let changed = batch("other brief");
+    assert_ne!(changed.0, 0, "{changed:?}");
+    assert!(changed.2.contains("does not match batch"), "{changed:?}");
 }
 
 #[test]
