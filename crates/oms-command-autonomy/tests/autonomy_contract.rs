@@ -3735,3 +3735,40 @@ fn autopilot_blocks_an_issue_less_proposal_until_restamped() {
     assert_eq!(code, 2);
     assert!(err.contains("already binds a different issue"), "{err}");
 }
+
+#[test]
+fn reviewed_assignment_without_model_takes_same_provider_operator_model() {
+    let resolve = |assignment: serde_json::Value, to: &str| {
+        let parse =
+            |v: &serde_json::Value| oms_context::parse_json(&value::canonical(v).unwrap()).unwrap();
+        let defaults = json!({"provider": to, "model": "cli-model", "fallback_model": "", "reasoning_effort": "high", "workload": "standard"});
+        let out = oms_command_task::assignment::resolve(
+            &parse(&json!({"assignment": assignment})),
+            &parse(&defaults),
+        )
+        .unwrap();
+        let out: serde_json::Value =
+            serde_json::from_slice(&oms_command_task::json::encode(&out)).unwrap();
+        (
+            out["model"].clone(),
+            out["reasoning_effort"].clone(),
+            out["workload"].clone(),
+        )
+    };
+    let bare = json!({"provider": "antigravity", "workload": "routine"});
+    assert_eq!(
+        resolve(bare.clone(), "antigravity"),
+        (json!("cli-model"), json!("high"), json!("routine"))
+    );
+    assert_eq!(
+        resolve(bare, "claude"),
+        (json!(""), json!("auto"), json!("routine"))
+    );
+    let pinned = json!({"provider": "antigravity", "model": "reviewed", "reasoning_effort": "low"});
+    assert_eq!(
+        resolve(pinned, "antigravity"),
+        (json!("reviewed"), json!("low"), json!("standard"))
+    );
+    let effort = json!({"provider": "antigravity", "reasoning_effort": "low"});
+    assert_eq!(resolve(effort, "antigravity").1, json!("low"));
+}
