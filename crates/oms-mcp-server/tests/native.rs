@@ -353,7 +353,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v30.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v31.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -3001,7 +3001,22 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v30.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v31.html");
+    for name in [
+        "oms_panel_usage",
+        "oms_panel_project_graph",
+        "oms_panel_tui_view",
+    ] {
+        let read = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap();
+        assert_eq!(read["_meta"]["ui"]["visibility"], json!(["app", "model"]));
+        assert_eq!(read["annotations"]["readOnlyHint"], true);
+        assert_eq!(read["annotations"]["openWorldHint"], false);
+    }
     // Codex uses the stdio transport configuration to decide whether to reuse a running server.
     for package in [
         include_str!("../../../plugins/oms/mcp.json"),
@@ -3068,6 +3083,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v27.html"),
         json!("ui://oms/conversation-panel/v28.html"),
         json!("ui://oms/conversation-panel/v29.html"),
+        json!("ui://oms/conversation-panel/v30.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);

@@ -7,7 +7,7 @@
       "args": ["mcp-server"],
       "env": {
         "OMS_MCP_TOOL_PROFILE": "chatgpt-panel",
-        "OMS_MCP_PANEL_RESOURCE_VERSION": "v30"
+        "OMS_MCP_PANEL_RESOURCE_VERSION": "v31"
       }
     }
   }
