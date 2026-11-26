@@ -1946,12 +1946,22 @@ onClick('evidence-toggle',()=>{
 });
 function resultTask(source,d=dashboardData){
   if(source.projectKey!==bindingKey || source.room!==joinedMain()?.room)return null;
-  const records=Array.isArray(d?.conversationAttempts)?d.conversationAttempts:[];
+  const hasAttempts=Array.isArray(d?.conversationAttempts),records=hasAttempts?d.conversationAttempts:[];
   const id=source.kind==='worker-output'?source.workerAttempt:source.kind==='room-result'?source.attempt:source.kind==='lead-answer'?source.operation:null;
   const matches=records.filter(r=>id && r?.id===id && (source.kind==='worker-output'
     ? (r.room==null || r.room===source.room) && r.parentAttempt===source.leadAttempt
     : r.room===source.room && (r.participant||r.id)===source.participant && (!source.provider || providerName(r.provider)===providerName(source.provider))));
-  const attempt=matches.length===1?matches[0]:null;
+  let attempt=matches.length===1?matches[0]:null;
+  if(!matches.length && source.kind==='worker-output'){
+    const lead=rows.find(r=>r.attempt.id===source.leadAttempt),fallback=lead?.workers.find(r=>r.attempt.id===source.workerAttempt)?.attempt;
+    if(fallback && (!hasAttempts || d===dashboardData))attempt=fallback;
+    else if(fallback){
+      const linked=records.filter(r=>r?.id===id && r.room===source.room && !r.parentAttempt && fallback.participant && r.participant===fallback.participant);
+      const membersOk=!Array.isArray(d?.conversationMain?.participants) || d.conversationMain.participants.some(m=>m?.room===source.room &&
+        m.participant===fallback.participant && m.parent===lead.member?.participant && m.role==='worker' && m.joined===true);
+      if(linked.length===1 && membersOk)attempt=linked[0];
+    }
+  }
   return typeof attempt?.task==='string' && /^[A-Za-z0-9._-]{1,160}$/.test(attempt.task)?attempt.task:null;
 }
 const resultSourceFields=['kind','projectKey','room','provider','participant','leadRequestId','turnId','operation','leadAttempt','workerAttempt','attempt','format','digest','pageCursor'];
@@ -2047,8 +2057,10 @@ onClick('finding-share',async()=>{
       !currentFollowup(draft) || !findingScope() || !hasContext() || el('followup-text').value!==text)throw uiError('finding.changed');
     const excerptSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(selected.text))),
       byte=>byte.toString(16).padStart(2,'0')).join('');
-    const delivered=await updateContext({kind:'oms-selected-finding',authority:'context-only',project:draft.project||null,projectKey:draft.projectKey,
-      room:draft.room,owner:draft.owner,...(draft.task?{task:draft.task}:{}),source:draft.source,selection:{...selected,excerptSha256},text},false,
+    const delivered=await updateContext({kind:'oms-selected-finding',authority:'context-only',...(draft.project?{project:draft.project}:{}),
+      ...(draft.task?{task:draft.task}:{}),...(turnUuid(draft.turnId)?{turnId:draft.turnId}:{}),source:{kind:draft.source.kind,summary:draft.summary},
+      selection:{text:selected.text,offset:selected.offset,bytes:selected.bytes,totalBytes:selected.totalBytes,truncated:selected.truncated,
+        displayedBytes:selected.displayedBytes,excerptSha256},text},false,
       ()=>currentFollowup(draft) && findingScope() && hasContext() && el('followup-text').value===text && draft.finding===finding);
     if(currentFollowup(draft))put('followup-status',delivered?'finding.done':'followup.failed');
   }catch{if(currentFollowup(draft)){draft.finding=null;clearFinding();put('followup-status','finding.changed');}}

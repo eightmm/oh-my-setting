@@ -1435,6 +1435,22 @@ test('only an independently confirmed physical binding retains a public stale sn
   assert.equal(p.get('view').hidden,true);assert.equal(p.run('dashboardData'),undefined);
 });
 
+const droppedFindingFields=['projectKey','room','owner','provider','participant','leadRequestId','operation','leadAttempt','workerAttempt','attempt','format','digest','pageCursor'];
+function collectObjectKeys(value,keys=new Set()){
+  if(!value || typeof value!=='object')return keys;
+  if(Array.isArray(value)){for(const item of value)collectObjectKeys(item,keys);return keys;}
+  for(const [k,v] of Object.entries(value)){keys.add(k);collectObjectKeys(v,keys);}
+  return keys;
+}
+function assertPrivateFindingOmitted(delivered,internalValues=[],allowTurnId=false){
+  const keys=collectObjectKeys(delivered);
+  for(const field of droppedFindingFields)assert.equal(keys.has(field),false,field);
+  if(!allowTurnId)assert.equal(keys.has('turnId'),false,'turnId');
+  else if(delivered?.structuredContent?.source)assert.equal(Object.hasOwn(delivered.structuredContent.source,'turnId'),false,'source.turnId');
+  const serialized=JSON.stringify(delivered);
+  for(const internal of internalValues)assert.ok(!serialized.includes(internal),internal);
+}
+
 test('recorded Lead answer pages are lazy, digest-bound and prepare only an exact scoped draft',async()=>{
   const id=randomUUID(),copied=[],digest='d'.repeat(64);let changed=false,wrongHandoff=false;
   const claudeReq=leadStatus({provider:'claude'},'ready').leads[0].requestId,askParticipant='ask-'+claudeReq;
@@ -1492,11 +1508,13 @@ test('recorded Lead answer pages are lazy, digest-bound and prepare only an exac
   assert.equal(p.get('finding-text').textContent,'tail');assert.match(p.get('finding-range').textContent,/bytes 7–10 of 10.*partial/);
   assert.ok(!p.host.contexts.some(c=>c.structuredContent?.kind==='oms-selected-finding'));
   await p.event('finding-share','click');
-  const shared=p.host.contexts.at(-1).structuredContent;
-  assert.equal(shared.kind,'oms-selected-finding');assert.equal(shared.task,'task-b');assert.equal(shared.source.operation,'recorded-operation');
-  assert.equal(shared.source.turnId,id);assert.equal(shared.source.pageCursor,'next-part');
-  assert.deepEqual({...shared.selection},{text:'tail',offset:6,bytes:4,totalBytes:10,digest,truncated:true,displayedBytes:4,
-    excerptSha256:createHash('sha256').update('tail').digest('hex')});
+  const deliveredLead=p.host.contexts.at(-1),shared=JSON.parse(JSON.stringify(deliveredLead.structuredContent));
+  assert.deepEqual(shared,{kind:'oms-selected-finding',authority:'context-only',project:'one',task:'task-b',turnId:id,
+    source:{kind:'lead-answer',summary:'OMS Lead · Claude · Recorded output'},
+    selection:{text:'tail',offset:6,bytes:4,totalBytes:10,truncated:true,displayedBytes:4,
+      excerptSha256:createHash('sha256').update('tail').digest('hex')},
+    text:p.get('followup-text').value});
+  assertPrivateFindingOmitted(deliveredLead,['recorded-operation',askParticipant,claudeReq,'b'.repeat(64),digest,main.room,main.participant,'next-part'],true);
   assert.doesNotMatch(JSON.stringify(shared),/Question|Excerpt/);assert.equal(p.host.messages.length,0);
   wrongHandoff=true;await p.event('finding-share','click');
   assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length,1);
@@ -1533,11 +1551,13 @@ test('Room result truncation links a bounded evidence read and keeps the reader 
   p.get('leads').children[1].children[2].dispatchEvent(new Event('click'));await setImmediate();
   await p.event('chat-result-full','click');await p.event('answer-more','click');await p.event('answer-preview','click');
   assert.equal(p.get('finding-text').textContent,'last');await p.event('finding-share','click');
-  const shared=p.host.contexts.at(-1).structuredContent;
-  assert.equal(shared.kind,'oms-selected-finding');assert.equal(shared.task,'task-b');
-  assert.deepEqual({...shared.source},{kind:'room-result',projectKey:key,room:main.room,participant:lead.participant,attempt:'l',digest});
-  assert.deepEqual({...shared.selection},{text:'last',offset:5,bytes:4,totalBytes:9,digest,truncated:true,displayedBytes:4,
-    excerptSha256:createHash('sha256').update('last').digest('hex')});
+  const deliveredRoom=p.host.contexts.at(-1),shared=JSON.parse(JSON.stringify(deliveredRoom.structuredContent));
+  assert.deepEqual(shared,{kind:'oms-selected-finding',authority:'context-only',project:'one',task:'task-b',
+    source:{kind:'room-result',summary:'OMS Lead · Claude · Recorded output'},
+    selection:{text:'last',offset:5,bytes:4,totalBytes:9,truncated:true,displayedBytes:4,
+      excerptSha256:createHash('sha256').update('last').digest('hex')},
+    text:p.get('followup-text').value});
+  assertPrivateFindingOmitted(deliveredRoom,[key,digest,lead.participant,main.room,main.participant]);
   assert.doesNotMatch(JSON.stringify(shared),/Message [12]|Result excerpt/);assert.equal(p.host.messages.length,0);
   p.get('leads').children[1].children[2].dispatchEvent(new Event('click'));await setImmediate();
   wrongAttempt=true;await p.event('chat-result-full','click');
@@ -1606,11 +1626,13 @@ test('selected worker findings stay private through preview and references-only 
   assert.equal(p.host.contexts.at(-1).structuredContent.kind,'oms-followup-draft');
   assert.doesNotMatch(JSON.stringify(p.host.contexts),/한|PRIVATE OFF-PAGE/);
   const mark=p.calls.length;await p.event('finding-share','click');
-  const shared=p.host.contexts.at(-1).structuredContent;
-  assert.equal(shared.kind,'oms-selected-finding');assert.equal(shared.authority,'context-only');assert.equal(shared.task,'task-b');
-  assert.deepEqual({...shared.source},{kind:'worker-output',projectKey:key,room:main.room,leadAttempt:'l',workerAttempt:'worker-1',format:'indexed-answer',digest});
-  assert.deepEqual({...shared.selection},{text:selection,offset:0,bytes:3999,totalBytes:Buffer.byteLength(displayed+tail),digest,truncated:true,
-    displayedBytes:6000,excerptSha256:createHash('sha256').update(selection).digest('hex')});
+  const deliveredWorker=p.host.contexts.at(-1),shared=JSON.parse(JSON.stringify(deliveredWorker.structuredContent));
+  assert.deepEqual(shared,{kind:'oms-selected-finding',authority:'context-only',project:'one',task:'task-b',
+    source:{kind:'worker-output',summary:'Codex Worker · Worker output'},
+    selection:{text:selection,offset:0,bytes:3999,totalBytes:Buffer.byteLength(displayed+tail),truncated:true,
+      displayedBytes:6000,excerptSha256:createHash('sha256').update(selection).digest('hex')},
+    text:p.get('followup-text').value});
+  assertPrivateFindingOmitted(deliveredWorker,[key,digest,main.room,main.participant,'worker-1','indexed-answer']);
   assert.deepEqual(p.calls.slice(mark).map(c=>c.name),['oms_list_projects','oms_panel_snapshot','oms_worker_output','oms_list_projects','oms_panel_snapshot']);
   assert.equal(p.calls.slice(mark)[2].args.answerPage,'');assert.equal(p.host.messages.length,0);
   assert.doesNotMatch(JSON.stringify(shared),/PRIVATE OFF-PAGE/);assert.match(p.get('followup-status').textContent,/no execution authority/);
@@ -1647,9 +1669,66 @@ test('pending finding Share is fenced by project changes, teardown, source-scope
     assert.equal(p.get('finding-text').textContent,'',change);
     if(change==='teardown')assert.equal(p.calls.length,before);
   }
-  const {p}=await findingFixture();p.run('contextTypes={text:{}}');await p.event('finding-share','click');
-  const text=JSON.parse(p.host.contexts.at(-1).content[0].text);
+  const {p,key,digest}=await findingFixture();p.run('contextTypes={text:{}}');await p.event('finding-share','click');
+  const deliveredText=p.host.contexts.at(-1),text=JSON.parse(deliveredText.content[0].text);
   assert.equal(text.kind,'oms-selected-finding');assert.equal(text.selection.bytes,3999);assert.equal(text.authority,'context-only');
+  assertPrivateFindingOmitted(deliveredText,[key,digest,main.room,main.participant,'worker-1','indexed-answer']);
+  assertPrivateFindingOmitted(text,[key,digest,main.room,main.participant,'worker-1','indexed-answer']);
+});
+
+test('worker task attribution falls back to rendered Lead workers for member-parent links and snapshots without conversationAttempts',async()=>{
+  const key='b'.repeat(64),digest='d'.repeat(64);
+  const memberWorkers=[0,1].map(i=>({room:main.room,participant:'member-worker-'+i,parent:lead.participant,role:'worker',provider:'codex',joined:true}));
+  const workerAttempts=[{room:main.room,id:'mw-0',participant:'member-worker-0',role:'worker',provider:'codex',state:'done',task:'task-member'},
+    {room:main.room,id:'mw-1',participant:'member-worker-1',role:'worker',provider:'codex',state:'done',task:null}];
+  const d={...dashboard,conversationMain:{...main,participants:[lead,...memberWorkers]},
+    planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]},
+    conversationAttempts:[...dashboard.conversationAttempts,...workerAttempts]};
+  let snapshot=d;
+  const p=await panel([],d,{locale:'en',context:true,tools:{
+    oms_list_projects:()=>({projects:[],binding:'pinned',projectKey:key}),
+    oms_panel_snapshot:()=>({dashboard:snapshot}),
+    oms_worker_output:a=>{
+      const {project,answerPage,...pair}=a,publicData={...pair,status:'complete'},body='Member worker finding';
+      const out={...publicData,text:body,source:'indexed-answer',truncated:false};
+      if(answerPage!==undefined)out.page={offset:0,bytes:Buffer.byteLength(body),totalBytes:Buffer.byteLength(body),digest,nextCursor:null,hasMore:false};
+      return {structuredContent:publicData,_meta:{workerOutput:out}};
+    }
+  }});
+  const items=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li');
+  const open=i=>items[i].children.find(e=>e.className?.includes('worker-output-link'));
+  open(0).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');
+  assert.match(p.get('followup-text').value,/^Task: task-member$/m);
+  assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
+  await p.event('followup-add','click');
+  assert.equal(p.host.contexts.at(-1).structuredContent.task,'task-member');
+  assert.equal(Object.hasOwn(p.host.contexts.at(-1).structuredContent,'project'),false);
+  open(0).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
+  snapshot={conversationBinding:'matched',conversationMain:d.conversationMain};
+  await p.event('finding-share','click');
+  const sharedMember=p.host.contexts.at(-1);
+  assert.equal(sharedMember.structuredContent.kind,'oms-selected-finding');
+  assert.equal(sharedMember.structuredContent.task,'task-member');
+  assert.equal(Object.hasOwn(sharedMember.structuredContent,'project'),false);
+  assertPrivateFindingOmitted(sharedMember,[key,digest,main.room,main.participant,'mw-0','member-worker-0','indexed-answer']);
+  open(1).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
+  assert.doesNotMatch(p.get('followup-text').value,/^Task:|task-a|Review task A/m);
+  await p.event('followup-add','click');
+  assert.equal(Object.hasOwn(p.host.contexts.at(-1).structuredContent,'task'),false);
+  await p.event('finding-share','click');
+  const sharedUnattributed=p.host.contexts.at(-1);
+  assert.equal(sharedUnattributed.structuredContent.kind,'oms-selected-finding');
+  assert.equal(Object.hasOwn(sharedUnattributed.structuredContent,'task'),false);
+  assertPrivateFindingOmitted(sharedUnattributed,[key,digest,main.room,main.participant,'mw-1','member-worker-1','indexed-answer']);
+  snapshot=d;await p.event('refresh','click');
+  const refreshedItems=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li');
+  refreshedItems[0].children.find(e=>e.className?.includes('worker-output-link')).dispatchEvent(new Event('click'));
+  await setImmediate();await p.event('output-preview','click');
+  snapshot={...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='mw-0'?{...a,task:'task-a'}:a)};
+  const sharedBefore=p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length;
+  await p.event('finding-share','click');
+  assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length,sharedBefore);
+  assert.match(p.get('followup-status').textContent,/Nothing was shared/);
 });
 
 const inspectReads=['oms_panel_usage','oms_panel_tui_view','oms_panel_project_graph'];

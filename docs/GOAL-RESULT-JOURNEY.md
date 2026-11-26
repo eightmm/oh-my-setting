@@ -43,7 +43,7 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 | `oms_lead_settings` / `oms_update_lead_settings` | `scope`, `catalogAgeSeconds`, selection과 lastServed | 다음 메시지 설정과 실제 답변 증거를 구분하고 기존 revision-checked 저장을 유지한다. |
 | `oms_panel_chat` | transcript/diff·attempt에 `evidenceCursor`; 이 모드는 exact `projectKey` 필수 | 선택한 Room 결과를 읽는다. public/private projectKey와 Room·participant·attempt·section이 모두 일치해야 표시한다. 기존 메시지·legacy page 읽기는 유지한다. |
 | `oms_worker_output` | `answerPage`, private `page` metadata | 확인된 projectKey·Room·Lead attempt·worker attempt 쌍의 원문만 읽는다. |
-| `ui/update-model-context` | `oms-followup-draft`의 선택적 `project` 별칭·`goal`·`summary`·선택적 `task`·선택적 `turnId`·`text` (`projectKey`·`Room`·`owner`·`source`와 내부 결과 식별자는 생략); 선택 공유에는 `oms-selected-finding`, `authority: context-only`, `selection` | 참조만 추가하는 클릭과 발췌문을 공유하는 클릭을 분리한다. Main 수신이나 실행의 증거로 사용하지 않는다. |
+| `ui/update-model-context` | `oms-followup-draft`의 선택적 `project` 별칭·`goal`·`summary`·선택적 `task`·선택적 `turnId`·`text`; 선택 공유에는 `oms-selected-finding`의 `authority: context-only`·선택적 `project` 별칭·선택적 `task`·선택적 `turnId`·표시용 `source`(`kind`·`summary`)·`selection`·`text` (두 문맥 모두 `projectKey`·`Room`·`owner`와 내부 `source` 식별자·`digest`·`pageCursor`는 생략) | 참조만 추가하는 클릭과 발췌문을 공유하는 클릭을 분리한다. Main 수신이나 실행의 증거로 사용하지 않는다. |
 | `oms_panel_usage` | 기존 `repository-recent-attempts` projection | 더 살펴보기의 사용량 화면에서만 공급자 관측·쿼터 창·최근 시도의 보고된 값과 출처를 읽는다. |
 | `oms_panel_project_graph` | 기존 `node` 또는 `query`, `limit: 20`, `depth: 2` | 노드와 confidence가 붙은 관계를 표시하고, 선택한 노드 주변이나 검색 결과만 다시 읽는다. |
 | `oms_panel_tui_view` | 기존 `view: routes` 또는 `modelcatalog`, `page` | 최대 20행의 카드를 표시하고 이전·다음 페이지를 명시적으로 읽는다. 예상 라우팅과 캐시 관측의 한계를 함께 표시한다. |
@@ -59,17 +59,20 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 operation과 연결된 값만 넣으며, 확인되지 않으면 생략한다. 결과를 선택하지 않은 일반 초안은 현재
 attention `task`를 사용할 수 있다.
 호스트에 전달하는 `oms-followup-draft` 문맥(선택적 `project` 별칭·`goal`·`summary`·선택적 `task`·선택적
-`turnId`·`text`)과 복사 가능한 초안 본문(선택적 `Turn: …`·선택적 `Task: …`·목표 요약·항목 요약)에는
-`projectKey`·`Room`·`owner`·`source` 및 내부 operation·participant·attempt·digest 식별자를 의도적으로
-넣지 않는다.
+`turnId`·`text`), `oms-selected-finding` 문맥(`authority: context-only`·선택적 `project` 별칭·선택적 `task`·선택적
+`turnId`·`source`의 `kind`와 표시용 `summary`·`selection`·`text`), 복사 가능한 초안 본문(선택적 `Turn: …`·선택적
+`Task: …`·목표 요약·항목 요약)에는 `projectKey`·`Room`·`owner`와 내부 `source` 식별자
+(`provider`·`participant`·`leadRequestId`·`operation`·`leadAttempt`·`workerAttempt`·`attempt`·`format`),
+전체 원문 `digest`, `pageCursor`를 의도적으로 넣지 않는다.
 초안은 전환·실패 시 비우는 패널 메모리이며 새로운 영구 receipt가 아니다.
 
 선택 공유의 `selection`에는 미리 본 `text`, 원문의 0부터 시작하는 UTF-8 byte `offset`,
-`bytes`, `totalBytes`, 전체 원문 `digest`, 선택 발췌문의 `excerptSha256`, `truncated`,
-원래 표시된 부분의 `displayedBytes`가 포함된다. UI 범위 표시는 사람이 읽는 1부터 시작하는
+`bytes`, `totalBytes`, `truncated`, 원래 표시된 부분의 `displayedBytes`, 선택 발췌문의 `excerptSha256`가
+포함된다. UI 범위 표시는 사람이 읽는 1부터 시작하는
 byte 번호다. 문자열 중간을 자르지 않으므로 한도에 맞춘 실제 바이트 수는 4,000보다 작을 수 있다.
-`source`는 exact worker 쌍, Room attempt 또는 Lead의 Room·participant·operation·request·turn을
-보존하며, Lead 답변은 검증한 페이지 입력 cursor를 `pageCursor`로 포함한다.
+패널 메모리의 private `draft.source`는 공유 직전 재검증을 위해 exact worker 쌍, Room attempt 또는 Lead의
+`Room`·`participant`·`operation`·`leadRequestId`·`turnId`, 전체 원문 `digest`, Lead 답변의 검증한
+`pageCursor`를 보존하되 모델 문맥에는 내보내지 않는다.
 사용자가 아직 보지 않은 다음 페이지나 private transcript의 다른 메시지는 공유하지 않는다.
 
 공유는 읽기 전용·오래된 화면·문맥 기능이 없는 호스트에서 사용할 수 없다.
@@ -87,7 +90,7 @@ byte 번호다. 문자열 중간을 자르지 않으므로 한도에 맞춘 실�
 ## 검증과 남은 확인
 
 프런트엔드의 기존 `node:test` + VM/DOM fixture를 확장했다.
-다음 명령으로 78개 테스트를 실행한다(목표·결과 흐름의 70개를 확장하고 선택 공유·더 살펴보기 8개 시나리오 추가).
+다음 명령으로 79개 테스트를 실행한다(목표·결과 흐름의 70개를 확장하고 선택 공유·더 살펴보기 9개 시나리오 추가).
 
 ```sh
 node --test crates/oms-mcp-server/tests/conversation-panel.test.mjs
