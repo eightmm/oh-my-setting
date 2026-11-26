@@ -651,6 +651,7 @@ pub(crate) struct Seat {
     pub requested_model: String,
     pub artifact: PathBuf,
     pub answer: String,
+    pub findings: Option<crate::review::ParsedFindings>,
     pub code: i32,
     pub complete: bool,
     pub quality: String,
@@ -701,7 +702,7 @@ fn apply_target_explicitness(route: &mut providers::Route, args: &Args) {
     }
 }
 
-fn output_mode(args: &Args) -> providers::OutputMode {
+fn output_mode(args: &Args) -> providers::OutputMode<'static> {
     if args.has("output-json") || args.has("synthesis-json") {
         providers::OutputMode::Native
     } else {
@@ -731,7 +732,7 @@ fn call_route(
     )?;
     apply_target_explicitness(&mut route, args);
     if !dry(args, tool) && !args.has("export-only") {
-        if output_mode(args) == providers::OutputMode::Native {
+        if matches!(output_mode(args), providers::OutputMode::Native) {
             providers::require_native_output(&route.provider)?;
         }
         providers::bind_account(&mut route, repo)?;
@@ -883,6 +884,7 @@ fn call_routed(
             route,
             artifact,
             answer: String::new(),
+            findings: None,
             code: 0,
             complete: false,
             quality: "empty".into(),
@@ -948,6 +950,9 @@ fn call_routed(
         return fail("Team request lead lifecycle enrollment unavailable");
     }
     let mut usage_env = crate::usage::operation_env(&[])?;
+    let cargo_guard = private
+        .as_ref()
+        .map(|tree| tree.cargo_env(&route.provider, &mut usage_env));
     if args.has("team-requests") {
         usage_env.push((
             "OMS_TEAM_REQUEST_PROTOCOL".into(),
@@ -977,6 +982,23 @@ fn call_routed(
         .into_owned();
     let timeout_secs = timeout(args, tool)?;
     let call_started = std::time::Instant::now();
+    let scope = (tool == "peer-ask"
+        && round == 0
+        && args.has("no-current")
+        && args.get("providers") == target.provider
+        && !args.has("debate")
+        && matches!(target.provider.as_str(), "claude" | "antigravity"))
+    .then(|| {
+        crate::lead_observation::Scope::from_owner(
+            repo,
+            dir,
+            args.get("thread"),
+            &target.provider,
+            context,
+        )
+    })
+    .flatten();
+    let observed = std::cell::Cell::new(None);
     let result = providers::execute_with_fallback_output(
         &mut route,
         args.get("fallback-model"),
@@ -986,9 +1008,14 @@ fn call_routed(
         timeout_secs,
         repo,
         &usage_env,
-        output_mode(args),
+        if scope.is_some() {
+            providers::OutputMode::Observed(&observed)
+        } else {
+            output_mode(args)
+        },
         context,
     );
+    drop(cargo_guard);
     let mut result = match result {
         Ok(r) => r,
         Err(error) => crate::process::Completed {
@@ -1096,6 +1123,13 @@ fn call_routed(
         }
     }
     let answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
+    let findings = if tool == "peer-review" {
+        Some(crate::review::seat_findings(&String::from_utf8_lossy(
+            &result.stdout,
+        )))
+    } else {
+        None
+    };
     let quality = if result.complete {
         providers::answer_quality(&answer).to_owned()
     } else {
@@ -1214,11 +1248,19 @@ fn call_routed(
         )
         .map_err(publication_error("thread append"))?;
     }
+    if result.code == 0
+        && result.complete
+        && quality == "ok"
+        && let (Some(scope), Some(observation)) = (scope, observed.take())
+    {
+        scope.publish(&observation, &artifact, &artifact_sha256);
+    }
     Ok(Seat {
         target: target.clone(),
         route,
         artifact,
         answer,
+        findings,
         code: result.code,
         complete: result.complete,
         quality,

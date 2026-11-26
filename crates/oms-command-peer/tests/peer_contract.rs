@@ -3197,7 +3197,7 @@ fn review_classification_and_validation() {
                 &STOP,
                 &probe,
             );
-            assert!(output.0 == 0 || output.0 == 2, "{output:?}");
+            assert!(output.0 <= 2, "{output:?}");
             let name = storage::names(&repo.0, Path::new(directory), ".jsonl")
                 .unwrap()
                 .into_iter()
@@ -3207,6 +3207,75 @@ fn review_classification_and_validation() {
             (output, rows)
         };
         let (output, rows) = review(&answer, ".oms/review-anchors", 0, false);
+        let sensitive = format!("{}{} = example", "to", "ken");
+        let redacted_answer = format!(
+            "```findings\n{}\n```\nGATE: fail",
+            String::from_utf8(
+                finding("source.rs", 15, &sensitive, "changed();")
+                    .json(false)
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        let (redacted_output, redacted_rows) =
+            review(&redacted_answer, ".oms/review-redacted-finding", 0, false);
+        assert_eq!(redacted_rows.len(), 1);
+        assert_eq!(redacted_rows[0].get("file").text(), Some("source.rs"));
+        assert_eq!(redacted_rows[0].get("line"), &15usize.into());
+        assert_eq!(
+            redacted_rows[0].get("summary").text(),
+            Some("summary withheld: redacted by the outbound scanner")
+        );
+        assert!(redacted_rows[0].get("redacted").truth());
+        let printed = String::from_utf8_lossy(&redacted_output.1);
+        assert!(printed.contains("source.rs"), "{printed}");
+        assert!(!printed.contains(&sensitive));
+        let (fallback_output, fallback_rows) = review(
+            "```findings\n[oms-redacted:token-assignment]\n[oms-redacted:private-key]\n```\nGATE: fail",
+            ".oms/review-withheld-findings",
+            0,
+            false,
+        );
+        assert_eq!(fallback_rows.len(), 2);
+        assert_ne!(fallback_rows[0].get("id"), fallback_rows[1].get("id"));
+        let (_, later_rows) = review(
+            "```findings\n[oms-redacted:token-assignment]\n```\nGATE: fail",
+            ".oms/review-withheld-later",
+            0,
+            false,
+        );
+        assert_ne!(fallback_rows[0].get("id"), later_rows[0].get("id"));
+        let double_answer = format!(
+            "```findings\n{}\n{}\n```\nGATE: fail",
+            String::from_utf8(
+                finding("source.rs", 15, &sensitive, "one")
+                    .json(false)
+                    .unwrap()
+            )
+            .unwrap(),
+            String::from_utf8(
+                finding("source.rs", 15, &sensitive, "two")
+                    .json(false)
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        let (_, double_rows) = review(&double_answer, ".oms/review-redacted-double", 0, false);
+        assert_eq!(double_rows.len(), 2);
+        assert_ne!(double_rows[0].get("id"), double_rows[1].get("id"));
+
+        for row in &fallback_rows {
+            assert_eq!(row.get("withheld").text(), Some("redacted"));
+            assert_eq!(row.get("severity").text(), Some("blocking"));
+            assert!(!row.has("file"));
+            assert!(!row.has("line"));
+        }
+        assert_eq!(
+            String::from_utf8_lossy(&fallback_output.1)
+                .matches("finding: ")
+                .count(),
+            2
+        );
         assert_eq!(output.0, 0, "anchor labels never change GATE: pass");
         assert_eq!(rows.len(), claims.len() - 1, "traversal must be rejected");
         for ((summary, reported, quote, resolved, status, anchor), row) in cases.iter().zip(&rows) {
@@ -4437,9 +4506,21 @@ fn thread_hot_paths_read_each_log_once_and_keep_stale_contracts() {
 fn delegate_warm_cargo_slot_cache_and_opt_out() {
     isolated("delegate_warm_cargo_slot_cache_and_opt_out", || {
         use oms_command_peer::process::{Completed, Executor, Invocation};
+        use sha2::{Digest, Sha256};
         use std::sync::Mutex;
 
-        struct EnvRecorder(Mutex<Vec<(String, Option<String>)>>);
+        struct ObservedCall {
+            prog: String,
+            cwd: PathBuf,
+            env_override: Option<PathBuf>,
+            effective_stdout: String,
+            slot_lock_busy: bool,
+        }
+        struct EnvRecorder {
+            repo: PathBuf,
+            mutate: AtomicBool,
+            calls: Mutex<Vec<ObservedCall>>,
+        }
         impl Executor for EnvRecorder {
             fn execute(
                 &self,
@@ -4452,59 +4533,87 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                     .and_then(|s| s.to_str())
                     .unwrap_or("")
                     .to_owned();
-                if !prog.ends_with("git") {
-                    let found = request
-                        .environment
-                        .iter()
-                        .find(|(k, _)| k == "CARGO_TARGET_DIR")
-                        .map(|(_, v)| v.to_string_lossy().into_owned());
-                    self.0.lock().unwrap().push((prog, found));
-                    return Ok(Completed {
-                        code: 0,
-                        stdout: b"ok\n".to_vec(),
-                        stderr: Vec::new(),
-                        complete: true,
-                        cleanup_complete: Some(true),
-                        owned_cleanup: None,
-                        elapsed: std::time::Duration::ZERO,
-                    });
+                if prog.ends_with("git") {
+                    return oms_command_peer::process::Native.execute(request, interrupted);
                 }
-                oms_command_peer::process::Native.execute(request, interrupted)
+                let env_override = request
+                    .environment
+                    .iter()
+                    .rfind(|(k, _)| k == "CARGO_TARGET_DIR")
+                    .map(|(_, v)| PathBuf::from(v));
+                let slot_lock_busy = env_override
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .filter(|dir| {
+                        dir.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with("slot-"))
+                    })
+                    .is_some_and(|slot_dir| {
+                        let mut settings = oms_lock::Settings::from_env().unwrap();
+                        settings.cwd = self.repo.clone();
+                        let lock = oms_lock::Lock::for_file(&slot_dir.join("slot.lock"), settings)
+                            .unwrap();
+                        matches!(lock.try_acquire(), Err(oms_lock::Error::Busy))
+                    });
+                let cwd = request.cwd.clone();
+                let completed = oms_command_peer::process::Native.execute(request, interrupted)?;
+                if prog != "bash" && self.mutate.load(Ordering::SeqCst) {
+                    fs::write(
+                        cwd.join("Cargo.toml"),
+                        "[package]\nname = \"probe\"\nversion = \"0.1.1\"\n",
+                    )
+                    .unwrap();
+                }
+                let raw = String::from_utf8_lossy(&completed.stdout);
+                let effective_stdout = if prog == "bash" {
+                    raw.trim_end_matches('\n').to_owned()
+                } else {
+                    raw.lines()
+                        .find_map(|line| line.strip_prefix("EFFECTIVE="))
+                        .unwrap_or("")
+                        .to_owned()
+                };
+                self.calls.lock().unwrap().push(ObservedCall {
+                    prog,
+                    cwd,
+                    env_override,
+                    effective_stdout,
+                    slot_lock_busy,
+                });
+                Ok(completed)
             }
         }
 
-        let repo = Repo::new();
-        repo.write(
-            "Cargo.toml",
-            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n",
-        );
-        repo.git(&["add", "Cargo.toml"]);
-        repo.git(&[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-qm",
-            "cargo repo",
-        ]);
-        let fake_codex = repo.0.join(".fake-bin/codex");
+        let home = fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap();
+        let fake_codex = home.join(format!("fake-bin-{}/codex", std::process::id()));
         fs::create_dir_all(fake_codex.parent().unwrap()).unwrap();
-        fs::write(&fake_codex, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(
+            &fake_codex,
+            "#!/bin/sh\ncat >/dev/null\nprintf 'EFFECTIVE=%s\\nCONFIDENCE: 0.9\\nGATE: pass\\n' \"${CARGO_TARGET_DIR-<unset>}\"\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let home = fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap();
         let xdg_cache = home.join(".cache");
+        let caller_target = home.join("caller-target");
         let path_val = format!(
             "{}:{}",
             fake_codex.parent().unwrap().display(),
             std::env::var("PATH").unwrap_or_default()
         );
         if std::env::var_os("OMS_SLOT_INNER").is_none() {
-            for mode in ["slot", "optout"] {
+            for mode in [
+                "slot",
+                "optout",
+                "empty",
+                "caller-target",
+                "optout-caller-target",
+                "slot-cache-off-caller-target",
+            ] {
                 let mut cmd = Command::new(std::env::current_exe().unwrap());
                 cmd.args([
                     "--exact",
@@ -4518,11 +4627,31 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                 .env("OMS_SLOT_INNER", mode)
                 .env("XDG_CACHE_HOME", &xdg_cache)
                 .env("PATH", &path_val)
-                .env_remove("CARGO_TARGET_DIR");
-                if mode == "optout" {
-                    cmd.env("OMS_DELEGATE_ISOLATED_BUILD", "1");
-                } else {
-                    cmd.env_remove("OMS_DELEGATE_ISOLATED_BUILD");
+                .env_remove("OMS_DELEGATE_ISOLATED_BUILD")
+                .env_remove("OMS_CARGO_SLOT_CACHE");
+                match mode {
+                    "slot" => {
+                        cmd.env_remove("CARGO_TARGET_DIR");
+                    }
+                    "optout" => {
+                        cmd.env_remove("CARGO_TARGET_DIR")
+                            .env("OMS_DELEGATE_ISOLATED_BUILD", "1");
+                    }
+                    "empty" => {
+                        cmd.env("CARGO_TARGET_DIR", "");
+                    }
+                    "caller-target" => {
+                        cmd.env("CARGO_TARGET_DIR", &caller_target);
+                    }
+                    "optout-caller-target" => {
+                        cmd.env("CARGO_TARGET_DIR", &caller_target)
+                            .env("OMS_DELEGATE_ISOLATED_BUILD", "1");
+                    }
+                    "slot-cache-off-caller-target" => {
+                        cmd.env("CARGO_TARGET_DIR", &caller_target)
+                            .env("OMS_CARGO_SLOT_CACHE", "0");
+                    }
+                    _ => unreachable!(),
                 }
                 let out = cmd.output().unwrap();
                 assert!(
@@ -4531,54 +4660,295 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                     String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr)
                 );
+                assert!(
+                    String::from_utf8_lossy(&out.stdout).contains("1 passed;"),
+                    "{mode}: child ran no test"
+                );
             }
             return;
         }
+
+        let repo = Repo::new();
+        repo.write(".gitignore", "/target\n");
+        repo.write(
+            "Cargo.toml",
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\n",
+        );
+        repo.git(&["add", ".gitignore", "Cargo.toml"]);
+        repo.git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "cargo repo",
+        ]);
+
         let mode = std::env::var("OMS_SLOT_INNER").unwrap();
-        let recorder = EnvRecorder(Mutex::new(Vec::new()));
-        let values = args(&[
+        let recorder = EnvRecorder {
+            repo: repo.0.clone(),
+            mutate: AtomicBool::new(true),
+            calls: Mutex::new(Vec::new()),
+        };
+        let verify_cmd = "printf '%s' \"${CARGO_TARGET_DIR-<unset>}\"";
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let stop = AtomicBool::new(false);
+
+        let delegate_values = args(&[
             "--repo",
             repo.0.to_str().unwrap(),
             "--to",
             "codex",
             "--model",
             "fixture",
+            "--no-task",
+            "--no-memory",
+            "--no-ml-context",
+            "--no-graph-context",
             "--verify",
-            "cargo test",
-            "--allow-no-change",
+            verify_cmd,
             "Build check",
         ]);
-        let stop = AtomicBool::new(false);
         let out = oms_command_peer::run_with_executor(
             "peer-delegate",
-            &values,
+            &delegate_values,
             &repo.0,
-            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+            source,
             &stop,
             &recorder,
         );
         assert_eq!(
             out.0,
             0,
-            "delegate failed: {}",
+            "delegate ({mode}) failed: {}",
             String::from_utf8_lossy(&out.2)
         );
-        let calls = recorder.0.lock().unwrap();
-        assert!(!calls.is_empty());
-        if mode == "optout" {
+
+        recorder.mutate.store(false, Ordering::SeqCst);
+        let review_values = args(&[
+            "--repo",
+            repo.0.to_str().unwrap(),
+            "--providers",
+            "codex",
+            "--model",
+            "fixture",
+            "--gate",
+            "--no-task",
+            "--no-memory",
+            "--no-ml-context",
+            "--no-graph-context",
+            "--verify",
+            verify_cmd,
+            "--prompt",
+            "Gate check",
+        ]);
+        let review_out = oms_command_peer::run_with_executor(
+            "peer-review",
+            &review_values,
+            &repo.0,
+            source,
+            &stop,
+            &recorder,
+        );
+        assert_eq!(
+            review_out.0,
+            0,
+            "review ({mode}) failed: {}{}",
+            String::from_utf8_lossy(&review_out.1),
+            String::from_utf8_lossy(&review_out.2)
+        );
+
+        repo.write("tests/probe_test.rs", "#[test]\nfn red_probe() {}\n");
+        repo.git(&["add", "tests/probe_test.rs"]);
+        let advise_values = args(&[
+            "advise",
+            "--json",
+            "--repo",
+            repo.0.to_str().unwrap(),
+            "--red-check",
+            verify_cmd,
+        ]);
+        let advise_out = oms_command_peer::run_with_executor(
+            "peer-review",
+            &advise_values,
+            &repo.0,
+            source,
+            &stop,
+            &recorder,
+        );
+        assert_eq!(
+            advise_out.0,
+            0,
+            "advise red-check ({mode}) failed: {}{}",
+            String::from_utf8_lossy(&advise_out.1),
+            String::from_utf8_lossy(&advise_out.2)
+        );
+
+        let is_temp_tree =
+            |cwd: &Path| cwd.starts_with(repo.0.join(".oms/tmp")) && cwd.ends_with("tree");
+        let calls = recorder.calls.lock().unwrap();
+        assert_eq!(
+            calls.len(),
+            6,
+            "{mode}: expected delegate+verify, review+verify, and red-check control+file"
+        );
+        assert!(calls[0].prog.ends_with("codex"), "{}", calls[0].prog);
+        assert_eq!(calls[1].prog, "bash");
+        assert!(calls[2].prog.ends_with("codex"), "{}", calls[2].prog);
+        assert_eq!(calls[3].prog, "bash");
+        assert_eq!(calls[4].prog, "bash");
+        assert_eq!(calls[5].prog, "bash");
+        assert_eq!(calls[0].cwd, calls[1].cwd);
+        for idx in [0, 1, 2, 4, 5] {
             assert!(
-                calls[0].1.is_none(),
-                "OMS_DELEGATE_ISOLATED_BUILD=1 must omit CARGO_TARGET_DIR"
+                is_temp_tree(&calls[idx].cwd),
+                "call {idx} ({mode}) expected temp tree cwd, got {}",
+                calls[idx].cwd.display()
             );
-        } else {
-            let first_dir = calls[0]
-                .1
-                .as_ref()
-                .expect("slot-0 CARGO_TARGET_DIR assigned");
             assert!(
-                first_dir.contains("cargo-slots/") && first_dir.ends_with("/slot-0/target"),
-                "unexpected slot path: {first_dir}"
+                !calls[idx].cwd.exists(),
+                "call {idx} ({mode}) temp tree was not removed: {}",
+                calls[idx].cwd.display()
             );
+            assert_ne!(
+                Path::new(&calls[idx].effective_stdout),
+                caller_target,
+                "call {idx} ({mode}) leaked caller CARGO_TARGET_DIR"
+            );
+            assert!(
+                !Path::new(&calls[idx].effective_stdout).starts_with(&caller_target),
+                "call {idx} ({mode}) used subdirectory of caller CARGO_TARGET_DIR: {}",
+                calls[idx].effective_stdout
+            );
+        }
+        assert_eq!(
+            calls[3].cwd, repo.0,
+            "real-repo verify cwd must be repo root"
+        );
+        assert!(calls[3].env_override.is_none());
+
+        match mode.as_str() {
+            "optout" => {
+                for idx in [0, 1, 2, 3, 4, 5] {
+                    assert!(
+                        calls[idx].env_override.is_none(),
+                        "call {idx} must omit CARGO_TARGET_DIR when opted out without caller target"
+                    );
+                    assert_eq!(calls[idx].effective_stdout, "<unset>", "call {idx}");
+                }
+            }
+            "optout-caller-target" | "slot-cache-off-caller-target" => {
+                for idx in [0, 1, 2, 4, 5] {
+                    let expected = calls[idx].cwd.join("target");
+                    assert_eq!(
+                        calls[idx].env_override.as_deref(),
+                        Some(expected.as_path()),
+                        "call {idx} ({mode})"
+                    );
+                    assert_eq!(
+                        Path::new(&calls[idx].effective_stdout),
+                        expected,
+                        "call {idx} ({mode})"
+                    );
+                }
+                assert_eq!(Path::new(&calls[3].effective_stdout), caller_target);
+            }
+            "slot" | "empty" | "caller-target" => {
+                let codex_slot = calls[0]
+                    .env_override
+                    .as_ref()
+                    .expect("codex slot-0 CARGO_TARGET_DIR assigned")
+                    .to_string_lossy()
+                    .into_owned();
+                assert!(
+                    codex_slot.contains("cargo-slots/") && codex_slot.ends_with("/slot-0/target"),
+                    "unexpected codex slot path ({mode}): {codex_slot}"
+                );
+                for idx in [0, 1, 2] {
+                    assert_eq!(
+                        calls[idx].env_override.as_deref(),
+                        Some(Path::new(&codex_slot)),
+                        "call {idx} ({mode})"
+                    );
+                    assert_eq!(
+                        calls[idx].effective_stdout, codex_slot,
+                        "call {idx} ({mode})"
+                    );
+                    assert!(
+                        calls[idx].slot_lock_busy,
+                        "call {idx} ({mode}) slot lock not held"
+                    );
+                }
+                let red_slot = calls[4]
+                    .env_override
+                    .as_ref()
+                    .expect("red-check slot-0 CARGO_TARGET_DIR assigned")
+                    .to_string_lossy()
+                    .into_owned();
+                assert!(
+                    Path::new(&red_slot).starts_with(xdg_cache.join("oh-my-setting/cargo-slots"))
+                        && red_slot.ends_with("/slot-0/target"),
+                    "unexpected red-check slot path ({mode}): {red_slot}"
+                );
+                for idx in [4, 5] {
+                    assert_eq!(
+                        calls[idx].env_override.as_deref(),
+                        Some(Path::new(&red_slot)),
+                        "call {idx} ({mode})"
+                    );
+                    assert_eq!(calls[idx].effective_stdout, red_slot, "call {idx} ({mode})");
+                    assert!(
+                        calls[idx].slot_lock_busy,
+                        "call {idx} ({mode}) slot lock not held"
+                    );
+                }
+                match mode.as_str() {
+                    "slot" => assert_eq!(calls[3].effective_stdout, "<unset>"),
+                    "empty" => assert_eq!(calls[3].effective_stdout, ""),
+                    "caller-target" => {
+                        assert_eq!(Path::new(&calls[3].effective_stdout), caller_target);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+        drop(calls);
+
+        if mode == "caller-target" {
+            let repo_hash = format!("{:x}", Sha256::digest(repo.0.to_string_lossy().as_bytes()));
+            let slot_base = xdg_cache
+                .join("oh-my-setting/cargo-slots")
+                .join(&repo_hash[..16]);
+            let mut held = Vec::new();
+            let mut settings = oms_lock::Settings::from_env().unwrap();
+            settings.cwd = repo.0.clone();
+            for idx in 0..12 {
+                let dir = slot_base.join(format!("slot-{idx}"));
+                fs::create_dir_all(&dir).unwrap();
+                let lock =
+                    oms_lock::Lock::for_file(&dir.join("slot.lock"), settings.clone()).unwrap();
+                held.push(lock.try_acquire().unwrap());
+            }
+            let busy_out = oms_command_peer::run_with_executor(
+                "peer-review",
+                &advise_values,
+                &repo.0,
+                source,
+                &stop,
+                &recorder,
+            );
+            assert_eq!(busy_out.0, 0);
+            drop(held);
+            let calls = recorder.calls.lock().unwrap();
+            assert_eq!(calls.len(), 8);
+            for idx in [6, 7] {
+                let expected = calls[idx].cwd.join("target");
+                assert_eq!(calls[idx].env_override.as_deref(), Some(expected.as_path()));
+                assert_eq!(Path::new(&calls[idx].effective_stdout), expected);
+                assert!(!calls[idx].cwd.exists());
+            }
         }
     });
 }
@@ -7878,4 +8248,115 @@ fn peer_delegate_help_flags_parse_and_do_not_always_refuse_and_next_step_require
             );
         },
     );
+}
+
+#[test]
+fn native_lead_observation_is_private_and_bound_to_published_answer() {
+    for provider in ["claude", "antigravity"] {
+        if std::env::var("TEST_LEAD_PROVIDER").is_ok_and(|selected| selected != provider) {
+            continue;
+        }
+        native_lead_answer_fixture(provider);
+    }
+}
+
+fn native_lead_answer_fixture(provider: &str) {
+    let fixture = provider_repo();
+    fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700)).unwrap();
+    let binding = "a".repeat(64);
+    let hash = |data: &[u8]| oms_command_peer::storage::hash(data);
+    let op = format!(
+        "ask-20261125T000000Z-{}",
+        hash(format!("assignment-operation/{binding}").as_bytes())
+    );
+    let path = fixture.0.join(".oms/artifacts/mcp").join(&op);
+    provider_isolated_with_env(
+        "native_lead_observation_is_private_and_bound_to_published_answer",
+        "private",
+        &[
+            ("OMS_PEER_LEAD_OBSERVATION", &op),
+            ("TEST_LEAD_PROVIDER", provider),
+            ("OMS_PEER_CANCEL_DIR", path.to_str().unwrap()),
+        ],
+        || {
+            let dir = PathBuf::from(std::env::var_os("OMS_PEER_CANCEL_DIR").unwrap());
+            let repo = std::mem::ManuallyDrop::new(Repo(dir.ancestors().nth(4).unwrap().into()));
+            let op = dir.file_name().unwrap().to_str().unwrap();
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            let run_peer = |artifact_dir: &Path| {
+                run(
+                    &repo,
+                    source,
+                    "peer-ask",
+                    &[
+                        "--providers",
+                        provider,
+                        "--thread",
+                        op,
+                        "--no-current",
+                        "--prompt",
+                        "Read this fixture",
+                        "--artifact-dir",
+                        artifact_dir.to_str().unwrap(),
+                        "--no-task",
+                        "--no-memory",
+                    ],
+                )
+            };
+            success(run(
+                &repo,
+                source,
+                "thread",
+                &["new", "--live", "--no-current", "--id", op],
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            let meta = serde_json::json!({"operation":op,"thread":op,"kind":"ask","targets":[provider],"answer_storage":"operation","panel_assignment":binding});
+            let launch = serde_json::json!({"thread":op,"kind":"ask","targets":[provider],"preserve_current":true});
+            fs::write(dir.join("meta.json"), meta.to_string()).unwrap();
+            fs::write(dir.join("launch.json"), launch.to_string()).unwrap();
+            let id = "12345678-1234-4234-8234-123456789abc";
+            let (bin, stream) = if provider == "claude" {
+                ("claude", [
+                    serde_json::json!({"type":"system","subtype":"init","session_id":id}),
+                    serde_json::json!({"type":"assistant","parent_tool_use_id":null,"session_id":id,"message":{"model":"claude-sonnet-5-5","content":[{"type":"text","text":"actual fixture answer"}]}}),
+                    serde_json::json!({"type":"result","subtype":"success","is_error":false,"session_id":id,"result":"actual fixture answer"})
+                ].map(|row|row.to_string()).join("\n"))
+            } else {
+                ("agy",serde_json::json!({"status":"SUCCESS","conversation_id":id,"response":"actual fixture answer"}).to_string())
+            };
+            let fixture_script = format!(
+                "#!/bin/sh\n[ -z \"$OMS_PEER_LEAD_OBSERVATION\" ] || exit 6\ncat >/dev/null\ncat <<'END'\n{stream}\nEND\n"
+            );
+            fs::write(
+                PathBuf::from(std::env::var_os("HOME").unwrap())
+                    .join("bin")
+                    .join(bin),
+                fixture_script,
+            )
+            .unwrap();
+            let generic = repo.0.join(".oms/artifacts/ask");
+            success(run_peer(&generic));
+            assert!(!generic.join("native-lead-observation.json").exists());
+            let answers = dir.join("answers");
+            success(run_peer(&answers));
+            let receipt = answers.join("native-lead-observation.json");
+            let bytes = fs::read(&receipt).unwrap();
+            let row: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(row["operation"], op);
+            assert_eq!(row["sessionId"], id);
+            assert_eq!(row["provider"], provider);
+            assert_eq!(
+                row["model"].as_str(),
+                (provider == "claude").then_some("claude-sonnet-5-5")
+            );
+            let artifact = fs::read(answers.join(row["artifact"].as_str().unwrap())).unwrap();
+            assert_eq!(row["artifactSha256"], hash(&artifact));
+            assert!(String::from_utf8_lossy(&artifact).contains("actual fixture answer"));
+            assert!(!String::from_utf8_lossy(&bytes).contains("actual fixture answer"));
+            assert_eq!(
+                fs::metadata(&receipt).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        },
+    )
 }

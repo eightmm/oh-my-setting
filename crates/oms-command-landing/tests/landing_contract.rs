@@ -7383,6 +7383,88 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
     assert_eq!(cand_b.get("items"), cand_a.get("items"));
     assert_eq!(cand_b.get("recommendations"), cand_a.get("recommendations"));
 
+    // Candidate links distinguish reusable ready work from in-flight and terminal work.
+    fs::write(r.dir.join("panel-board"), board_page(false, "", &linked7)).unwrap();
+    for (state, excluded, reusable) in [
+        ("ready", false, true),
+        ("claimed", true, false),
+        ("running", true, false),
+        ("review", true, false),
+        ("blocked", true, false),
+        ("done", false, false),
+        ("cancelled", false, false),
+        ("failed", false, false),
+        ("unknown", true, false),
+    ] {
+        fs::write(&plan_file, format!(r##"{{"tasks":{{"z_task":{{"issue":"#7","state":"{state}"}},"a_task":{{"issue":"#7","state":"{state}"}}}}}}"##)).unwrap();
+        let doc = run_candidates();
+        let candidates = doc.get("github").get("candidates");
+        let rec = &candidates.get("recommendations").array()[0];
+        assert_eq!(
+            rec.get("state").text(),
+            Some(if excluded { "excluded" } else { "recommended" }),
+            "{state}"
+        );
+        if excluded {
+            assert_eq!(rec.get("reason").text(), Some("plan_linked"), "{state}");
+            assert!(candidates.get("items").array().is_empty(), "{state}");
+        } else {
+            let item = &candidates.get("items").array()[0];
+            let expected = if reusable { Some("a_task") } else { None };
+            assert_eq!(rec.get("plan_task").text(), expected, "{state}");
+            assert_eq!(item.get("plan_task").text(), expected, "{state}");
+        }
+    }
+    // A long valid task ID is emitted verbatim; a key outside Plan's grammar
+    // leaves the plan unverified instead of yielding a mutated task.
+    let long_id = "t".repeat(150);
+    fs::write(
+        &plan_file,
+        format!(r##"{{"tasks":{{"{long_id}":{{"issue":"#7","state":"ready"}}}}}}"##),
+    )
+    .unwrap();
+    let long = run_candidates();
+    assert_eq!(
+        long.get("github").get("candidates").get("items").array()[0]
+            .get("plan_task")
+            .text(),
+        Some(long_id.as_str())
+    );
+    for bad in ["   ", "a\\nb", "\\u200b"] {
+        fs::write(
+            &plan_file,
+            format!(r##"{{"tasks":{{"{bad}":{{"issue":"#7","state":"ready"}}}}}}"##),
+        )
+        .unwrap();
+        let doc = run_candidates();
+        let candidates = doc.get("github").get("candidates");
+        assert!(candidates.get("items").array().is_empty(), "{bad}");
+        assert_eq!(
+            candidates.get("reason").text(),
+            Some("plan_unverified"),
+            "{bad}"
+        );
+        assert!(
+            candidates.get("recommendations").array()[0]
+                .get("plan_task")
+                .text()
+                .is_none(),
+            "{bad}"
+        );
+    }
+    fs::write(&plan_file, r##"{"tasks":{"missing":{"issue":"#7"}}}"##).unwrap();
+    let missing = run_candidates();
+    assert_eq!(
+        missing
+            .get("github")
+            .get("candidates")
+            .get("recommendations")
+            .array()[0]
+            .get("reason")
+            .text(),
+        Some("plan_linked")
+    );
+
     // Option ID mismatch is never guessed by option name.
     let mismatched_id_card = issue(
         50,

@@ -87,6 +87,39 @@ fn targets(raw: &str, cwd: &Path) -> Result<Vec<String>, String> {
     }
     Ok(values)
 }
+/// Validate explicit selections for a single managed Lead before reservation and
+/// again when reconstructing the owner's argv. Catalog entitlement is checked by the panel.
+pub(crate) fn valid_lead_route(provider: &str, model: &str, effort: Option<&str>) -> bool {
+    use oms_command_agent_role::native_model;
+    let native = match provider {
+        "codex" | "claude" => provider,
+        "agy" | "antigravity" => "antigravity",
+        _ => return false,
+    };
+    matches("[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,159}", model)
+        && !model.contains("..")
+        && !matches!(model, "auto" | "provider-default")
+        && effort.is_none_or(|e| {
+            native_model::EFFORTS.contains(&e)
+                && native_model::validate_effort(native, model, e).is_ok()
+                && (native != "antigravity"
+                    || !native_model::is_agy_suffixed_selector(model)
+                    || model
+                        .rsplit_once('-')
+                        .is_some_and(|(_, suffix)| suffix == e))
+        })
+}
+
+fn stored_lead_route<'a>(route: &'a Value, provider: &str) -> Option<(&'a str, Option<&'a str>)> {
+    let model = route.get("model")?.as_str()?;
+    let effort = match route.get("effort")? {
+        Value::Null => None,
+        v => Some(v.as_str()?),
+    };
+    (route.as_object()?.iter().count() == 2 && valid_lead_route(provider, model, effort))
+        .then_some((model, effort))
+}
+
 // Lead starts and follow-ups have deterministic private addresses. A generic ask
 // may reuse an OMS thread, but cannot establish a Lead opener.
 fn assignment_op(op: &str, binding: &str) -> bool {
@@ -108,6 +141,8 @@ fn verify_lead_thread(
     operation: &str,
     binding: &str,
     provider: &str,
+    prompt: &str,
+    route: Option<&Value>,
 ) -> Result<(), String> {
     const INVALID: &str = "invalid Lead conversation binding";
     if !matches!(provider, "codex" | "claude" | "antigravity")
@@ -139,6 +174,30 @@ fn verify_lead_thread(
         || launch
             != json!({"kind":"ask","targets":targets,"thread":thread,"new_thread":false,
             "debate_rounds":0,"context_options":context,"preserve_current":true})
+    {
+        return Err(INVALID.into());
+    }
+    // The turn reservation lives in the original Lead's directory. Two matching
+    // child files alone cannot prove that the owner is running the user's selection.
+    let head = private_json(&dir, "lead-turn-head.json")?;
+    let id = head["id"]
+        .as_str()
+        .filter(|s| {
+            matches(
+                "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                s,
+            )
+        })
+        .ok_or(INVALID)?;
+    let note = private_json(&dir, &format!("lead-turn-{id}.json"))?;
+    let default_route = json!({"model": Value::Null, "effort": Value::Null});
+    if head["scope"] != meta["panel_assignment"]
+        || note["scope"] != head["scope"]
+        || note["id"] != id
+        || note["binding"] != binding
+        || note["text"] != prompt
+        || note["digest"] != storage::hash(prompt)
+        || note.get("route").unwrap_or(&default_route) != route.unwrap_or(&default_route)
     {
         return Err(INVALID.into());
     }
@@ -503,6 +562,10 @@ impl Server<'_> {
 
     /// The caller resolves the active Room owner, its Lead slot and per-message
     /// reservation. No tool argument grants this private launch mode.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "launch requires both Room and operation witnesses"
+    )]
     pub(crate) fn start_lead_followup(
         &self,
         repo: &Path,
@@ -511,6 +574,7 @@ impl Server<'_> {
         operation: &str,
         thread: &str,
         binding: &str,
+        settings: Option<(&str, Option<&str>)>,
     ) -> ToolResult {
         let target = match provider {
             "agy" | "antigravity" => "antigravity",
@@ -522,7 +586,10 @@ impl Server<'_> {
         if self.repo(&args)? != repo {
             return Err("error: Lead repository changed".into());
         }
-        self.start_bound_peer(&args, Some((operation, binding)), true)
+        if settings.is_some_and(|(model, effort)| !valid_lead_route(target, model, effort)) {
+            return Err("error: invalid Lead route".into());
+        }
+        self.start_routed_peer(&args, Some((operation, binding)), true, settings)
     }
 
     pub(crate) fn start_bound_peer(
@@ -530,6 +597,16 @@ impl Server<'_> {
         args: &Value,
         assignment: Option<(&str, &str)>,
         preserve_current: bool,
+    ) -> ToolResult {
+        self.start_routed_peer(args, assignment, preserve_current, None)
+    }
+
+    fn start_routed_peer(
+        &self,
+        args: &Value,
+        assignment: Option<(&str, &str)>,
+        preserve_current: bool,
+        settings: Option<(&str, Option<&str>)>,
     ) -> ToolResult {
         if delegated()
             && !(matches!(args["kind"].as_str(), Some("message" | "ack"))
@@ -658,6 +735,14 @@ impl Server<'_> {
         }
         // Owner reconstruction uses only validated typed fields, not stored argv.
         let mut launch = json!({"kind":kind,"targets":targets,"thread":thread,"new_thread":new,"debate_rounds":rounds,"context_options":context});
+        if let Some((model, effort)) = settings {
+            if !followup {
+                return Err("error: selected route requires a bound Lead follow-up".into());
+            }
+            let route = json!({"model":model,"effort":effort});
+            launch["lead_route"] = route.clone();
+            meta["lead_route"] = route;
+        }
         if preserve_current {
             if followup {
                 let (operation, binding) = assignment.ok_or("error: missing Lead binding")?;
@@ -669,7 +754,15 @@ impl Server<'_> {
                 {
                     return Err("error: invalid Lead follow-up".into());
                 }
-                verify_lead_thread(&repo, &thread, operation, binding, &targets[0])?;
+                verify_lead_thread(
+                    &repo,
+                    &thread,
+                    operation,
+                    binding,
+                    &targets[0],
+                    prompt,
+                    launch.get("lead_route"),
+                )?;
                 launch["lead_followup"] = json!(binding);
             } else if assignment.is_none() || kind != "ask" || thread != op {
                 return Err("error: invalid non-selecting assignment".into());
@@ -1307,6 +1400,12 @@ fn owner_run(
         .then(|| private_json(dir, "meta.json"))
         .transpose()
         .map_err(fail)?;
+    let route = launch.get("lead_route");
+    if route != meta.as_ref().and_then(|m| m.get("lead_route"))
+        || (route.is_some() && followup.is_none())
+    {
+        return Err(fail("selected route requires its original Lead receipt"));
+    }
     if meta
         .as_ref()
         .is_some_and(|m| m.get("lead_followup").is_some())
@@ -1426,10 +1525,42 @@ fn owner_run(
         {
             return Err(fail("Lead follow-up receipt changed"));
         }
-        verify_lead_thread(repo, thread, op, binding, &selected[0]).map_err(fail)?;
+        verify_lead_thread(repo, thread, op, binding, &selected[0], prompt, route).map_err(fail)?;
+        if let Some(route) = route {
+            let (model, effort) = stored_lead_route(route, &selected[0])
+                .ok_or_else(|| fail("invalid stored Lead route"))?;
+            argv.extend(["--model".into(), model.into()]);
+            if let Some(effort) = effort {
+                argv.extend(["--reasoning-effort".into(), effort.into()]);
+            }
+        }
     } else if protected && thread != op {
         return Err(fail("missing protected Lead follow-up"));
     }
+    // Only the detached owner of a single fixed Lead seat may request a
+    // result observation. Other consultations can have the same provider.
+    let observe_lead = protected
+        && launch["preserve_current"] == true
+        && matches!(selected.as_slice(), [p] if matches!(p.as_str(), "claude" | "antigravity"))
+        && (followup.is_some()
+            || (prompt == crate::panel::LEAD_PROMPT
+                && thread == op
+                && kind == "ask"
+                && !new
+                && rounds == 0
+                && launch["context_options"]
+                    == json!({"include_memory":false,"include_task":false})
+                && meta.as_ref().is_some_and(|m| {
+                    m["operation"] == op
+                        && m["thread"] == op
+                        && m["kind"] == kind
+                        && m["targets"] == launch["targets"]
+                        && m["answer_storage"] == "operation"
+                        && m["context_options"] == launch["context_options"]
+                        && m["panel_assignment"]
+                            .as_str()
+                            .is_some_and(|b| assignment_op(op, b))
+                })));
     if let Some(field) = launch.get("preserve_current") {
         let preserve = field
             .as_bool()
@@ -1489,6 +1620,15 @@ fn owner_run(
     dir.atomic("pid", format!("{}\n", std::process::id()).as_bytes())
         .map_err(fail)?;
     let mut cmd = Command::new(&program);
+    cmd.env_remove("OMS_PEER_LEAD_OBSERVATION");
+    if observe_lead {
+        cmd.env("OMS_PEER_LEAD_OBSERVATION", op);
+    }
+    if protected && launch["preserve_current"] == true {
+        // This dialog continues the original OMS thread. A supervisor's ambient
+        // native session selector could otherwise send its text to another chat.
+        cmd.env_remove("OMS_RESUME_SESSION");
+    }
     // The staged native CLI validates its manifest, revision and its own executable
     // before entering provider verbs. Preserve this proof in the detached owner.
     if let Some(revision) = program.parent().and_then(Path::file_name)
@@ -1569,6 +1709,7 @@ mod tests {
 if [ "$1" = thread ]; then
     test "$6" = context && test "$7" = --require-open && cat .oms/threads/"$5".jsonl
 else
+    test -z "${OMS_RESUME_SESSION+x}" || exit 9
     printf '%s\0' "$@" > received
 fi
 "#,
@@ -1617,8 +1758,30 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
         let threads = Directory::open(path, ".oms/threads", true, true).unwrap();
         threads.atomic("CURRENT", b"foreground\n").unwrap();
         let prompt = "--no-current\n같은 대화의 질문  ";
+        let turn = "32145678-1234-4123-a123-123456789abc";
+        let route = json!({"model":"gemini-4-carbon","effort":"high"});
+        let note_name = format!("lead-turn-{turn}.json");
+        let note = json!({"id":turn,"binding":child_binding,"scope":root_binding,
+                          "text":prompt,"digest":storage::hash(prompt),"route":route});
+        root.atomic(
+            "lead-turn-head.json",
+            json!({"id":turn,"scope":root_binding})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        root.atomic(&note_name, note.to_string().as_bytes())
+            .unwrap();
         let send = |provider| {
-            server.start_lead_followup(path, provider, prompt, &child, &thread, &child_binding)
+            server.start_lead_followup(
+                path,
+                provider,
+                prompt,
+                &child,
+                &thread,
+                &child_binding,
+                Some(("gemini-4-carbon", Some("high"))),
+            )
         };
         let no_effect = || {
             assert!(!path.join(RUN_ROOT).join(&child).exists());
@@ -1638,7 +1801,7 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
         assert!(send("agy,codex").is_err());
         assert!(
             server
-                .start_lead_followup(path, "agy", prompt, &child, &thread, &root_binding)
+                .start_lead_followup(path, "agy", prompt, &child, &thread, &root_binding, None)
                 .is_err()
         );
         no_effect();
@@ -1666,6 +1829,21 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
         root.atomic("launch.json", start.to_string().as_bytes())
             .unwrap();
         let child_launch = private_json(&dir, "launch.json").unwrap();
+        let mut swapped = child_launch.clone();
+        swapped["lead_route"]["effort"] = json!("low");
+        dir.atomic("launch.json", swapped.to_string().as_bytes())
+            .unwrap();
+        assert!(run().is_err());
+        assert!(!path.join("received").exists());
+        let original_meta = private_json(&dir, "meta.json").unwrap();
+        let mut swapped_meta = original_meta.clone();
+        swapped_meta["lead_route"] = swapped["lead_route"].clone();
+        dir.atomic("meta.json", swapped_meta.to_string().as_bytes())
+            .unwrap();
+        assert!(run().is_err());
+        assert!(!path.join("received").exists());
+        dir.atomic("meta.json", original_meta.to_string().as_bytes())
+            .unwrap();
         let mut downgraded = start.clone();
         downgraded["thread"] = json!(child);
         dir.atomic("launch.json", downgraded.to_string().as_bytes())
@@ -1678,6 +1856,18 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
         let received = std::fs::read_to_string(path.join("received")).unwrap();
         let argv: Vec<_> = received.split_terminator('\0').collect();
         assert_eq!(argv[0], "peer-ask");
+        assert!(argv.windows(2).any(|a| a == ["--model", "gemini-4-carbon"]));
+        assert!(argv.windows(2).any(|a| a == ["--reasoning-effort", "high"]));
+        for (provider, model, effort) in [
+            ("other", "example", None),
+            ("claude", "opus", Some("ultra")),
+            ("agy", "gemini-4-carbon-low", Some("high")),
+            ("agy", "gemini-pro-orchestrator", Some("low")),
+            ("codex", "-m", None),
+        ] {
+            assert!(!valid_lead_route(provider, model, effort));
+        }
+
         assert!(argv.windows(2).any(|a| a == ["--thread", thread.as_str()]));
         assert!(argv.windows(2).any(|a| a == ["--providers", "antigravity"]));
         for required in [
@@ -1689,6 +1879,33 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
             assert!(argv.contains(&required));
         }
         assert!(send("agy").is_err());
+        // Old reservations have no route field and keep provider defaults.
+        let old_binding = storage::hash("older turn");
+        let old_op = op(&old_binding);
+        let mut legacy = note.clone();
+        legacy.as_object_mut().unwrap().remove("route");
+        legacy["binding"] = json!(old_binding);
+        root.atomic(&note_name, legacy.to_string().as_bytes())
+            .unwrap();
+        assert!(
+            server
+                .start_lead_followup(path, "agy", prompt, &old_op, &thread, &old_binding, None)
+                .is_ok()
+        );
+        let old_dir = Directory::run(path, &old_op, true).unwrap();
+        assert!(
+            private_json(&old_dir, "meta.json")
+                .unwrap()
+                .get("lead_route")
+                .is_none()
+        );
+        owner_run(Some(&program), path, path, &old_op, &old_dir).unwrap();
+        let default_argv = std::fs::read_to_string(path.join("received")).unwrap();
+        assert!(
+            !default_argv
+                .split_terminator('\0')
+                .any(|a| matches!(a, "--model" | "--reasoning-effort"))
+        );
         assert_eq!(
             std::fs::read(threads.path.join("CURRENT")).unwrap(),
             b"foreground\n"

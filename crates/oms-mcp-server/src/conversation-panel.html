@@ -100,6 +100,15 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 .workers .person{padding:.35rem .1rem;gap:.4rem}
 .workers strong{font-size:.84rem;font-weight:620}
 .workers small,.workers .state{font-size:.77rem}
+.workers li{display:grid;align-items:center}
+.worker-output-link{justify-self:start;min-height:1.9rem;font-weight:600}
+.worker-no-attempt{color:var(--soft);font-size:.77rem;padding-inline:.1rem}
+@media(min-width:36rem){.workers li{grid-template-columns:minmax(0,1fr) auto;column-gap:.6rem}}
+#worker-output{max-width:min(44rem,calc(100% - 1.5rem))}
+#output-worker{font-weight:650;overflow-wrap:anywhere;margin-top:.65rem}
+#output-body{margin:.75rem 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
+#output-status:not(:empty),#output-limited:not([hidden]){margin-top:.4rem}
+#output-refresh{margin-top:.65rem}
 .slot-heading .state[data-tone]{flex:none;max-width:60%}
 .person{width:100%;background:none;text-align:start;border:0;border-radius:0;padding:.72rem .05rem;cursor:default}
 .lead-children>.person{border-top:1px solid var(--line)}
@@ -152,10 +161,26 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 #chat-title{min-width:0;overflow-wrap:anywhere}
 #conversation[open]{display:flex;flex-direction:column;width:min(46rem,calc(100% - 1.5rem));max-width:none;height:min(44rem,88dvh);padding:0;overflow:hidden}
 #conversation>.section-head{flex:none;padding:.7rem 1rem;border-bottom:1px solid var(--line)}
-#conversation>.section-head .identity{margin:0}
+#conversation>.section-head .identity{margin:0;min-width:0}
 /* A margin on a direct child is dialog surface, where a click would close the conversation. */
 #conversation>#chat-status{margin:0}
 #chat-status:not(:empty){padding:.65rem 1rem 0}
+#settings-toggle[aria-expanded="true"]{border-color:var(--soft)}
+#chat-settings{border-bottom:1px solid var(--line);padding:.65rem 1rem;overflow:auto;max-height:43dvh;flex:none}
+#settings-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(6rem,.65fr);gap:.5rem .7rem;margin-block:.5rem}
+#settings-fields label{font-weight:600}
+#settings-fields select{display:block;width:100%;margin-top:.2rem;text-overflow:ellipsis}
+#settings-saved,#settings-actual,#settings-hint,#settings-status{overflow-wrap:anywhere}
+#settings-actual{white-space:pre-line}
+#settings-controls{display:flex;align-items:center;gap:.6rem;justify-content:flex-end}
+#settings-status{margin-inline-end:auto}
+@media(max-width:24rem){
+  #conversation>.section-head{flex-wrap:wrap;gap:.35rem;padding-inline:.65rem}
+  #conversation>.section-head .identity{flex:1 1 11rem}
+  #conversation .dialog-actions{margin-inline-start:auto}
+  #conversation>.section-head button{padding-inline:.4rem}
+  #settings-fields{grid-template-columns:minmax(0,1fr)}
+}
 #chat-scroll{flex:1;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;padding:.7rem 1rem;scrollbar-gutter:stable}
 #chat-messages{list-style:none;padding:0;margin:0}
 #chat-messages li{width:fit-content;max-width:100%;padding:.55rem 0}
@@ -231,7 +256,16 @@ header{gap:.4rem;padding-bottom:.5rem}
 <p id="launch-status" class="note" role="status"></p>
 <button id="issue-review" type="button" hidden data-i18n="reviewIssue">현재 Main에 전달할 이슈 확인</button><p id="issue-evidence" class="note" role="status"></p><button id="issue-record" type="button" hidden></button>
 </div></dialog>
-<dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><div class="identity"><span id="chat-avatar" class="avatar" aria-hidden="true" hidden></span><h2 id="chat-title"></h2></div><span class="dialog-actions"><button id="chat-refresh" type="button" aria-label="대화 새로고침">↻</button><button id="chat-back" type="button" data-i18n="close">닫기</button></span></div>
+<dialog id="worker-output" aria-labelledby="output-title"><div class="dialog-body"><div class="section-head"><h2 id="output-title" data-i18n="out.title">워커 출력</h2><button id="output-close" type="button" data-i18n="close">닫기</button></div>
+<p id="output-worker"></p><p id="output-status" class="note" role="status"></p><pre id="output-body" hidden></pre><p id="output-limited" class="note" data-i18n="out.limited" hidden>기록된 출력의 일부입니다.</p>
+<button id="output-refresh" type="button" data-i18n="refresh">새로고침</button></div></dialog>
+<dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><div class="identity"><span id="chat-avatar" class="avatar" aria-hidden="true" hidden></span><h2 id="chat-title"></h2></div><span class="dialog-actions"><button id="settings-toggle" type="button" aria-controls="chat-settings" aria-expanded="false" data-i18n="prefs.title" hidden>대화 설정</button><button id="chat-refresh" type="button" aria-label="대화 새로고침">↻</button><button id="chat-back" type="button" data-i18n="close">닫기</button></span></div>
+<section id="chat-settings" tabindex="-1" aria-labelledby="settings-toggle" hidden>
+<p id="settings-saved"></p><p id="settings-actual" class="note" hidden></p>
+<fieldset id="settings-fields" hidden><legend class="sr-only" data-i18n="prefs.next">다음 메시지 설정</legend>
+<label><span data-i18n="prefs.model">모델</span><select id="settings-model"></select></label>
+<label><span data-i18n="prefs.effort">추론 강도</span><select id="settings-effort"></select></label></fieldset>
+<p id="settings-hint" class="note"></p><div id="settings-controls"><p id="settings-status" class="note" role="status"></p><button id="settings-read" type="button" data-i18n="refresh" hidden>새로고침</button><button id="settings-save" type="button" data-i18n="prefs.save" hidden>저장</button></div></section>
 <p id="chat-status" class="note" role="status"></p><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-result"></p></div>
 <form id="chat-compose" hidden><label for="chat-text" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000"></textarea>
 <div class="actions"><span id="chat-delivery" role="status"></span><button id="chat-check" type="button" hidden></button><button id="chat-send" type="submit" data-i18n="chatSend">보내기</button></div></form></dialog>
@@ -284,8 +318,38 @@ const messages = {
   "connecting": ["OMS 연결 중…", "Connecting to OMS…"],
   "connectionFailed": ["OMS 프로젝트를 확인할 수 없습니다. 연결을 확인한 뒤 새로고침하세요.", "Could not read the OMS project. Check the connection and refresh."],
   "criteriaMet": ["프로젝트 완료 기준 {n}개를 모두 검증했습니다.", "All {n} project completion criteria verified."],
-  "dispatchOnly": ["Main · {provider} 연결", "Main · via {provider}"],
-  "currentMain": ["이 대화의 Main", "Conversation Main"],
+  "dispatchOnly": ["OMS Main · {provider} 연결", "OMS Main · via {provider}"],
+  "out.open": ["출력 보기", "View output"],
+  "out.title": ["워커 출력", "Worker output"],
+  "out.noAttempt": ["실행 기록 없음", "No recorded attempt"],
+  "out.loading": ["기록된 출력을 불러오는 중…", "Loading recorded output…"],
+  "out.running": ["실행 중입니다. 아직 기록된 출력이 없습니다.", "Running. No output has been recorded yet."],
+  "out.complete": ["기록된 결과", "Recorded result"],
+  "out.not_recorded": ["이 실행에 기록된 출력이 없습니다.", "No output was recorded for this run."],
+  "out.unavailable": ["이 워커의 출력을 확인할 수 없습니다.", "Output for this worker could not be verified."],
+  "out.limited": ["기록된 출력의 일부입니다.", "Showing part of the recorded output."],
+  "prefs.title": ["대화 설정", "Chat settings"],
+  "prefs.model": ["모델", "Model"],
+  "prefs.effort": ["추론 강도", "Reasoning effort"],
+  "prefs.next": ["다음 메시지 설정", "Settings for the next message"],
+  "prefs.actual": ["Claude가 보고한 응답 모델 · {v}", "Reply model reported by Claude · {v}"],
+  "prefs.session": ["이 요청에 사용된 {v} 세션 확인", "{v} session observed for this request"],
+  "prefs.saved": ["다음 메시지의 저장된 설정 · {v}", "Saved for the next message · {v}"],
+  "prefs.default": ["OMS 기본 라우팅", "OMS routing default"],
+  "prefs.modelDefault": ["모델 기본값", "Model default"],
+  "prefs.choose": ["강도 선택", "Choose an effort"],
+  "prefs.fixed": ["모델에서 고정", "Fixed by model"],
+  "prefs.unknown": ["설정 가능한 추론 강도를 확인할 수 없습니다.", "Available reasoning levels were not reported."],
+  "prefs.catalog": ["공급자 카탈로그에 있는 옵션입니다.", "Listed in the provider catalog."],
+  "prefs.policy": ["OMS 정책에 정의된 모델 별칭입니다.", "Model alias from OMS policy."],
+  "prefs.save": ["저장", "Save"],
+  "prefs.loading": ["설정 확인 중…", "Reading settings…"],
+  "prefs.saving": ["저장 중…", "Saving…"],
+  "prefs.done": ["저장했습니다.", "Settings saved."],
+  "prefs.confirmed": ["저장된 값이 요청과 일치합니다.", "The saved values match your request."],
+  "prefs.conflict": ["변경을 확인하지 못해 현재 저장된 값을 다시 불러왔습니다.", "The change was not confirmed. The current saved values are shown."],
+  "prefs.failed": ["이 Lead의 설정을 확인할 수 없습니다.", "Settings for this Lead could not be verified."],
+  "currentMain": ["현재 대화", "Current conversation"],
   "emptyChat": ["아직 기록된 메시지가 없습니다.", "No messages recorded yet."],
   "goalLabel": ["프로젝트 목표", "Project goal"],
   "goalNone": ["기록된 목표 없음", "No goal recorded"],
@@ -338,7 +402,7 @@ const messages = {
   "recordIssue": ["현재 Main에 이 이슈 전달", "Record this issue for the current Main"],
   "refresh": ["새로고침", "Refresh"],
   "refreshing": ["새로고침 중…", "Refreshing…"],
-  "repositoryMain": ["프로젝트에 기록된 Main", "Recorded project Main"],
+  "repositoryMain": ["프로젝트 기록", "Project record"],
   "reviewIssue": ["현재 Main에 전달할 이슈 확인", "Review issue for the current Main"],
   "selectProject": ["프로젝트 선택", "Choose a project"],
   "start.badResponse": ["시작 응답을 확인할 수 없습니다. 진행 상황을 새로고침하세요.", "Cannot confirm the start response. Refresh to check progress."],
@@ -393,7 +457,7 @@ const messages = {
   "timeout": ["응답 시간이 초과되었습니다. 새로고침으로 처리 결과를 확인하세요.", "The request timed out. Refresh to check the result."],
   "toolFail": ["OMS 도구 호출에 실패했습니다.", "The OMS tool call failed."],
   "uncertainIssue": ["전달 상태 미확인", "Handoff unconfirmed"],
-  "unknownMain": ["Main 미확인", "Main unconfirmed"],
+  "unknownMain": ["OMS Main 미확인", "OMS Main unconfirmed"],
   "unverifiedIssue": ["이 프로젝트의 열린 이슈를 확인할 수 없습니다.", "Could not verify an open issue for this project."],
 };
 const LANGS=['ko','en'], LANG_KEY='oms.panel.language';
@@ -470,6 +534,7 @@ function setLanguage(next,explicit) {
 }
 const stateLabel=state=>messages['state.'+state]?t('state.'+state):state||t('statusUnknown');
 let dashboardData, members=[], rows=[], selectedChat, chatOrigin, chatCursor, chatPage=0;
+let selectedOutput;
 let approvedScope=0, issueTicket=0, reviewedIssue;
 const approvalState=new Map();
 
@@ -823,7 +888,8 @@ function nativeMainUri(page,member) {
     page.participant===member.participant && /^codex:\/\/threads\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(page.nativeUri || '') ? page.nativeUri : '';
 }
 
-function assignmentLabel(row) { return providerName(row.provider) + (row.role === 'lead' ? ' Lead' : choice(' 배정',' assignment')); }
+function roleTitle(role,provider){return 'OMS '+role+' · '+providerName(provider);}
+function assignmentLabel(row) { return row.role==='lead'?roleTitle('Lead',row.provider):providerName(row.provider)+choice(' 배정',' assignment'); }
 function attemptMember(row) {
   // Native Codex assignments enrol the exact attempt ID as the Room participant.
   return members.find(m => m.room === row.room && (row.participant ? m.participant === row.participant :
@@ -831,12 +897,14 @@ function attemptMember(row) {
 }
 
 function clearChat() {
+  clearSettings();el('settings-toggle').hidden=true;
   clearTimeout(managedChat?.timer);selectedChat=undefined;managedChat=undefined;chatCursor=null;chatPage++;
   el('chat-compose').hidden=true;el('chat-avatar').hidden=true;el('chat-text').value='';el('chat-delivery').textContent='';
   el('chat-messages').replaceChildren();el('chat-result').textContent='';
   el('chat-older').hidden=true;
 }
 function closeDialogs() {
+  closeWorkerOutput();
   for(const id of ['conversation','launcher']) if(el(id).open) el(id).close();
   clearChat();
 }
@@ -855,7 +923,7 @@ function clearProject() {
   updateContext(null);
 }
 function conversationMainName(main) {
-  return Object.hasOwn(names,main.harness) ? providerName(main.harness)+' Main' :
+  return Object.hasOwn(names,main.harness) ? roleTitle('Main',main.harness) :
     t('dispatchOnly',{provider:providerName(main.provider)});
 }
 function joinedMain() {
@@ -922,11 +990,17 @@ function paintAvatar(element,provider) {
   element.setAttribute('data-provider',provider==='antigravity'?'agy':provider||'');
   element.textContent=provider==='pi'?'P':Object.hasOwn(names,provider)?'':'–';
 }
+function memberLabel(member){
+  return typeof member?.label==='string' && member.label.trim()!==member.participant ? member.label.trim() : '';
+}
+function workerName({attempt,member}){
+  const role=providerName(attempt.provider || member?.provider)+choice(' 워커',' Worker');
+  return memberLabel(member)?memberLabel(member)+' · '+role:role;
+}
 function personEntry({attempt,member},kind) {
   const entry=node(member?'button':'article','','person');
-  const label=typeof member?.label==='string' && member.label.trim()!==member.participant ? member.label.trim() : '';
-  const role=()=>kind==='worker'?providerName(attempt.provider || member?.provider)+choice(' 워커',' Worker'):assignmentLabel(attempt);
-  const identity=()=>label?label+' · '+role():role();
+  const label=memberLabel(member);
+  const identity=()=>kind==='worker'?workerName({attempt,member}):[assignmentLabel(attempt),label].filter(Boolean).join(' · ');
   const title=typeof attempt.taskTitle==='string'?attempt.taskTitle.trim():'';
   const body=node('span','','body');
   if(kind==='slot' && attempt.role==='lead'){
@@ -954,10 +1028,69 @@ function leadEntry(entry,inSlot){
   if(!entry.workers.length)return row;
   const group=node('div','','lead-group'), list=node('ul','','workers');
   for(const worker of entry.workers){
-    const item=node('li','');item.append(personEntry(worker,'worker'));list.append(item);
+    const item=node('li','');item.append(personEntry(worker,'worker'));
+    if(entry.attempt.id && worker.attempt.id){
+      const button=node('button','','subtle worker-output-link');
+      worker.outputButton=button;button.type='button';button.setAttribute('aria-haspopup','dialog');
+      button.append(node('span',message('out.open')),node('span',()=> ' · '+workerName(worker),'sr-only'));
+      button.addEventListener('click',()=>openWorkerOutput(entry,worker,button));
+      if(selectedOutput?.leadAttempt===entry.attempt.id && selectedOutput.workerAttempt===worker.attempt.id)selectedOutput.origin=button;
+      item.append(button);
+    }else item.append(node('small',message('out.noAttempt'),'worker-no-attempt'));
+    list.append(item);
   }
   group.append(row,list);return group;
 }
+function currentWorkerOutput(s){
+  return s && s===selectedOutput && el('worker-output').open && currentLeadControl(s.ctl) &&
+    s.ctl.observed && s.ctl.projectKey===s.projectKey && rows.some(lead=>lead.attempt.id===s.leadAttempt &&
+      lead.workers.some(worker=>worker.attempt.id===s.workerAttempt));
+}
+function clearWorkerOutput(){
+  selectedOutput=undefined;
+  for(const id of ['output-worker','output-status','output-body']){const e=el(id);bindings.delete(e);e.textContent='';}
+  el('output-body').hidden=true;el('output-limited').hidden=true;
+}
+function closeWorkerOutput(){
+  if(el('worker-output').open)el('worker-output').close();
+  clearWorkerOutput();
+}
+async function readWorkerOutput(s){
+  if(!s || s!==selectedOutput || s.loading)return;
+  const args={projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt};
+  el('output-body').hidden=true;el('output-body').textContent='';el('output-limited').hidden=true;
+  if(!currentWorkerOutput(s)){put('output-status','out.unavailable');return;}
+  s.loading=true;el('output-refresh').disabled=true;put('output-status','out.loading');
+  try{
+    const result=await tool('oms_worker_output',args,s.ctl.generation);
+    if(!currentWorkerOutput(s))return;
+    const data=result.structuredContent, out=result._meta?.workerOutput;
+    if(!data || !out || Object.keys(args).some(k=>data[k]!==args[k] || out[k]!==args[k]) ||
+      !['running','complete','not_recorded','unavailable'].includes(data.status) || out.status!==data.status ||
+      typeof out.truncated!=='boolean' || (data.status==='complete'
+        ? !['native-report','indexed-answer'].includes(out.source) || typeof out.text!=='string' || !out.text.trim() ||
+          out.text.length>16384 || new TextEncoder().encode(out.text).length>16384
+        : out.text!==null || out.source!==null || out.truncated))throw uiError('out.unavailable');
+    put('output-status','out.'+out.status);
+    el('output-body').textContent=out.text||'';el('output-body').hidden=!out.text;
+    el('output-limited').hidden=!(out.text && out.truncated);
+  }catch{if(currentWorkerOutput(s))put('output-status','out.unavailable');}
+  finally{if(selectedOutput===s){s.loading=false;el('output-refresh').disabled=false;}}
+}
+function openWorkerOutput(lead,worker,origin){
+  if(!currentLeadControl(leadControl) || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
+  const s={ctl:leadControl,room:leadControl.room,projectKey:leadControl.projectKey,leadAttempt:lead.attempt.id,workerAttempt:worker.attempt.id,origin};
+  selectedOutput=s;el('output-refresh').disabled=false;
+  put('output-worker',()=>[workerName(worker),worker.attempt.taskTitle].filter(Boolean).join(' · '));
+  el('worker-output').showModal();el('output-close').focus();armAuto();readWorkerOutput(s);
+}
+onClick('output-refresh',()=>readWorkerOutput(selectedOutput));
+onClick('output-close',()=>el('worker-output').close());
+on('worker-output','close',()=>{
+  if(el('worker-output').open)return;
+  const s=selectedOutput;clearWorkerOutput();armAuto();
+  if(s && currentLeadControl(s.ctl) && !el('view').hidden)(s.origin?.isConnected===false?el('main-name'):s.origin)?.focus();
+});
 function renderLeadSlots(leads,complete) {
   const list=el('leads');list.replaceChildren();leadSlots.clear();
   const providerOf=record=>record.attempt.provider==='antigravity'?'agy':record.attempt.provider;
@@ -965,7 +1098,7 @@ function renderLeadSlots(leads,complete) {
     const entries=leads.filter(r=>providerOf(r)===provider);
     const slot=node('section','','lead-slot'), heading=node('div','','slot-heading');
     const avatar=node('span','','avatar');paintAvatar(avatar,provider);avatar.setAttribute('aria-hidden','true');
-    heading.append(avatar,node('h3',names[provider]+' Lead'));
+    heading.append(avatar,node('h3',roleTitle('Lead',provider)));
     const status=node('span','','state'), open=node('button','','subtle');
     open.type='button';open.hidden=true;
     const ctl=leadControl;
@@ -995,6 +1128,8 @@ function rememberLeads(ctl,on) {
 }
 function paintLeadControls(){
   const ctl=leadControl, known=currentLeadControl(ctl);
+  for(const lead of rows)for(const worker of lead.workers)if(worker.outputButton)worker.outputButton.disabled=!(known && ctl.observed && ctl.projectKey);
+  if(selectedOutput && !currentWorkerOutput(selectedOutput))closeWorkerOutput();
   const opener=el('open-leads');
   opener.hidden=!known;opener.disabled=!known || !ctl.observed || ctl.reading || ctl.writing;
   const auto=known && autoLeads(ctl);
@@ -1095,6 +1230,130 @@ function currentManaged(c){
   return c && c===managedChat && currentLeadControl(c.ctl) && el('conversation').open &&
     c.ctl.items.get(c.provider)?.requestId===c.requestId && c.ctl.items.get(c.provider)?.status==='ready';
 }
+function clearSettings(){
+  if(managedChat)managedChat.settings=null;
+  el('settings-toggle').setAttribute('aria-expanded','false');
+  el('chat-settings').hidden=true;
+  for(const id of ['settings-saved','settings-actual','settings-hint','settings-status']){
+    const e=el(id);bindings.delete(e);e.textContent='';
+  }
+  for(const id of ['settings-model','settings-effort'])el(id).replaceChildren();
+  for(const id of ['settings-fields','settings-actual','settings-save','settings-read'])el(id).hidden=true;
+}
+function settingsScope(c){return {projectKey:c.ctl.projectKey,room:c.ctl.room,provider:c.provider,leadRequestId:c.requestId};}
+function confirmedSettings(c,response){
+  const meta=response._meta?.leadSettings, data=response.structuredContent, scope=settingsScope(c);
+  const validOptionText=v=>typeof v==='string' && v.length>0 && v.length<=256 && !/\p{Cc}/u.test(v);
+  if(!meta || !data || Object.keys(scope).some(key=>meta[key]!==scope[key] || data[key]!==scope[key]) ||
+    !/^[a-f0-9]{64}$/.test(meta.revision) || meta.revision!==data.revision || !meta.selection ||
+    !(meta.selection.model===null || validOptionText(meta.selection.model)) || !(meta.selection.effort===null || validOptionText(meta.selection.effort)) ||
+    !meta.selection.model && meta.selection.effort || !Array.isArray(meta.options) ||
+    !meta.options.every(o=>o && validOptionText(o.model) && ['catalog','policy'].includes(o.source) && typeof o.fixed==='boolean' &&
+      typeof o.requiresEffort==='boolean' && Array.isArray(o.efforts) && o.efforts.every(validOptionText)) ||
+    new Set(meta.options.map(o=>o.model)).size!==meta.options.length)throw uiError('prefs.failed');
+  return meta;
+}
+function settingsOption(select,value,label,disabled=false){
+  const option=new Option('',value);put(option,label);option.disabled=disabled;select.add(option);
+}
+function effortChoices(c,value=''){
+  const select=el('settings-effort'), model=el('settings-model').value, o=c.settings.data.options.find(r=>r.model===model);
+  select.replaceChildren();
+  settingsOption(select,'',message(o?.fixed?'prefs.fixed':o?.requiresEffort?'prefs.choose':'prefs.modelDefault'),Boolean(o?.requiresEffort));
+  for(const level of o?.efforts || [])settingsOption(select,level,()=>level);
+  if(value && !o?.efforts.includes(value))settingsOption(select,value,()=>value,true);
+  select.value=value;select.disabled=!o || o.fixed || !o.efforts.length;
+  put('settings-hint',()=>o?t(!o.fixed && !o.efforts.length?'prefs.unknown':'prefs.'+o.source):'');
+}
+function showSettings(c,data,observedTurn){
+  c.settings.data=data;
+  c.settings.observedTurn=observedTurn;
+  const served=data.lastServed, session=data.nativeSession;
+  const modelReported=c.provider==='claude' && served?.effort===null && typeof served.model==='string' &&
+    /^[a-z0-9][a-z0-9._:/-]{0,159}$/i.test(served.model) && !served.model.includes('..') && !['auto','provider-default'].includes(served.model);
+  const sessionReported=['claude','agy'].includes(c.provider) && session?.source==='provider-result' &&
+    session.scope==='invocation' && session.resumable===false && typeof session.id==='string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(session.id);
+  put('settings-actual',()=>[modelReported && t('prefs.actual',{v:served.model}),
+    sessionReported && t('prefs.session',{v:names[c.provider]})].filter(Boolean).join('\n'));
+  const select=el('settings-model'), {model,effort}=data.selection;
+  select.replaceChildren();settingsOption(select,'',message('prefs.default'));
+  for(const o of data.options)settingsOption(select,o.model,()=>o.model);
+  if(model && !data.options.some(o=>o.model===model))settingsOption(select,model,()=>model,true);
+  select.value=model || '';select.disabled=!model && !data.options.length;effortChoices(c,effort || '');
+  const fixed=data.options.find(o=>o.model===model)?.fixed;
+  put('settings-saved',()=>t('prefs.saved',{v:model?model+' · '+(effort || t(fixed?'prefs.fixed':'prefs.modelDefault')):t('prefs.default')}));
+}
+function paintSettings(c){
+  const p=c.settings;if(!p)return;
+  const data=p.data, model=el('settings-model').value || null, effort=el('settings-effort').value || null;
+  const option=data?.options.find(o=>o.model===model);
+  const allowed=model===null?!effort:option && (effort? !option.fixed && option.efforts.includes(effort):!option.requiresEffort);
+  const changed=data && (model!==data.selection.model || effort!==data.selection.effort);
+  el('settings-fields').hidden=el('settings-save').hidden=!data;
+  el('settings-actual').hidden=!data || !el('settings-actual').textContent || p.observedTurn!==c.latestTurn ||
+    !c.verified || !!c.session.pending || !!c.session.writing || !!c.previous;
+  el('settings-fields').disabled=p.busy || c.session.settingsSaving;
+  el('settings-save').disabled=!changed || !allowed || p.busy || c.session.settingsSaving || c.session.writing || !c.verified;
+  el('settings-read').hidden=!!data || !!p.busy || c.session.settingsSaving;
+  put('settings-status',()=>p.status?t(p.status):'');
+}
+async function loadSettings(c,p){
+  if(!currentManaged(c) || c.settings!==p || p.busy || c.session.settingsSaving)return;
+  const observedTurn=c.latestTurn;
+  p.busy=true;p.status='prefs.loading';paintSettings(c);
+  try{
+    const result=await tool('oms_lead_settings',settingsScope(c),c.ctl.generation);
+    if(currentManaged(c) && c.settings===p){showSettings(c,confirmedSettings(c,result),observedTurn);p.status='';}
+  }catch{if(currentManaged(c) && c.settings===p)p.status='prefs.failed';}
+  finally{if(currentManaged(c) && c.settings===p){p.busy=false;paintSettings(c);}}
+}
+async function saveSettings(){
+  const c=managedChat,p=c?.settings;
+  if(!currentManaged(c) || !p?.data || el('settings-save').disabled)return;
+  const s=c.session,observedTurn=c.latestTurn,model=el('settings-model').value || null,effort=el('settings-effort').value || null;
+  const args={...settingsScope(c),revision:p.data.revision,model,effort};
+  const active=()=>currentManaged(c) && c.settings===p;
+  const matches=data=>data.revision!==args.revision && data.selection.model===model && data.selection.effort===effort;
+  s.settingsSaving=true;p.status='prefs.saving';paintComposer(c);
+  try{
+    const result=await tool('oms_update_lead_settings',args,c.ctl.generation);
+    if(!active())return;
+    const data=confirmedSettings(c,result);
+    if(!matches(data))throw uiError('prefs.conflict');
+    showSettings(c,data,observedTurn);p.status='prefs.done';
+  }catch{
+    if(!active())return;
+    try{
+      const result=await tool('oms_lead_settings',settingsScope(c),c.ctl.generation);
+      if(!active())return;
+      const data=confirmedSettings(c,result);showSettings(c,data,observedTurn);p.status=matches(data)?'prefs.confirmed':'prefs.conflict';
+    }catch{if(active()){p.data=null;p.status='prefs.failed';put('settings-saved',()=>'');put('settings-hint',()=>'');}}
+  }finally{
+    s.settingsSaving=false;
+    const current=managedChat;
+    if(currentManaged(current) && current.session===s){
+      paintComposer(current);
+      if(current.settings && current.settings!==p)loadSettings(current,current.settings);
+    }
+  }
+}
+function closeSettings(){
+  clearSettings();el('settings-toggle').focus();
+}
+onClick('settings-toggle',()=>{
+  const c=managedChat;if(!currentManaged(c))return;
+  if(c.settings){closeSettings();return;}
+  if(!c.verified)return;
+  const p={status:c.session.settingsSaving?'prefs.saving':'prefs.loading'};c.settings=p;
+  el('settings-toggle').setAttribute('aria-expanded','true');el('chat-settings').hidden=false;el('chat-settings').focus();
+  paintSettings(c);loadSettings(c,p);
+});
+on('conversation','cancel',e=>{if(managedChat?.settings){e.preventDefault();closeSettings();}});
+on('settings-model','change',()=>{const c=managedChat;if(currentManaged(c) && c.settings?.data){effortChoices(c);c.settings.status='';paintSettings(c);}});
+on('settings-effort','change',()=>{const c=managedChat;if(currentManaged(c) && c.settings?.data){c.settings.status='';paintSettings(c);}});
+onClick('settings-save',saveSettings);
+onClick('settings-read',()=>{const c=managedChat;if(currentManaged(c) && c.settings)loadSettings(c,c.settings);});
 function validText(text){
   return typeof text==='string' && text.trim().length>0 && !/\p{Cc}/u.test(text.replace(/[\n\t]/g,'')) && new TextEncoder().encode(text).length<=4000;
 }
@@ -1102,7 +1361,9 @@ function paintComposer(c){
   if(!currentManaged(c))return;
   const s=c.session,p=s.pending;
   el('chat-compose').hidden=!c.verified && !p && !c.failed;
-  el('chat-send').disabled=!c.verified || c.reading || s.writing || !!p || !!c.previous || !validText(s.draft);
+  el('settings-toggle').hidden=!c.verified && !c.settings;
+  if(c.settings)paintSettings(c);
+  el('chat-send').disabled=!c.verified || c.reading || s.settingsSaving || s.writing || !!p || !!c.previous || !validText(s.draft);
   const state=s.writing?'sending':c.previous?'previous':p?.status || s.outcome;
   put('chat-delivery',()=>state?t('turn.'+state):s.draft && !validText(s.draft)?t('turn.limit'):'');
   const check=el('chat-check');check.hidden=!p && !c.failed && !c.previous || s.writing;check.disabled=c.reading;
@@ -1176,6 +1437,7 @@ async function readManaged(c,before=null){
     settleTurn(c,result,p);
     if(!before){
       const latest=page.transcript.turns.filter(r=>r.role==='user').at(-1);
+      c.latestTurn=latest?.turnId;
       c.previous=latest && latest.turnId!==p?.id && ['reserved','running','unconfirmed'].includes(latest.status)?latest.status:null;
     }
     if(before)c.visited.add(before);
@@ -1190,11 +1452,11 @@ async function readManaged(c,before=null){
   }
 }
 async function sendManaged(c,retry=false){
-  if(!currentManaged(c) || !c.verified || c.reading || c.session.writing || c.previous)return;
+  if(!currentManaged(c) || !c.verified || c.reading || c.session.settingsSaving || c.session.writing || c.previous)return;
   const s=c.session;
   if(retry ? s.pending?.status!=='not_found' : !!s.pending || !validText(s.draft))return;
   const p=retry?s.pending:{id:crypto.randomUUID(),text:s.draft,status:'unconfirmed'};
-  s.pending=p;s.outcome='';s.writing=true;c.until=Date.now()+120000;clearTimeout(c.timer);paintComposer(c);
+  c.latestTurn=p.id;s.pending=p;s.outcome='';s.writing=true;c.until=Date.now()+120000;clearTimeout(c.timer);paintComposer(c);
   try{
     const result=await tool('oms_send_lead_message',{room:c.ctl.room,projectKey:c.ctl.projectKey,provider:c.provider,
       leadRequestId:c.requestId,turnId:p.id,text:p.text},c.ctl.generation);
@@ -1227,7 +1489,7 @@ async function openManagedChat(ctl,provider,origin){
   if(ctl.sessions.get(provider)?.requestId!==requestId)ctl.sessions.set(provider,{requestId,draft:'',pending:null});
   clearChat();
   const c={ctl,provider,requestId,session:ctl.sessions.get(provider),keys:new Map(),visited:new Set(),first:true,until:Date.now()+120000};
-  managedChat=c;chatOrigin=origin;paintAvatar(el('chat-avatar'),provider);el('chat-avatar').hidden=false;put('chat-title',()=>names[provider]+' Lead');put('chat-status','chatLoading');
+  managedChat=c;chatOrigin=origin;paintAvatar(el('chat-avatar'),provider);el('chat-avatar').hidden=false;put('chat-title',()=>roleTitle('Lead',provider));put('chat-status','chatLoading');
   showChat();el('chat-text').value=c.session.draft;paintComposer(c);
   await readManaged(c);
 }
@@ -1272,7 +1534,7 @@ function render(d) {
   const owner=main || (readOnly?d.main:null);
   put('main-scope',main?'currentMain':readOnly?'repositoryMain':'currentMain');
   paintAvatar(el('avatar'),main ? main.harness : owner?.provider);
-  put('main-name',()=>main?conversationMainName(main):owner?.provider?providerName(owner.provider)+' Main':t('unknownMain'));
+  put('main-name',()=>main?conversationMainName(main):owner?.provider?roleTitle('Main',owner.provider):t('unknownMain'));
   if(main && selectedChat?.room===main.room && selectedChat.participant===main.participant)put('chat-title',()=>conversationMainName(main));
   el('header-main').hidden=!main;
   members=main && Array.isArray(main.participants)?main.participants.filter(m=>m?.room===main.room && m.participant):[];
@@ -1342,7 +1604,7 @@ onClick('chat-refresh',()=>{
   if(managedChat){managedChat.until=Date.now()+120000;readManaged(managedChat);}
   else if(selectedChat)readChat(null,false);
 });
-for(const [id,close] of [['conversation',closeChat],['launcher',closeLauncher]]){
+for(const [id,close] of [['conversation',closeChat],['launcher',closeLauncher],['worker-output',()=>el('worker-output').close()]]){
   // A text selection dragged out of the content also clicks the dialog; it must not dismiss it.
   let pressed;
   on(id,'pointerdown',event=>{pressed=event.target;});
@@ -1447,7 +1709,7 @@ function setBusy(value,writing=false) {
   armAuto();
 }
 function panelIdle() {
-  return Boolean(!disposed && !el('conversation').open && !el('launcher').open &&
+  return Boolean(!disposed && !el('conversation').open && !el('launcher').open && !el('worker-output').open &&
     ((dashboardData && !el('view').hidden) || (transientError && autoRetryCount<AUTO_RETRY_LIMIT)));
 }
 function resetAutoRetry(){transientError=false;autoRetryCount=0;}
@@ -1679,7 +1941,7 @@ window.addEventListener('keydown',event=>{
   // WCAG 2.1.4: never a bare character key. The physical code covers layouts where Alt composes another character.
   if(!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat || event.isComposing || event.defaultPrevented ||
      !(event.code==='KeyR' || event.key==='r' || event.key==='R'))return;
-  if(busy || disposed || el('conversation').open || el('launcher').open || isTyping(event.target) || isTyping(document.activeElement))return;
+  if(busy || disposed || el('conversation').open || el('launcher').open || el('worker-output').open || isTyping(event.target) || isTyping(document.activeElement))return;
   event.preventDefault();manualRefresh();
 });
 on('language-choice','change', () => { const value = el('language-choice').value; if (LANGS.includes(value)) setLanguage(value, true); });
