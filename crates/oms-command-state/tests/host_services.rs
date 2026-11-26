@@ -148,6 +148,72 @@ fn state_uses_host_plan_services_and_task_status() {
 }
 
 #[test]
+fn state_and_run_list_project_spine_in_first_seen_order() {
+    let repo = TempRepo::new();
+    let spine = repo.path().join(".oms/runs/spine.jsonl");
+    fs::create_dir_all(spine.parent().unwrap()).unwrap();
+    let rows = br#"{"run_id":"run-z","ts":"2026-01-03T00:00:00Z","tool":"oms-run","event":"new"}
+{"run_id":"run-a","ts":"2026-01-05T00:00:00Z","tool":"zeta","event":"note"}
+{"run_id":"run-m","ts":"2026-01-06T00:00:00Z","tool":"oms-run","event":"new"}
+{"run_id":"run-z","ts":"2026-01-04T00:00:00Z","tool":"alpha","event":"close"}
+{"run_id":"run-m","ts":"2026-01-07T00:00:00Z","tool":"oms-run","event":"close"}
+{"invalid"
+{"run_id":"run-m","ts":"2026-01-01T00:00:00Z","tool":"alpha","event":"note"}
+{"run_id":"run-a","tool":"zeta","event":"note"}
+{"tool":"oms-run","event":"close"}
+"#;
+    fs::write(&spine, rows).unwrap();
+
+    let snapshot = state(repo.path(), &NoHostServices);
+    let runs = snapshot.get("runs");
+    let recent = json::parse(
+        br#"[
+            {"run_id":"run-z","closed":false,"last":"2026-01-04T00:00:00Z"},
+            {"run_id":"run-a","closed":false,"last":null},
+            {"run_id":"run-m","closed":true,"last":"2026-01-01T00:00:00Z"}
+        ]"#,
+    )
+    .unwrap();
+    assert_eq!(runs.get("healthy"), &json::Value::Bool(false));
+    assert_eq!(runs.get("recent"), &recent);
+    assert_eq!(
+        runs.get("open").array().unwrap(),
+        &recent.array().unwrap()[..2]
+    );
+
+    let list = |options: &[&str]| {
+        let mut argv = args(&["ls", "--json"]);
+        argv.extend(args(options));
+        let (code, out, err) = run_with_host(
+            "run",
+            &argv,
+            repo.path(),
+            &AtomicBool::new(false),
+            &mut Dummy,
+            &NoHostServices,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        json::parse(&out).unwrap()
+    };
+    let all = json::parse(
+        br#"[
+            {"run_id":"run-z","first":"2026-01-03T00:00:00Z","last":"2026-01-04T00:00:00Z",
+                "closed":false,"events":2,"tools":["alpha","oms-run"]},
+            {"run_id":"run-a","first":"2026-01-05T00:00:00Z","last":null,
+                "closed":false,"events":2,"tools":["zeta"]},
+            {"run_id":"run-m","first":"2026-01-06T00:00:00Z","last":"2026-01-01T00:00:00Z",
+                "closed":true,"events":3,"tools":["alpha","oms-run"]}
+        ]"#,
+    )
+    .unwrap();
+    assert_eq!(list(&["0"]), all);
+    let all = all.array().unwrap();
+    assert_eq!(list(&["2"]).array().unwrap(), &all[1..]);
+    assert_eq!(list(&["1", "--open"]).array().unwrap(), &all[1..2]);
+    assert_eq!(fs::read(spine).unwrap(), rows);
+}
+
+#[test]
 fn state_verify_retirement_check_uses_host_plan_services() {
     let repo = TempRepo::new();
     seed(repo.path());
