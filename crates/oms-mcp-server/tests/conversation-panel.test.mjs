@@ -1188,7 +1188,7 @@ test('v33 tones split decision from failure, rank the presence dot and keep the 
   // Project, language and the refresh segment; Inspect moved to the closing row of the view.
   const tools=html.match(/<div class="tools">([\s\S]*?)<\/div><\/header>/)[1];
   assert.deepEqual([...tools.matchAll(/<(select|button|span) id="([^"]+)"|<span class="([^"]+)"/g)].map(m=>m[2]||m[3]),['language-choice','refresh-group','refresh','auto-refresh','display-mode']);
-  assert.ok(html.indexOf('id="inspect-open"')>html.indexOf('id="outcome"'));
+  assert.ok(html.indexOf('id="inspect-open"')>html.indexOf('id="more-results"'));
   assert.equal(p.get('leads-heading').textContent,'Leads 3');
   const ko=await panel(['one'],dashboard,{locale:'ko'});assert.equal(ko.get('leads-heading').textContent,'Lead 3');
   assert.equal(ko.get('leads-help').textContent,'질문은 읽기 전용 상담 · 작업 배정은 Main에서');
@@ -1972,6 +1972,65 @@ test('a failed Include keeps the excerpt private, and a superseded Include never
   assert.equal(p.get('finding-preview').hidden,false);assert.equal(p.get('finding-text').textContent,'Previewable output');
 });
 
+// v34 usage card and More: read-only reads on demand, cached per binding scope.
+function moreFixture(state){
+  const jobs=new Map(),timers={setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const tools={...inspectionTools(state),
+    oms_panel_usage:()=>({scope:'repository-recent-attempts',providers:[
+      {provider:'codex',windows:[{name:'5 hour',used:40,stale:false,age_seconds:30},{name:'weekly',used:86,stale:true,age_seconds:2700,source:'session log'}]},
+      {provider:'claude',windows:[{name:'weekly',used:38,stale:false,age_seconds:120}]}],attempts:[]}),
+    oms_panel_git_status:()=>({git:{available:true,branch:'feat',dirty:false,upstream:'origin/feat'},github:{status:'available',repository:'o/r',observedAt:null,
+      pullRequests:[{number:1,title:'Pass',checks:{passed:2},url:'https://github.com/o/r/pull/1'},
+        {number:2,title:'Broken',baseBranch:'dev',checks:{failed:1,passed:1,items:[{name:'lint',status:'failed'}]},url:'https://evil.example/o/r/pull/2'},
+        {number:3,title:'Running',checks:{pending:1}}]}}),
+  };
+  const fire=async ms=>{for(const [id,j] of jobs)if(j.ms===ms){jobs.delete(id);j.fn();}for(let i=0;i<4;i++)await setImmediate();};
+  return {jobs,timers,tools,fire};
+}
+const count=(p,name)=>p.calls.filter(c=>c.name===name).length,kids=e=>e.children.filter(c=>typeof c!=='string');
+const settle=async()=>{for(let i=0;i<4;i++)await setImmediate();};
+
+test('v34 usage card reads once after the first screen, warns low and keeps no record apart from zero',async()=>{
+  const state={key:'b'.repeat(64)},f=moreFixture(state),p=await panel(['one','two'],dashboard,{locale:'en',timers:f.timers,tools:f.tools});
+  await p.open('input',{arguments:{project:'one'}});await settle();
+  assert.ok(!p.calls.some(c=>/^oms_panel_(usage|git_status|work_items|tui_view)$/.test(c.name)));
+  await f.fire(1500);assert.equal(count(p,'oms_panel_usage'),1);
+  const rows=p.get('usage-rows').children.map(li=>kids(li)[0]);
+  assert.deepEqual(rows.map(r=>r.getAttribute('data-tone')),['warn','plain',null,null]);
+  assert.equal(rows[0].getAttribute('data-stale'),'true');assert.match(rows[0].textContent,/14%Stale · 45m/);
+  assert.match(rows[0].getAttribute('aria-label'),/^Codex Weekly 14% left, Stale · 45/);
+  assert.equal(kids(rows[2])[2].getAttribute('data-known'),'false');assert.match(rows[2].textContent,/No record/);assert.doesNotMatch(rows[2].textContent,/0%/);
+  assert.match(rows[2].getAttribute('aria-label'),/has no recorded limit/);
+  rows[0].dispatchEvent(new Event('click'));const detail=kids(p.get('usage-rows').children[0])[1];
+  assert.equal(detail.hidden,false);assert.match(detail.textContent,/86% used · 14% left/);assert.match(detail.textContent,/Stale value/);
+  await p.event('refresh','click');await settle();assert.equal(count(p,'oms_panel_usage'),1);
+  assert.equal(kids(p.get('usage-rows').children[0])[1].hidden,false);
+  await p.event('usage-refresh','click');await settle();assert.equal(count(p,'oms_panel_usage'),2);
+  await p.open('input',{arguments:{project:'two'}});await settle();
+  assert.equal(p.get('usage-rows').children.length,0);await f.fire(1500);assert.equal(count(p,'oms_panel_usage'),3);
+  assert.equal(kids(p.get('usage-rows').children[0])[1].hidden,true);
+});
+
+test('v34 More PR · CI reads on first expand, sorts PRs by failure and keeps the read across auto refresh',async()=>{
+  const state={key:'b'.repeat(64)},f=moreFixture(state),p=await panel(['one','two'],dashboard,{locale:'en',timers:f.timers,tools:f.tools,openLinks:true});
+  await p.open('input',{arguments:{project:'one'}});await settle();
+  await p.event('more-pr','click');await settle();
+  const pr=p.get('more-pr-body');assert.equal(p.get('more-pr').getAttribute('aria-expanded'),'true');assert.equal(count(p,'oms_panel_git_status'),1);
+  const list=pr.children.find(e=>e.tagName==='ul'),items=kids(list).map(li=>li.row.textContent);
+  assert.deepEqual(items.map(s=>s.slice(0,s.indexOf(' '))),['×Broken','●Running','✓Pass']);
+  assert.match(items[0],/1 failed · 1 passed · lint · → dev/);assert.match(p.get('more-pr-chip').textContent,/1 failed/);
+  const link=li=>li.head.children.at(-1);
+  assert.equal(link(kids(list)[0]).tagName,'span');assert.equal(link(kids(list)[2]).tagName,'button');
+  await p.event('more-pr','click');await p.event('more-pr','click');await settle();assert.equal(count(p,'oms_panel_git_status'),1);
+  kids(kids(pr)[0])[1].dispatchEvent(new Event('click'));await settle();assert.equal(count(p,'oms_panel_git_status'),2);
+  assert.equal(p.get('more-work'),undefined);assert.equal(p.get('more-results'),undefined);
+  await p.event('refresh','click');await settle();
+  assert.equal(p.get('more-pr').getAttribute('aria-expanded'),'true');assert.equal(count(p,'oms_panel_git_status'),2);assert.match(pr.textContent,/Broken/);
+  await p.open('input',{arguments:{project:'two'}});await settle();
+  for(const k of ['pr']){assert.equal(p.get('more-'+k).getAttribute('aria-expanded'),'false',k);assert.equal(p.get('more-'+k+'-body').hidden,true,k);
+    assert.equal(kids(p.get('more-'+k+'-body')).length,0,k);}
+});
+
 test('pending-turn polling pauses visibly and slot badges change only after a confirmed metadata read',async()=>{
   let now=0,state='running',agyTurnState={status:'unavailable',reason:'outbound_withheld'};const id=randomUUID(),jobs=new Map(),timers={Date:{now:()=>now},
     setTimeout(fn,ms){const key=Symbol();jobs.set(key,{fn,ms});return key;},clearTimeout:key=>jobs.delete(key)};
@@ -2149,6 +2208,9 @@ test('hostToolsUnavailable sets only for host transport refusal before any tools
   assert.equal(p.get('header-main').disabled,true);
   assert.equal(p.get('inspect-open').disabled,true);
   assert.equal(p.get('open-leads').disabled,true);
+  // The usage card and More never read through a host that refuses tools/call.
+  assert.equal(p.get('more-pr').disabled,true);assert.equal(p.get('usage-refresh').disabled,true);
+  assert.equal([...timers.values()].filter(t=>t.ms===1500).length,0);
   const memberButton=p.get('leads').children[1].children[2];
   assert.equal(memberButton.disabled,true);
   assert.equal([...timers.values()].filter(t=>t.ms===20000).length,0);

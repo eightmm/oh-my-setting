@@ -76,7 +76,7 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 }
 @media(min-width:64rem){
   #view{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px clamp(1.5rem,3vw,3rem);align-items:start}
-  #goal-section,#outcome,#inspect-row{grid-column:1 / -1}
+  #goal-section,#outcome{grid-column:1 / -1}
   #goal-section{--goal-lines:4}
 }
 #goal{max-inline-size:64ch;font-weight:650;font-size:clamp(1.1rem,2.6vw,1.15rem);line-height:1.45;letter-spacing:-.015em;margin:4px 0;word-break:keep-all;text-wrap:pretty;overflow-wrap:anywhere}
@@ -194,9 +194,42 @@ button.person:hover .arrow,button.person:active .arrow{transform:translateX(3px)
 .refresh-group>button:last-child{border-start-end-radius:var(--r-sm);border-end-end-radius:var(--r-sm);margin-inline-start:-1px}
 #refresh{position:relative}
 .refresh-group:has(#auto-refresh[aria-pressed=true]) #refresh::after{content:"";position:absolute;top:6px;inset-inline-end:6px;width:6px;height:6px;border-radius:50%;background-color:var(--info)}
-#inspect-row{border-top:1px solid var(--line);padding-top:4px}
-#inspect-open{color:var(--ink);font-weight:620}
-#inspect-open::after{content:" ›";content:" ›"/""}
+/* Usage and More read on demand; a missing window is a dashed empty meter, never 0%. */
+.plain{list-style:none;margin:0;padding:0}
+.icon{min-width:var(--tap);padding:4px;border:0;background:none;color:var(--soft)}
+.usage-row,.more-row,.item-row{display:grid;align-items:center;column-gap:10px;width:100%;text-align:start;border:0;border-top:1px solid var(--line);border-radius:0;background:none;padding:6px 2px}
+.usage-row{grid-template-columns:30px 4.4rem 1fr auto;min-height:48px}
+.usage-row .avatar{width:30px;height:30px;font-size:.72rem}
+.usage-row b,.more-row strong{display:block;font-size:.86rem;font-weight:650}
+:is(.usage-row,.more-row,.item-row) small{display:block;font-size:.72rem}
+.meter{position:relative;height:8px;border-radius:4px;background-color:var(--line);overflow:hidden}
+.meter i{position:absolute;inset:0 auto 0 0;border-radius:4px;background-color:var(--ink)}
+.meter[data-known=false]{background:none;border:1.5px dashed var(--line)}
+.usage-row[data-tone=warn] .meter i{background-color:var(--warm)}
+.usage-row[data-tone=warn] .pct b{color:var(--warm)}
+.usage-row[data-stale=true] .meter i{opacity:.5}
+.usage-row[data-stale=true] .pct small{color:var(--warm)}
+.pct{text-align:end;min-width:4.6rem;font-variant-numeric:tabular-nums}
+.detail{margin:2px 0 8px;padding:10px 12px;border-radius:var(--r-xs);background-color:var(--surface);font-size:.82rem}
+.detail dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0}
+.detail dd{margin:0;text-align:end;font-weight:600;overflow-wrap:anywhere}
+.warn-box{margin:6px 0 0;padding:6px 8px;border:1px dashed var(--warm);border-radius:var(--r-xs);color:var(--warm);font-weight:600}
+.more-row{grid-template-columns:1fr auto auto;min-height:52px;color:var(--ink)}
+.more-row::after{content:"›";content:"›"/"";color:var(--soft)}
+.more-row[aria-expanded=true]::after{transform:rotate(90deg)}
+#inspect-open{grid-template-columns:1fr auto}
+.chip{font-size:.72rem;padding:1px 8px;border:1px solid var(--line);border-radius:999px;color:var(--soft);white-space:nowrap}
+.chip:empty{display:none}
+.chip[data-tone=failure]{color:var(--danger);border-color:currentColor}
+.chip[data-tone=decision]{color:var(--warm);border-color:currentColor}
+.chip[data-tone=done]{color:var(--ok)}
+.more-body{padding:2px 0 12px}
+.more-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.item-row{grid-template-columns:1.1rem 1fr auto;min-height:44px}
+.item-row .state{border:0;padding:0;background:none}
+.mark{font-weight:800;text-align:center}
+.mark[data-tone=failure]{color:var(--danger)}.mark[data-tone=active]{color:var(--info)}.mark[data-tone=done]{color:var(--ok)}.mark[data-tone=decision]{color:var(--warm)}.mark[data-tone=muted]{color:var(--soft)}
+.link{padding:0;min-height:0;border:0;background:none;color:var(--info);text-decoration:underline}
 @media(prefers-reduced-motion:no-preference){.arrow{transition:transform .12s ease}#refresh[aria-busy=true]{animation:spin 1.6s linear infinite}}
 @keyframes spin{to{transform:rotate(360deg)}}
 .note:not(:empty),#receipt:not(:empty){margin-top:12px}
@@ -357,8 +390,12 @@ header{gap:8px;padding-bottom:8px}
 </div>
 <section id="leads-section" aria-labelledby="leads-heading"><div class="section-head"><h2 id="leads-heading">Lead</h2><details id="lead-settings" hidden><summary data-i18n="leads.settings">연결 설정</summary><div class="lead-settings-body"><button id="open-leads" type="button" aria-describedby="lead-opt-in-note" data-i18n="openLeads" hidden>세 Lead 연결</button><p id="lead-opt-in-note" class="note" data-i18n="leadOptIn" hidden></p><label id="lead-auto-label" hidden><input id="lead-auto" type="checkbox"><span data-i18n="autoLeads">다음에도 세 Lead 자동 연결</span></label><button id="lead-refresh" type="button" class="subtle" data-i18n="turn.check" hidden>상태 확인</button></div></details></div><p id="leads-help" class="note" data-i18n="leads.help">질문은 읽기 전용 상담 · 작업 배정은 Main에서</p><p id="lead-control-status" class="note" role="status"></p><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
 
+<section id="usage-card" aria-labelledby="usage-heading"><div class="section-head"><h2 id="usage-heading" data-i18n="use.title">남은 사용량</h2><span class="tools"><span id="usage-at" class="note"></span><button id="usage-refresh" class="icon" type="button" aria-label="사용량 다시 읽기">↻</button></span></div><ul id="usage-rows" class="plain"></ul><p class="note" data-i18n="use.note">기록된 한도만 표시합니다. 기록 없음은 0이 아닙니다.</p></section>
+<section id="more" aria-labelledby="more-heading"><h2 id="more-heading" class="sr-only" data-i18n="more.title">더 보기</h2>
+<div><button id="more-pr" class="more-row" type="button" aria-expanded="false" aria-controls="more-pr-body"><span><strong data-i18n="pr.title">PR · CI</strong><small data-i18n="pr.desc">이 작업트리와 연결된 PR과 check</small></span><span id="more-pr-chip" class="chip"></span></button><div id="more-pr-body" class="more-body" hidden></div></div>
+<button id="inspect-open" class="more-row" type="button" aria-haspopup="dialog" disabled><span><strong data-i18n="inspect.open">더 살펴보기</strong><small data-i18n="inspect.desc">사용량 상세·프로젝트 관계·라우팅·모델</small></span></button>
+</section>
 <p id="outcome" hidden></p>
-<p id="inspect-row"><button id="inspect-open" class="subtle" type="button" aria-haspopup="dialog" data-i18n="inspect.open" disabled>더 살펴보기</button></p>
 </div>
 <dialog id="launcher" aria-labelledby="launch-title"><div class="dialog-body"><div class="section-head"><h2 id="launch-title" data-i18n="newGoal">새 목표</h2><button id="close-launch" type="button" data-i18n="close">닫기</button></div><form id="launch"><fieldset id="controls">
 <label class="field" for="brief" data-i18n="briefLabel">작업 목표</label><input id="brief" required aria-describedby="brief-count" placeholder="예: Auth 모듈 테스트 추가 또는 GitHub 이슈 URL"><span id="brief-count" class="count">0 / 2,000</span>
@@ -404,7 +441,6 @@ const messages = {
   "appr.mismatch": ["결정 응답이 요청과 다릅니다. 승인 목록을 확인하세요.", "The decision response does not match the request. Check the approval list."],
   "appr.partial": ["승인 목록을 일부만 조회했습니다.", "Only part of the approval list was retrieved."],
   "appr.scope": ["결정 범위 · Main이 요청한 다음 작업", "Decision scope · next work requested by Main"],
-  "appr.sender": ["요청자 · {v}", "Requester · {v}"],
   "appr.target": ["대상 · {v}", "Target · {v}"],
   "briefLabel": ["작업 목표", "Goal"],
   "chatLoading": ["대화 여는 중…", "Opening conversation…"],
@@ -481,7 +517,6 @@ const messages = {
   "joined": ["작업방에 참여 중", "Joined this room"],
   "launchMain": ["이 목표로 새 Main 시작", "Start a new Main"],
   "less": ["접기", "Show less"],
-  "main.headerAria": ["이 대화의 {name} 작업방 대화 보기", "View the room conversation of {name} for this conversation"],
   "more": ["목표 전체 보기", "Read full goal"],
   "mutate.working": ["요청을 처리하는 중…", "Processing the request…"],
   "newGoal": ["새 작업 시작", "Start new work"],
@@ -638,6 +673,42 @@ const messages = {
   "finding.changed": ["범위나 원문을 다시 확인할 수 없어 공유하지 않았습니다. 결과를 다시 열어 선택하세요.", "Scope or source could not be reverified. Nothing was shared. Reopen the result to select it again."],
   "finding.done": ["선택한 발췌문과 초안을 현재 대화 문맥에 추가했습니다. 실행 권한이나 Main 수신 확인은 아닙니다.", "Added the selected excerpt and draft to this conversation's context. This grants no execution authority and does not confirm Main receipt."],
   "inspect.open": ["더 살펴보기", "Inspect"],
+  "inspect.desc": ["사용량 상세·프로젝트 관계·라우팅·모델", "Usage detail, relationships, routing, models"],
+  "use.title": ["남은 사용량", "Remaining usage"],
+  "use.note": ["기록된 한도만 표시합니다. 기록 없음은 0이 아닙니다.", "Only recorded limits are shown. No record is not 0."],
+  "use.refresh": ["사용량 다시 읽기", "Read usage again"],
+  "use.failed": ["사용량 확인 실패", "Usage check failed"],
+  "use.none": ["기록 없음", "No record"],
+  "use.limit": ["한도", "Limit"],
+  "use.weekly": ["주간", "Weekly"],
+  "use.split": ["{used}% 사용 · {left}% 남음", "{used}% used · {left}% left"],
+  "use.stale": ["오래됨 · {age}", "Stale · {age}"],
+  "use.staleOnly": ["오래됨", "Stale"],
+  "use.staleNote": ["오래된 값 — {name}를 다시 쓰면 갱신됩니다", "Stale value — it refreshes the next time {name} runs"],
+  "use.resets": ["초기화", "Resets"],
+  "use.source": ["출처", "Source"],
+  "use.aria": ["{name} {win} {n}% 남음, {age}", "{name} {win} {n}% left, {age}"],
+  "use.ariaNone": ["{name} 한도 기록 없음", "{name} has no recorded limit"],
+  "ago.now": ["방금", "just now"], "ago.m": ["{n}분 전", "{n}m ago"], "ago.h": ["{n}시간 전", "{n}h ago"], "ago.d": ["{n}일 전", "{n}d ago"],
+  "in.h": ["{n}시간 후", "in {n}h"], "in.d": ["{n}일 후", "in {n}d"],
+  "checked": ["{time} 확인", "Checked {time}"],
+  "more.title": ["더 보기", "More"],
+  "more.rest": ["외 {n}", "+{n} more"],
+  "more.failed": ["읽기 실패 · ↻로 다시 읽기", "Read failed · use ↻ to retry"],
+  "pr.title": ["PR · CI", "PR · CI"],
+  "pr.desc": ["이 작업트리와 연결된 PR과 check", "PRs and checks linked to this worktree"],
+  "pr.gitUnknown": ["Git 상태 미확인", "Git status unconfirmed"],
+  "pr.dirty": ["변경 있음", "changes"], "pr.clean": ["깨끗함", "clean"],
+  "pr.same": ["{u}과 같음", "even with {u}"], "pr.ahead": ["앞섬 {n}", "ahead {n}"], "pr.behind": ["뒤처짐 {n}", "behind {n}"],
+  "pr.counts": ["실패 {f} · 통과 {p}", "{f} failed · {p} passed"],
+  "pr.pending": ["진행 {n}", "{n} running"],
+  "pr.pass": ["통과", "Passing"],
+  "pr.none": ["연결된 PR 없음", "No linked PRs"],
+  "pr.otherHead": ["로컬 HEAD와 다름", "Differs from local HEAD"],
+  "pr.footer": ["이 프로젝트 작업트리의 PR {n} / 열린 PR {m} · {time}", "{n} worktree PRs / {m} open · {time}"],
+  "pr.list": ["PR 목록", "All pull requests"],
+  "pr.github": ["GitHub 미확인", "GitHub unconfirmed"],
+  "res.failCount": ["실패 {n}", "{n} failed"],
   "inspect.title": ["프로젝트 더 살펴보기", "Inspect project"],
   "inspect.choose": ["살펴볼 항목", "What to inspect"],
   "inspect.usage": ["사용량과 쿼터", "Usage and quota"],
@@ -727,6 +798,8 @@ function localize() {
   el('auto-refresh').setAttribute('aria-label',t('autoLabel'));
   el('chat-refresh').setAttribute('aria-label',t('refreshChat'));
   el('output-refresh').setAttribute('aria-label',t('refresh'));
+  el('usage-refresh').setAttribute('aria-label',t('use.refresh'));
+  for(const [e,fn] of ariaBindings){if(e.isConnected===false)ariaBindings.delete(e);else e.setAttribute('aria-label',fn());}
   el('brief').setAttribute('placeholder',t('briefPlaceholder'));
   el('inspect-query').setAttribute('placeholder',t('inspect.searchLabel'));
   if(followupDraft)paintFollowup();
@@ -851,7 +924,7 @@ window.addEventListener('message', event => {
     if (msg.method === 'ui/resource-teardown' && !disposed) {
       disposed = true;
       generation++;resetLeadControl();
-      closeDialogs(); resetIssue(); clearFollowup();
+      closeDialogs(); resetIssue(); clearFollowup(); resetMore();
       setBusy(true, true);
       syncDisplayMode();
       el('view').hidden = true;
@@ -939,6 +1012,7 @@ window.addEventListener('message', event => {
             if (savedIntent && !leadIntent) leadIntent = savedIntent;
             lastLoadedAt = Date.now();
             syncHostTools();
+            syncMore();
             if (hostToolsUnavailable) setStatus('hostToolsUnavailable', 'warn');
             else {
               const notice = snapshotNotice(d);
@@ -1193,7 +1267,7 @@ function clearProject() {
   el('view').hidden=true;el('project').textContent='';el('receipt').textContent='';
   el('goal-expand').setAttribute('aria-expanded','false');el('goal').className='clamp';goalToggleLabel();
   el('launch-status').textContent='';el('launch').reset();el('brief').setCustomValidity('');briefInvalid=false;syncBriefCount();
-  closeDialogs();resetIssue();el('leads').replaceChildren();el('approvals').replaceChildren();
+  closeDialogs();resetIssue();resetMore();el('leads').replaceChildren();el('approvals').replaceChildren();
   updateContext(null);
 }
 function conversationMainName(main) {
@@ -2351,7 +2425,10 @@ async function readInspection(s,graph=s.graph||{}){
     const result=await tool(kind==='graph'?'oms_panel_project_graph':kind==='usage'?'oms_panel_usage':'oms_panel_tui_view',args,s.generation);
     await verifyInspectionBinding(s,ticket);
     const data=result.structuredContent;
+    // A verified Inspect read refills the usage card's cache.
+    if(kind==='usage')shared.set('usage',{scope:scopeKey(),promise:Promise.resolve(data),at:new Date()});
     const summary=kind==='graph'?inspectGraph(data,args,s,ticket):kind==='usage'?inspectUsage(data):inspectTable(data,kind,page);
+    if(kind==='usage')try{paintUsage(data);}catch{}
     if(!summary.count && !summary.unavailable)el('inspect-content').append(node('p',message('inspect.empty'),'note'));
     put('inspect-status',()=>summary.unavailable?t('statusUnknown'):
       [(['routes','modelcatalog'].includes(kind)?t('inspect.page',{page,n:summary.count}):''),summary.partial?t('inspect.partial'):''].filter(Boolean).join(' · '));
@@ -2384,6 +2461,156 @@ on('inspect-graph-form','submit',event=>{
   if(!hostToolsUnavailable && currentInspection(s) && s.kind==='graph' && (!query || displayText(query,256)))readInspection(s,query?{query}:{});
 });
 onClick('inspect-root',()=>{const s=inspection;if(!hostToolsUnavailable && currentInspection(s) && s.kind==='graph'){el('inspect-query').value='';readInspection(s,{});}});
+
+// Usage and More read existing read-only tools: usage once after the first screen, each section on its first expand.
+// Reads are cached per binding scope; auto refresh never re-reads, and a scope change clears and collapses them.
+const shared=new Map(),usageOpen=new Set(),more={},ariaBindings=new Map();
+function aria(e,fn){if(ariaBindings.size>64)for(const k of ariaBindings.keys())if(k.isConnected===false)ariaBindings.delete(k);ariaBindings.set(e,fn);e.setAttribute('aria-label',fn());}let moreScope=null,usageTimer;
+const scopeKey=()=>[generation,project,bindingKey,inspectionRoom()].join('|');
+const canRead=()=>!disposed && !hostToolsUnavailable && !staleView && !!dashboardData && !el('view').hidden && /^[a-f0-9]{64}$/.test(bindingKey);
+function readShared(name,toolName,args={},force=false){
+  const scope=scopeKey(),hit=shared.get(name);
+  if(!force && hit?.scope===scope)return hit.promise;
+  const expected=generation,key=bindingKey,alias=project;
+  const promise=(async()=>{
+    const data=(await tool(toolName,args,expected)).structuredContent;
+    const reg=(await tool('oms_list_projects',{},expected)).structuredContent;
+    if(scopeKey()!==scope || (alias?reg?.projectKeys?.[alias]:reg?.projectKey)!==key)throw uiError('inspect.failed');
+    return data;
+  })(),entry={scope,promise,at:null};
+  shared.set(name,entry);
+  promise.then(()=>{entry.at=new Date();},()=>{if(shared.get(name)===entry)shared.delete(name);});
+  return promise;
+}
+const hhmm=d=>d?[d.getHours(),d.getMinutes()].map(n=>String(n).padStart(2,'0')).join(':'):'';
+const checkedAt=name=>()=>shared.get(name)?.at?t('checked',{time:hhmm(shared.get(name).at)}):'';
+function ago(sec){
+  if(typeof sec!=='number' || !Number.isFinite(sec) || sec<0)return '';
+  return sec<60?t('ago.now'):sec<3600?t('ago.m',{n:Math.floor(sec/60)}):sec<86400?t('ago.h',{n:Math.floor(sec/3600)}):t('ago.d',{n:Math.floor(sec/86400)});
+}
+function resetMore(){
+  shared.clear();usageOpen.clear();ariaBindings.clear();clearTimeout(usageTimer);usageTimer=undefined;moreScope=null;
+  for(const k of ['pr']){
+    more[k]={open:false,ticket:(more[k]?.ticket||0)+1};
+    el('more-'+k).setAttribute('aria-expanded','false');el('more-'+k+'-body').hidden=true;el('more-'+k+'-body').replaceChildren();
+    put('more-'+k+'-chip',()=>'');el('more-'+k+'-chip').removeAttribute('data-tone');
+  }
+  el('usage-rows').replaceChildren();put('usage-at',()=>'');
+}
+function syncMore(){
+  if(moreScope===scopeKey())return;
+  resetMore();if(!canRead())return;moreScope=scopeKey();
+  usageTimer=setTimeout(()=>{usageTimer=undefined;readUsage();},1500);usageTimer?.unref?.();
+}
+async function readUsage(force=false){
+  if(!canRead())return;const scope=scopeKey();el('usage-refresh').disabled=true;
+  try{const data=await readShared('usage','oms_panel_usage',{},force);if(scope===scopeKey())paintUsage(data);}
+  catch{if(scope===scopeKey()){el('usage-rows').replaceChildren(node('li',message('use.failed'),'note'));put('usage-at',()=>'');}}
+  finally{if(scope===scopeKey())el('usage-refresh').disabled=false;}
+}
+const pct=v=>typeof v==='number' && Number.isFinite(v) && v>=0 && v<=100;
+function paintUsage(data){
+  if(data?.scope!=='repository-recent-attempts' || !Array.isArray(data.providers) || data.providers.length>4 ||
+    data.providers.some(p=>!p || !Array.isArray(p.windows) || p.windows.length>8))throw uiError('use.failed');
+  const list=el('usage-rows');list.replaceChildren();
+  for(const id of ['codex','claude','antigravity','pi']){
+    const p=data.providers.find(x=>x.provider===id || id==='antigravity' && x.provider==='agy'),name=providerName(id);
+    const wins=(p?.windows||[]).filter(w=>w && pct(w.used) && displayText(w.name,160));
+    const top=wins.reduce((a,w)=>!a || w.used>a.used?w:a,null),left=top?Math.round(100-top.used):null;
+    const win=w=>w.name==='weekly'?t('use.weekly'):w.name;
+    const li=node('li',''),row=node('button','','usage-row'),mark=node('span','','avatar'),bar=node('span','','meter'),fill=node('i','');
+    row.type='button';paintAvatar(mark,id);mark.setAttribute('aria-hidden','true');bar.setAttribute('aria-hidden','true');
+    bar.setAttribute('data-known',String(!!top));fill.style.width=(top?left:0)+'%';bar.append(fill);
+    const label=node('span','');label.append(node('b',name),node('small',()=>top?win(top):t('use.limit')));
+    const age=()=>{const a=top?ago(top.age_seconds):'';return top?.stale===true?(a?t('use.stale',{age:a}):t('use.staleOnly')):a||'—';};
+    const num=node('span','','pct');num.append(node('b',()=>top?left+'%':t('use.none')),node('small',age));
+    row.append(mark,label,bar,num);
+    if(top){row.setAttribute('data-tone',left<=20?'warn':'plain');row.setAttribute('data-stale',String(top.stale===true));}
+    aria(row,()=>top?t('use.aria',{name,win:win(top),n:left,age:age()}):t('use.ariaNone',{name}));
+    li.append(row);
+    if(top){
+      const detail=node('div','','detail'),dl=node('dl','');detail.hidden=!usageOpen.has(id);
+      for(const w of wins){
+        dl.append(node('dt',()=>win(w)),node('dd',()=>t('use.split',{used:Math.round(w.used),left:Math.round(100-w.used)})));
+        const at=new Date(typeof w.resets_at==='number'?w.resets_at*1000:w.resets_at??NaN);
+        if(Number.isFinite(at.getTime()))dl.append(node('dt',message('use.resets')),node('dd',()=>{
+          const s=(at-Date.now())/1000;
+          return at.toLocaleString(lang==='ko'?'ko-KR':'en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})+
+            (s>0?' · '+(s<86400?t('in.h',{n:Math.max(1,Math.round(s/3600))}):t('in.d',{n:Math.round(s/86400)})):'');
+        }));
+        dl.append(node('dt',message('use.source')),node('dd',()=>[displayText(w.source,160),ago(w.age_seconds)].filter(Boolean).join(' · ')||t('statusUnknown')));
+      }
+      detail.append(dl);if(wins.some(w=>w.stale===true))detail.append(node('p',()=>t('use.staleNote',{name}),'warn-box'));
+      row.setAttribute('aria-expanded',String(!detail.hidden));
+      row.addEventListener('click',()=>{detail.hidden=!detail.hidden;row.setAttribute('aria-expanded',String(!detail.hidden));
+        if(detail.hidden)usageOpen.delete(id);else usageOpen.add(id);});
+      li.append(detail);
+    }
+    list.append(li);
+  }
+  put('usage-at',checkedAt('usage'));
+}
+const ghLink=(repo,kind,n)=>/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo||'') && Number.isSafeInteger(n) && n>0?`https://github.com/${repo}/${kind}/${n}`:null;
+function linkNode(text,url){
+  if(!url || !canOpenLinks)return node('span',text);
+  const b=node('button',text,'link');b.type='button';b.addEventListener('click',()=>request('ui/open-link',{url},5000).catch(()=>{}));return b;
+}
+function chip(k,text,tone){put('more-'+k+'-chip',text);if(tone)el('more-'+k+'-chip').setAttribute('data-tone',tone);else el('more-'+k+'-chip').removeAttribute('data-tone');}
+function sectionHead(k,body){
+  const head=node('div','','more-head'),again=node('button','↻','icon');again.type='button';
+  aria(again,message('refresh'));
+  again.addEventListener('click',()=>readSection(k,true));head.append(node('span',checkedAt(k),'note'),again);body.append(head);
+}
+function itemRow(tone,mark,title,meta){
+  const li=node('li',''),b=node('div','','item-row'),m=node('span',mark,'mark');m.setAttribute('data-tone',tone);m.setAttribute('aria-hidden','true');
+  const text=node('span',''),head=node('strong',title);text.append(head);if(meta)text.append(node('small',meta));
+  b.append(m,text);li.append(b);li.row=b;li.head=head;
+  return li;
+}
+function paintPr(body,d){
+  const g=d?.git,gh=d?.github;if(!g || typeof g!=='object' || !gh || typeof gh!=='object')throw uiError('inspect.failed');
+  const u=displayText(g.upstream,160),n=x=>Number.isSafeInteger(x) && x>0;
+  body.append(node('p',()=>g.available===false?t('pr.gitUnknown'):[displayText(g.branch,160),t(g.dirty?'pr.dirty':'pr.clean'),
+    n(g.ahead)?t('pr.ahead',{n:g.ahead}):n(g.behind)?t('pr.behind',{n:g.behind}):u?t('pr.same',{u}):''].filter(Boolean).join(' · ')));
+  if(gh.status!=='available'){chip('pr',message('pr.github'));body.append(node('p',message('pr.github'),'note'));return;}
+  const prs=(Array.isArray(gh.pullRequests)?gh.pullRequests:[]).filter(p=>p && Number.isSafeInteger(p.number)).slice(0,20),c=p=>p.checks||{};
+  const rank=p=>c(p).failed>0?0:c(p).pending>0?1:2;prs.sort((a,b)=>rank(a)-rank(b));
+  const failed=prs.filter(p=>rank(p)===0).length,running=prs.filter(p=>rank(p)===1).length;
+  chip('pr',()=>failed?t('res.failCount',{n:failed}):running?t('pr.pending',{n:running}):prs.length?t('pr.pass'):t('pr.none'),failed?'failure':running?'active':prs.length?'done':null);
+  const list=node('ul','','plain');
+  for(const p of prs){
+    const r=rank(p),url=p.url===ghLink(gh.repository,'pull',p.number)?p.url:null,names=(Array.isArray(c(p).items)?c(p).items:[]).filter(i=>i?.status==='failed').map(i=>displayText(i.name,96)).filter(Boolean);
+    const li=itemRow(['failure','active','done'][r],['×','●','✓'][r],displayText(p.title,240)||'#'+p.number,()=>[t('pr.counts',{f:c(p).failed||0,p:c(p).passed||0}),
+      c(p).pending>0?t('pr.pending',{n:c(p).pending}):'',names.length?names.slice(0,3).join(', ')+(names.length>3?' '+t('more.rest',{n:names.length-3}):''):'',
+      p.baseBranch && !['main','master'].includes(p.baseBranch)?'→ '+displayText(p.baseBranch,160):'',p.matchesLocalHead===false?t('pr.otherHead'):''].filter(Boolean).join(' · '));
+    li.head.append(' ',linkNode('#'+p.number,url));list.append(li);
+  }
+  if(!prs.length)list.append(node('li',message('pr.none'),'note'));
+  body.append(list);
+  const all=Array.isArray(gh.work?.pullRequests?.items)?gh.work.pullRequests.items.length:0,listUrl=ghLink(gh.repository,'pulls',1)?.replace(/\/1$/,'');
+  const foot=node('p','','note');foot.append(node('span',()=>t('pr.footer',{n:prs.length,m:all,time:clock(gh.observedAt)}).replace(/ · $/,'')+' '),linkNode(t('pr.list'),listUrl));body.append(foot);
+}
+async function readSection(k,force=false){
+  const s=more[k];if(!canRead() || !s?.open)return;const scope=scopeKey(),ticket=++s.ticket,body=el('more-'+k+'-body');
+  body.replaceChildren(node('p',message('chatLoading'),'note'));
+  try{
+    s.data=await readShared('pr','oms_panel_git_status',{},force);
+    if(scope===scopeKey() && ticket===s.ticket)paintSection(k);
+  }catch{if(scope===scopeKey() && ticket===s.ticket)body.replaceChildren(node('p',message('more.failed'),'note'));}
+}
+function paintSection(k){
+  const s=more[k],body=el('more-'+k+'-body');body.replaceChildren();sectionHead(k,body);
+  try{paintPr(body,s.data);}
+  catch{body.replaceChildren();sectionHead(k,body);body.append(node('p',message('more.failed'),'note'));}
+}
+function openSection(k){
+  const s=more[k];if(!canRead())return;s.open=true;el('more-'+k).setAttribute('aria-expanded','true');el('more-'+k+'-body').hidden=false;
+  if(shared.get(k)?.at && s.data)paintSection(k);else readSection(k);
+}
+for(const k of ['pr'])onClick('more-'+k,()=>{
+  const s=more[k];if(s.open){s.open=false;s.ticket++;el('more-'+k).setAttribute('aria-expanded','false');el('more-'+k+'-body').hidden=true;}else openSection(k);
+});
+onClick('usage-refresh',()=>readUsage(true));
 
 function render(d) {
   for(const element of bindings.keys())if(element.isConnected===false)bindings.delete(element);
@@ -2614,6 +2841,8 @@ function syncHostTools() {
   el('chat-older').disabled=blocked || Boolean(managedChat?.reading || chatReading);
   el('settings-toggle').disabled=blocked && !managedChat?.settings;
   el('settings-read').disabled=blocked || Boolean(managedChat?.settings?.busy || managedChat?.session?.settingsSaving);
+  el('more-pr').disabled=blocked || !canRead();
+  el('usage-refresh').disabled=blocked || !canRead();
   syncInspectControls();
   if(followupDraft)paintFollowup();
   for(const b of el('approvals').querySelectorAll('button'))b.disabled=busy || staleView || blocked;
@@ -2704,7 +2933,7 @@ async function loadStatus(expected,recover=true) {
       d=snapshot.structuredContent?.dashboard||snapshot._meta?.dashboard;
       if(!d || typeof d!=='object' || Array.isArray(d))throw uiError('status.badSnapshot');
     }
-    staleView=false;render(d);lastGoodBinding=confirmedBinding;lastGoodGeneration=generation;
+    staleView=false;render(d);syncMore();lastGoodBinding=confirmedBinding;lastGoodGeneration=generation;
     renderedToolSnapshot={seq:++snapshotClock,generation:expected,project:project||(typeof d.project==='string'&&d.project)||null};
     syncHostTools();resetAutoRetry();lastLoadedAt=Date.now();const notice=snapshotNotice(d);setStatus(()=>notice?t(notice):'',notice?'warn':'info');
     if(readOnly){retryStart=undefined;el('approval-card').hidden=true;el('approvals').replaceChildren();approvalButtons.length=0;return;}
@@ -2727,7 +2956,7 @@ async function loadStatus(expected,recover=true) {
     const retained=dashboardData && confirmedBinding && confirmedBinding===lastGoodBinding && lastGoodGeneration===expected;
     staleView=Boolean(retained);
     resetLeadControl();leadIntent=undefined;paintLeadControls();
-    members=[];approvedScope++;approvalButtons.length=0;closeDialogs();resetIssue();clearFollowup();updateContext(null);
+    members=[];approvedScope++;approvalButtons.length=0;closeDialogs();resetIssue();clearFollowup();resetMore();updateContext(null);
     if(!retained){dashboardData=undefined;rows=[];personButtons.length=0;el('view').hidden=true;}
     else{el('view').hidden=false;el('approvals').replaceChildren();el('approval-card').hidden=true;paintObserved();}
     setStatus(retained?'snapshot.stale':'connectionFailed','warn');
