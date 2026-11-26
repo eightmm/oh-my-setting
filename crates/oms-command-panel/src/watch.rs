@@ -11063,14 +11063,39 @@ fi
                     .filter(|line| *line == "capture-pane -p -t %3")
                     .count()
             };
-            let claude_watch_armed = || {
+            let inotify_fds = || {
                 let pid = std::fs::read_to_string(&watch_pid).unwrap();
                 std::fs::read_dir(format!("/proc/{pid}/fd"))
                     .unwrap()
                     .flatten()
-                    .any(|entry| {
+                    .filter(|entry| {
                         std::fs::read_link(entry.path())
                             .is_ok_and(|target| target == Path::new("anon_inode:inotify"))
+                    })
+                    .count()
+            };
+            let claude_watching = |dir: &Path| {
+                use std::os::unix::fs::MetadataExt;
+                let Ok(meta) = std::fs::symlink_metadata(dir) else {
+                    return false;
+                };
+                let needle = format!(" ino:{:x} ", meta.ino());
+                let pid = std::fs::read_to_string(&watch_pid).unwrap();
+                std::fs::read_dir(format!("/proc/{pid}/fd"))
+                    .unwrap()
+                    .flatten()
+                    .filter(|entry| {
+                        std::fs::read_link(entry.path())
+                            .is_ok_and(|target| target == Path::new("anon_inode:inotify"))
+                    })
+                    .any(|entry| {
+                        let fd = entry.file_name();
+                        std::fs::read_to_string(Path::new(&format!("/proc/{pid}/fdinfo")).join(fd))
+                            .is_ok_and(|info| {
+                                info.lines().any(|line| {
+                                    line.starts_with("inotify ") && line.contains(&needle)
+                                })
+                            })
                     })
             };
             let seed_subagents = |dir: &Path| {
@@ -11094,19 +11119,46 @@ fi
                 }
             };
 
-            seed_subagents(&subagents_dir);
+            let mut armed_fds = 0;
             let (_, calls) = run_pty(false, false, &mut |input, stream, screen, rx| {
                 wait_for(stream, screen, rx, "Claude overview", &mut |lines| {
-                    lines.iter().any(|line| line.contains("[Overview]")) && claude_watch_armed()
+                    lines.iter().any(|line| line.contains("[Overview]"))
+                        && claude_watching(&session_dir)
                 });
                 input.write_all(b"\t").unwrap();
                 input.flush().unwrap();
-                wait_for(stream, screen, rx, "Claude history", &mut |lines| {
+                wait_for(stream, screen, rx, "Claude empty tasks", &mut |lines| {
                     lines.iter().any(|line| line.contains("[All tasks]"))
-                        && lines.iter().any(|line| line.contains(history))
-                        && lines.iter().all(|line| !line.contains(next))
+                        && lines.iter().any(|line| line.contains(WORKER))
+                        && lines
+                            .iter()
+                            .all(|line| !line.contains(history) && !line.contains(next))
                 });
-                assert!(claude_watch_armed());
+                assert!(claude_watching(&session_dir) && !claude_watching(&subagents_dir));
+                armed_fds = inotify_fds();
+
+                let prior = primary_captures();
+                let started = Instant::now();
+                seed_subagents(&subagents_dir);
+                loop {
+                    apply_frames(stream, screen);
+                    if screen.iter().any(|line| line.contains(history)) {
+                        break;
+                    }
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "Claude lazy subagents paint exceeded 5s; screen:\n{}",
+                        screen.join("\n")
+                    );
+                    if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(10)) {
+                        stream.push_str(&String::from_utf8_lossy(&chunk));
+                    }
+                }
+                assert!(screen.iter().all(|line| !line.contains(next)));
+                assert!(claude_watching(&subagents_dir) && !claude_watching(&session_dir));
+                assert_eq!(inotify_fds(), armed_fds);
+                assert_eq!(primary_captures(), prior + 1);
+
                 let prior = primary_captures();
                 let started = Instant::now();
                 let child = subagents_dir.join(format!("agent-{new_agent}.jsonl"));
@@ -11126,6 +11178,7 @@ fi
                         stream.push_str(&String::from_utf8_lossy(&chunk));
                     }
                 }
+                assert_eq!(inotify_fds(), armed_fds);
                 assert_eq!(primary_captures(), prior + 1);
             });
             assert!(!calls.contains("UNEXPECTED:"), "{calls}");
@@ -11147,7 +11200,9 @@ fi
                     lines.iter().any(|line| line.contains("[All tasks]"))
                         && lines.iter().any(|line| line.contains(WORKER))
                 });
-                assert!(!claude_watch_armed());
+                let unarmed_fds = inotify_fds();
+                assert_eq!(unarmed_fds + 1, armed_fds);
+                assert!(!claude_watching(&elsewhere) && !claude_watching(&session_dir));
                 let prior = primary_captures();
                 let child = subagents_dir.join(format!("agent-{new_agent}.jsonl"));
                 std::fs::write(&child, b"").unwrap();
@@ -11158,7 +11213,8 @@ fi
                     }
                     apply_frames(stream, screen);
                 }
-                assert!(!claude_watch_armed());
+                assert_eq!(inotify_fds(), unarmed_fds);
+                assert!(!claude_watching(&elsewhere) && !claude_watching(&session_dir));
                 assert_eq!(primary_captures(), prior);
                 assert!(screen.iter().all(|line| !line.contains(next)));
             });

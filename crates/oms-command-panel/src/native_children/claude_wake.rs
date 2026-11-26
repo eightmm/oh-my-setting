@@ -7,10 +7,12 @@ use crate::text;
 use crate::wakeup::ChildWakeSource;
 use oms_panel_core::terminals;
 use rustix::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use rustix::fs::inotify::{CreateFlags, ReadFlags, Reader, WatchFlags, add_watch, init};
-use rustix::fs::{self, FileType, Mode, Stat};
+use rustix::fs::inotify::{
+    CreateFlags, ReadFlags, Reader, WatchFlags, add_watch, init, remove_watch,
+};
+use rustix::fs::{self, AtFlags, FileType, Mode, Stat};
 use rustix::process::geteuid;
-use std::collections::BTreeSet;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Read;
 use std::mem::MaybeUninit;
@@ -20,30 +22,87 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 const EVENT_LIMIT: usize = 64;
+const ENTRY_LIMIT: usize = 2048;
 const RECORD_LIMIT: u64 = 16 * 1024;
+const SESSION_WATCH_FLAGS: WatchFlags = WatchFlags::ONLYDIR
+    .union(WatchFlags::CREATE)
+    .union(WatchFlags::MOVED_TO)
+    .union(WatchFlags::ATTRIB)
+    .union(WatchFlags::MOVE_SELF)
+    .union(WatchFlags::DELETE_SELF);
+const SUBAGENTS_WATCH_FLAGS: WatchFlags = WatchFlags::ONLYDIR
+    .union(WatchFlags::CREATE)
+    .union(WatchFlags::MOVED_TO)
+    .union(WatchFlags::DELETE)
+    .union(WatchFlags::MOVED_FROM)
+    .union(WatchFlags::ATTRIB)
+    .union(WatchFlags::MOVE_SELF)
+    .union(WatchFlags::DELETE_SELF);
 
 pub(super) struct Request<'a> {
     pub(super) previous: Option<&'a Arc<SubagentsWatch>>,
 }
 
-#[derive(Default)]
+enum Target {
+    Session {
+        watch: i32,
+    },
+    Subagents {
+        watch: i32,
+        dir: OwnedFd,
+        identity: (fs::Dev, u64),
+        retired_watch: Option<i32>,
+    },
+}
+
 struct WatchState {
-    incomplete: BTreeSet<String>,
-    proven: BTreeSet<String>,
+    target: Target,
+    proven: VecDeque<String>,
+}
+
+impl WatchState {
+    fn remember(&mut self, id: &str) {
+        remember_in(&mut self.proven, id);
+    }
+
+    fn remember_new(&mut self, id: &str) -> bool {
+        if self.proven.iter().any(|entry| entry == id) {
+            return false;
+        }
+        if self.proven.len() >= EVENT_LIMIT {
+            self.proven.pop_front();
+        }
+        self.proven.push_back(id.to_owned());
+        true
+    }
+
+    fn forget(&mut self, id: &str) {
+        if let Some(pos) = self.proven.iter().position(|entry| entry == id) {
+            self.proven.remove(pos);
+        }
+    }
+}
+
+fn remember_in(proven: &mut VecDeque<String>, id: &str) {
+    if let Some(pos) = proven.iter().position(|entry| entry == id) {
+        proven.remove(pos);
+    } else if proven.len() >= EVENT_LIMIT {
+        proven.pop_front();
+    }
+    proven.push_back(id.to_owned());
 }
 
 pub(crate) struct SubagentsWatch {
     fd: OwnedFd,
-    watch: i32,
     uid: u32,
     config: PathBuf,
     root: OwnedFd,
     root_identity: (fs::Dev, u64),
     record_name: String,
     record: Vec<u8>,
-    path: PathBuf,
-    dir: OwnedFd,
-    identity: (fs::Dev, u64),
+    session_path: PathBuf,
+    session_dir: OwnedFd,
+    session_identity: (fs::Dev, u64),
     state: Mutex<WatchState>,
     lost: AtomicBool,
 }
@@ -100,12 +159,15 @@ impl SubagentsWatch {
         let record_name = format!("{pid}.json");
         let record = read_session_record(&root, &record_name, uid)?;
         let session = verified_session(&record, pid, birth, repo)?;
-        let path = Path::new("projects")
+        let session_path = Path::new("projects")
             .join(claude_project_key(repo)?)
-            .join(session)
-            .join("subagents");
-        let (dir, dir_stat) = claude_directory(&root, &path, uid)?;
-        let identity = (dir_stat.st_dev, dir_stat.st_ino);
+            .join(session);
+        let (session_dir, session_stat) = claude_directory(&root, &session_path, uid)?;
+        let session_identity = (session_stat.st_dev, session_stat.st_ino);
+        let subagents = inspect_subagents(&session_dir, uid)?;
+        let subagents_identity = subagents
+            .as_ref()
+            .map(|(_, stat)| (stat.st_dev, stat.st_ino));
         if let Some(previous) = request.previous.filter(|previous| {
             previous.active()
                 && previous.uid == uid
@@ -113,44 +175,83 @@ impl SubagentsWatch {
                 && previous.root_identity == root_identity
                 && previous.record_name == record_name
                 && previous.record == record
-                && previous.path == path
-                && previous.identity == identity
+                && previous.session_path == session_path
+                && previous.session_identity == session_identity
+                && previous.matches_target(subagents_identity)
                 && previous.current()
         }) {
             return Some(Arc::clone(previous));
         }
 
         let fd = init(CreateFlags::NONBLOCK | CreateFlags::CLOEXEC).ok()?;
-        let flags = WatchFlags::ONLYDIR
-            | WatchFlags::CREATE
-            | WatchFlags::MOVED_TO
-            | WatchFlags::MODIFY
-            | WatchFlags::CLOSE_WRITE
-            | WatchFlags::DELETE
-            | WatchFlags::MOVED_FROM
-            | WatchFlags::ATTRIB
-            | WatchFlags::MOVE_SELF
-            | WatchFlags::DELETE_SELF;
-        let watch = add_watch(&fd, format!("/proc/self/fd/{}", dir.as_raw_fd()), flags).ok()?;
+        let mut proven = VecDeque::new();
+        let target = match subagents {
+            Some((dir, stat)) => {
+                let (target, existing) = arm_subagents(&fd, dir, stat, None)?;
+                for id in existing {
+                    remember_in(&mut proven, &id);
+                }
+                target
+            }
+            None => {
+                let session_watch = add_watch(
+                    &fd,
+                    format!("/proc/self/fd/{}", session_dir.as_raw_fd()),
+                    SESSION_WATCH_FLAGS,
+                )
+                .ok()?;
+                match inspect_subagents(&session_dir, uid)? {
+                    None => Target::Session {
+                        watch: session_watch,
+                    },
+                    Some((dir, stat)) => {
+                        let (target, existing) =
+                            arm_subagents(&fd, dir, stat, Some(session_watch))?;
+                        let _ = remove_watch(&fd, session_watch);
+                        for id in existing {
+                            remember_in(&mut proven, &id);
+                        }
+                        target
+                    }
+                }
+            }
+        };
         let source = Arc::new(Self {
             fd,
-            watch,
             uid,
             config: config.to_path_buf(),
             root,
             root_identity,
             record_name,
             record,
-            path,
-            dir,
-            identity,
-            state: Mutex::default(),
+            session_path,
+            session_dir,
+            session_identity,
+            state: Mutex::new(WatchState { target, proven }),
             lost: AtomicBool::new(false),
         });
         source.current().then_some(source)
     }
 
+    fn matches_target(&self, expected_subagents: Option<(fs::Dev, u64)>) -> bool {
+        let Ok(state) = self.state.lock() else {
+            return false;
+        };
+        match (&state.target, expected_subagents) {
+            (Target::Session { .. }, None) => true,
+            (Target::Subagents { identity, .. }, Some(expected)) => *identity == expected,
+            _ => false,
+        }
+    }
+
     pub(crate) fn current(&self) -> bool {
+        let Ok(state) = self.state.lock() else {
+            return false;
+        };
+        self.current_target(&state.target)
+    }
+
+    fn current_target(&self, target: &Target) -> bool {
         let Some(named_root) = open_dir(&self.config).and_then(|fd| private_dir_for(&fd, self.uid))
         else {
             return false;
@@ -161,12 +262,30 @@ impl SubagentsWatch {
         {
             return false;
         }
-        read_session_record(&self.root, &self.record_name, self.uid)
-            .is_some_and(|record| record == self.record)
-            && private_dir_for(&self.dir, self.uid)
-                .is_some_and(|held| (held.st_dev, held.st_ino) == self.identity)
-            && claude_directory(&self.root, &self.path, self.uid)
-                .is_some_and(|(_, named)| (named.st_dev, named.st_ino) == self.identity)
+        if read_session_record(&self.root, &self.record_name, self.uid)
+            .is_none_or(|record| record != self.record)
+            || private_dir_for(&self.session_dir, self.uid)
+                .is_none_or(|held| (held.st_dev, held.st_ino) != self.session_identity)
+        {
+            return false;
+        }
+        let Some((named_session, named_session_stat)) =
+            claude_directory(&self.root, &self.session_path, self.uid)
+        else {
+            return false;
+        };
+        if (named_session_stat.st_dev, named_session_stat.st_ino) != self.session_identity {
+            return false;
+        }
+        match target {
+            Target::Session { .. } => inspect_subagents(&named_session, self.uid).is_some(),
+            Target::Subagents { dir, identity, .. } => {
+                private_dir_for(dir, self.uid)
+                    .is_some_and(|held| (held.st_dev, held.st_ino) == *identity)
+                    && open_subagents(&named_session, self.uid)
+                        .is_some_and(|(_, named)| (named.st_dev, named.st_ino) == *identity)
+            }
+        }
     }
 
     pub(crate) fn record_proven<'a>(&self, agents: impl IntoIterator<Item = &'a str>) {
@@ -174,10 +293,7 @@ impl SubagentsWatch {
             return;
         };
         for id in agents {
-            state.incomplete.remove(id);
-            if state.proven.len() < EVENT_LIMIT {
-                state.proven.insert(id.to_owned());
-            }
+            state.remember(id);
         }
     }
 }
@@ -200,60 +316,97 @@ impl ChildWakeSource for SubagentsWatch {
             let event = match reader.next() {
                 Ok(event) => event,
                 Err(rustix::io::Errno::AGAIN) => {
+                    let ok = !changed || self.current_target(&state.target);
                     drop(state);
-                    return (!changed || self.current()).then_some(changed);
+                    return ok.then_some(changed);
                 }
                 Err(_) => return None,
             };
             let flags = event.events();
-            if event.wd() != self.watch
-                || flags.is_empty()
-                || flags.intersects(
-                    ReadFlags::IGNORED
-                        | ReadFlags::QUEUE_OVERFLOW
-                        | ReadFlags::MOVE_SELF
-                        | ReadFlags::DELETE_SELF
-                        | ReadFlags::UNMOUNT,
-                )
-            {
+            if flags.is_empty() || flags.contains(ReadFlags::QUEUE_OVERFLOW) {
                 return None;
             }
-            let name = event.file_name()?;
-            let name = std::ffi::OsStr::from_bytes(name.to_bytes());
-            if flags.contains(ReadFlags::ISDIR) {
-                continue;
-            }
-            let path = Path::new(name);
-            if let Some(id) = claude_agent_filename_id(path, ".jsonl") {
-                if flags.intersects(ReadFlags::DELETE | ReadFlags::MOVED_FROM) {
-                    state.incomplete.remove(id);
-                    state.proven.remove(id);
-                    continue;
-                }
-                if state.proven.contains(id) {
-                    continue;
-                }
-                if flags.intersects(ReadFlags::CREATE | ReadFlags::MOVED_TO) {
-                    if state.incomplete.len() >= EVENT_LIMIT && !state.incomplete.contains(id) {
+            match &mut state.target {
+                Target::Session { watch } => {
+                    let watch = *watch;
+                    if event.wd() != watch
+                        || flags.intersects(
+                            ReadFlags::IGNORED
+                                | ReadFlags::MOVE_SELF
+                                | ReadFlags::DELETE_SELF
+                                | ReadFlags::UNMOUNT,
+                        )
+                    {
                         return None;
                     }
-                    state.incomplete.insert(id.to_owned());
-                    changed = true;
-                } else if flags.intersects(ReadFlags::MODIFY | ReadFlags::CLOSE_WRITE)
-                    && state.incomplete.contains(id)
-                {
-                    changed = true;
+                    let Some(name) = event.file_name() else {
+                        if !self.current_target(&state.target) {
+                            return None;
+                        }
+                        continue;
+                    };
+                    if name.to_bytes() != b"subagents" {
+                        continue;
+                    }
+                    if !flags.contains(ReadFlags::ISDIR)
+                        || !flags.intersects(ReadFlags::CREATE | ReadFlags::MOVED_TO)
+                    {
+                        return None;
+                    }
+                    let (dir, stat) = open_subagents(&self.session_dir, self.uid)?;
+                    let (target, existing) = arm_subagents(&self.fd, dir, stat, Some(watch))?;
+                    let _ = remove_watch(&self.fd, watch);
+                    for id in existing {
+                        if state.remember_new(&id) {
+                            changed = true;
+                        }
+                    }
+                    state.target = target;
+                    if !self.current_target(&state.target) {
+                        return None;
+                    }
                 }
-            } else if let Some(id) = claude_agent_filename_id(path, ".meta.json")
-                && flags.intersects(
-                    ReadFlags::CREATE
-                        | ReadFlags::MOVED_TO
-                        | ReadFlags::MODIFY
-                        | ReadFlags::CLOSE_WRITE,
-                )
-                && state.incomplete.contains(id)
-            {
-                changed = true;
+                Target::Subagents {
+                    watch,
+                    retired_watch,
+                    ..
+                } => {
+                    if *retired_watch == Some(event.wd()) {
+                        if flags.contains(ReadFlags::IGNORED) {
+                            *retired_watch = None;
+                        }
+                        continue;
+                    }
+                    if event.wd() != *watch
+                        || flags.intersects(
+                            ReadFlags::IGNORED
+                                | ReadFlags::MOVE_SELF
+                                | ReadFlags::DELETE_SELF
+                                | ReadFlags::UNMOUNT,
+                        )
+                    {
+                        return None;
+                    }
+                    let Some(name) = event.file_name() else {
+                        if !self.current_target(&state.target) {
+                            return None;
+                        }
+                        continue;
+                    };
+                    if flags.contains(ReadFlags::ISDIR) {
+                        continue;
+                    }
+                    let name = std::ffi::OsStr::from_bytes(name.to_bytes());
+                    if let Some(id) = claude_agent_filename_id(Path::new(name)) {
+                        if flags.intersects(ReadFlags::DELETE | ReadFlags::MOVED_FROM) {
+                            state.forget(id);
+                        } else if flags.intersects(ReadFlags::CREATE | ReadFlags::MOVED_TO)
+                            && state.remember_new(id)
+                        {
+                            changed = true;
+                        }
+                    }
+                }
             }
         }
         None
@@ -264,13 +417,40 @@ impl ChildWakeSource for SubagentsWatch {
     }
 }
 
-fn claude_agent_filename_id<'a>(path: &'a Path, suffix: &str) -> Option<&'a str> {
+fn claude_agent_filename_id(path: &Path) -> Option<&str> {
     let id = path
         .file_name()?
         .to_str()?
         .strip_prefix("agent-")?
-        .strip_suffix(suffix)?;
+        .strip_suffix(".jsonl")?;
     ((8..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())).then_some(id)
+}
+
+fn arm_subagents(
+    fd: &OwnedFd,
+    dir: OwnedFd,
+    stat: Stat,
+    retired_watch: Option<i32>,
+) -> Option<(Target, Vec<String>)> {
+    let watch = add_watch(
+        fd,
+        format!("/proc/self/fd/{}", dir.as_raw_fd()),
+        SUBAGENTS_WATCH_FLAGS,
+    )
+    .ok()?;
+    let Some(existing) = scan_agent_ids(&dir) else {
+        let _ = remove_watch(fd, watch);
+        return None;
+    };
+    Some((
+        Target::Subagents {
+            watch,
+            dir,
+            identity: (stat.st_dev, stat.st_ino),
+            retired_watch,
+        },
+        existing,
+    ))
 }
 
 fn private_dir_for(dir: &OwnedFd, uid: u32) -> Option<Stat> {
@@ -279,6 +459,51 @@ fn private_dir_for(dir: &OwnedFd, uid: u32) -> Option<Stat> {
         && stat.st_uid == uid
         && stat.st_mode & 0o022 == 0)
         .then_some(stat)
+}
+
+fn open_subagents(session_dir: &OwnedFd, uid: u32) -> Option<(OwnedFd, Stat)> {
+    let dir = fs::openat(session_dir, "subagents", DIR, Mode::empty()).ok()?;
+    let stat = private_dir_for(&dir, uid)?;
+    Some((dir, stat))
+}
+
+fn inspect_subagents(session_dir: &OwnedFd, uid: u32) -> Option<Option<(OwnedFd, Stat)>> {
+    match fs::openat(session_dir, "subagents", DIR, Mode::empty()) {
+        Ok(dir) => private_dir_for(&dir, uid).map(|stat| Some((dir, stat))),
+        Err(rustix::io::Errno::NOENT) => matches!(
+            fs::statat(session_dir, "subagents", AtFlags::SYMLINK_NOFOLLOW),
+            Err(rustix::io::Errno::NOENT)
+        )
+        .then_some(None),
+        Err(_) => None,
+    }
+}
+
+fn scan_agent_ids(dir: &OwnedFd) -> Option<Vec<String>> {
+    let opened = fs::openat(dir, ".", DIR, Mode::empty()).ok()?;
+    let entries = fs::Dir::read_from(opened).ok()?;
+    let mut ids = Vec::new();
+    for entry in entries.take(ENTRY_LIMIT).flatten() {
+        let raw = entry.file_name();
+        let name = std::ffi::OsStr::from_bytes(raw.to_bytes());
+        if let Some(id) = claude_agent_filename_id(Path::new(name)) {
+            ids.push((raw.to_owned(), id.to_owned()));
+        }
+    }
+    if ids.len() > EVENT_LIMIT {
+        let mut stamped: Vec<_> = ids
+            .into_iter()
+            .map(|(raw, id)| {
+                let order = fs::statat(dir, &raw, AtFlags::SYMLINK_NOFOLLOW)
+                    .ok()
+                    .map(|st| (st.st_mtime, st.st_mtime_nsec));
+                (order, id)
+            })
+            .collect();
+        stamped.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        return Some(stamped.into_iter().map(|(_, id)| id).collect());
+    }
+    Some(ids.into_iter().map(|(_, id)| id).collect())
 }
 
 fn claude_directory(root: &OwnedFd, path: &Path, uid: u32) -> Option<(OwnedFd, Stat)> {

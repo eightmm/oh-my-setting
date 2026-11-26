@@ -358,12 +358,7 @@ pub(crate) fn claude_in(home: &Path, pid: u32, repo: &Path) -> Option<Vec<Value>
     {
         return None;
     }
-    let project_key: String = repo
-        .to_str()?
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let folder = Path::new("projects").join(project_key);
+    let folder = Path::new("projects").join(claude_project_key(repo)?);
     let rows = jsonl(&store, &folder.join(format!("{session}.jsonl")))?;
     if rows.is_empty() {
         return None;
@@ -467,8 +462,8 @@ pub(crate) fn claude_child_row(agent: &str, title: &str, state: &str) -> Value {
     row("claude", agent, &safe(title, 80), "", "", "", state)
 }
 
-#[cfg(target_os = "linux")]
-pub(super) fn claude_project_key(repo: &Path) -> Option<String> {
+/// Claude Code's project folder name: every non-alphanumeric becomes `-`.
+pub(crate) fn claude_project_key(repo: &Path) -> Option<String> {
     let key: String = repo
         .to_str()?
         .chars()
@@ -4127,6 +4122,7 @@ mod tests {
     fn claude_subagents_wake_tracks_child_creation_and_refuses_unsafe_directories() {
         use crate::wakeup::{ChildWakeSource, FirstChildWake};
         use std::io::Write;
+        use std::os::fd::AsRawFd;
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
         use std::time::Duration;
 
@@ -4134,8 +4130,10 @@ mod tests {
         const BIRTH: &str = "fixture-boot:987654";
         const SESSION: &str = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
         const OTHER_SESSION: &str = "1a1b2c3d-4e5f-6789-abcd-ef0123456789";
+        const LAZY_CHILD: &str = "1111222233334444";
         const OLD_CHILD: &str = "f0e1d2c3b4a59687";
         const NEW_CHILD: &str = "a1b2c3d4e5f60718";
+        const OUT_OF_SCOPE_CHILD: &str = "9999888877776666";
 
         struct Temp(PathBuf);
         impl Drop for Temp {
@@ -4169,7 +4167,6 @@ mod tests {
             &sessions,
             &config.join("projects"),
             &project,
-            &session_dir,
             &elsewhere,
         ] {
             std::fs::create_dir_all(path).unwrap();
@@ -4191,9 +4188,20 @@ mod tests {
             std::fs::set_permissions(&record_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         };
         write_record(SESSION);
+        let watch_count = |source: &Arc<ClaudeSubagentsWatch>| {
+            std::fs::read_to_string(format!("/proc/self/fdinfo/{}", source.fd().as_raw_fd()))
+                .unwrap()
+                .lines()
+                .filter(|line| line.starts_with("inotify "))
+                .count()
+        };
 
-        // Missing subagents directory falls back silently.
+        // Missing session directory itself falls back silently.
         assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&session_dir)
+            .unwrap();
 
         // Symlinked subagents directory falls back silently and never wakes.
         symlink(&elsewhere, &subagents).unwrap();
@@ -4205,10 +4213,64 @@ mod tests {
         .unwrap();
         std::fs::remove_file(&subagents).unwrap();
 
+        // A session with no subagents/ watches the Lead's session directory for subagents/
+        // only, switches on first child creation, and keeps the watch count bounded at 1.
+        let lazy = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        let same_lazy =
+            ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, Some(&lazy)).unwrap();
+        assert!(Arc::ptr_eq(&lazy, &same_lazy));
+        assert_eq!(watch_count(&lazy), 1);
+        std::fs::write(session_dir.join("notes.txt"), b"ignored\n").unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(session_dir.join("tool-results"))
+            .unwrap();
+        assert_eq!(lazy.changed(), Some(false));
+        assert_eq!(watch_count(&lazy), 1);
+
+        let lazy_now = Instant::now();
+        let mut lazy_wake = FirstChildWake::default();
+        lazy_wake.replace(Some(lazy.clone()));
         std::fs::DirBuilder::new()
             .mode(0o755)
             .create(&subagents)
             .unwrap();
+        assert!(!lazy_wake.refresh(true, true, lazy_now));
+        assert_eq!(watch_count(&lazy), 1);
+        std::fs::write(
+            subagents.join(format!("agent-{LAZY_CHILD}.jsonl")),
+            b"first child\n",
+        )
+        .unwrap();
+        assert!(lazy_wake.refresh(true, true, lazy_now));
+        assert_eq!(watch_count(&lazy), 1);
+        let switched =
+            ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, Some(&lazy)).unwrap();
+        assert!(Arc::ptr_eq(&lazy, &switched));
+        drop(switched);
+        drop(same_lazy);
+        drop(lazy_wake);
+        drop(lazy);
+
+        // Also wakes when subagents/ and the first child transcript appear in one burst.
+        std::fs::remove_dir_all(&subagents).unwrap();
+        let burst_lazy = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        let mut burst_wake = FirstChildWake::default();
+        burst_wake.replace(Some(burst_lazy.clone()));
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&subagents)
+            .unwrap();
+        std::fs::write(
+            subagents.join(format!("agent-{LAZY_CHILD}.jsonl")),
+            b"first child\n",
+        )
+        .unwrap();
+        assert!(burst_wake.refresh(true, true, lazy_now));
+        assert_eq!(watch_count(&burst_lazy), 1);
+        drop(burst_wake);
+        drop(burst_lazy);
+
         // Foreign uid and group/other-writable modes fall back silently.
         let uid = rustix::process::geteuid().as_raw();
         assert!(
@@ -4265,7 +4327,7 @@ mod tests {
         std::fs::create_dir(subagents.join("nested")).unwrap();
         assert_eq!(source.changed(), Some(false));
 
-        // Creating a child transcript wakes the Board without reading its content.
+        // Creating a child transcript wakes the Board once without reading its content.
         let now = Instant::now();
         let mut wake = FirstChildWake::default();
         wake.replace(Some(source.clone()));
@@ -4275,13 +4337,46 @@ mod tests {
         assert!(wake.fd().is_none());
         assert!(wake.refresh(false, true, now));
         assert!(!wake.refresh(false, true, now + Duration::from_millis(100)));
-
-        // While unproved, follow-up writes remain eligible; once proven, streaming stays quiet.
-        child.write_all(b"reply\n").unwrap();
-        assert_eq!(source.changed(), Some(true));
         source.record_proven([NEW_CHILD]);
         child.write_all(b"streaming\n").unwrap();
         drop(child);
+        assert_eq!(source.changed(), Some(false));
+
+        // Repeated writes to an out-of-scope child (never passed to record_proven)
+        // cause at most one wake across subsequent cooldown windows.
+        let out_path = subagents.join(format!("agent-{OUT_OF_SCOPE_CHILD}.jsonl"));
+        let mut out_child = File::create(&out_path).unwrap();
+        let mut out_wakes = usize::from(wake.refresh(true, true, now + Duration::from_secs(2)));
+        for step in 0..5u64 {
+            out_child
+                .write_all(format!("out-of-scope write {step}\n").as_bytes())
+                .unwrap();
+            out_child.flush().unwrap();
+            if wake.refresh(true, true, now + Duration::from_secs(3 + step * 2)) {
+                out_wakes += 1;
+            }
+        }
+        drop(out_child);
+        let staged = subagents.join("staged.tmp");
+        std::fs::write(&staged, b"atomic rewrite\n").unwrap();
+        std::fs::rename(&staged, &out_path).unwrap();
+        if wake.refresh(true, true, now + Duration::from_secs(20)) {
+            out_wakes += 1;
+        }
+        assert_eq!(out_wakes, 1);
+        assert_eq!(source.changed(), Some(false));
+
+        // After more than 64 children, oldest proven entries are evicted rather than
+        // refusing inserts, keeping newer children quiet against spurious wakes.
+        for idx in 0..70 {
+            let id = format!("{idx:016x}");
+            std::fs::write(subagents.join(format!("agent-{id}.jsonl")), b"seed\n").unwrap();
+            assert_eq!(source.changed(), Some(true));
+        }
+        let newest = format!("{:016x}", 69);
+        let newest_path = subagents.join(format!("agent-{newest}.jsonl"));
+        std::fs::write(&staged, b"rewrite newest\n").unwrap();
+        std::fs::rename(&staged, &newest_path).unwrap();
         assert_eq!(source.changed(), Some(false));
 
         // Permission exposure, directory replacement, session switch and queue bounds retire.
@@ -4291,7 +4386,10 @@ mod tests {
         std::fs::set_permissions(&subagents, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let reopened = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
-        for idx in 0..64 {
+        std::fs::write(&staged, b"rewrite after reopen\n").unwrap();
+        std::fs::rename(&staged, &newest_path).unwrap();
+        assert_eq!(reopened.changed(), Some(false));
+        for idx in 100..164 {
             std::fs::write(
                 subagents.join(format!("agent-{idx:016x}.jsonl")),
                 b"burst\n",
