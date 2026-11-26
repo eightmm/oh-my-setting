@@ -396,13 +396,14 @@ pub(super) fn enrich(
     state: &mut Value,
     include_dashboard: bool,
 ) -> Result<Option<DashboardArtifacts>> {
-    let task_text = storage::read(
+    let task_read = storage::read(
         &ctx.repo,
         Path::new(".oms/task/current.md"),
         storage::MAX_FILE,
         true,
-    )
-    .unwrap_or_default();
+    );
+    let packet_ok = task_read.is_ok();
+    let task_text = task_read.unwrap_or_default();
     let mut section = "";
     let mut goal = Vec::new();
     let mut next = Vec::new();
@@ -436,14 +437,19 @@ pub(super) fn enrich(
         (stale, dormant, idle)
     };
     if task.get("present").truth() {
-        let eligible = matches!(task.get("current_goal_eligible"), Value::Bool(true))
-            && !is_stale
-            && !is_dormant
-            && idle_secs.is_some()
+        let eligible = open
+            && packet_ok
+            && matches!(task.get("current_goal_eligible"), Value::Bool(true))
+            && oms_command_task::packet::current_goal_eligible(
+                &task_text,
+                oms_command_task::packet::PacketFreshness {
+                    idle_seconds: idle_secs,
+                    stale: is_stale,
+                    dormant: is_dormant,
+                },
+            )
             && oms_command_task::packet::metadata(&task_text, "task_id").unwrap_or(b"legacy")
-                == task.text("task_id").as_bytes()
-            && oms_command_task::packet::metadata(&task_text, "status").unwrap_or(b"active")
-                == b"active";
+                == task.text("task_id").as_bytes();
         task.set("current_goal_eligible", Value::Bool(eligible))?;
         task.set("stale", Value::Bool(is_stale))?;
         task.set("dormant", Value::Bool(is_dormant))?;
@@ -903,7 +909,7 @@ pub(super) fn extra_attention(state: &Value, repo: &Path, items: &mut Vec<Value>
     };
     let memory = state.get("memory_review");
     let command = format!("oms agent-memory --repo {anchor} review");
-    if memory.get("healthy") == &Value::Bool(false) {
+    if memory.get("pending") == &Value::Null {
         add(
             "P2",
             "memory-review-unavailable",
@@ -913,13 +919,30 @@ pub(super) fn extra_attention(state: &Value, repo: &Path, items: &mut Vec<Value>
         );
     } else {
         let pending = memory.get("pending").int().unwrap_or(0) as usize;
+        let skipped = memory.get("skipped").int().unwrap_or(0) as usize;
         add(
             "P2",
             "pending-memory-review",
             pending,
-            format!("{pending} memory proposal(s) await explicit review; unverified"),
-            command,
+            format!(
+                "{pending} memory proposal(s) await explicit review{}; unverified",
+                if skipped > 0 {
+                    format!(" ({skipped} invalid row(s) skipped)")
+                } else {
+                    String::new()
+                }
+            ),
+            command.clone(),
         );
+        if skipped > 0 {
+            add(
+                "P2",
+                "memory-review-partial",
+                skipped,
+                format!("memory review skipped {skipped} invalid row(s)"),
+                command,
+            );
+        }
     }
     let orphans = state
         .get("delegations")
@@ -2734,15 +2757,27 @@ fn state_text(state: &Value) -> Result<String> {
         }
     }
     let memory = state.get("memory_review");
-    if !memory.get("healthy").truth() || n(memory, "pending") > 0 {
+    if !memory.get("healthy").truth() || n(memory, "pending") > 0 || n(memory, "skipped") > 0 {
         out.push_str("\n## Memory review\n");
-        if memory.get("healthy").truth() {
-            out.push_str(&format!(
-                "  {} proposal(s) await explicit review; unverified\n",
-                n(memory, "pending")
-            ));
-        } else {
+        if memory.get("pending") == &Value::Null {
             out.push_str("  unavailable; pending count is unknown\n");
+        } else {
+            let skipped = n(memory, "skipped");
+            if n(memory, "pending") > 0 || skipped == 0 {
+                out.push_str(&format!(
+                    "  {} proposal(s) await explicit review{}; unverified\n",
+                    n(memory, "pending"),
+                    if skipped > 0 {
+                        format!(" (partial: {skipped} invalid row(s) skipped)")
+                    } else {
+                        String::new()
+                    }
+                ));
+            } else {
+                out.push_str(&format!(
+                    "  0 proposal(s) await explicit review (partial: {skipped} invalid row(s) skipped)\n"
+                ));
+            }
         }
         out.push_str("  inspect: oms agent-memory review\n");
     }
