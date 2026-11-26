@@ -18,7 +18,8 @@ mod lead_plan_context;
 mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
-const URI: &str = "ui://oms/conversation-panel/v31.html";
+const URI: &str = "ui://oms/conversation-panel/v32.html";
+const V31: &str = "ui://oms/conversation-panel/v31.html";
 const V30: &str = "ui://oms/conversation-panel/v30.html";
 const V29: &str = "ui://oms/conversation-panel/v29.html";
 const V28: &str = "ui://oms/conversation-panel/v28.html";
@@ -306,9 +307,19 @@ fn checked_peer_directory(
     Ok(Some(dir.path))
 }
 
-pub(super) fn runtime_request(request: &Value) -> bool {
+fn valid_call_id(request: &Value) -> bool {
     let id = &request["id"];
-    (matches!(id, Value::Number(_)) || id.as_str().is_some_and(|s| s.len() <= 1024))
+    matches!(id, Value::Number(_)) || id.as_str().is_some_and(|s| s.len() <= 1024)
+}
+
+pub(super) fn open_request(request: &Value) -> bool {
+    valid_call_id(request)
+        && request["method"] == "tools/call"
+        && request["params"]["name"].as_str() == Some(OPEN)
+}
+
+pub(super) fn runtime_request(request: &Value) -> bool {
+    valid_call_id(request)
         && request["method"] == "tools/call"
         && matches!(
             request["params"]["name"].as_str(),
@@ -1375,6 +1386,7 @@ impl Server<'_> {
                             | V28
                             | V29
                             | V30
+                            | V31
                     )
                 ) =>
             {
@@ -1594,6 +1606,31 @@ impl Server<'_> {
                             result["_meta"]["chat"] = data;
                             result
                         }
+                        Err(e) => response(Err(e)),
+                    }
+                } else if name == OPEN {
+                    match result {
+                        Ok(mut data)
+                            if crate::output::outbound(
+                                data.to_string().as_bytes(),
+                                &Value::Null,
+                            )
+                            .is_ok() =>
+                        {
+                            let dashboard =
+                                data.as_object_mut().and_then(|o| o.remove("dashboard"));
+                            if dashboard.is_some() {
+                                data["snapshot"] = json!("attached");
+                            }
+                            let mut result = response(Ok(data));
+                            if let Some(dashboard) = dashboard {
+                                result["_meta"]["dashboard"] = dashboard;
+                            }
+                            result
+                        }
+                        Ok(_) => response(Err(
+                            "OMS withheld this response during its outbound scan".into(),
+                        )),
                         Err(e) => response(Err(e)),
                     }
                 } else {
@@ -1871,9 +1908,11 @@ impl Server<'_> {
             }));
         }
         if name == OPEN {
-            if args.get("project").is_some() {
-                self.panel_repo(args)?;
-            }
+            let resolved = if args.get("project").is_some() {
+                Some(self.panel_repo(args)?)
+            } else {
+                None
+            };
             let mut result = json!({"panel":"OMS","project":args["project"]});
             if let Some(flag) = args.get("leadConversations") {
                 let requested = flag
@@ -1885,6 +1924,18 @@ impl Server<'_> {
             }
             if self.config.profile == ToolProfile::McpApp {
                 result["readOnly"] = json!(true);
+            }
+            if !self.open_snapshot {
+                result["snapshotOmitted"] = json!("busy");
+            } else if let Some(repo) = resolved.or_else(|| self.panel_repo(args).ok())
+                && let Ok(dashboard) = self.panel_snapshot_projection(&repo, meta)
+            {
+                let encoded = dashboard.to_string();
+                if encoded.len() > crate::OUTPUT_LIMIT {
+                    result["snapshotOmitted"] = json!("size");
+                } else if crate::output::outbound(encoded.as_bytes(), &Value::Null).is_ok() {
+                    result["dashboard"] = dashboard;
+                }
             }
             return Ok(result);
         }
@@ -3519,6 +3570,14 @@ impl Server<'_> {
     }
 
     pub(super) fn panel_snapshot(&self, repo: &Path, meta: &Value) -> PanelResult<Value> {
+        let dashboard = self.panel_snapshot_projection(repo, meta)?;
+        if dashboard.to_string().len() > crate::OUTPUT_LIMIT {
+            return Err("OMS panel snapshot exceeds its output limit.".into());
+        }
+        Ok(dashboard)
+    }
+
+    fn panel_snapshot_projection(&self, repo: &Path, meta: &Value) -> PanelResult<Value> {
         let mut argv = vec![
             "dashboard".into(),
             "--repo".into(),
@@ -3577,9 +3636,6 @@ impl Server<'_> {
                 }
                 dashboard["observation"]["revision"] = Value::Null;
             }
-        }
-        if dashboard.to_string().len() > crate::OUTPUT_LIMIT {
-            return Err("OMS panel snapshot exceeds its output limit.".into());
         }
         Ok(dashboard)
     }
