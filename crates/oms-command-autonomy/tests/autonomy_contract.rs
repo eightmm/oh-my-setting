@@ -184,6 +184,7 @@ fn owns_help_and_parse_errors_for_every_command() {
 
 struct FeedbackMock {
     mode: &'static str,
+    state_override: Option<PathBuf>,
     reads: std::sync::atomic::AtomicUsize,
     rechecks: std::sync::atomic::AtomicUsize,
     sends: std::sync::atomic::AtomicUsize,
@@ -193,6 +194,7 @@ impl FeedbackMock {
     fn new(mode: &'static str) -> Self {
         Self {
             mode,
+            state_override: None,
             reads: 0.into(),
             rechecks: 0.into(),
             sends: 0.into(),
@@ -337,12 +339,45 @@ fn plan_run_refuses_missing_brief_before_provider() {
 }
 impl oms_command_plan::Services for FeedbackMock {}
 impl Services for FeedbackMock {
+    fn validate_context_pack(
+        &self,
+        repo: &Path,
+        path: &Path,
+        _: &AtomicBool,
+    ) -> oms_command_autonomy::Result<serde_json::Value> {
+        let bytes =
+            fs::read(path).map_err(|e| oms_command_autonomy::Error::new(2, e.to_string()))?;
+        let excerpt = oms_command_plan::reviewed_context::from_pack(&bytes)?;
+        if let Some(excerpt) = &excerpt {
+            excerpt.check_project(repo)?;
+        }
+        let mut value = value::parse(&bytes)?;
+        value["sha256"] = json!(value::hash(&bytes));
+        let n = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if (self.mode == "lead-context-preclaim" && n == 0)
+            || (self.mode == "lead-context-dispatch" && n == 1)
+        {
+            let mut changed = bytes;
+            changed.push(b'\n');
+            fs::write(path, changed).unwrap();
+        }
+        if self.mode == "lead-context-answer-dispatch" && n == 1 {
+            write_private(
+                &repo.join(".oms/artifacts/mcp/ask-fixture/answers/fixture.md"),
+                b"## Output\nchanged answer after claim\n## Exit\n0\n",
+            );
+        }
+        Ok(value)
+    }
     fn state_repository(
         &self,
         work: &Path,
         _: &AtomicBool,
     ) -> oms_command_autonomy::Result<PathBuf> {
-        Ok(work.to_owned())
+        Ok(self
+            .state_override
+            .clone()
+            .unwrap_or_else(|| work.to_owned()))
     }
     fn resolve_route(
         &self,
@@ -352,7 +387,12 @@ impl Services for FeedbackMock {
         _: &AtomicBool,
     ) -> oms_command_autonomy::Result<oms_command_autonomy::ModelRoute> {
         Ok(oms_command_autonomy::ModelRoute {
-            provider: "codex".into(),
+            provider: if self.mode.starts_with("lead-context") {
+                "claude"
+            } else {
+                "codex"
+            }
+            .into(),
             model_class: "explicit".into(),
             primary: "fixture-model".into(),
             fallback: String::new(),
@@ -474,6 +514,24 @@ impl Services for FeedbackMock {
                 assert!(!args.iter().any(|arg| arg == "--repair"));
                 let binding =
                     serde_json::from_str::<serde_json::Value>(&arg("--plan-binding")).unwrap();
+                if self.mode.starts_with("lead-context") {
+                    assert_eq!(arg("--to"), "claude");
+                    let raw = fs::read(arg("--context-pack")).unwrap();
+                    assert_eq!(value::hash(&raw), arg("--expected-context-pack-sha256"));
+                    let state = self.state_override.as_deref().unwrap_or(&call.cwd);
+                    let issued =
+                        self.plan(state, &["evidence-snapshot", "--id", &arg("--plan-task")]);
+                    assert_eq!(binding["task_sha256"], issued["task_sha256"]);
+                    oms_command_plan::reviewed_context::from_pack(&raw)
+                        .unwrap()
+                        .unwrap()
+                        .check_task(state, &value::plan(&issued).unwrap(), "claude", false)
+                        .unwrap();
+                    return Err(oms_command_autonomy::Error::new(
+                        2,
+                        "fixture stops before provider execution",
+                    ));
+                }
                 if self.mode.starts_with("unknown-after-start") {
                     let issued = self.plan(
                         &call.cwd,
@@ -592,6 +650,175 @@ impl Services for FeedbackMock {
                 Ok((1, vec![], b"fixture admission hold".to_vec()))
             }
             other => panic!("unexpected command: {other}"),
+        }
+    }
+}
+
+fn write_lead_answer_fixture(state: &Path, provider: &str, answer: &str) {
+    let canonical = if provider == "agy" {
+        "antigravity"
+    } else {
+        provider
+    };
+    let scope = "1".repeat(64);
+    let binding = "2".repeat(64);
+    let prompt_sha = "3".repeat(64);
+    let thread = "ask-thread-fixture";
+    let op = "ask-fixture";
+    write_private(
+        &state.join(format!(".oms/artifacts/mcp/{thread}/status")),
+        b"0\n",
+    );
+    write_private(
+        &state.join(format!(".oms/artifacts/mcp/{thread}/meta.json")),
+        json!({"operation":thread,"thread":thread,"kind":"ask","answer_storage":"operation","targets":[canonical],"panel_assignment":scope})
+            .to_string()
+            .as_bytes(),
+    );
+    write_private(
+        &state.join(format!(
+            ".oms/artifacts/mcp/{thread}/lead-turn-turn-fixture.json"
+        )),
+        json!({"id":"turn-fixture","scope":scope,"binding":binding,"digest":prompt_sha})
+            .to_string()
+            .as_bytes(),
+    );
+    write_private(
+        &state.join(format!(".oms/artifacts/mcp/{op}/status")),
+        b"0\n",
+    );
+    write_private(
+        &state.join(format!(".oms/artifacts/mcp/{op}/meta.json")),
+        json!({"operation":op,"thread":thread,"kind":"ask","answer_storage":"operation","lead_followup":true,"targets":[canonical],"panel_assignment":binding,"prompt_sha256":prompt_sha})
+            .to_string()
+            .as_bytes(),
+    );
+    let rel = format!(".oms/artifacts/mcp/{op}/answers/fixture.md");
+    write_private(
+        &state.join(format!(".oms/artifacts/mcp/{op}/run.log")),
+        format!("{rel}\n").as_bytes(),
+    );
+    write_private(
+        &state.join(&rel),
+        format!("## Output\n{answer}\n## Exit\n0\n").as_bytes(),
+    );
+}
+
+#[test]
+fn reviewed_lead_context_is_pinned_before_claim_and_again_before_dispatch() {
+    const NAME: &str = "reviewed_lead_context_is_pinned_before_claim_and_again_before_dispatch";
+    if std::env::var("OMS_REVIEWED_CONTEXT_TEST").as_deref() != Ok("1") {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        for (key, _) in std::env::vars_os().filter(|(k, _)| ambient(k)) {
+            command.env_remove(key);
+        }
+        let result = command
+            .args(["--exact", NAME, "--nocapture"])
+            .env("OMS_REVIEWED_CONTEXT_TEST", "1")
+            .env("OMS_ROOM_ID", "lead-room")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    for mode in [
+        "lead-context",
+        "lead-context-preclaim",
+        "lead-context-dispatch",
+        "lead-context-answer-preclaim",
+        "lead-context-answer-dispatch",
+        "lead-context-split-state",
+    ] {
+        let mut mock = FeedbackMock::new(mode);
+        let work = mock.fixture();
+        let separate_state = (mode == "lead-context-split-state").then(|| mock.fixture());
+        let state_root = separate_state
+            .as_ref()
+            .map_or_else(|| work.0.clone(), |s| s.0.clone());
+        if separate_state.is_some() {
+            mock.state_override = Some(state_root.clone());
+        }
+        mock.plan(
+            &state_root,
+            &[
+                "add",
+                "--id",
+                "fresh",
+                "--title",
+                "Frozen worker",
+                "--allowed",
+                "src",
+                "--verify",
+                "true",
+                "--assignment",
+                r#"{"provider":"claude","model":"fixture-model"}"#,
+            ],
+        );
+        let ready = mock.plan(&state_root, &["evidence-snapshot", "--id", "fresh"]);
+        let body = "A selected Lead finding about src.";
+        write_lead_answer_fixture(&state_root, "claude", body);
+        let findings = json!({"schema":1,"kind":"reviewed-lead-answer","authority":"context-only",
+            "source":{"project_key":oms_command_plan::reviewed_context::project_key(&state_root).unwrap(),"room":"lead-room","participant":"ask-lead-fixture","provider":"claude","lead_request_id":"lead-fixture","turn_id":"turn-fixture","operation":"ask-fixture","answer_sha256":value::hash(body),"page_offset":0,"page_bytes":body.len(),"page_cursor_sha256":value::hash(""),"answer_bytes":body.len()},
+            "selection":{"text":body,"offset":0,"bytes":body.len(),"sha256":value::hash(body)},
+            "target":{"task_id":"fresh","task_sha256":ready["task_sha256"],"contract_sha256":oms_command_plan::reviewed_context::task_contract(&value::plan(&ready).unwrap()).unwrap(),"provider":"claude"}});
+        let digest = oms_command_plan::json::hash(&value::plan(&findings).unwrap()).unwrap();
+        let pack =
+            serde_json::to_vec(&json!({"pack_digest":digest,"files":[],"lead_findings":findings}))
+                .unwrap();
+        work.write(".oms/reviewed-context.json", &pack);
+        if mode == "lead-context-answer-preclaim" {
+            write_lead_answer_fixture(&state_root, "claude", "Lead answer changed after prepare.");
+        }
+        let prior = fs::read(state_root.join(".oms/plan/tasks.json")).unwrap();
+        let args = [
+            "--to",
+            "claude",
+            "--id",
+            "fresh",
+            "--expected-task-sha256",
+            ready["task_sha256"].as_str().unwrap(),
+            "--context-pack",
+            ".oms/reviewed-context.json",
+            "--expected-context-pack-sha256",
+            &value::hash(&pack),
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+        let result = run_with_services("plan-run", &args, &work.0, &AtomicBool::new(false), &mock);
+        assert_ne!(result.0, 0, "{mode}");
+        assert_eq!(
+            FeedbackMock::count(&mock.sends),
+            usize::from(matches!(mode, "lead-context" | "lead-context-split-state")),
+            "{mode}: {result:?}"
+        );
+        if matches!(
+            mode,
+            "lead-context-answer-preclaim" | "lead-context-answer-dispatch"
+        ) {
+            assert!(
+                String::from_utf8_lossy(&result.2).contains("unavailable or changed"),
+                "{mode}: {}",
+                String::from_utf8_lossy(&result.2)
+            );
+        }
+        let current = mock.plan(&state_root, &["evidence-snapshot", "--id", "fresh"]);
+        assert_eq!(current["state"], "ready", "{mode}: {result:?}");
+        if matches!(
+            mode,
+            "lead-context-preclaim" | "lead-context-answer-preclaim"
+        ) {
+            assert_eq!(
+                fs::read(state_root.join(".oms/plan/tasks.json")).unwrap(),
+                prior
+            );
+        } else {
+            assert_eq!(current["lease_id"], "");
         }
     }
 }
@@ -1963,6 +2190,7 @@ struct Planner {
     answer: std::sync::Mutex<String>,
     calls: std::sync::atomic::AtomicUsize,
     issue_reads: std::sync::atomic::AtomicUsize,
+    acceptance_checks: std::sync::atomic::AtomicUsize,
 }
 impl oms_command_plan::Services for Planner {
     fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
@@ -1982,6 +2210,8 @@ impl oms_command_plan::Services for Planner {
         &self,
         _: &oms_command_plan::services::SupervisedCommand,
     ) -> oms_command_plan::Result<oms_command_plan::services::Execution> {
+        self.acceptance_checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(oms_command_plan::services::Execution {
             exit: 1,
             runner_exit: 1,
@@ -2158,6 +2388,7 @@ impl Repo {
             answer: std::sync::Mutex::new(answer.into()),
             calls: 0.into(),
             issue_reads: 0.into(),
+            acceptance_checks: 0.into(),
         }
     }
 }
@@ -2621,6 +2852,193 @@ fn github_issue_intake_is_stamped_only_by_the_harness() {
             "{owner}"
         );
         assert_eq!(out.contains(pending), carried.is_none(), "{out}");
+    }
+}
+
+#[test]
+fn intent_amendment_replays_exact_publication_across_contract_replacement() {
+    if scrubbed_child("intent_amendment_replays_exact_publication_across_contract_replacement") {
+        return;
+    }
+    use std::sync::atomic::Ordering::SeqCst;
+    let previous = "# Project\n## Status\n- State: confirmed\n## Project\n- Goal: recover old contract\n- Scope: src\n- Non-goals: none\n## Commands\n- Check: bash tests/check.sh\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh\n## Acceptance\n- Original requirement [id:changed]\n- Removed requirement [id:removed]\n";
+    let candidate = previous
+        .replace("- State: confirmed", "- State: draft")
+        .replace("recover old contract", "recover amended contract")
+        .replace("Original requirement", "Amended requirement")
+        .replace(
+            "Removed requirement [id:removed]",
+            "New requirement [id:added]",
+        );
+    let staged = candidate.replace("- State: draft", "- State: confirmed");
+    let expected = value::hash(previous);
+    let reason = "Reviewed contract amendment";
+    // Exercise the original lost-reply boundary before the stricter refusals.
+    for (phase, conflicts) in [
+        ("before-replacement", false),
+        ("before-replacement", true),
+        ("after-replacement", true),
+        ("fresh", false),
+    ] {
+        let repo = Repo::github(ORIGIN, Some(previous));
+        let planner = repo.planner(ANSWER);
+        let (code, out, err) = intake("intent", &repo, &planner, &["amend", "--reason", reason]);
+        assert_eq!(code, 0, "{phase}: {err}");
+        let id = out
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("intent: amendment draft ")
+            .unwrap()
+            .split_once(';')
+            .unwrap()
+            .0;
+        let candidate_path = format!(".oms/intents/{id}.md");
+        let binding_path = format!(".oms/intents/{id}.amend.json");
+        let pending_path = format!(".oms/intents/{id}.publish.json");
+        let archive_path = format!(".oms/intents/archive/{expected}.md");
+        let ledger_path = ".oms/intents/amendments.jsonl";
+        repo.write(&candidate_path, &candidate);
+        let changes = oms_command_autonomy::intent::delta(
+            &contract::parse(previous.as_bytes(), &repo.0).unwrap(),
+            &contract::parse(candidate.as_bytes(), &repo.0).unwrap(),
+        );
+        for field in ["sections", "added", "modified", "removed"] {
+            assert!(!changes[field].as_array().unwrap().is_empty());
+        }
+        let receipt = json!({"schema": 1, "kind": "intent-amendment-receipt", "id": id,
+            "ts": "2000-01-01T00:00:00Z", "reason": reason, "previous_sha256": expected,
+            "project_sha256": value::hash(&staged), "archive": format!("archive/{expected}.md"),
+            "sections": changes["sections"], "added": changes["added"],
+            "modified": changes["modified"], "removed": changes["removed"]});
+        // Retained bytes need not use the current writer's whitespace.
+        let pending = serde_json::to_vec(&receipt).unwrap();
+        let run = || {
+            intake(
+                "intent",
+                &repo,
+                &planner,
+                &["adopt", "--id", id, "--expected-project-sha256", &expected],
+            )
+        };
+        let snapshot = || {
+            [
+                "PROJECT.md",
+                &candidate_path,
+                &binding_path,
+                &pending_path,
+                &archive_path,
+                ledger_path,
+            ]
+            .map(|path| fs::read(repo.0.join(path)).ok())
+        };
+        let refused = |case: &str| {
+            let before = snapshot();
+            let (code, _, err) = run();
+            assert_eq!(code, 2, "{phase}/{case}: {err}");
+            assert_eq!(snapshot(), before, "{phase}/{case} changed state");
+            err
+        };
+        if phase != "fresh" {
+            repo.write(&archive_path, previous);
+            repo.write(&pending_path, &pending);
+            if phase == "after-replacement" {
+                repo.write("PROJECT.md", &staged);
+            }
+        }
+        if conflicts {
+            for field in [
+                "schema",
+                "kind",
+                "id",
+                "ts",
+                "reason",
+                "previous_sha256",
+                "project_sha256",
+                "archive",
+                "sections",
+                "added",
+                "modified",
+                "removed",
+                "extra",
+            ] {
+                let mut conflicting = receipt.clone();
+                conflicting[field] = match field {
+                    "schema" => 2.into(),
+                    "sections" | "added" | "modified" | "removed" => json!([]),
+                    _ => "different".into(),
+                };
+                repo.write(&pending_path, value::pretty(&conflicting).unwrap());
+                refused(field);
+            }
+            repo.write(&pending_path, b"{");
+            refused("corrupt receipt");
+            repo.write(&pending_path, &pending);
+            repo.write(&archive_path, b"changed predecessor");
+            refused("changed archive");
+            fs::remove_file(repo.0.join(&archive_path)).unwrap();
+            refused("missing archive");
+            repo.write(&archive_path, previous);
+            repo.write(
+                &candidate_path,
+                candidate.replace("New requirement", "Different requirement"),
+            );
+            refused("changed candidate");
+            repo.write(&candidate_path, &candidate);
+            let binding = json_file(repo.0.join(&binding_path));
+            for field in ["id", "base_project_sha256", "reason"] {
+                let mut conflicting = binding.clone();
+                conflicting[field] = "different".into();
+                repo.write(&binding_path, value::pretty(&conflicting).unwrap());
+                refused("changed amendment binding");
+            }
+            repo.write(&binding_path, value::pretty(&binding).unwrap());
+            let mut conflicting = receipt.clone();
+            conflicting["reason"] = "different".into();
+            let mut row = serde_json::to_vec(&conflicting).unwrap();
+            row.push(b'\n');
+            repo.write(ledger_path, row);
+            assert!(
+                refused("conflicting final receipt")
+                    .contains("conflicting amendment publication receipt")
+            );
+            fs::remove_file(repo.0.join(ledger_path)).unwrap();
+        }
+        let checks = planner.acceptance_checks.load(SeqCst);
+        let (code, _, err) = run();
+        assert_eq!(code, 0, "{phase}: {err}");
+        assert_eq!(
+            planner.acceptance_checks.load(SeqCst) - checks,
+            usize::from(phase != "after-replacement"),
+            "only a pending contract replacement reruns supervised acceptance"
+        );
+        assert_eq!(
+            fs::read(repo.0.join("PROJECT.md")).unwrap(),
+            staged.as_bytes()
+        );
+        assert_eq!(
+            fs::read(repo.0.join(&archive_path)).unwrap(),
+            previous.as_bytes()
+        );
+        if phase != "fresh" {
+            assert_eq!(fs::read(repo.0.join(&pending_path)).unwrap(), pending);
+        }
+        let receipt = json_file(repo.0.join(&pending_path));
+        let ledger = fs::read_to_string(repo.0.join(ledger_path)).unwrap();
+        assert_eq!(ledger.lines().count(), 1);
+        assert_eq!(value::parse(ledger.trim().as_bytes()).unwrap(), receipt);
+        let completed = snapshot();
+        let checks = planner.acceptance_checks.load(SeqCst);
+        for _ in 0..2 {
+            let (code, _, err) = run();
+            assert_eq!(code, 0, "{phase} replay: {err}");
+            assert_eq!(snapshot(), completed, "exact replay changed state");
+            assert_eq!(planner.acceptance_checks.load(SeqCst), checks);
+        }
+        repo.write("PROJECT.md", previous);
+        refused("completed receipt cannot reapply after a later contract reversal");
+        assert_eq!(planner.calls.load(SeqCst), 0);
+        assert_eq!(planner.issue_reads.load(SeqCst), 0);
     }
 }
 
