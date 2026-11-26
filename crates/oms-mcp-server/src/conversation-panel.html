@@ -128,7 +128,21 @@ label,legend{font-size:.86rem} .field{display:block;margin:.85rem 0 .25rem}
 #start{background-color:var(--ink);color:var(--bg);margin-top:.9rem}
 #conversation[open]{display:flex;flex-direction:column;width:min(46rem,calc(100% - 1.5rem));max-width:none;height:min(44rem,88dvh);padding:0;overflow:hidden}
 #conversation>.section-head{padding:.7rem 1rem;border-bottom:1px solid var(--line)}
-#conversation>.section-head .identity{margin:0}
+#conversation>.section-head .identity{margin:0;min-width:0}
+#conversation .tools{flex:none}
+#settings-toggle[aria-expanded="true"]{border-color:var(--soft)}
+#chat-settings{border-bottom:1px solid var(--line);padding:.65rem 1rem;overflow:auto;max-height:43dvh;flex:none}
+#settings-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(6rem,.65fr);gap:.5rem .7rem;margin-block:.5rem}
+#settings-fields label{font-weight:600}
+#settings-fields select{display:block;width:100%;margin-top:.2rem;text-overflow:ellipsis}
+#settings-saved,#settings-actual,#settings-hint,#settings-status{overflow-wrap:anywhere}
+#settings-controls{display:flex;align-items:center;gap:.6rem;justify-content:flex-end}
+#settings-status{margin-inline-end:auto}
+@media(max-width:24rem){
+  #conversation>.section-head{gap:.35rem;padding-inline:.65rem}
+  #conversation>.section-head button{padding-inline:.4rem}
+  #settings-fields{grid-template-columns:minmax(0,1fr)}
+}
 #chat-status:not(:empty){padding:0 1rem}
 #chat-scroll{flex:1;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;padding:.7rem 1rem;scrollbar-gutter:stable}
 #chat-messages{list-style:none;padding:0;margin:0}
@@ -175,7 +189,13 @@ label,legend{font-size:.86rem} .field{display:block;margin:.85rem 0 .25rem}
 <dialog id="worker-output" aria-labelledby="output-title"><div class="section-head"><h2 id="output-title" data-i18n="out.title">워커 출력</h2><button id="output-close" type="button" data-i18n="close">닫기</button></div>
 <p id="output-worker"></p><p id="output-status" class="note" role="status"></p><pre id="output-body" hidden></pre><p id="output-limited" class="note" data-i18n="out.limited" hidden>기록된 출력의 일부입니다.</p>
 <button id="output-refresh" type="button" data-i18n="refresh">새로고침</button></dialog>
-<dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><div class="identity"><span id="chat-avatar" class="avatar" aria-hidden="true" hidden></span><h2 id="chat-title"></h2></div><button id="chat-back" type="button" data-i18n="close">닫기</button></div>
+<dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><div class="identity"><span id="chat-avatar" class="avatar" aria-hidden="true" hidden></span><h2 id="chat-title"></h2></div><div class="tools"><button id="settings-toggle" type="button" aria-controls="chat-settings" aria-expanded="false" data-i18n="prefs.title" hidden>대화 설정</button><button id="chat-back" type="button" data-i18n="close">닫기</button></div></div>
+<section id="chat-settings" tabindex="-1" aria-labelledby="settings-toggle" hidden>
+<p id="settings-saved"></p><p id="settings-actual" class="note" data-i18n="prefs.actual" hidden>최근 답변의 실제 모델은 보고되지 않았습니다.</p>
+<fieldset id="settings-fields" hidden><legend class="sr-only" data-i18n="prefs.next">다음 메시지 설정</legend>
+<label><span data-i18n="prefs.model">모델</span><select id="settings-model"></select></label>
+<label><span data-i18n="prefs.effort">추론 강도</span><select id="settings-effort"></select></label></fieldset>
+<p id="settings-hint" class="note"></p><div id="settings-controls"><p id="settings-status" class="note" role="status"></p><button id="settings-read" type="button" data-i18n="refresh" hidden>새로고침</button><button id="settings-save" type="button" data-i18n="prefs.save" hidden>저장</button></div></section>
 <p id="chat-status" class="note" role="status"></p><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-result"></p></div>
 <form id="chat-compose" hidden><label for="chat-text" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000"></textarea>
 <div class="actions"><span id="chat-delivery" role="status"></span><button id="chat-check" type="button" hidden></button><button id="chat-send" type="submit" data-i18n="chatSend">보내기</button></div></form></dialog>
@@ -238,6 +258,26 @@ const messages = {
   "out.not_recorded": ["이 실행에 기록된 출력이 없습니다.", "No output was recorded for this run."],
   "out.unavailable": ["이 워커의 출력을 확인할 수 없습니다.", "Output for this worker could not be verified."],
   "out.limited": ["기록된 출력의 일부입니다.", "Showing part of the recorded output."],
+  "prefs.title": ["대화 설정", "Chat settings"],
+  "prefs.model": ["모델", "Model"],
+  "prefs.effort": ["추론 강도", "Reasoning effort"],
+  "prefs.next": ["다음 메시지 설정", "Settings for the next message"],
+  "prefs.actual": ["최근 답변의 실제 모델은 보고되지 않았습니다.", "The model that produced the last reply was not reported."],
+  "prefs.saved": ["다음 메시지의 저장된 설정 · {v}", "Saved for the next message · {v}"],
+  "prefs.default": ["OMS 기본 라우팅", "OMS routing default"],
+  "prefs.modelDefault": ["모델 기본값", "Model default"],
+  "prefs.choose": ["강도 선택", "Choose an effort"],
+  "prefs.fixed": ["모델에서 고정", "Fixed by model"],
+  "prefs.unknown": ["설정 가능한 추론 강도를 확인할 수 없습니다.", "Available reasoning levels were not reported."],
+  "prefs.catalog": ["공급자 카탈로그에 있는 옵션입니다.", "Listed in the provider catalog."],
+  "prefs.policy": ["OMS 정책에 정의된 모델 별칭입니다.", "Model alias from OMS policy."],
+  "prefs.save": ["저장", "Save"],
+  "prefs.loading": ["설정 확인 중…", "Reading settings…"],
+  "prefs.saving": ["저장 중…", "Saving…"],
+  "prefs.done": ["저장했습니다.", "Settings saved."],
+  "prefs.confirmed": ["저장된 값이 요청과 일치합니다.", "The saved values match your request."],
+  "prefs.conflict": ["변경을 확인하지 못해 현재 저장된 값을 다시 불러왔습니다.", "The change was not confirmed. The current saved values are shown."],
+  "prefs.failed": ["이 Lead의 설정을 확인할 수 없습니다.", "Settings for this Lead could not be verified."],
   "currentMain": ["현재 대화", "Current conversation"],
   "emptyChat": ["아직 기록된 메시지가 없습니다.", "No messages recorded yet."],
   "goalLabel": ["프로젝트 목표", "Project goal"],
@@ -734,6 +774,7 @@ function attemptMember(row) {
 }
 
 function clearChat() {
+  clearSettings();el('settings-toggle').hidden=true;
   clearTimeout(managedChat?.timer);selectedChat=undefined;managedChat=undefined;chatCursor=null;chatPage++;
   el('chat-compose').hidden=true;el('chat-avatar').hidden=true;el('chat-text').value='';el('chat-delivery').textContent='';
   el('chat-messages').replaceChildren();el('chat-result').textContent='';
@@ -1062,6 +1103,118 @@ function currentManaged(c){
   return c && c===managedChat && currentLeadControl(c.ctl) && el('conversation').open &&
     c.ctl.items.get(c.provider)?.requestId===c.requestId && c.ctl.items.get(c.provider)?.status==='ready';
 }
+function clearSettings(){
+  if(managedChat)managedChat.settings=null;
+  el('settings-toggle').setAttribute('aria-expanded','false');
+  el('chat-settings').hidden=true;
+  for(const id of ['settings-saved','settings-hint','settings-status']){
+    const e=el(id);bindings.delete(e);e.textContent='';
+  }
+  for(const id of ['settings-model','settings-effort'])el(id).replaceChildren();
+  for(const id of ['settings-fields','settings-actual','settings-save','settings-read'])el(id).hidden=true;
+}
+function settingsScope(c){return {projectKey:c.ctl.projectKey,room:c.ctl.room,provider:c.provider,leadRequestId:c.requestId};}
+function confirmedSettings(c,response){
+  const meta=response._meta?.leadSettings, data=response.structuredContent, scope=settingsScope(c);
+  const token=v=>typeof v==='string' && v.length>0 && v.length<=256 && !/\p{Cc}/u.test(v);
+  if(!meta || !data || Object.keys(scope).some(key=>meta[key]!==scope[key] || data[key]!==scope[key]) ||
+    !/^[a-f0-9]{64}$/.test(meta.revision) || meta.revision!==data.revision || !meta.selection ||
+    !(meta.selection.model===null || token(meta.selection.model)) || !(meta.selection.effort===null || token(meta.selection.effort)) ||
+    !meta.selection.model && meta.selection.effort || !Array.isArray(meta.options) ||
+    !meta.options.every(o=>o && token(o.model) && ['catalog','policy'].includes(o.source) && typeof o.fixed==='boolean' &&
+      typeof o.requiresEffort==='boolean' && Array.isArray(o.efforts) && o.efforts.every(token)) ||
+    new Set(meta.options.map(o=>o.model)).size!==meta.options.length)throw uiError('prefs.failed');
+  return meta;
+}
+function settingsOption(select,value,label,disabled=false){
+  const option=new Option('',value);put(option,label);option.disabled=disabled;select.add(option);
+}
+function effortChoices(c,value=''){
+  const select=el('settings-effort'), model=el('settings-model').value, o=c.settings.data.options.find(r=>r.model===model);
+  select.replaceChildren();
+  settingsOption(select,'',message(o?.fixed?'prefs.fixed':o?.requiresEffort?'prefs.choose':'prefs.modelDefault'),Boolean(o?.requiresEffort));
+  for(const level of o?.efforts || [])settingsOption(select,level,()=>level);
+  if(value && !o?.efforts.includes(value))settingsOption(select,value,()=>value,true);
+  select.value=value;select.disabled=!o || o.fixed || !o.efforts.length;
+  put('settings-hint',()=>o?t(!o.fixed && !o.efforts.length?'prefs.unknown':'prefs.'+o.source):'');
+}
+function showSettings(c,data){
+  c.settings.data=data;
+  const select=el('settings-model'), {model,effort}=data.selection;
+  select.replaceChildren();settingsOption(select,'',message('prefs.default'));
+  for(const o of data.options)settingsOption(select,o.model,()=>o.model);
+  if(model && !data.options.some(o=>o.model===model))settingsOption(select,model,()=>model,true);
+  select.value=model || '';select.disabled=!model && !data.options.length;effortChoices(c,effort || '');
+  const fixed=data.options.find(o=>o.model===model)?.fixed;
+  put('settings-saved',()=>t('prefs.saved',{v:model?model+' · '+(effort || t(fixed?'prefs.fixed':'prefs.modelDefault')):t('prefs.default')}));
+}
+function paintSettings(c){
+  const p=c.settings;if(!p)return;
+  const data=p.data, model=el('settings-model').value || null, effort=el('settings-effort').value || null;
+  const option=data?.options.find(o=>o.model===model);
+  const allowed=model===null?!effort:option && (effort? !option.fixed && option.efforts.includes(effort):!option.requiresEffort);
+  const changed=data && (model!==data.selection.model || effort!==data.selection.effort);
+  el('settings-fields').hidden=el('settings-actual').hidden=el('settings-save').hidden=!data;
+  el('settings-fields').disabled=p.busy || c.session.settingsSaving;
+  el('settings-save').disabled=!changed || !allowed || p.busy || c.session.settingsSaving || c.session.writing || !c.verified;
+  el('settings-read').hidden=!!data || !!p.busy || c.session.settingsSaving;
+  put('settings-status',()=>p.status?t(p.status):'');
+}
+async function loadSettings(c,p){
+  if(!currentManaged(c) || c.settings!==p || p.busy || c.session.settingsSaving)return;
+  p.busy=true;p.status='prefs.loading';paintSettings(c);
+  try{
+    const result=await tool('oms_lead_settings',settingsScope(c),c.ctl.generation);
+    if(currentManaged(c) && c.settings===p){showSettings(c,confirmedSettings(c,result));p.status='';}
+  }catch{if(currentManaged(c) && c.settings===p)p.status='prefs.failed';}
+  finally{if(currentManaged(c) && c.settings===p){p.busy=false;paintSettings(c);}}
+}
+async function saveSettings(){
+  const c=managedChat,p=c?.settings;
+  if(!currentManaged(c) || !p?.data || el('settings-save').disabled)return;
+  const s=c.session,model=el('settings-model').value || null,effort=el('settings-effort').value || null;
+  const args={...settingsScope(c),revision:p.data.revision,model,effort};
+  const active=()=>currentManaged(c) && c.settings===p;
+  const matches=data=>data.revision!==args.revision && data.selection.model===model && data.selection.effort===effort;
+  s.settingsSaving=true;p.status='prefs.saving';paintComposer(c);
+  try{
+    const result=await tool('oms_update_lead_settings',args,c.ctl.generation);
+    if(!active())return;
+    const data=confirmedSettings(c,result);
+    if(!matches(data))throw uiError('prefs.conflict');
+    showSettings(c,data);p.status='prefs.done';
+  }catch{
+    if(!active())return;
+    try{
+      const result=await tool('oms_lead_settings',settingsScope(c),c.ctl.generation);
+      if(!active())return;
+      const data=confirmedSettings(c,result);showSettings(c,data);p.status=matches(data)?'prefs.confirmed':'prefs.conflict';
+    }catch{if(active()){p.data=null;p.status='prefs.failed';put('settings-saved',()=>'');put('settings-hint',()=>'');}}
+  }finally{
+    s.settingsSaving=false;
+    const current=managedChat;
+    if(currentManaged(current) && current.session===s){
+      paintComposer(current);
+      if(current.settings && current.settings!==p)loadSettings(current,current.settings);
+    }
+  }
+}
+function closeSettings(){
+  clearSettings();el('settings-toggle').focus();
+}
+onClick('settings-toggle',()=>{
+  const c=managedChat;if(!currentManaged(c))return;
+  if(c.settings){closeSettings();return;}
+  if(!c.verified)return;
+  const p={status:c.session.settingsSaving?'prefs.saving':'prefs.loading'};c.settings=p;
+  el('settings-toggle').setAttribute('aria-expanded','true');el('chat-settings').hidden=false;el('chat-settings').focus();
+  paintSettings(c);loadSettings(c,p);
+});
+on('conversation','cancel',e=>{if(managedChat?.settings){e.preventDefault();closeSettings();}});
+on('settings-model','change',()=>{const c=managedChat;if(currentManaged(c) && c.settings?.data){effortChoices(c);c.settings.status='';paintSettings(c);}});
+on('settings-effort','change',()=>{const c=managedChat;if(currentManaged(c) && c.settings?.data){c.settings.status='';paintSettings(c);}});
+onClick('settings-save',saveSettings);
+onClick('settings-read',()=>{const c=managedChat;if(currentManaged(c) && c.settings)loadSettings(c,c.settings);});
 function validText(text){
   return typeof text==='string' && text.trim().length>0 && !/\p{Cc}/u.test(text.replace(/[\n\t]/g,'')) && new TextEncoder().encode(text).length<=4000;
 }
@@ -1069,7 +1222,9 @@ function paintComposer(c){
   if(!currentManaged(c))return;
   const s=c.session,p=s.pending;
   el('chat-compose').hidden=!c.verified && !p && !c.failed;
-  el('chat-send').disabled=!c.verified || c.reading || s.writing || !!p || !!c.previous || !validText(s.draft);
+  el('settings-toggle').hidden=!c.verified && !c.settings;
+  if(c.settings)paintSettings(c);
+  el('chat-send').disabled=!c.verified || c.reading || s.settingsSaving || s.writing || !!p || !!c.previous || !validText(s.draft);
   const state=s.writing?'sending':c.previous?'previous':p?.status || s.outcome;
   put('chat-delivery',()=>state?t('turn.'+state):s.draft && !validText(s.draft)?t('turn.limit'):'');
   const check=el('chat-check');check.hidden=!p && !c.failed && !c.previous || s.writing;check.disabled=c.reading;
@@ -1157,7 +1312,7 @@ async function readManaged(c,before=null){
   }
 }
 async function sendManaged(c,retry=false){
-  if(!currentManaged(c) || !c.verified || c.reading || c.session.writing || c.previous)return;
+  if(!currentManaged(c) || !c.verified || c.reading || c.session.settingsSaving || c.session.writing || c.previous)return;
   const s=c.session;
   if(retry ? s.pending?.status!=='not_found' : !!s.pending || !validText(s.draft))return;
   const p=retry?s.pending:{id:crypto.randomUUID(),text:s.draft,status:'unconfirmed'};

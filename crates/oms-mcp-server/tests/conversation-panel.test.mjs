@@ -106,7 +106,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
-        if(params.name==='oms_worker_output')result=value;
+        if(['oms_worker_output','oms_lead_settings','oms_update_lead_settings'].includes(params.name))result=value;
         else result = params.name==='oms_lead_conversation_status' && value._private ? {_meta:{leadConversation:value._private},structuredContent:{projectKey:value.projectKey,room:value.room,leads:value.leads,turn:value.turn}} : params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
       }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
@@ -610,6 +610,67 @@ test('managed Lead composes privately, keeps scoped drafts and reconciles a lost
   await p.open('input',{arguments:{project:'two'}});
   assert.equal(p.get('chat-text').value,'');assert.equal(p.get('chat-messages').textContent,'');
   assert.ok(!p.get('conversation').open);
+});
+
+test('Lead settings are private and lazy, with model-specific effort and explicit revision-checked saves',async()=>{
+  const read='oms_lead_settings',write='oms_update_lead_settings';
+  let revision='1'.repeat(64),selection={model:null,effort:null},lost=false,conflict=false;
+  const options=[{model:'configurable',source:'catalog',fixed:false,requiresEffort:false,efforts:['low','high']},
+    {model:'select-level',source:'catalog',fixed:false,requiresEffort:true,efforts:['standard','deep']},
+    {model:'fixed',source:'policy',fixed:true,requiresEffort:false,efforts:[]}];
+  const response=args=>{
+    const {project,...scope}=args;
+    const data={projectKey:scope.projectKey,provider:scope.provider,room:scope.room,leadRequestId:scope.leadRequestId,revision};
+    return {structuredContent:data,_meta:{leadSettings:{...data,options,selection,lastServed:null,nativeTitle:null}}};
+  };
+  const p=await panel(['one'],dashboard,{locale:'en',tools:{
+    [managedRead]:a=>{const v=leadStatus(a,'ready');if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'claude',text:'Earlier answer'}]}};return v;},
+    [read]:response,
+    [write]:a=>{assert.equal(a.revision,revision);revision=(revision[0]==='1'?'2':'3').repeat(64);
+      selection=conflict?{model:'fixed',effort:null}:{model:a.model,effort:a.effort};
+      if(lost || conflict)throw Error('Inconclusive response');return response(a);}
+  }});
+  const open=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.calls.filter(c=>c.name===read).length,0);
+  p.get('chat-text').value='Keep my draft';await p.event('chat-text','input');p.get('chat-scroll').scrollTop=72;
+  await p.event('settings-toggle','click');
+  assert.deepEqual({...p.calls.at(-1).args},{project:'one',provider:'claude',room:main.room,projectKey:'b'.repeat(64),leadRequestId:leadStatus({provider:'claude'},'ready').leads[0].requestId});
+  assert.equal(p.get('settings-save').disabled,true);assert.match(p.get('settings-saved').textContent,/OMS routing default/);
+  p.get('settings-model').value='fixed';await p.event('settings-model','change');assert.ok(p.get('settings-effort').disabled);
+  p.get('settings-model').value='select-level';await p.event('settings-model','change');assert.equal(p.get('settings-save').disabled,true);
+  assert.ok(!p.get('settings-effort').children.some(o=>o.value==='high'));
+  p.get('settings-effort').value='deep';await p.event('settings-effort','change');
+  await choose(p,'ko');assert.equal(p.get('settings-model').value,'select-level');assert.equal(p.get('settings-effort').value,'deep');
+  assert.equal(p.get('chat-text').value,'Keep my draft');assert.equal(p.get('chat-scroll').scrollTop,72);
+  p.host.delayTool=write;await p.event('settings-save','click');await p.event('chat-compose','submit');await p.event('settings-save','click');
+  assert.equal(p.calls.filter(c=>c.name===write).length,1);assert.equal(p.calls.filter(c=>c.name==='oms_send_lead_message').length,0);
+  assert.equal(p.get('chat-send').disabled,true);p.host.release();await setImmediate();
+  assert.ok(!p.get('chat-send').disabled);assert.match(p.get('settings-saved').textContent,/select-level · deep/);
+  lost=true;p.get('settings-model').value='configurable';await p.event('settings-model','change');await p.event('settings-save','click');
+  assert.match(p.get('settings-status').textContent,/일치/);assert.equal(p.calls.at(-1).name,read);
+  conflict=true;p.get('settings-model').value='';await p.event('settings-model','change');await p.event('settings-save','click');
+  assert.equal(p.get('settings-model').value,'fixed');assert.match(p.get('settings-status').textContent,/다시 불러왔습니다/);
+  assert.equal(p.calls.filter(c=>c.name===write).length,3);
+  assert.equal(p.get('chat-text').value,'Keep my draft');assert.match(p.get('chat-messages').textContent,/Earlier answer/);
+  await p.event('settings-toggle','click');assert.equal(p.get('settings-toggle').getAttribute('aria-expanded'),'false');assert.ok(p.get('settings-toggle').focused);
+  assert.equal(p.host.messages.length,0);assert.equal(p.host.contexts.length,0);
+});
+
+test('settings refuse foreign receipts and discard late reads on project changes',async()=>{
+  const read='oms_lead_settings',write='oms_update_lead_settings';let spoof=true;
+  const p=await panel(['one','two'],dashboard,{locale:'en',tools:{
+    [managedRead]:a=>{const v=leadStatus(a,'ready');if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[]}};return v;},
+    [read]:a=>{const {project,...scope}=a;const data={...scope,revision:'a'.repeat(64)};
+      return {structuredContent:data,_meta:{leadSettings:{...data,room:spoof?'foreign':a.room,selection:{model:null,effort:null},options:[],lastServed:null,nativeTitle:null}}};}
+  }});
+  await p.open('input',{arguments:{project:'one'}});
+  const open=p.get('leads').children[0].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
+  await p.event('settings-toggle','click');assert.match(p.get('settings-status').textContent,/could not be verified/);
+  await p.event('settings-save','click');assert.ok(!p.calls.some(c=>c.name===write));
+  spoof=false;p.host.delayTool=read;await p.event('settings-read','click');
+  await p.open('input',{arguments:{project:'two'}});p.host.release();await setImmediate();
+  assert.ok(!p.get('conversation').open);assert.ok(p.get('chat-settings').hidden);assert.equal(p.get('settings-saved').textContent,'');
+  const q=await panel(['one'],dashboard,{readOnly:true});await q.event('settings-toggle','click');assert.ok(!q.calls.some(c=>c.name===read || c.name===write));
 });
 
 test('recorded Lead turns poll reads only while open and keep a draft typed while sending',async()=>{
