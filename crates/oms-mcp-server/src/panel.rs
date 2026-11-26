@@ -18,7 +18,8 @@ mod lead_plan_context;
 mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
-const URI: &str = "ui://oms/conversation-panel/v32.html";
+const URI: &str = "ui://oms/conversation-panel/v33.html";
+const V32: &str = "ui://oms/conversation-panel/v32.html";
 const V31: &str = "ui://oms/conversation-panel/v31.html";
 const V30: &str = "ui://oms/conversation-panel/v30.html";
 const V29: &str = "ui://oms/conversation-panel/v29.html";
@@ -1390,6 +1391,7 @@ impl Server<'_> {
                             | V29
                             | V30
                             | V31
+                            | V32
                     )
                 ) =>
             {
