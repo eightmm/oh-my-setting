@@ -206,7 +206,7 @@ impl FeedbackMock {
         let mut args = args.iter().map(OsString::from).collect::<Vec<_>>();
         if args.first().is_some_and(|a| a == "add") {
             let path = repo.join(".oms/fixture-brief");
-            fs::write(&path, "Implement the scoped fixture work.").unwrap();
+            write_private(&path, b"Implement the scoped fixture work.");
             args.extend(["--brief-file".into(), path.into_os_string()]);
         }
         let (code, out, err) =

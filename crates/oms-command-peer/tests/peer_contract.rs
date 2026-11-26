@@ -2163,6 +2163,11 @@ exec "$real_git" "$@"
                 }
                 host.plan(Request::new(Action::Init).with("goal", "native Plan delegate"));
                 repo.write(".oms/fixture-brief", "Implement the detailed fixture work.");
+                fs::set_permissions(
+                    repo.0.join(".oms/fixture-brief"),
+                    fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
                 let mut task_request = Request::new(Action::Add)
                     .with("id", "t1")
                     .with("title", "update tracked.txt")
