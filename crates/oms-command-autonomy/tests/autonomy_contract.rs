@@ -3741,7 +3741,7 @@ fn reviewed_assignment_without_model_takes_same_provider_operator_model() {
     let resolve = |assignment: serde_json::Value, to: &str| {
         let parse =
             |v: &serde_json::Value| oms_context::parse_json(&value::canonical(v).unwrap()).unwrap();
-        let defaults = json!({"provider": to, "model": "cli-model", "fallback_model": "", "reasoning_effort": "high", "workload": "standard"});
+        let defaults = json!({"provider": to, "model": "cli-model", "fallback_model": "cli-fb", "reasoning_effort": "high", "workload": "standard"});
         let out = oms_command_task::assignment::resolve(
             &parse(&json!({"assignment": assignment})),
             &parse(&defaults),
@@ -3749,26 +3749,28 @@ fn reviewed_assignment_without_model_takes_same_provider_operator_model() {
         .unwrap();
         let out: serde_json::Value =
             serde_json::from_slice(&oms_command_task::json::encode(&out)).unwrap();
-        (
-            out["model"].clone(),
-            out["reasoning_effort"].clone(),
-            out["workload"].clone(),
-        )
+        ["model", "fallback_model", "reasoning_effort", "workload"].map(|k| out[k].clone())
     };
+    let row = |m: &str, f: &str, e: &str, w: &str| [json!(m), json!(f), json!(e), json!(w)];
     let bare = json!({"provider": "antigravity", "workload": "routine"});
     assert_eq!(
         resolve(bare.clone(), "antigravity"),
-        (json!("cli-model"), json!("high"), json!("routine"))
+        row("cli-model", "cli-fb", "high", "routine")
     );
+    assert_eq!(resolve(bare, "claude"), row("", "", "auto", "routine"));
+    let empty = json!({"provider": "antigravity", "model": ""});
     assert_eq!(
-        resolve(bare, "claude"),
-        (json!(""), json!("auto"), json!("routine"))
+        resolve(empty, "antigravity"),
+        row("", "", "auto", "standard")
     );
-    let pinned = json!({"provider": "antigravity", "model": "reviewed", "reasoning_effort": "low"});
+    let pinned = json!({"provider": "antigravity", "model": "reviewed"});
     assert_eq!(
         resolve(pinned, "antigravity"),
-        (json!("reviewed"), json!("low"), json!("standard"))
+        row("reviewed", "", "auto", "standard")
     );
     let effort = json!({"provider": "antigravity", "reasoning_effort": "low"});
-    assert_eq!(resolve(effort, "antigravity").1, json!("low"));
+    assert_eq!(
+        resolve(effort, "antigravity"),
+        row("cli-model", "cli-fb", "low", "standard")
+    );
 }

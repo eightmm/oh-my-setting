@@ -151,7 +151,7 @@ pub fn resolve(task: &Json, defaults: &Json) -> Result<Json> {
     // A reviewed assignment that names no model takes the operator's explicit
     // model for the same provider only; another provider's model never carries.
     if !std::ptr::eq(source, defaults)
-        && get(source, "model", "").is_empty()
+        && matches!(field(source, "model"), Json::Null)
         && get(source, "provider", "") == get(defaults, "provider", "")
     {
         for key in ["model", "fallback_model", "reasoning_effort"] {
