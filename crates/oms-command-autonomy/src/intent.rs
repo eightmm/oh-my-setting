@@ -232,6 +232,79 @@ pub fn delta(old: &Contract, new: &Contract) -> Value {
         .collect::<Vec<_>>();
     json!({"sections": sections, "added": added, "modified": modified, "removed": removed, "criteria": "read"})
 }
+fn amendment_receipt(
+    id: &str,
+    binding: &Value,
+    previous: &[u8],
+    staged: &[u8],
+    changes: &Value,
+    pending: Option<&[u8]>,
+) -> Result<(Value, Vec<u8>)> {
+    value::keys(
+        binding,
+        &[
+            "schema",
+            "kind",
+            "id",
+            "base_project_sha256",
+            "reason",
+            "ts",
+        ],
+        &[],
+    )?;
+    let expected = value::hash(previous);
+    require(
+        binding["schema"] == 1
+            && binding["kind"] == "intent-amendment"
+            && value::text(binding, "id") == id
+            && value::text(binding, "base_project_sha256") == expected
+            && value::text(binding, "reason").chars().count() <= 500
+            && chrono::DateTime::parse_from_rfc3339(value::text(binding, "ts")).is_ok(),
+        "invalid amendment binding",
+    )?;
+    verify::reason(value::text(binding, "reason"))?;
+    require(
+        ["sections", "added", "modified", "removed"]
+            .iter()
+            .any(|field| changes[*field].as_array().is_some_and(|a| !a.is_empty())),
+        "amendment changes no contract content",
+    )?;
+    let retained = pending.map(value::parse).transpose()?;
+    let ts = retained
+        .as_ref()
+        .map(|row| value::text(row, "ts").to_owned())
+        .unwrap_or_else(value::now);
+    require(
+        chrono::DateTime::parse_from_rfc3339(&ts).is_ok(),
+        "invalid amendment publication timestamp",
+    )?;
+    let receipt = json!({"schema": 1, "kind": "intent-amendment-receipt", "id": id,
+        "ts": ts, "reason": binding["reason"], "previous_sha256": expected,
+        "project_sha256": value::hash(staged), "archive": format!("archive/{expected}.md"),
+        "sections": changes["sections"], "added": changes["added"],
+        "modified": changes["modified"], "removed": changes["removed"]});
+    require(
+        retained.as_ref().is_none_or(|row| row == &receipt),
+        "interrupted amendment receipt differs from exact publication",
+    )?;
+    // Preserve the original timestamp and bytes across either side of the CAS.
+    let raw = match pending {
+        Some(raw) => raw.to_vec(),
+        None => value::pretty(&receipt)?,
+    };
+    Ok((receipt, raw))
+}
+fn amendment_recorded(ctx: &Context<'_>, receipt: &Value) -> Result<bool> {
+    let mut found = false;
+    for row in ctx.source.rows(".oms/intents/amendments.jsonl", true)? {
+        let row = value::from_plan(&row)?;
+        if value::text(&row, "id") == value::text(receipt, "id") {
+            require(row == *receipt, "conflicting amendment publication receipt")?;
+            found = true;
+        }
+    }
+    Ok(found)
+}
 fn reject_live(ctx: &Context<'_>) -> Result<()> {
     if let Some(raw) = ctx.store.optional(RECEIPT, 64 * 1024)? {
         let row = value::parse(&raw)?;
@@ -578,43 +651,38 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     oms_contract_markdown::scope::normalize_scope_default(&spec.allowed.join(","))
         .map_err(|_| Error::new(2, "unsafe or empty Scope defaults"))?;
     let binding_path = format!(".oms/intents/{}.amend.json", args.required("id")?);
-    let binding = ctx
-        .source
-        .optional(&binding_path, MAX_FILE)?
-        .map(|raw| value::parse(&raw))
-        .transpose()?;
+    let binding_raw = ctx.source.optional(&binding_path, MAX_FILE)?;
+    let binding = binding_raw.as_deref().map(value::parse).transpose()?;
     let before = ctx.source.optional("PROJECT.md", MAX_FILE)?;
     let expected = args.text("expected-project-sha256")?;
-    if binding.is_some() && before.as_deref() == Some(staged.as_slice()) {
+    if let Some(binding) = &binding
+        && before.as_deref() == Some(staged.as_slice())
+    {
+        require(
+            value::digest(expected),
+            "amendment requires an exact predecessor SHA-256",
+        )?;
         let pending = ctx.source.read(
             format!(".oms/intents/{}.publish.json", args.required("id")?),
             MAX_FILE,
         )?;
-        let receipt = value::parse(&pending)?;
+        let previous = ctx
+            .source
+            .read(format!(".oms/intents/archive/{expected}.md"), MAX_FILE)?;
         require(
-            value::digest(expected)
-                && value::text(&receipt, "previous_sha256") == expected
-                && value::text(&receipt, "project_sha256") == value::hash(&staged)
-                && value::text(&receipt, "id") == args.required("id")?,
-            "interrupted amendment receipt differs from exact publication",
-        )?;
-        require(
-            value::hash(
-                ctx.source
-                    .read(format!(".oms/intents/archive/{expected}.md"), MAX_FILE)?,
-            ) == expected,
+            value::hash(&previous) == expected,
             "amendment predecessor archive changed",
         )?;
-        let rows = ctx.source.rows(".oms/intents/amendments.jsonl", true)?;
-        let mut found = false;
-        for row in rows {
-            let row = value::from_plan(&row)?;
-            if value::text(&row, "id") == args.required("id")? {
-                require(row == receipt, "conflicting amendment publication receipt")?;
-                found = true;
-            }
-        }
-        if !found {
+        let changes = delta(&contract::parse(&previous, &ctx.repo)?, &spec);
+        let (receipt, _) = amendment_receipt(
+            args.required("id")?,
+            binding,
+            &previous,
+            &staged,
+            &changes,
+            Some(&pending),
+        )?;
+        if !amendment_recorded(ctx, &receipt)? {
             ctx.source
                 .append(".oms/intents/amendments.jsonl", &value::plan(&receipt)?)?;
         }
@@ -664,37 +732,45 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     reject_live(ctx)?;
     require(
         ctx.source.read(&path, MAX_FILE)? == candidate
-            && ctx.source.optional("PROJECT.md", MAX_FILE)? == before,
-        "candidate or PROJECT.md changed during acceptance; no contract published",
+            && ctx.source.optional("PROJECT.md", MAX_FILE)? == before
+            && ctx.source.optional(&binding_path, MAX_FILE)? == binding_raw,
+        "candidate, amendment binding or PROJECT.md changed during acceptance; no contract published",
     )?;
     let mut out = Output::default();
     if let Some(binding) = binding {
         let before = before.as_ref().unwrap();
         let old = contract::parse(before, &ctx.repo)?;
         let changes = delta(&old, &spec);
+        let publication_path = format!(".oms/intents/{}.publish.json", args.required("id")?);
+        let pending = ctx.source.optional(&publication_path, MAX_FILE)?;
+        if pending.is_some() {
+            require(
+                ctx.source
+                    .read(format!(".oms/intents/archive/{expected}.md"), MAX_FILE)?
+                    == *before,
+                "amendment predecessor archive changed",
+            )?;
+        }
+        let (receipt, publication) = amendment_receipt(
+            args.required("id")?,
+            &binding,
+            before,
+            &staged,
+            &changes,
+            pending.as_deref(),
+        )?;
         require(
-            changes["sections"]
-                .as_array()
-                .is_some_and(|a| !a.is_empty())
-                || changes["added"].as_array().is_some_and(|a| !a.is_empty())
-                || changes["modified"]
-                    .as_array()
-                    .is_some_and(|a| !a.is_empty())
-                || changes["removed"].as_array().is_some_and(|a| !a.is_empty()),
-            "amendment changes no contract content",
+            !amendment_recorded(ctx, &receipt)?,
+            "completed amendment receipt cannot replace its predecessor again",
         )?;
         ctx.source.publish_once(
             format!(".oms/intents/archive/{expected}.md"),
             before,
             MAX_FILE,
         )?;
-        let receipt = json!({"schema": 1, "kind": "intent-amendment-receipt", "id": args.required("id")?, "ts": value::now(), "reason": binding["reason"], "previous_sha256": expected, "project_sha256": value::hash(&staged), "archive": format!("archive/{expected}.md"), "sections": changes["sections"], "added": changes["added"], "modified": changes["modified"], "removed": changes["removed"]});
         // The recoverable intent precedes the CAS; the final receipt follows it.
-        ctx.source.publish_once(
-            format!(".oms/intents/{}.publish.json", args.required("id")?),
-            &value::pretty(&receipt)?,
-            MAX_FILE,
-        )?;
+        ctx.source
+            .publish_once(&publication_path, &publication, MAX_FILE)?;
         ctx.source
             .mutate("PROJECT.md", Some(before), &staged, MAX_FILE, false)?;
         ctx.source
