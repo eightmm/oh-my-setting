@@ -59,6 +59,7 @@ pub(crate) const SCAN_WORKER_FLAG: &str = "--oms-publication-scan-worker";
 /// already holds extra threads (such as `patch-admit`'s live scope monitor)
 /// and still requires exclusive `Scope::WholeTree` subreaper containment.
 pub(crate) const SUPERVISE_WORKER_FLAG: &str = "--oms-supervise-worker";
+pub(crate) const SUPERVISE_STARTED: &[u8] = b"OMS_SUPERVISE_STARTED\n";
 
 /// Outcome of one fully supervised child. Exit codes follow the shell
 /// convention used by the owning crates: 124 deadline, 125 output limit or
@@ -122,6 +123,14 @@ impl<'a> Spawn<'a> {
 }
 
 fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String> {
+    run_child_started(spawn, interrupted, || Ok(()))
+}
+
+fn run_child_started(
+    spawn: Spawn<'_>,
+    interrupted: &AtomicBool,
+    started: impl FnOnce() -> Result<(), String>,
+) -> Result<Child, String> {
     let Spawn {
         scope,
         argv,
@@ -188,6 +197,7 @@ fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String
     let id = reactor
         .start(request)
         .map_err(|e| format!("launch failed: {e}"))?;
+    started()?;
     let mut cancelled = false;
     loop {
         if interrupted.load(Ordering::Acquire) && !cancelled {
@@ -3570,11 +3580,10 @@ fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn run_via_supervise_worker(
-    worker: &[OsString],
+pub(crate) fn supervise_worker_request(
     spawn: &Spawn<'_>,
-    interrupted: &AtomicBool,
-) -> Result<Child, String> {
+    acknowledge_start: bool,
+) -> Result<Vec<u8>, String> {
     let argv: Vec<String> = spawn
         .argv
         .iter()
@@ -3593,6 +3602,7 @@ pub(crate) fn run_via_supervise_worker(
         .collect();
     let payload = serde_json::json!({
         "schema": 1,
+        "acknowledge_start": acknowledge_start,
         "argv": argv,
         "cwd": cwd,
         "clear_environment": spawn.clear_environment,
@@ -3609,6 +3619,16 @@ pub(crate) fn run_via_supervise_worker(
     if encoded.len() > SUPERVISE_REQUEST_LIMIT {
         return Err("supervised request exceeds IPC byte limit".into());
     }
+    Ok(encoded)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn run_via_supervise_worker(
+    worker: &[OsString],
+    spawn: &Spawn<'_>,
+    interrupted: &AtomicBool,
+) -> Result<Child, String> {
+    let encoded = supervise_worker_request(spawn, false)?;
     let outer_limit = spawn
         .limit
         .saturating_mul(4)
@@ -3639,15 +3659,21 @@ pub(crate) fn run_via_supervise_worker(
             dropped: 0,
         });
     }
-    let result: Value = serde_json::from_slice(&done.stdout).map_err(|_| {
+    supervise_worker_result(&done.stdout).map_err(|error| {
         let detail = String::from_utf8_lossy(&done.stderr);
         let detail = detail.trim();
         if detail.is_empty() {
-            format!("native supervise worker failed (exit {})", done.code)
+            error
         } else {
             detail.to_owned()
         }
-    })?;
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn supervise_worker_result(raw: &[u8]) -> Result<Child, String> {
+    let result: Value = serde_json::from_slice(raw)
+        .map_err(|_| "native supervise worker returned invalid completion".to_owned())?;
     if result["ok"] != true {
         return Err(result["error"]
             .as_str()
@@ -3806,7 +3832,16 @@ pub(crate) fn supervise_worker_main(args: &[OsString], interrupted: &AtomicBool)
     spawn.merged = merged;
     spawn.drain = parsed["drain"] == true;
     spawn.stdin = stdin;
-    match run_child(spawn, interrupted) {
+    let started = || {
+        if parsed["acknowledge_start"] == true {
+            let mut out = std::io::stdout().lock();
+            out.write_all(SUPERVISE_STARTED)
+                .and_then(|()| out.flush())
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    };
+    match run_child_started(spawn, interrupted, started) {
         Ok(child) => report_json(serde_json::json!({
             "ok": true,
             "code": child.code,

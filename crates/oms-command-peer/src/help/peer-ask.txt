@@ -48,8 +48,10 @@ Options:
                        Partial quorum remains available without this flag.
   --synthesize TARGET  Add one advisory synthesis with the selected provider/model.
   --synthesis-json     Emit schema-1 oms-council-synthesis instead of human text.
-                       Requires --synthesize with an exact model, --debate,
-                       --deliberation and --require-complete. One required seat
+                       Requires --synthesize with an exact model and
+                       --require-complete. For rebuttals, add both --debate
+                       and --deliberation; omitting both uses initial answers.
+                       One required seat
                        per provider; all declared rounds must complete. Enforces
                        nonempty evidence/counterargument/verification sections
                        and synthesis Decision/Evidence/Remaining disagreements/
@@ -69,6 +71,12 @@ Options:
                        seat declares "none" under "Changed from previous
                        round:" — stability, not consensus: recorded
                        disagreements stand.
+                       Native OMS opening/rebuttal calls use at most four active
+                       seats; completed thread turns publish without waiting
+                       for slower seats. Every started call is joined on error.
+                       Linux seats keep isolated whole-tree supervisors.
+                       Embedded executors run serially unless their host
+                       explicitly supports concurrent child cleanup.
   --until-agreement    Opt-in: debate until every answering seat (at least two)
                        shares one Verdict:/Recommendation:/Answer: line, or the
                        cap is reached. Replaces --debate; incompatible with

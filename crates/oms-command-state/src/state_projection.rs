@@ -822,6 +822,26 @@ pub(super) fn extra_attention(state: &Value, repo: &Path, items: &mut Vec<Value>
             ]));
         }
     };
+    let memory = state.get("memory_review");
+    let command = format!("oms agent-memory --repo {anchor} review");
+    if memory.get("healthy") == &Value::Bool(false) {
+        add(
+            "P2",
+            "memory-review-unavailable",
+            1,
+            "memory review source is unavailable; pending count is unknown".into(),
+            command,
+        );
+    } else {
+        let pending = memory.get("pending").int().unwrap_or(0) as usize;
+        add(
+            "P2",
+            "pending-memory-review",
+            pending,
+            format!("{pending} memory proposal(s) await explicit review; unverified"),
+            command,
+        );
+    }
     let orphans = state
         .get("delegations")
         .array()
@@ -2474,6 +2494,19 @@ fn state_text(state: &Value) -> Result<String> {
         } else {
             out.push_str(&format!("  {} unacknowledged; oldest age: {}\n  read: {} (explicit acknowledgment required)\n",n(mail,"pending"),mail.get("oldest_age_seconds").int().map(|n|format!("{n}s")).unwrap_or_else(|_|"-".into()),mail.text("command")));
         }
+    }
+    let memory = state.get("memory_review");
+    if !memory.get("healthy").truth() || n(memory, "pending") > 0 {
+        out.push_str("\n## Memory review\n");
+        if memory.get("healthy").truth() {
+            out.push_str(&format!(
+                "  {} proposal(s) await explicit review; unverified\n",
+                n(memory, "pending")
+            ));
+        } else {
+            out.push_str("  unavailable; pending count is unknown\n");
+        }
+        out.push_str("  inspect: oms agent-memory review\n");
     }
     let journal = state.get("work_journal");
     if journal.get("present").truth() {

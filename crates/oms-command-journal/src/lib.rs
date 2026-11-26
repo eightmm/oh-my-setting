@@ -475,25 +475,7 @@ fn execute_command(
                         .iter()
                         .flat_map(|w| format!("warning: {w}\n").into_bytes()),
                 );
-                let mut counts = Vec::new();
-                if report.promoted > 0 {
-                    counts.push(format!("{} queued for memory review", report.promoted));
-                }
-                if report.deduped > 0 {
-                    counts.push(format!("{} already in shared memory", report.deduped));
-                }
-                if !report.skipped_refused.is_empty() {
-                    counts.push(format!(
-                        "{} refused by the memory writer",
-                        report.skipped_refused.len()
-                    ));
-                }
-                if report.dropped > 0 {
-                    counts.push(format!("{} beyond the per-run cap", report.dropped));
-                }
-                if !counts.is_empty() {
-                    out.push_str(&format!("[work-journal] distill: {}\n", counts.join(", ")));
-                }
+                out.push_str(&report.prompt_summary());
             }
             if let Ok(signature) = std::env::var("OMS_JOURNAL_PROMPT_STAMP")
                 && !signature.is_empty()
