@@ -591,7 +591,8 @@ pub(crate) fn run_task(
         let review = value::text(&task, "state") == "review" && args.flag("land");
         // A legacy review task without a brief may still land, but never reach a provider repair.
         require(
-            review && repair == 0 || !value::text(&task, "brief").trim().is_empty(),
+            review && repair == 0 && !args.flag("auto-repair")
+                || !value::text(&task, "brief").trim().is_empty(),
             format!(
                 "task {id} has no work brief; use agent-plan amend --id {id} --brief-file PATH"
             ),

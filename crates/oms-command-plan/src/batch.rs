@@ -164,6 +164,8 @@ impl Plan<'_> {
                     !brief.trim().is_empty() && brief.len() <= crate::engine::MAX_BRIEF,
                     "batch task brief must be nonempty and at most 65536 bytes",
                 )?;
+                // The raw-file screen ran before JSON unescaping.
+                screen(brief.as_bytes())?;
                 task.set("brief", string(brief))?;
             }
             match row.opt("issue") {

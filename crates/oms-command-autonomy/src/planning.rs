@@ -314,7 +314,7 @@ pub(crate) fn validate(
             )?;
         }
         require(
-            replay || task.get("brief").is_some(),
+            task.get("brief").is_some(),
             format!(
                 "proposal task {} has no work brief",
                 value::text(task, "id")

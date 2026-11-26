@@ -189,13 +189,13 @@ fn brief_file_round_trip_and_bounds() {
         "first work\nsecond line"
     );
     assert_eq!(amendment.get("after").text("brief"), "amended work");
-    let secret = ["sk-", &"a".repeat(48)].concat();
+    let sensitive: String = ["sk-", &"a".repeat(48)].concat();
     for bytes in [
         vec![b'x'; 65537],
         vec![0xff],
         vec![],
         b" \n\t".to_vec(),
-        secret.into_bytes(),
+        sensitive.into_bytes(),
     ] {
         fs::write(&file, bytes).unwrap();
         assert_ne!(
