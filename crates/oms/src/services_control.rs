@@ -2314,11 +2314,9 @@ fn collect_task_protected_tokens(value: &Value, tokens: &mut std::collections::B
     }
 }
 
-const LIFECYCLE_LOG_ADVISORY_BYTES: u64 = 32 * 1024 * 1024;
-
 fn collect_protected_dispatch_tokens(
     repo: &Path,
-) -> oms_command_state::Result<(std::collections::BTreeSet<String>, Option<String>)> {
+) -> oms_command_state::Result<std::collections::BTreeSet<String>> {
     const KNOWN_STATES: &[&str] = &[
         "ready",
         "claimed",
@@ -2375,7 +2373,6 @@ fn collect_protected_dispatch_tokens(
         }
     }
 
-    let mut oversized_lifecycle_log = None;
     let lifecycle_dir = repo.join(".oms/lifecycle");
     if let Some(dir_meta) = no_symlink_metadata(&lifecycle_dir)?
         && !dir_meta.is_dir()
@@ -2389,11 +2386,6 @@ fn collect_protected_dispatch_tokens(
                 2,
                 format!("refusing non-regular file: {}", events_path.display()),
             ));
-        }
-        if meta.len() > LIFECYCLE_LOG_ADVISORY_BYTES {
-            oversized_lifecycle_log = Some(
-                ".oms/lifecycle/events.jsonl exceeds 32 MiB; run `oms agent-events compact` (dry run by default, `--apply` to drop events)".to_string(),
-            );
         }
         let (_, attempts) =
             oms_command_operations::load_projection(repo).map_err(|e| state_err(2, e))?;
@@ -2416,7 +2408,7 @@ fn collect_protected_dispatch_tokens(
         }
     }
 
-    Ok((tokens, oversized_lifecycle_log))
+    Ok(tokens)
 }
 
 fn json_bytes_protect(raw: &[u8], protected: &std::collections::BTreeSet<String>) -> bool {
@@ -2487,7 +2479,7 @@ fn gc_dispatch_logs_native(
         ));
     }
 
-    let (protected, oversized_lifecycle_log) = collect_protected_dispatch_tokens(&repo)?;
+    let protected = collect_protected_dispatch_tokens(&repo)?;
     let mut reclaimed = Vec::new();
     let mut delete_paths = Vec::new();
 
@@ -2620,11 +2612,6 @@ fn gc_dispatch_logs_native(
         }
     }
     reclaimed.sort();
-    if reclaimed.is_empty()
-        && let Some(advisory) = oversized_lifecycle_log
-    {
-        return Ok(oms_command_state::GcHookResult::Deferred(advisory));
-    }
     Ok(oms_command_state::GcHookResult::Reclaimed(reclaimed))
 }
 
@@ -2840,8 +2827,11 @@ mod gc_host_tests {
         drop(events_bytes);
 
         let live_attempt_log = logs_dir.join("att-live-oversized.log");
-        std::fs::write(&live_attempt_log, b"{}\n").unwrap();
-        age_file(&live_attempt_log, 60);
+        let term_attempt_log = logs_dir.join("att-term-0.log");
+        for path in [&live_attempt_log, &term_attempt_log] {
+            std::fs::write(path, b"{}\n").unwrap();
+            age_file(path, 60);
+        }
 
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -2898,6 +2888,16 @@ mod gc_host_tests {
             String::from_utf8_lossy(&gc_stderr)
         );
         let gc_out = String::from_utf8_lossy(&gc_stdout);
+        assert!(
+            gc_out.lines().any(
+                |line| line == "- dispatch-logs: .oms/panel-state/dispatch-logs/att-term-0.log"
+            ),
+            "aged terminal-attempt log should be listed for reclaim: {gc_out}"
+        );
+        assert!(
+            !gc_out.contains("att-live-oversized.log"),
+            "non-terminal attempt log must stay protected: {gc_out}"
+        );
         let advisory_lines: Vec<&str> = gc_out
             .lines()
             .filter(|line| line.contains(".oms/lifecycle/events.jsonl"))
@@ -2909,32 +2909,9 @@ mod gc_host_tests {
             "advisory should suggest compact: {}",
             advisory_lines[0]
         );
-        assert!(
-            !gc_out.contains("att-live-oversized.log"),
-            "non-terminal attempt log must stay protected: {gc_out}"
-        );
-
-        let oversized_dry = host.gc_dispatch_logs(&repo, 30, false).unwrap();
-        match &oversized_dry {
-            GcHookResult::Deferred(msg) => {
-                assert!(msg.contains(".oms/lifecycle/events.jsonl"), "{msg}");
-                assert!(msg.contains("oms agent-events compact"), "{msg}");
-                assert!(msg.contains("--apply"), "{msg}");
-            }
-            other => {
-                panic!("expected oversized advisory deferral when nothing reclaimed, got {other:?}")
-            }
-        }
-        assert_eq!(
-            host.gc_dispatch_logs(&repo, 30, true).unwrap(),
-            oversized_dry
-        );
+        assert!(term_attempt_log.exists());
         assert!(live_attempt_log.exists());
 
-        // Aged log from a terminal attempt in the oversized log is reclaimed while live stays protected.
-        let term_attempt_log = logs_dir.join("att-term-0.log");
-        std::fs::write(&term_attempt_log, b"{}\n").unwrap();
-        age_file(&term_attempt_log, 60);
         let oversized_plan = host.gc_dispatch_logs(&repo, 30, false).unwrap();
         assert_eq!(
             oversized_plan,
@@ -2947,18 +2924,23 @@ mod gc_host_tests {
         assert_eq!(oversized_plan, oversized_applied);
         assert!(!term_attempt_log.exists());
         assert!(live_attempt_log.exists());
+        assert_eq!(
+            host.gc_dispatch_logs(&repo, 30, false).unwrap(),
+            GcHookResult::Reclaimed(vec![])
+        );
 
-        // Malformed and non-regular lifecycle logs still fail closed.
+        // Malformed, non-regular and symlinked lifecycle logs still fail closed,
+        // both through dispatch-log collection and through the gc planner directly.
         std::fs::write(&events_path, b"{not valid json}\n").unwrap();
         let bad_err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
         assert_eq!(bad_err.code, 2);
-        let (bad_gc_code, _, _) = run_gc_dry(&repo);
-        assert_eq!(bad_gc_code, 2);
+        assert_eq!(run_gc_dry(&repo).0, 2);
 
         std::fs::remove_file(&events_path).unwrap();
         std::fs::create_dir(&events_path).unwrap();
         let non_reg_err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
         assert_eq!(non_reg_err.code, 2);
+        assert_eq!(run_gc_dry(&repo).0, 2);
 
         std::fs::remove_dir(&events_path).unwrap();
         let outside = repo.join("outside-events.jsonl");
@@ -2966,6 +2948,20 @@ mod gc_host_tests {
         std::os::unix::fs::symlink(&outside, &events_path).unwrap();
         let symlink_err = host.gc_dispatch_logs(&repo, 30, false).unwrap_err();
         assert_eq!(symlink_err.code, 2);
+        assert_eq!(run_gc_dry(&repo).0, 2);
+
+        std::fs::remove_dir_all(&logs_dir).unwrap();
+        assert_eq!(run_gc_dry(&repo).0, 2);
+        std::fs::remove_file(&events_path).unwrap();
+        std::fs::create_dir(&events_path).unwrap();
+        assert_eq!(run_gc_dry(&repo).0, 2);
+        std::fs::remove_dir(&events_path).unwrap();
+        std::fs::write(&events_path, b"{not valid json}\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&events_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        assert_eq!(run_gc_dry(&repo).0, 2);
 
         let _ = std::fs::remove_dir_all(&repo);
     }
@@ -4460,22 +4456,6 @@ mod tests {
 
     #[test]
     fn plan_and_autonomy_resolve_explicit_and_policy_routes() {
-        if std::env::var_os("OMS_ROUTE_TEST_ISOLATED").is_none() {
-            let clean_cache = Tmp::new();
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "services_control::tests::plan_and_autonomy_resolve_explicit_and_policy_routes",
-                    "--nocapture",
-                ])
-                .env("OMS_ROUTE_TEST_ISOLATED", "1")
-                .env_remove("OMS_CAPABILITY_DIR")
-                .env("XDG_CACHE_HOME", clean_cache.path())
-                .status()
-                .unwrap();
-            assert!(status.success());
-            return;
-        }
         let root = Tmp::repo(&[("a", "x")]);
         let stop = Arc::new(AtomicBool::new(false));
         let control = services(&stop, root.path(), Vec::new());
