@@ -869,10 +869,13 @@ test('opt-in auto refresh persists, pauses and clears, and r refreshes only outs
   const p=await panel(['one'],{},{locale:'en',timers,storage,visibility:true});
   const reads=()=>p.calls.filter(c=>c.name==='oms_panel_snapshot').length;
   assert.equal(autos().length,0);assert.equal(p.get('auto-refresh').getAttribute('aria-pressed'),'false');
+  // With Auto off, neither return trigger rereads a stale snapshot.
+  let mark=reads();now+=15000;p.window.dispatchEvent(new Event('focus'));await setImmediate();assert.equal(reads(),mark);
+  p.document.show(false);p.document.show(true);await setImmediate();assert.equal(reads(),mark);assert.equal(autos().length,0);
   await p.event('auto-refresh','click');
   assert.equal(memory.get('oms.panel.auto-refresh.v1'),'on');assert.equal(p.get('auto-refresh').getAttribute('aria-pressed'),'true');
   assert.equal(autos().length,1);
-  let mark=reads();const [id,job]=autos()[0];jobs.delete(id);job.fn();await setImmediate();
+  mark=reads();const [id,job]=autos()[0];jobs.delete(id);job.fn();await setImmediate();
   assert.equal(reads(),mark+1);assert.equal(autos().length,1);
   p.document.show(false);assert.equal(autos().length,0);
   // A return within 15 seconds only rearms; a stale return rereads once.
@@ -892,6 +895,15 @@ test('opt-in auto refresh persists, pauses and clears, and r refreshes only outs
   assert.equal(reopened.get('auto-refresh').getAttribute('aria-pressed'),'true');
   p.notify({method:'ui/resource-teardown',id:'close-auto-refresh',params:{}});assert.equal(autos().length,0);
   mark=reads();await press();assert.equal(reads(),mark);assert.equal(p.get('refresh').getAttribute('aria-busy'),'false');
+  // A pinned binding lists no aliases; its loaded view still refreshes.
+  const pinned=await panel([],{},{timers,tools:{oms_list_projects:()=>({projects:[],binding:'pinned'})}});
+  const pinnedReads=()=>pinned.calls.filter(c=>c.name==='oms_panel_snapshot').length;
+  assert.equal(autos().length,0);await pinned.event('auto-refresh','click');
+  assert.equal(pinned.get('auto-refresh').getAttribute('aria-pressed'),'true');assert.equal(autos().length,1);
+  mark=pinnedReads();const [pinnedId,pinnedJob]=autos()[0];jobs.delete(pinnedId);pinnedJob.fn();await setImmediate();
+  assert.equal(pinnedReads(),mark+1);assert.equal(autos().length,1);
+  pinned.window.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'r'}));await setImmediate();
+  assert.equal(pinnedReads(),mark+2);
 });
 test('the launcher counts and normalizes the brief, and the container width selects compact density',async()=>{
   const p=await panel(['one'],{},{locale:'ko',hostContext:{locale:'ko',displayMode:'inline',containerDimensions:{maxWidth:360}}});

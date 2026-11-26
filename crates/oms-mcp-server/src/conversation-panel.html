@@ -1219,7 +1219,7 @@ function setBusy(value,writing=false) {
   armAuto();
 }
 function panelIdle() {
-  return Boolean(!disposed && project && !el('view').hidden && !el('conversation').open && !el('launcher').open);
+  return Boolean(!disposed && dashboardData && !el('view').hidden && !el('conversation').open && !el('launcher').open);
 }
 function stopAuto(){clearTimeout(autoTimer);autoTimer=undefined;}
 function armAuto() {
@@ -1230,7 +1230,7 @@ function armAuto() {
   autoTimer?.unref?.();
 }
 function refetchStale() {
-  if(!document?.hidden && lastLoadedAt>0 && Date.now()-lastLoadedAt>=15000 && !busy && panelIdle())refresh();
+  if(!autoRefresh || document?.hidden || lastLoadedAt<=0 || Date.now()-lastLoadedAt<15000 || busy || !panelIdle())return; refresh();
 }
 function paintAuto(){el('auto-refresh').setAttribute('aria-pressed',String(autoRefresh));}
 function isTyping(target) {
