@@ -434,19 +434,21 @@ fn normalized(raw: &str) -> String {
         .join(" ")
 }
 pub fn parse_findings(answer: &str) -> (Vec<V>, usize) {
-    let mut inside = false;
+    // Only a bare fence at least as long as the opener closes the block, so a
+    // nested or info-string fence inside it is counted, never a silent close.
+    let mut fence = 0;
     let mut found = Vec::new();
     let mut rejected = 0;
     for line in answer.lines() {
         let line = line.trim();
-        if !inside {
+        if fence == 0 {
             if line.trim_start_matches('`').trim() == "findings" && line.starts_with("```") {
-                inside = true;
+                fence = line.len() - line.trim_start_matches('`').len();
             }
             continue;
         }
-        if line.starts_with("```") {
-            inside = false;
+        if line.len() >= fence && line.bytes().all(|b| b == b'`') {
+            fence = 0;
             continue;
         }
         if line.is_empty() {
@@ -654,6 +656,17 @@ pub(crate) fn seal_findings(rows: Vec<(V, String)>) -> Result<Vec<(V, bool)>> {
             .zip(&ids)
             .map(|((row, _), id)| (locationless(row, id), true))
             .collect();
+        let mut batch = Vec::new();
+        for (row, _) in &sealed {
+            if !row_clean(row)? {
+                return fail("withheld finding placeholder is not scanner clean");
+            }
+            batch.extend(row.json(false)?);
+            batch.push(b'\n');
+        }
+        if !emits_clean(&batch)? {
+            return fail("withheld finding batch is not scanner clean");
+        }
     }
     Ok(sealed)
 }
@@ -2124,15 +2137,29 @@ mod redaction_regression_tests {
             (
                 "fence swallowed by redaction",
                 format!("````findings\n{hit}\n```findings\n{}\n```\n", row(&[])),
+                4,
+            ),
+            (
+                "nested info fence",
+                format!("```findings\n```json\n{}\n```\n```\n", row(&[])),
                 2,
+            ),
+            (
+                "opener quoted in tilde fence",
+                format!("~~~\n```findings\n~~~\n```findings\n{}\n```\n", row(&[])),
+                3,
             ),
             ("over the cap", block(&vec![row(&[]); 2000]), 2000),
         ];
         for (name, raw, lines) in cases {
             let (sealed, rejected) = seal(&raw);
             assert!(sealed.len() <= 50, "{name}");
-            if name != "fence swallowed by redaction" {
-                assert_eq!(sealed.len() + rejected, lines, "{name}");
+            assert_eq!(sealed.len() + rejected, lines, "{name}");
+            if name.contains("fence") {
+                assert!(
+                    sealed.iter().any(|(row, _)| text(row, "file") == "a.rs"),
+                    "{name}"
+                );
             }
             let expect_withheld = !matches!(
                 name,
@@ -2140,6 +2167,8 @@ mod redaction_regression_tests {
                     | "extra field"
                     | "over the cap"
                     | "fence swallowed by redaction"
+                    | "nested info fence"
+                    | "opener quoted in tilde fence"
             );
             assert_eq!(
                 sealed
