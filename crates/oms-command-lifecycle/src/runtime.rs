@@ -479,6 +479,12 @@ pub(crate) fn git(root: &Path, args: &[&str], flag: &AtomicBool) -> Result<Strin
         .map(|s| s.trim_end_matches(['\r', '\n']).to_string())
         .map_err(|_| Error(2, "git returned non UTF-8 metadata".into()))
 }
+/// Child output split on `\n`, `\r\n` and bare `\r`. Lines that still hold a
+/// control character other than tab are dropped.
+pub(crate) fn plain_lines(text: &str) -> impl DoubleEndedIterator<Item = &str> {
+    text.split(['\n', '\r'])
+        .filter(|line| !line.chars().any(|c| c != '\t' && c.is_control()))
+}
 pub(crate) fn safe_name(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
