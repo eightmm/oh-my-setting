@@ -31,7 +31,7 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 
 ## 기존 API와 연결
 
-패널 리소스와 두 플러그인 manifest는 `ui://oms/conversation-panel/v31.html`을 사용하며,
+패널 리소스와 두 플러그인 manifest는 `ui://oms/conversation-panel/v32.html`을 사용하며,
 이전 버전의 리소스 읽기 별칭을 유지한다.
 
 | 경로 | 추가 입력·출력 | UI 사용 |

@@ -713,6 +713,7 @@ let busy = false, busyWriting = false;
 let disposed = false;
 let hostToolsUnavailable = false, hostToolsSucceeded = false, seenOpenResult = false;
 let snapshotClock = 0, renderedToolSnapshot = {seq:0, generation:-1, project:null};
+let awaitingSnapshotFor = -1, openDashboard = null;
 const personButtons = [], approvalButtons = [], turnAnswerButtons = [], inspectNodeButtons = [];
 let issueReviewBusy = false, chatReading = false;
 const AUTO_KEY='oms.panel.auto-refresh.v1';
@@ -844,11 +845,11 @@ window.addEventListener('message', event => {
       if (!seenInputOrManual) switchProject(invalidProject);
       return;
     }
-    const result = msg.params?.structuredContent;
-    if (result?.panel === 'OMS') {
+    const result = msg.params, summary = result?.structuredContent;
+    if (summary?.panel === 'OMS') {
       const priorOpen = seenOpenResult;
       seenOpenResult = true;
-      const target = projectArgument(result.project);
+      const target = projectArgument(summary.project);
       let index = -1;
       for (let i = pendingOpens.length - 1; i >= 0; i--) {
         if (pendingOpens[i].target === target) { index = i; break; }
@@ -856,7 +857,7 @@ window.addEventListener('message', event => {
       const opened = index >= 0 ? pendingOpens[index] : null;
       if (index >= 0) {
         const authorized=opened.explicit && opened.id===openSeq && opened.generation===generation &&
-          pendingOpens.length===1 && !pendingErrors.length && result.leadConversations===true && result.readOnly!==true;
+          pendingOpens.length===1 && !pendingErrors.length && summary.leadConversations===true && summary.readOnly!==true;
         pendingOpens.splice(index, 1);
         reconcileOpens();
         if(authorized && target!==invalidProject && requestedProject===target){
@@ -868,7 +869,7 @@ window.addEventListener('message', event => {
         switchProject(target);
       }
       if (target !== invalidProject && requestedProject === target) {
-        const d = result.dashboard;
+        const d = result._meta?.dashboard;
         if (d && typeof d === 'object' && !Array.isArray(d)) {
           const scope = target || project || (typeof d.project === 'string' && d.project) || null;
           const openBaseline = opened ? opened.seq : (priorOpen ? snapshotClock : 0);
@@ -876,8 +877,9 @@ window.addEventListener('message', event => {
             renderedToolSnapshot.project === scope &&
             renderedToolSnapshot.seq > openBaseline;
           if (!hasNewerSnapshot) {
-            if (renderedToolSnapshot.generation !== generation) readOnly = result.readOnly === true;
+            if (renderedToolSnapshot.generation !== generation) readOnly = summary.readOnly === true;
             if (!project && typeof target === 'string') project = target;
+            if (awaitingSnapshotFor === generation) openDashboard = {generation, target, dashboard:d};
             staleView = false;
             resetAutoRetry();
             const savedIntent = busy ? leadIntent : undefined;
@@ -891,6 +893,8 @@ window.addEventListener('message', event => {
               setStatus(() => notice ? t(notice) : '', notice ? 'warn' : 'info');
             }
           }
+        } else if (summary.snapshotOmitted && !busy && !hostToolsUnavailable) {
+          refresh();
         }
       }
     }
@@ -1130,7 +1134,7 @@ function resetIssue() {
 }
 function clearProject() {
   personButtons.length=0;approvalButtons.length=0;
-  staleView=false;bindingKey=null;lastGoodBinding=null;lastGoodGeneration=-1;clearFollowup();
+  openDashboard=null;staleView=false;bindingKey=null;lastGoodBinding=null;lastGoodGeneration=-1;clearFollowup();
   resetLeadControl();leadSlots.clear();paintLeadControls();
   dashboardData=undefined;members=[];rows=[];retryStart=undefined;approvalState.clear();approvedScope++;
   stopAuto();lastLoadedAt=0;paintObserved();
@@ -2597,6 +2601,7 @@ function launchNotice(value){
   put('receipt',value);put('launch-status',value);
 }
 async function loadStatus(expected,recover=true) {
+  if(!busyWriting)awaitingSnapshotFor=expected;
   setStatus(dashboardData?'refreshing':'connecting');
   let confirmedBinding=null;
   try{
@@ -2615,8 +2620,17 @@ async function loadStatus(expected,recover=true) {
     }
     bindingKey=confirmedBinding;
     if(project && (!contextKey||contextKey==='null'))updateContext({project});
-    const snapshot=await tool('oms_panel_snapshot',{},expected), d=snapshot.structuredContent?.dashboard||snapshot._meta?.dashboard;
-    if(!d || typeof d!=='object' || Array.isArray(d))throw uiError('status.badSnapshot');
+    if(awaitingSnapshotFor===expected)awaitingSnapshotFor=-1;
+    let d;
+    if(!busyWriting && openDashboard?.generation===expected &&
+       (openDashboard.target?openDashboard.target===project:requestedProject===null && (!project || !openDashboard.dashboard.project || openDashboard.dashboard.project===project))){
+      d=openDashboard.dashboard;openDashboard=null;
+    }else{
+      if(openDashboard?.generation===expected)openDashboard=null;
+      const snapshot=await tool('oms_panel_snapshot',{},expected);
+      d=snapshot.structuredContent?.dashboard||snapshot._meta?.dashboard;
+      if(!d || typeof d!=='object' || Array.isArray(d))throw uiError('status.badSnapshot');
+    }
     staleView=false;render(d);lastGoodBinding=confirmedBinding;lastGoodGeneration=generation;
     renderedToolSnapshot={seq:++snapshotClock,generation:expected,project:project||(typeof d.project==='string'&&d.project)||null};
     syncHostTools();resetAutoRetry();lastLoadedAt=Date.now();const notice=snapshotNotice(d);setStatus(()=>notice?t(notice):'',notice?'warn':'info');
@@ -2644,7 +2658,10 @@ async function loadStatus(expected,recover=true) {
     if(!retained){dashboardData=undefined;rows=[];personButtons.length=0;el('view').hidden=true;}
     else{el('view').hidden=false;el('approvals').replaceChildren();el('approval-card').hidden=true;paintObserved();}
     setStatus(retained?'snapshot.stale':'connectionFailed','warn');
-  }}
+  }}finally{
+    if(awaitingSnapshotFor===expected)awaitingSnapshotFor=-1;
+    if(openDashboard?.generation===expected)openDashboard=null;
+  }
 }
 function renderApprovals(rows, incomplete) {
   const card = el('approval-card');

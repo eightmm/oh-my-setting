@@ -1610,26 +1610,23 @@ impl Server<'_> {
                     }
                 } else if name == OPEN {
                     match result {
-                        Ok(data)
+                        Ok(mut data)
                             if crate::output::outbound(
                                 data.to_string().as_bytes(),
                                 &Value::Null,
                             )
                             .is_ok() =>
                         {
-                            let mut summary = data.clone();
-                            if summary
-                                .as_object_mut()
-                                .and_then(|o| o.remove("dashboard"))
-                                .is_some()
-                            {
-                                summary["snapshot"] = json!("attached");
+                            let dashboard =
+                                data.as_object_mut().and_then(|o| o.remove("dashboard"));
+                            if dashboard.is_some() {
+                                data["snapshot"] = json!("attached");
                             }
-                            json!({
-                                "content":[{"type":"text","text":summary.to_string()}],
-                                "structuredContent":data,
-                                "isError":false
-                            })
+                            let mut result = response(Ok(data));
+                            if let Some(dashboard) = dashboard {
+                                result["_meta"]["dashboard"] = dashboard;
+                            }
+                            result
                         }
                         Ok(_) => response(Err(
                             "OMS withheld this response during its outbound scan".into(),

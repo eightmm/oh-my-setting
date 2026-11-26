@@ -84,7 +84,13 @@ async function panel(projects, dashboard = {}, options = {}) {
   window.parent = {postMessage(message) {
     const {id, method, params} = message;
     if (!method) { host.replies.push(JSON.parse(JSON.stringify(message))); return; }
-    if (id == null) { host.notices.push(method); return; }
+    if (id == null) {
+      host.notices.push(method);
+      if (method === 'ui/notifications/initialized' && options.initialOpen) {
+        for (const [kind, openParams] of options.initialOpen) queueMicrotask(() => notify({method:'ui/notifications/tool-' + kind, params:openParams}));
+      }
+      return;
+    }
     let result = {};
     if (method === 'ui/initialize') {
       host.initialize = params;
@@ -2086,8 +2092,13 @@ test('hostToolsUnavailable sets only for host transport refusal before any tools
   await p.open('input',{arguments:{project:'one'}});
   await p.open('result',{structuredContent:{
     panel:'OMS',project:'one',readOnly:false,
-    dashboard:{...dashboard,project:'one',goal:'Rendered from initial open'}
+    dashboard:{...dashboard,project:'one',goal:'Ignored public dashboard'}
   }});
+  assert.equal(p.get('view').hidden,true);
+  await p.open('result',{
+    structuredContent:{panel:'OMS',project:'one',readOnly:false,snapshot:'attached'},
+    _meta:{dashboard:{...dashboard,project:'one',goal:'Rendered from initial open'}}
+  });
   assert.equal(p.get('view').hidden,false);
   assert.equal(p.get('project').textContent,'one');
   assert.equal(p.get('goal').textContent,'Rendered from initial open');
@@ -2166,7 +2177,7 @@ test('hostToolsUnavailable sets only for host transport refusal before any tools
   await p.open('input',{arguments:{project:'two'}});
   assert.equal(p.get('project').textContent,'two');
   assert.equal(p.get('goal').textContent,'Live snapshot from tools/call');
-  await p.open('result',{structuredContent:{panel:'OMS',project:'two',dashboard:{project:'two',goal:'Stale open dashboard'}}});
+  await p.open('result',{structuredContent:{panel:'OMS',project:'two',snapshot:'attached'},_meta:{dashboard:{project:'two',goal:'Stale open dashboard'}}});
   assert.equal(p.get('goal').textContent,'Live snapshot from tools/call');
 
   // Once any panel tools/call has succeeded, neither server errors (-32000, -32602, -32601, isError) nor later JSON-RPC errors ever set hostToolsUnavailable.
@@ -2198,4 +2209,59 @@ test('hostToolsUnavailable sets only for host transport refusal before any tools
   assert.equal(q.get('goal').textContent,'Recovered live');
   assert.equal(approveButton().disabled,false);
   assert.equal(q.get('status').textContent,'');
+});
+
+test('initial open renders _meta.dashboard without a second snapshot read until the next refresh tick, while snapshotOmitted still fetches',async()=>{
+  const key='b'.repeat(64);
+  let now=1000;
+  const jobs=new Map(),memory=new Map([['oms.panel.auto-refresh.v1','on']]);
+  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
+  const autos=()=>[...jobs].filter(([,job])=>job.ms===20000);
+  const p=await panel(['one','two'],{...dashboard,goal:'Refreshed snapshot'},{
+    locale:'en',
+    timers,
+    storage,
+    tools:{oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:key,two:'c'.repeat(64)}})},
+    initialOpen:[
+      ['input',{arguments:{project:'one'}}],
+      ['result',{
+        structuredContent:{panel:'OMS',project:'one',snapshot:'attached'},
+        _meta:{dashboard:{...dashboard,project:'one',goal:'Delivered in _meta.dashboard'}}
+      }]
+    ]
+  });
+  const snapshots=()=>p.calls.filter(c=>c.name==='oms_panel_snapshot');
+  assert.equal(p.get('view').hidden,false);
+  assert.equal(p.get('goal').textContent,'Delivered in _meta.dashboard');
+  assert.equal(p.get('main-name').textContent,'OMS Main · Codex');
+  assert.equal(snapshots().length,0);
+  assert.deepEqual(p.calls.map(c=>c.name),['oms_list_projects','oms_list_approvals',managedRead]);
+  assert.equal(autos().length,1);
+
+  const [tickId,tickJob]=autos()[0];
+  jobs.delete(tickId);
+  now+=20000;
+  tickJob.fn();
+  await setImmediate();
+  assert.equal(snapshots().length,1);
+  assert.equal(p.get('goal').textContent,'Refreshed snapshot');
+  assert.equal(autos().length,1);
+
+  for(const reason of ['busy','size']){
+    const omittedJobs=new Map();
+    const omitted=await panel(['one'],{...dashboard,goal:'Fetched after '+reason},{
+      locale:'en',
+      storage,
+      timers:{Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();omittedJobs.set(id,{fn,ms});return id;},clearTimeout(id){omittedJobs.delete(id);}},
+      tools:{oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}})},
+      initialOpen:[
+        ['input',{arguments:{project:'one'}}],
+        ['result',{structuredContent:{panel:'OMS',project:'one',snapshotOmitted:reason}}]
+      ]
+    });
+    assert.equal(omitted.calls.filter(c=>c.name==='oms_panel_snapshot').length,1);
+    assert.equal(omitted.get('goal').textContent,'Fetched after '+reason);
+    assert.equal([...omittedJobs.values()].filter(j=>j.ms===20000).length,1);
+  }
 });

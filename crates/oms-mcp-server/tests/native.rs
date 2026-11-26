@@ -513,21 +513,23 @@ fn cross_host_project_reads() {
     let opened = c.tool("oms_open_panel", json!({"project":"fixture"}));
     good(&opened);
     assert_eq!(
-        opened["result"]["structuredContent"]["dashboard"],
+        opened["result"]["_meta"]["dashboard"],
         reply["result"]["structuredContent"]["dashboard"]
     );
     assert!(
         opened["result"]["structuredContent"]
-            .get("snapshot")
+            .get("dashboard")
             .is_none()
     );
+    let expected_open =
+        json!({"panel":"OMS","project":"fixture","readOnly":true,"snapshot":"attached"});
+    assert_eq!(opened["result"]["structuredContent"], expected_open);
     let open_text = opened["result"]["content"][0]["text"].as_str().unwrap();
     assert!(!open_text.contains("obs-v1:"));
     assert!(!open_text.contains("conversationMain"));
-    assert_eq!(
-        payload(&opened),
-        json!({"panel":"OMS","project":"fixture","readOnly":true,"snapshot":"attached"})
-    );
+    assert!(!open_text.contains("dashboard"));
+    assert!(payload(&opened).get("dashboard").is_none());
+    assert_eq!(payload(&opened), expected_open);
     let unresolvable = c.tool("oms_open_panel", json!({}));
     good(&unresolvable);
     assert!(
@@ -535,6 +537,7 @@ fn cross_host_project_reads() {
             .get("dashboard")
             .is_none()
     );
+    assert!(unresolvable["result"]["_meta"].get("dashboard").is_none());
     assert!(payload(&unresolvable).get("dashboard").is_none());
     assert!(payload(&unresolvable).get("snapshot").is_none());
     fixture_settings(&source, json!({"exit":2,"stderr":"snapshot failed"}));
@@ -542,6 +545,11 @@ fn cross_host_project_reads() {
     good(&failed_snapshot_open);
     assert!(
         failed_snapshot_open["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert!(
+        failed_snapshot_open["result"]["_meta"]
             .get("dashboard")
             .is_none()
     );
@@ -556,9 +564,10 @@ fn cross_host_project_reads() {
             .get("dashboard")
             .is_none()
     );
+    assert!(oversized_open["result"]["_meta"].get("dashboard").is_none());
     assert_eq!(
-        oversized_open["result"]["structuredContent"]["snapshotOmitted"],
-        "size"
+        oversized_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":"fixture","readOnly":true,"snapshotOmitted":"size"})
     );
     assert_eq!(
         payload(&oversized_open),
@@ -3223,11 +3232,16 @@ fn conversation_panel() {
     );
     let opened = c.tool("oms_open_panel", json!({"leadConversations":true}));
     good(&opened);
-    assert_eq!(opened["result"]["structuredContent"]["dashboard"], *data);
+    assert_eq!(opened["result"]["_meta"]["dashboard"], *data);
     assert!(
         opened["result"]["structuredContent"]
-            .get("snapshot")
+            .get("dashboard")
             .is_none()
+    );
+    assert!(payload(&opened).get("dashboard").is_none());
+    assert_eq!(
+        opened["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"leadConversations":true,"snapshot":"attached"})
     );
     assert!(
         !opened["result"]["content"][0]["text"]
@@ -3253,6 +3267,7 @@ fn conversation_panel() {
     let snapshot_pid = record(&source)["pid"].clone();
     let busy_open = c.tool("oms_open_panel", json!({}));
     good(&busy_open);
+    assert!(busy_open["result"]["_meta"].get("dashboard").is_none());
     assert_eq!(
         busy_open["result"]["structuredContent"],
         json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
@@ -3271,6 +3286,7 @@ fn conversation_panel() {
     assert_eq!(refused["error"]["code"], -32000);
     let full_open = c.tool("oms_open_panel", json!({}));
     good(&full_open);
+    assert!(full_open["result"]["_meta"].get("dashboard").is_none());
     assert_eq!(
         full_open["result"]["structuredContent"],
         json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
@@ -3293,14 +3309,22 @@ fn conversation_panel() {
     }
     let idle_open = c.tool("oms_open_panel", json!({}));
     good(&idle_open);
-    assert_eq!(
-        idle_open["result"]["structuredContent"]["dashboard"]["project"],
-        "demo"
-    );
     assert!(
         idle_open["result"]["structuredContent"]
-            .get("snapshotOmitted")
+            .get("dashboard")
             .is_none()
+    );
+    assert!(payload(&idle_open).get("dashboard").is_none());
+    assert!(
+        !idle_open["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("dashboard")
+    );
+    assert_eq!(idle_open["result"]["_meta"]["dashboard"]["project"], "demo");
+    assert_eq!(
+        idle_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
     );
     assert_eq!(
         payload(&idle_open),
@@ -3318,6 +3342,11 @@ fn conversation_panel() {
     assert_eq!(read(&mut c, uri)["text"], current["text"]);
     let concurrent_open = c.tool("oms_open_panel", json!({}));
     good(&concurrent_open);
+    assert!(
+        concurrent_open["result"]["_meta"]
+            .get("dashboard")
+            .is_none()
+    );
     assert_eq!(
         concurrent_open["result"]["structuredContent"],
         json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
@@ -3331,9 +3360,19 @@ fn conversation_panel() {
     let gated_open = c.read();
     assert_eq!(gated_open["id"], 9020);
     good(&gated_open);
+    assert!(
+        gated_open["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert!(payload(&gated_open).get("dashboard").is_none());
     assert_eq!(
-        gated_open["result"]["structuredContent"]["dashboard"]["project"],
+        gated_open["result"]["_meta"]["dashboard"]["project"],
         "demo"
+    );
+    assert_eq!(
+        gated_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
     );
     assert_eq!(
         payload(&gated_open),
@@ -3355,9 +3394,19 @@ fn conversation_panel() {
     assert!(single_open.status.success(), "{single_open:?}");
     let single_reply: Value = serde_json::from_slice(&single_open.stdout).unwrap();
     good(&single_reply);
+    assert!(
+        single_reply["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert!(payload(&single_reply).get("dashboard").is_none());
     assert_eq!(
-        single_reply["result"]["structuredContent"]["dashboard"]["project"],
+        single_reply["result"]["_meta"]["dashboard"]["project"],
         "demo"
+    );
+    assert_eq!(
+        single_reply["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
     );
     assert_eq!(
         payload(&single_reply),
