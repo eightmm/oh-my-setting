@@ -1235,6 +1235,49 @@ fn worker_output_reader(c: &mut Client, source: &Path, key: &str, thread: &str) 
             .to_string()
             .contains(withheld["text"].as_str().unwrap())
     );
+
+    // A secret straddling an 8192-byte page boundary (including beyond the 16 KiB preview)
+    // withholds every page of worker output via the shared whole-body scan.
+    let clean_worker = format!("{}{}", "w".repeat(16_382), "y".repeat(600));
+    fixture_settings(
+        source,
+        json!({"pagedWorkerBody":clean_worker,"room":args["room"],"leadAttempt":args["leadAttempt"],"workerAttempt":args["workerAttempt"]}),
+    );
+    let mut paged = args.clone();
+    paged["answerPage"] = json!("");
+    let p1 = request(c, &paged);
+    good(&p1);
+    let c2 = p1["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    paged["answerPage"] = c2.clone();
+    let p2 = request(c, &paged);
+    good(&p2);
+    let c3 = p2["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    assert!(c3.is_string());
+
+    let left = ["gh", "p_LeftHalf012345"].concat();
+    let right = "RightHalf67890abcdef01";
+    let straddling_worker = format!(
+        "{} {left}{right} {}",
+        "w".repeat(16_384 - 1 - left.len()),
+        "y".repeat(560)
+    );
+    fixture_settings(
+        source,
+        json!({"pagedWorkerBody":straddling_worker,"room":args["room"],"leadAttempt":args["leadAttempt"],"workerAttempt":args["workerAttempt"]}),
+    );
+    for cursor in [json!(""), c2, c3] {
+        let mut req = args.clone();
+        req["answerPage"] = cursor;
+        let refused = request(c, &req);
+        bad(&refused, "withheld");
+        let wire = refused.to_string();
+        assert!(
+            !wire.contains(&left)
+                && !wire.contains(right)
+                && !wire.contains(&"w".repeat(32))
+                && !wire.contains(&"y".repeat(32))
+        );
+    }
 }
 
 fn desktop_lead_conversations() {
@@ -1798,7 +1841,7 @@ fn desktop_lead_conversations() {
             }
             assert_eq!(text, long);
             assert_eq!(runs(), 4, "reading complete answers must not dispatch");
-            full["answerPage"] = first_cursor;
+            full["answerPage"] = first_cursor.clone();
             let mut wrong = full.clone();
             wrong["leadRequestId"] = initial["leads"][1]["requestId"].clone();
             bad(&call(&mut c, read, &wrong, owner), "selected Lead changed");
@@ -1814,7 +1857,39 @@ fn desktop_lead_conversations() {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
             bad(&call(&mut c, read, &full, owner), "changed");
+
+            // A secret beyond the preview that straddles an 8192-byte page boundary (5 * 8192 = 40960)
+            // withholds every page and marks latestTurn unavailable with outbound_withheld.
+            let left = ["gh", "p_LeftHalf012345"].concat();
+            let right = "RightHalf67890abcdef01";
+            let straddling = format!(
+                "{} {left}{right} {}",
+                "a".repeat(40_960 - 1 - left.len()),
+                "z".repeat(25_000)
+            );
+            std::fs::write(&artifact, format!("## Output\n{straddling}\n## Exit\n0\n")).unwrap();
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+            for cursor in [json!(""), first_cursor.clone()] {
+                let mut req = full.clone();
+                req["answerPage"] = cursor;
+                let refused = call(&mut c, read, &req, owner);
+                bad(&refused, "withheld");
+                let wire = refused.to_string();
+                assert!(
+                    !wire.contains(&left)
+                        && !wire.contains(right)
+                        && !wire.contains(&"a".repeat(32))
+                        && !wire.contains(&"z".repeat(32))
+                );
+            }
+            let status_row = payload(&call(&mut c, read, &args, owner));
+            assert_eq!(status_row["leads"][0]["latestTurn"], Value::Null);
+            assert_eq!(
+                status_row["leads"][0]["turnState"],
+                json!({"status":"unavailable","reason":"outbound_withheld"})
+            );
             std::fs::write(&artifact, original).unwrap();
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         let reset = change_to(
             seat,
@@ -2768,6 +2843,43 @@ fn conversation_panel() {
     bad(&evidence(&mut c, full.clone()), "changed");
     full["page"] = json!(2);
     bad(&evidence(&mut c, full), "returned cursor");
+
+    // Room transcript/diff full paging withholds every page when a secret straddles byte 8192.
+    let clean_evidence = format!("{}{}", "a".repeat(8_190), "z".repeat(400));
+    fixture_settings(
+        &source,
+        json!({"pagedChatEvidence":{"base":detail,"attempt":"bound-attempt","section":"transcript","body":clean_evidence}}),
+    );
+    let mut ev_req = json!({"room":"fixture","participant":"owner","section":"transcript","attempt":"bound-attempt","projectKey":project_key,"evidenceCursor":""});
+    let ev_p1 = evidence(&mut c, ev_req.clone());
+    good(&ev_p1);
+    let ev_c2 = ev_p1["result"]["_meta"]["chat"]["evidence"]["nextCursor"].clone();
+    assert!(ev_c2.is_string());
+
+    let left = ["gh", "p_LeftHalf012345"].concat();
+    let right = "RightHalf67890abcdef01";
+    let straddling_evidence = format!(
+        "{} {left}{right} {}",
+        "a".repeat(8_192 - 1 - left.len()),
+        "z".repeat(360)
+    );
+    fixture_settings(
+        &source,
+        json!({"pagedChatEvidence":{"base":detail,"attempt":"bound-attempt","section":"transcript","body":straddling_evidence}}),
+    );
+    for cursor in [json!(""), ev_c2] {
+        ev_req["evidenceCursor"] = cursor;
+        let refused = evidence(&mut c, ev_req.clone());
+        bad(&refused, "withheld");
+        let wire = refused.to_string();
+        assert!(
+            !wire.contains(&left)
+                && !wire.contains(right)
+                && !wire.contains(&"a".repeat(32))
+                && !wire.contains(&"z".repeat(32))
+        );
+    }
+
     fixture_settings(&source, json!({"stdout":detail.to_string()}));
     bad(
         &evidence(
@@ -6258,6 +6370,94 @@ fn fake_oms() {
     }
     if args.iter().any(|v| v == "updates") && cfg["updates"].is_string() {
         print!("{}", cfg["updates"].as_str().unwrap());
+        return;
+    }
+    if let Some(body) = cfg["pagedWorkerBody"].as_str()
+        && args.iter().any(|v| v == "--desktop-worker-output")
+    {
+        let page = args
+            .windows(2)
+            .find(|pair| pair[0] == "--page")
+            .and_then(|pair| pair[1].to_str()?.parse::<usize>().ok())
+            .unwrap_or(1);
+        let out = match oms_scrub::outbound_page(
+            body,
+            1024 * 1024,
+            oms_scrub::PageSelector::Number(page),
+        ) {
+            Ok(part) => json!({
+                "room":cfg["room"],
+                "leadAttempt":cfg["leadAttempt"],
+                "workerAttempt":cfg["workerAttempt"],
+                "status":"complete",
+                "source":"indexed-answer",
+                "text":part.text,
+                "truncated":part.has_more,
+                "page":{
+                    "page":page,
+                    "offset":part.offset,
+                    "bytes":part.end - part.offset,
+                    "totalBytes":part.total_bytes,
+                    "digest":"d".repeat(64),
+                    "revision":"e".repeat(64),
+                    "hasMore":part.has_more,
+                    "nextPage":part.has_more.then_some(page + 1)
+                }
+            }),
+            Err(oms_scrub::PageError::OutboundWithheld) => json!({
+                "room":cfg["room"],
+                "leadAttempt":cfg["leadAttempt"],
+                "workerAttempt":cfg["workerAttempt"],
+                "status":"outbound_withheld",
+                "text":Value::Null,
+                "source":Value::Null,
+                "truncated":false
+            }),
+            Err(oms_scrub::PageError::InvalidRange) => std::process::exit(2),
+        };
+        println!("{out}");
+        return;
+    }
+    if let Some(spec) = cfg.get("pagedChatEvidence").filter(|v| v.is_object())
+        && args.iter().any(|v| v == "--evidence-full")
+    {
+        let page = args
+            .windows(2)
+            .find(|pair| pair[0] == "--page")
+            .and_then(|pair| pair[1].to_str()?.parse::<usize>().ok())
+            .unwrap_or(1);
+        let body = spec["body"].as_str().unwrap();
+        let mut out = spec["base"].clone();
+        out["messages"] = json!([]);
+        out["evidence"] = match oms_scrub::outbound_page(
+            body,
+            16 * 1024 * 1024,
+            oms_scrub::PageSelector::Number(page),
+        ) {
+            Ok(part) => json!({
+                "attempt":spec["attempt"],
+                "section":spec["section"],
+                "page":page,
+                "source":"indexed-answer",
+                "text":part.text,
+                "lines":part.text.lines().collect::<Vec<_>>(),
+                "offset":part.offset,
+                "bytes":part.end - part.offset,
+                "totalBytes":part.total_bytes,
+                "digest":"a".repeat(64),
+                "revision":"b".repeat(64),
+                "nextPage":part.has_more.then_some(page + 1),
+                "hasMore":part.has_more,
+                "truncated":false
+            }),
+            Err(oms_scrub::PageError::OutboundWithheld) => json!({
+                "attempt":spec["attempt"],
+                "section":spec["section"],
+                "status":"outbound_withheld"
+            }),
+            Err(oms_scrub::PageError::InvalidRange) => std::process::exit(2),
+        };
+        println!("{out}");
         return;
     }
     if cfg["hold"] == true {

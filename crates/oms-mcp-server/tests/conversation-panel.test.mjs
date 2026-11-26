@@ -1543,13 +1543,14 @@ test('worker full output pages keep the exact pair and reject a changed digest',
 });
 
 test('pending-turn polling pauses visibly and slot badges change only after a confirmed metadata read',async()=>{
-  let now=0,state='running',degradeAgy=true;const id=randomUUID(),jobs=new Map(),timers={Date:{now:()=>now},
+  let now=0,state='running',agyTurnState={status:'unavailable',reason:'outbound_withheld'};const id=randomUUID(),jobs=new Map(),timers={Date:{now:()=>now},
     setTimeout(fn,ms){const key=Symbol();jobs.set(key,{fn,ms});return key;},clearTimeout:key=>jobs.delete(key)};
+  assert.ok(!html.includes('"followup.scope"'));
   const p=await panel(['one'],dashboard,{locale:'en',timers,tools:{[managedRead]:a=>{
     const v=leadStatus(a,'ready');
     for(const row of v.leads){
       if(row.provider==='claude')row.latestTurn={turnId:id,status:state,submittedAt:null,lastObservedAt:null};
-      if(row.provider==='agy' && degradeAgy){row.latestTurn=null;row.turnState={status:'unavailable',reason:'outbound_withheld'};}
+      if(row.provider==='agy' && agyTurnState){row.latestTurn=null;row.turnState=agyTurnState;}
     }
     if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Recorded question',turnId:id,status:state},...(state==='replied'?[{role:'claude',text:'Recorded reply',turnId:id}]:[])]}};
     return v;
@@ -1557,14 +1558,25 @@ test('pending-turn polling pauses visibly and slot badges change only after a co
   assert.equal([...jobs.values()].filter(v=>v.ms>=8000 && v.ms<=15000).length,0);
   assert.match(p.get('leads').children[0].textContent,/Ask Codex/);
   assert.match(p.get('leads').children[1].textContent,/Reply pending/);
-  assert.match(p.get('leads').children[2].textContent,/Ask AGY.*Delivery is unconfirmed/);
+  assert.match(p.get('leads').children[2].textContent,/Ask AGY.*Answer withheld by the safety scan/);
+  await choose(p,'ko');assert.match(p.get('leads').children[2].textContent,/안전 검사로 답변이 보류되었습니다/);
+  await choose(p,'en');
+  for(const [turnState,enRe,koRe] of [
+    [{status:'unavailable',reason:'invalid_turn_record'},/Turn record unreadable/,/전달 기록을 읽을 수 없습니다/],
+    [{status:'unconfirmed',reason:'receipt_changed'},/Receipt changed · delivery unconfirmed/,/접수 상태가 변경되어 전달을 확인할 수 없습니다/]
+  ]){
+    agyTurnState=turnState;await p.event('lead-refresh','click');
+    assert.match(p.get('leads').children[2].textContent,enRe);
+    await choose(p,'ko');assert.match(p.get('leads').children[2].textContent,koRe);
+    await choose(p,'en');
+  }
   const open=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
   const poll=[...jobs].find(([,v])=>v.ms===8000);jobs.delete(poll[0]);now=130000;poll[1].fn();await setImmediate();
   assert.match(p.get('chat-delivery').textContent,/Automatic checks paused/);assert.equal([...jobs.values()].filter(v=>v.ms===8000).length,0);
   const mark=p.calls.length;await p.event('chat-check','click');assert.equal(p.calls.length,mark+1);assert.equal(p.calls.at(-1).name,managedRead);
   await p.event('chat-back','click');assert.equal([...jobs.values()].filter(v=>v.ms>=8000 && v.ms<=15000).length,0);
-  state='replied';degradeAgy=false;await p.event('lead-refresh','click');assert.match(p.get('leads').children[1].textContent,/New reply/);
-  assert.doesNotMatch(p.get('leads').children[2].textContent,/Delivery is unconfirmed/);
+  state='replied';agyTurnState=null;await p.event('lead-refresh','click');assert.match(p.get('leads').children[1].textContent,/New reply/);
+  assert.doesNotMatch(p.get('leads').children[2].textContent,/withheld|unreadable|unconfirmed/);
   open.dispatchEvent(new Event('click'));await setImmediate();await p.event('chat-back','click');assert.match(p.get('leads').children[1].textContent,/Reply read/);
   assert.ok(!p.calls.some(c=>c.name==='oms_send_lead_message'));
 });

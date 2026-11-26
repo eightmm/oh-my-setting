@@ -18,7 +18,7 @@
 | Lead 연결 선택 | 특정 Lead 하나 또는 세 Lead 전체를 명시적으로 연결한다. 미래 방문의 자동 연결 선호는 별도 opt-in으로 저장한다. | 이번 연결 클릭은 미래 자동 실행 선호를 저장하지 않는다. 선호 체크를 켜는 동작도 현재 방문에서 즉시 연결을 실행하지 않는다. |
 | 설정과 관측 값 | 다음 메시지에 적용할 요청 설정, catalog 관측 나이, 요청 모델·effort와 해당 답변에서 확인된 모델 증거를 구분한다. 설정 범위와 OMS thread 연속성을 표시한다. | Lead 상담 설정은 worker로 상속되지 않는다. 계정·failover·사용량을 이 답변에 결합하는 reader는 이번에 추가하지 않았으며 해당 값은 null이고 미확인으로 안내한다. 저장소에 관련 telemetry가 없거나 수집되지 않는다는 뜻이 아니다. |
 | 긴 결과 읽기 | Lead 답변, Room 결과, worker 출력은 선택한 뒤에만 byte-bounded 페이지로 읽는다. 잘림, 현재 바이트 범위, 다음 부분, 처음부터 다시 읽기를 표시한다. | 복사는 현재 표시된 부분만 복사한다. 한 번에 전체 원문을 모으거나 화면 밖에서 자동으로 끝까지 읽지 않는다. 파일 경로를 사용자가 입력하는 reader를 추가하지 않는다. |
-| 결과에 대한 후속 요청 | 현재 프로젝트·Room과 선택한 결과 참조를 포함한 수정 가능한 초안을 준비한다. 복사 또는 지원하는 호스트의 대화 문맥에 추가하고 Main 대화로 이동할 수 있다. | 문맥 추가는 Main 수신 receipt, 사용자 메시지 전송, 작업 배정, 실행 시작, 완료 승인이 아니다. 이 상태를 성공한 실행으로 표시하지 않는다. |
+| 결과에 대한 후속 요청 | 현재 프로젝트·Room에 고정한 상태에서 목표·요약과 확인된 `task`(및 Lead 답변의 `turnId`)를 담은 수정 가능한 초안을 준비한다. 복사 또는 지원하는 호스트의 대화 문맥에 추가하고 Main 대화로 이동할 수 있다. | 문맥 추가는 Main 수신 receipt, 사용자 메시지 전송, 작업 배정, 실행 시작, 완료 승인이 아니다. 이 상태를 성공한 실행으로 표시하지 않는다. |
 
 완료 기준은 공개 projection에서 최대 8개, 기준별 근거는 최대 3개를 표시한다.
 Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 사실을 안내한다.
@@ -39,20 +39,22 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 | `oms_lead_settings` / `oms_update_lead_settings` | `scope`, `catalogAgeSeconds`, selection과 lastServed | 다음 메시지 설정과 실제 답변 증거를 구분하고 기존 revision-checked 저장을 유지한다. |
 | `oms_panel_chat` | transcript/diff·attempt에 `evidenceCursor`; 이 모드는 exact `projectKey` 필수 | 선택한 Room 결과를 읽는다. public/private projectKey와 Room·participant·attempt·section이 모두 일치해야 표시한다. 기존 메시지·legacy page 읽기는 유지한다. |
 | `oms_worker_output` | `answerPage`, private `page` metadata | 확인된 projectKey·Room·Lead attempt·worker attempt 쌍의 원문만 읽는다. |
-| `ui/update-model-context` | `oms-followup-draft`의 projectKey·Room·owner·source·text와 확인된 task | 명시적인 클릭으로 현재 호스트 대화의 문맥에 초안을 추가한다. Main 수신이나 실행의 증거로 사용하지 않는다. |
+| `ui/update-model-context` | `oms-followup-draft`의 선택적 `project` 별칭·`goal`·`summary`·선택적 `task`·선택적 `turnId`·`text` (`projectKey`·`Room`·`owner`·`source`와 내부 결과 식별자는 생략) | 명시적인 클릭으로 현재 호스트 대화의 문맥에 초안을 추가한다. Main 수신이나 실행의 증거로 사용하지 않는다. |
 
 답변은 private `_meta` 경로로 전달하며 초기 public snapshot에 본문을 넣지 않는다.
 페이지는 scope와 원문 digest에 결합한다. UI는 바이트 길이·offset 연속성·전체 크기·digest·cursor를
 검증하고, 다른 원문 또는 범위의 응답이면 표시된 private 본문과 복사·후속 요청 제어를 지운다.
 프로젝트 전환 뒤 늦게 도착한 응답도 이전 본문을 되살리지 않는다.
 
-Lead 결과의 후속 초안은 서버가 다시 확인한 Room·participant·operation·turn 참조를 사용한다.
-worker와 Room 결과도 reader가 확인한 정확한 쌍과 attempt를 사용한다.
-선택한 결과의 task는 같은 물리 프로젝트·Room의 정확한 worker·attempt 또는 Lead operation과
-연결된 값만 넣으며, 확인되지 않으면 생략한다. 결과를 선택하지 않은 일반 초안은 현재 attention
-task를 사용할 수 있다.
-호스트 문맥 기능이 없거나 실패하면 복사할 수 있으며, 초안 본문에도 프로젝트·Room·결과 식별자를
-남기므로 structured payload 없이도 선택한 범위를 확인할 수 있다.
+패널 메모리의 후속 초안은 서버·reader가 확인한 `projectKey`·`Room`·`owner`와 Lead
+(`participant`·`operation`·`turnId`) 또는 worker·Room attempt 쌍에 고정해 활성 범위와 `task` 귀속만
+검증한다. 선택한 결과의 `task`는 같은 물리 프로젝트·Room의 정확한 worker·attempt 또는 Lead
+operation과 연결된 값만 넣으며, 확인되지 않으면 생략한다. 결과를 선택하지 않은 일반 초안은 현재
+attention `task`를 사용할 수 있다.
+호스트에 전달하는 `oms-followup-draft` 문맥(선택적 `project` 별칭·`goal`·`summary`·선택적 `task`·선택적
+`turnId`·`text`)과 복사 가능한 초안 본문(선택적 `Turn: …`·선택적 `Task: …`·목표 요약·항목 요약)에는
+`projectKey`·`Room`·`owner`·`source` 및 내부 operation·participant·attempt·digest 식별자를 의도적으로
+넣지 않는다.
 초안은 전환·실패 시 비우는 패널 메모리이며 새로운 영구 receipt가 아니다.
 
 ## 검증과 남은 확인
@@ -69,7 +71,7 @@ alias 재매핑·프로젝트 전환·늦은 응답의 private purge, 전송 중
 개별 Lead 선택과 미래 자동 연결 분리, 부분 완료 기준과 Plan 구분, 긴 기준·다음 단계 문구,
 UTF-8 한도·목표 prefix, Room 읽기 위치, 긴 원문의 scope/digest 검증,
 공백만 있는 중간 페이지를 지나 끝까지 읽기, 다른 Room attempt 또는 물리 projectKey 응답 거부,
-복사할 초안의 결과 범위 보존, 서로 다른 worker·Lead 결과의 task 귀속과 미확인 task 생략이다.
+초안 본문·문맥에서 내부 식별자 생략과 확인된 요약·turn·task 전달, 서로 다른 worker·Lead 결과의 task 귀속과 미확인 task 생략이다.
 
 이 fixture는 실제 브라우저의 layout·scroll 계산·접근성 트리와 native host capability를 대체하지 않는다.
 320px와 736px의 실제 브라우저 렌더, 키보드·스크린리더 상호작용,

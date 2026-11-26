@@ -283,23 +283,34 @@ pub(super) fn worker_output(
     let attempt = &proof.2;
     if options.has("page") {
         let number = options.integer("page", 1, 1, 10000)?;
-        if let Some(mut page) = crate::desktop_evidence::worker_answer_page(repo, attempt, number)?
-        {
+        if let Some(outcome) = crate::desktop_evidence::worker_answer_page(repo, attempt, number)? {
             if stop.load(std::sync::atomic::Ordering::Relaxed) || select()? != proof {
                 return Err(Error::new("worker output binding changed"));
             }
-            let text = page.as_object_mut().and_then(|o| o.remove("text"));
-            return Ok(
-                json!({"room":id,"leadAttempt":lead,"workerAttempt":worker,"status":"complete",
-                "text":text,"source":page["source"],"truncated":page["hasMore"],"page":page}),
-            );
+            return match outcome {
+                Ok(mut page) => {
+                    let text = page.as_object_mut().and_then(|o| o.remove("text"));
+                    Ok(
+                        json!({"room":id,"leadAttempt":lead,"workerAttempt":worker,"status":"complete",
+                        "text":text,"source":page["source"],"truncated":page["hasMore"],"page":page}),
+                    )
+                }
+                Err(oms_scrub::OutboundWithheld) => Ok(
+                    json!({"room":id,"leadAttempt":lead,"workerAttempt":worker,"status":"outbound_withheld",
+                    "text":Value::Null,"source":Value::Null,"truncated":false}),
+                ),
+            };
         }
     }
     let (status, text, source, truncated) =
         match crate::desktop_evidence::worker_answer(repo, attempt) {
-            Ok(Some((text, source, truncated))) => {
-                ("complete", Some(text), Some(source), truncated)
-            }
+            Ok(Some(Ok(preview))) => (
+                "complete",
+                Some(preview.text),
+                Some(preview.source),
+                preview.truncated,
+            ),
+            Ok(Some(Err(oms_scrub::OutboundWithheld))) => ("outbound_withheld", None, None, false),
             Ok(None) if attempt["terminal"] == true => ("not_recorded", None, None, false),
             Ok(None)
                 if attempt["terminal"] == false

@@ -2242,11 +2242,17 @@ impl Server<'_> {
                     {
                         return Err("The evidence selection changed. Reopen the result.".into());
                     }
+                    if data["evidence"]["status"] == "outbound_withheld" {
+                        return Err("OMS withheld this evidence during its outbound scan.".into());
+                    }
+                    if data["evidence"].get("status").is_some() {
+                        return Err("Full retained evidence is unavailable.".into());
+                    }
                     data["projectKey"] = json!(key);
                     let text = data["evidence"]["text"]
                         .as_str()
                         .ok_or("Full retained evidence is unavailable.")?;
-                    crate::output::outbound(text.as_bytes(), &Value::Null)
+                    oms_scrub::check_outbound(text.as_bytes())
                         .map_err(|_| "OMS withheld this evidence during its outbound scan.")?;
                     let page = output_page(&data["evidence"], text, cursor, position, &scope)?;
                     for field in [
@@ -2571,6 +2577,14 @@ impl Server<'_> {
             return Err(err.into());
         }
         match data["status"].as_str() {
+            Some("outbound_withheld")
+                if data.get("text").is_some_and(Value::is_null)
+                    && data.get("source").is_some_and(Value::is_null)
+                    && data["truncated"] == false
+                    && data.get("page").is_none() =>
+            {
+                return Err("OMS withheld this worker output during its outbound scan.".into());
+            }
             Some("complete")
                 if matches!(
                     data["source"].as_str(),
@@ -2587,7 +2601,7 @@ impl Server<'_> {
                                 .any(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'))
                     })
                     .ok_or(err)?;
-                crate::output::outbound(text.as_bytes(), &Value::Null)
+                oms_scrub::check_outbound(text.as_bytes())
                     .map_err(|_| "OMS withheld this worker output during its outbound scan.")?;
             }
             Some("running" | "not_recorded" | "unavailable")

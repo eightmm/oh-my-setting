@@ -361,6 +361,9 @@ const messages = {
   "turn.replied": ["답변 도착", "Reply received"],
   "turn.failed": ["답변을 받지 못했습니다.", "The request ended without a reply."],
   "turn.unconfirmed": ["전달 상태를 확인할 수 없습니다.", "Delivery is unconfirmed."],
+  "turn.outbound_withheld": ["안전 검사로 답변이 보류되었습니다.", "Answer withheld by the safety scan."],
+  "turn.invalid_turn_record": ["전달 기록을 읽을 수 없습니다.", "Turn record unreadable."],
+  "turn.receipt_changed": ["접수 상태가 변경되어 전달을 확인할 수 없습니다.", "Receipt changed · delivery unconfirmed."],
   "turn.not_found": ["이전 전송 기록을 찾을 수 없습니다.", "The previous send was not found."],
   "turn.check": ["전달 상태 확인", "Check delivery"],
   "turn.retry": ["원래 메시지 다시 보내기", "Retry original message"],
@@ -550,7 +553,6 @@ const messages = {
   "journey.next": ["다음 확인 · {v}", "Next check · {v}"],
   "followup.prepare": ["현재 Main에 요청할 초안 준비", "Prepare a follow-up for Main"],
   "followup.result": ["이 결과로 요청 초안 준비", "Prepare a follow-up on this result"],
-  "followup.scope": ["프로젝트: {project}\nRoom: {room}", "Project: {project}\nRoom: {room}"],
   "followup.reference": ["선택한 결과 참조: {v}", "Selected result reference: {v}"],
   "followup.label": ["현재 대화에 추가할 요청 초안", "Request draft for the current conversation"],
   "followup.note": ["초안 추가는 작업 배정이나 실행 시작이 아닙니다.", "Adding a draft does not assign a task or start execution."],
@@ -1369,7 +1371,7 @@ function paintLeadControls(){
     slot.connect.disabled=!known || !ctl.observed || ctl.reading || ctl.writing;
     if(!slot.connect.hidden)put(slot.connect,()=>t('lead.connect',{provider:names[provider]}));else slot.connect.textContent='';
     const latest=row?.latestTurn,turnState=row?.turnState;
-    put(slot.turn,()=>!latest?(turnState?t('turn.unconfirmed'):''):['reserved','running','unconfirmed'].includes(latest.status)?t('lead.waitingReply'):
+    put(slot.turn,()=>!latest?(turnState?t(Object.hasOwn(messages,'turn.'+turnState.reason)?'turn.'+turnState.reason:'turn.unconfirmed'):''):['reserved','running','unconfirmed'].includes(latest.status)?t('lead.waitingReply'):
       latest.status==='replied'?t(ctl.seenTurns?.get(provider)===latest.turnId?'lead.replyRead':'lead.newReply'):
       latest.status==='failed'?t('turn.failed'):'');
   }

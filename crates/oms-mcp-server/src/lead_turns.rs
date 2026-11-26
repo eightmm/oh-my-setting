@@ -352,19 +352,33 @@ impl<'a> Conversation<'a> {
                     .and_then(|r| r.as_str().and_then(|s| crate::value::from_str(s).ok()));
                 let answer = proof
                     .as_ref()
-                    .filter(|v| {
-                        v["operation"] == op
-                            && v["exit"] == 0
-                            && v["answer_details"].as_array().is_some_and(|d| {
-                                d.len() == 1
-                                    && d[0]["exit"] == "0"
-                                    && d[0]["read_arguments"]["operation"] == op
-                            })
+                    .filter(|v| v["operation"] == op && v["exit"] == 0)
+                    .and_then(|v| v["answer_details"].as_array())
+                    .and_then(|d| match d.as_slice() {
+                        [detail]
+                            if detail["exit"] == "0"
+                                && detail["read_arguments"]["operation"] == op =>
+                        {
+                            detail["read_arguments"]["answer_ref"].as_str()
+                        }
+                        _ => None,
                     })
-                    .and_then(|v| v["answer"].as_str())
-                    .filter(|s| !s.trim().is_empty());
+                    .and_then(|reference| {
+                        let (name, _) = reference.rsplit_once(':')?;
+                        let (text, exit) =
+                            crate::storage::owned_answer(self.repo, &op, name).ok()?;
+                        (exit == "0"
+                            && reference == crate::storage::reference(&op, name, &text)
+                            && !text.trim().is_empty())
+                        .then_some(text)
+                    });
                 if let Some(answer) = answer {
-                    crate::output::outbound(answer.as_bytes(), &Value::Null).map_err(|_| {
+                    oms_scrub::outbound_page(
+                        &answer,
+                        crate::MAX_ANSWER,
+                        oms_scrub::PageSelector::Offset(0),
+                    )
+                    .map_err(|_| {
                         (
                             TurnLookupError::OutboundWithheld,
                             "OMS withheld this Lead answer during its outbound scan.".to_owned(),
@@ -373,7 +387,7 @@ impl<'a> Conversation<'a> {
                     Ok((
                         "replied",
                         Some(
-                            json!({"role":self.lead["provider"],"text":byte_prefix(answer,4000),"turnId":record["id"],"at":Value::Null,"truncated":answer.len()>4000 || proof.as_ref().is_some_and(|v|v["answer_truncated"]==true)}),
+                            json!({"role":self.lead["provider"],"text":byte_prefix(&answer,4000),"turnId":record["id"],"at":Value::Null,"truncated":answer.len()>4000}),
                         ),
                     ))
                 } else {
@@ -629,28 +643,32 @@ impl<'a> Conversation<'a> {
         let cursor = args["answerPage"].as_str().ok_or(INVALID)?;
         let offset = super::output_position(cursor, crate::MAX_ANSWER)?;
         super::check_output_cursor(cursor, self.scope, &revision, offset)?;
-        let page = server.peer_result(&json!({"repo":self.repo,"operation":operation,"answer_ref":reference,"answer_offset":offset,"answer_limit":8192}))
+        if crate::peer::status(&operation_dir.path) != ("done", Some(0))
+            || crate::storage::meta(&operation_dir.path)["answer_storage"] != "operation"
+        {
+            return Err("The retained answer changed. Reopen the result.".into());
+        }
+        let (answer, artifact_exit) = crate::storage::owned_answer(self.repo, &operation, name)
             .map_err(|_| "The retained answer changed. Reopen the result.")?;
-        let page = crate::value::from_str(page.as_str().ok_or(INVALID)?).map_err(|_| INVALID)?;
-        let text = page["answer"].as_str().ok_or(INVALID)?;
-        let end = page["answer_end"].as_u64().ok_or(INVALID)? as usize;
-        let total = page["answer_bytes"].as_u64().ok_or(INVALID)? as usize;
-        if page["operation"] != operation
-            || page["exit"] != 0
-            || page["artifact_exit"] != "0"
-            || page["answer_ref"] != reference
-            || page["answer_sha256"] != detail["answer_sha256"]
-            || page["answer_offset"].as_u64() != Some(offset as u64)
-            || text.len() > 8192
-            || end != offset + text.len()
-            || end > total
-            || page["has_more"] != (end < total)
+        let digest = crate::storage::hash(&answer);
+        if artifact_exit != "0"
+            || reference != crate::storage::reference(&operation, name, &answer)
+            || detail["answer_sha256"].as_str() != Some(digest.as_str())
             || identity(&stat()?) != identity(&before)
         {
-            return Err(INVALID.into());
+            return Err("The retained answer changed. Reopen the result.".into());
         }
-        crate::output::outbound(text.as_bytes(), &Value::Null)
-            .map_err(|_| "OMS withheld this Lead answer during its outbound scan.")?;
+        let page = oms_scrub::outbound_page(
+            &answer,
+            crate::MAX_ANSWER,
+            oms_scrub::PageSelector::Offset(offset),
+        )
+        .map_err(|err| match err {
+            oms_scrub::PageError::OutboundWithheld => {
+                "OMS withheld this Lead answer during its outbound scan."
+            }
+            oms_scrub::PageError::InvalidRange => INVALID,
+        })?;
         self.bound()?;
         check()?;
         let checked = checked_peer_directory(
@@ -683,9 +701,9 @@ impl<'a> Conversation<'a> {
             return Err(INVALID.into());
         }
         Ok(
-            json!({"turnId":id,"text":text,"offset":offset,"bytes":text.len(),"totalBytes":total,
-            "digest":page["answer_sha256"],"nextCursor":(end<total).then(||super::output_cursor(self.scope,&revision,end)),
-            "hasMore":end<total,"source":"recorded-answer",
+            json!({"turnId":id,"text":page.text,"offset":page.offset,"bytes":page.text.len(),"totalBytes":page.total_bytes,
+            "digest":digest,"nextCursor":page.has_more.then(||super::output_cursor(self.scope,&revision,page.end)),
+            "hasMore":page.has_more,"source":"recorded-answer",
             "handoff":{"room":self.lead["room"],"participant":self.lead["participant"],"provider":self.provider,
                 "leadRequestId":self.lead["request"],"turnId":id,"operation":operation}}),
         )

@@ -9,7 +9,6 @@ use std::{
 
 const PAGE_SIZE: usize = 20;
 const LINE_CHARS: usize = 200;
-const ANSWER_PAGE_BYTES: usize = 8192;
 
 pub(super) fn sections(_attempt: &Value) -> Value {
     json!(["info", "events"])
@@ -19,12 +18,16 @@ struct Body {
     text: String,
     source: &'static str,
     digest: String,
+    bound: usize,
 }
 
 #[derive(Default)]
 struct Retained {
     answer: Option<Body>,
+    raw_answer: Option<Body>,
     patch: Option<Body>,
+    raw_patch: Option<Body>,
+    raw_patch_withheld: bool,
     paths: Vec<String>,
     patch_digest: Option<String>,
 }
@@ -50,7 +53,7 @@ fn unique_row<'a>(
         .then_some(first)
 }
 
-fn recorded_answer(
+fn raw_recorded_answer(
     store: &Store,
     id: &str,
     attempt: &Value,
@@ -58,20 +61,18 @@ fn recorded_answer(
     index: &[Value],
 ) -> Result<Option<Body>> {
     if let Some(report) = native {
-        return report["summary"]
+        return Ok(report["summary"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
-            .map(|text| {
-                Ok(Body {
-                    text: oms_panel_core::redact(text.as_bytes())?,
-                    source: "native-report",
-                    digest: attempt["refs"]["native_result_sha256"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                })
-            })
-            .transpose();
+            .map(|text| Body {
+                text: text.to_owned(),
+                source: "native-report",
+                digest: attempt["refs"]["native_result_sha256"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                bound: results::MAX_DRAFT,
+            }));
     }
     let eligible = |r: &Value| {
         matches!(
@@ -87,34 +88,52 @@ fn recorded_answer(
     }
     let row = unique_row(index, id, "artifact_sha256", eligible)
         .ok_or_else(|| Error::new("ambiguous worker answer"))?;
-    let text = results::indexed_answer(store, row)?;
+    let text = results::unredacted_indexed_answer(store, row)?;
     if !matches!(text.lines().next(), Some("## Answer" | "## Findings"))
         || !text.lines().skip(1).any(|l| !l.trim().is_empty())
     {
         return Ok(None);
     }
     Ok(Some(Body {
-        text: oms_panel_core::redact(text.as_bytes())?,
+        text,
         source: "indexed-answer",
         digest: row["artifact_sha256"]
             .as_str()
             .unwrap_or_default()
             .to_owned(),
+        bound: results::MAX_RESULT,
     }))
+}
+
+pub(super) struct WorkerPreview {
+    pub text: String,
+    pub source: &'static str,
+    pub truncated: bool,
 }
 
 /// Read just the retained answer of an already authority-checked attempt, without opening its patch.
 pub(super) fn worker_answer(
     repo: &Path,
     attempt: &Value,
-) -> Result<Option<(String, &'static str, bool)>> {
-    Ok(worker_body(repo, attempt)?.map(|body| {
-        let mut text = body.text;
-        let length = text.len();
-        text.truncate(text.floor_char_boundary(16 * 1024));
-        let truncated = text.len() != length;
-        (text, body.source, truncated)
-    }))
+) -> Result<Option<std::result::Result<WorkerPreview, oms_scrub::OutboundWithheld>>> {
+    let Some(body) = worker_body(repo, attempt)? else {
+        return Ok(None);
+    };
+    if body.text.len() > body.bound {
+        return Err(Error::new("worker answer exceeds size bound"));
+    }
+    if oms_scrub::check_outbound(body.text.as_bytes()).is_err() {
+        return Ok(Some(Err(oms_scrub::OutboundWithheld)));
+    }
+    let mut text = body.text;
+    let length = text.len();
+    text.truncate(text.floor_char_boundary(16 * 1024));
+    let truncated = text.len() != length;
+    Ok(Some(Ok(WorkerPreview {
+        text,
+        source: body.source,
+        truncated,
+    })))
 }
 
 fn worker_body(repo: &Path, attempt: &Value) -> Result<Option<Body>> {
@@ -132,38 +151,37 @@ fn worker_body(repo: &Path, attempt: &Value) -> Result<Option<Body>> {
     } else {
         Vec::new()
     };
-    recorded_answer(&store, id, attempt, native.as_ref(), &index)
+    raw_recorded_answer(&store, id, attempt, native.as_ref(), &index)
 }
 
 pub(super) fn worker_answer_page(
     repo: &Path,
     attempt: &Value,
     page: usize,
-) -> Result<Option<Value>> {
+) -> Result<Option<std::result::Result<Value, oms_scrub::OutboundWithheld>>> {
     worker_body(repo, attempt)?
         .map(|body| body_page(&body, attempt, page))
         .transpose()
 }
 
-fn body_page(body: &Body, attempt: &Value, page: usize) -> Result<Value> {
-    if !(1..=10000).contains(&page) {
-        return Err(Error::new("Evidence page unavailable"));
-    }
-    let mut offset = 0;
-    for _ in 1..page {
-        if offset == body.text.len() {
+fn body_page(
+    body: &Body,
+    attempt: &Value,
+    page: usize,
+) -> Result<std::result::Result<Value, oms_scrub::OutboundWithheld>> {
+    let part = match oms_scrub::outbound_page(
+        &body.text,
+        body.bound,
+        oms_scrub::PageSelector::Number(page),
+    ) {
+        Ok(part) => part,
+        Err(oms_scrub::PageError::OutboundWithheld) => {
+            return Ok(Err(oms_scrub::OutboundWithheld));
+        }
+        Err(oms_scrub::PageError::InvalidRange) => {
             return Err(Error::new("Evidence page unavailable"));
         }
-        offset = body
-            .text
-            .floor_char_boundary((offset + ANSWER_PAGE_BYTES).min(body.text.len()));
-    }
-    let end = body
-        .text
-        .floor_char_boundary((offset + ANSWER_PAGE_BYTES).min(body.text.len()));
-    if offset >= body.text.len() {
-        return Err(Error::new("Evidence page unavailable"));
-    }
+    };
     let revision = oms_panel_core::digest(
         json!([
             "desktop-answer-page-v1",
@@ -179,10 +197,10 @@ fn body_page(body: &Body, attempt: &Value, page: usize) -> Result<Value> {
         .to_string()
         .as_bytes(),
     );
-    Ok(
-        json!({"text":&body.text[offset..end],"page":page,"offset":offset,"bytes":end-offset,"totalBytes":body.text.len(),
-        "digest":body.digest,"revision":revision,"source":body.source,"nextPage":(end<body.text.len()).then_some(page+1),"hasMore":end<body.text.len()}),
-    )
+    Ok(Ok(
+        json!({"text":part.text,"page":page,"offset":part.offset,"bytes":part.end-part.offset,"totalBytes":part.total_bytes,
+        "digest":body.digest,"revision":revision,"source":body.source,"nextPage":part.has_more.then_some(page+1),"hasMore":part.has_more}),
+    ))
 }
 
 fn retained(repo: &Path, attempt: &Value) -> Retained {
@@ -196,9 +214,17 @@ fn retained(repo: &Path, attempt: &Value) -> Retained {
         None
     };
     let index = results::index_rows(repo).unwrap_or_default();
-    result.answer = recorded_answer(&store, id, attempt, native.as_ref(), &index)
+    result.raw_answer = raw_recorded_answer(&store, id, attempt, native.as_ref(), &index)
         .ok()
         .flatten();
+    result.answer = result.raw_answer.as_ref().and_then(|raw| {
+        Some(Body {
+            text: oms_panel_core::redact(raw.text.as_bytes()).ok()?,
+            source: raw.source,
+            digest: raw.digest.clone(),
+            bound: raw.bound,
+        })
+    });
     let native_patch = native.as_ref().and_then(|r| {
         Some(json!({"patch":r["patch"]["path"].as_str()?,"patch_sha256":r["patch"]["sha256"].as_str()?}))
     });
@@ -216,17 +242,37 @@ fn retained(repo: &Path, attempt: &Value) -> Retained {
         if !raw
             .split(|b| *b == b'\n')
             .any(|s| s.strip_suffix(b"\r").unwrap_or(s) == b"GIT binary patch")
-            && let Ok(text) = oms_panel_core::redact(&raw)
         {
-            result.patch = Some(Body {
-                text,
-                source: if native_patch.is_some() {
-                    "native-patch"
-                } else {
-                    "indexed-patch"
-                },
-                digest: row["patch_sha256"].as_str().unwrap_or_default().to_owned(),
-            });
+            let source = if native_patch.is_some() {
+                "native-patch"
+            } else {
+                "indexed-patch"
+            };
+            let digest = row["patch_sha256"].as_str().unwrap_or_default().to_owned();
+            let lossy = String::from_utf8_lossy(&raw).into_owned();
+            let bound = if raw.len() <= results::PATCH_MAX {
+                lossy.len().max(results::PATCH_MAX)
+            } else {
+                results::PATCH_MAX
+            };
+            if std::str::from_utf8(&raw).is_err() && oms_scrub::check_outbound(&raw).is_err() {
+                result.raw_patch_withheld = true;
+            } else {
+                result.raw_patch = Some(Body {
+                    text: lossy,
+                    source,
+                    digest: digest.clone(),
+                    bound,
+                });
+            }
+            if let Ok(text) = oms_panel_core::redact(&raw) {
+                result.patch = Some(Body {
+                    text,
+                    source,
+                    digest,
+                    bound: results::PATCH_MAX,
+                });
+            }
         }
     }
     result
@@ -328,24 +374,45 @@ pub(super) fn read(
                 page_rows(kept.paths.iter().map(String::as_str), page)
             }
             "diff" | "transcript" => {
-                let body = if section == "diff" {
-                    kept.patch
-                } else {
-                    kept.answer
-                }
-                .ok_or_else(|| Error::new("Verified retained evidence unavailable"))?;
-                source = body.source;
-                digest = json!(body.digest);
                 if full_text {
-                    let part = body_page(&body, selected, page)?;
-                    let text = part["text"]
-                        .as_str()
-                        .ok_or_else(|| Error::new("Evidence page unavailable"))?;
-                    let rows = text.lines().map(str::to_owned).collect();
-                    let next = part["nextPage"].as_u64().map(|n| n as usize);
-                    full = Some(part);
-                    Ok((rows, next, false))
+                    if section == "diff" && kept.raw_patch_withheld {
+                        return Ok(
+                            json!({"attempt":id,"section":section,"status":"outbound_withheld"}),
+                        );
+                    }
+                    let raw_body = if section == "diff" {
+                        kept.raw_patch
+                    } else {
+                        kept.raw_answer
+                    }
+                    .ok_or_else(|| Error::new("Verified retained evidence unavailable"))?;
+                    source = raw_body.source;
+                    digest = json!(raw_body.digest);
+                    match body_page(&raw_body, selected, page)? {
+                        Ok(part) => {
+                            let text = part["text"]
+                                .as_str()
+                                .ok_or_else(|| Error::new("Evidence page unavailable"))?;
+                            let rows = text.lines().map(str::to_owned).collect();
+                            let next = part["nextPage"].as_u64().map(|n| n as usize);
+                            full = Some(part);
+                            Ok((rows, next, false))
+                        }
+                        Err(oms_scrub::OutboundWithheld) => {
+                            return Ok(
+                                json!({"attempt":id,"section":section,"status":"outbound_withheld"}),
+                            );
+                        }
+                    }
                 } else {
+                    let body = if section == "diff" {
+                        kept.patch
+                    } else {
+                        kept.answer
+                    }
+                    .ok_or_else(|| Error::new("Verified retained evidence unavailable"))?;
+                    source = body.source;
+                    digest = json!(body.digest);
                     page_rows(body.text.lines(), page)
                 }
             }
@@ -473,10 +540,13 @@ mod tests {
             let part = fetch_full(number).unwrap();
             assert_eq!(part["offset"], joined.len());
             let text = part["text"].as_str().unwrap();
-            assert!(text.len() <= ANSWER_PAGE_BYTES);
+            assert!(text.len() <= oms_scrub::OUTBOUND_PAGE_BYTES);
             joined.push_str(text);
             assert_eq!(part["truncated"], false);
-            let worker = worker_answer_page(root, &attempt, number).unwrap().unwrap();
+            let worker = worker_answer_page(root, &attempt, number)
+                .unwrap()
+                .unwrap()
+                .unwrap();
             assert_eq!(worker["text"], part["text"]);
             if let Some(expected) = &revision {
                 assert_eq!(&part["revision"], expected);
@@ -493,6 +563,74 @@ mod tests {
             "long lines and multibyte text must be readable without omitted bytes"
         );
         assert!(fetch_full(number + 1).is_err());
+
+        // A secret or machine path straddling a page boundary withholds every page.
+        let left = ["gh", "p_LeftHalf012345"].concat();
+        let right = "RightHalf67890abcdef01";
+        let answer_prefix = "## Answer\n";
+        let straddling_answer = format!(
+            "{answer_prefix}{} {left}{right} {}\n",
+            "a".repeat(oms_scrub::OUTBOUND_PAGE_BYTES - answer_prefix.len() - 1 - left.len()),
+            "z".repeat(400)
+        );
+        let straddling_bytes = format!("## Output\n{straddling_answer}## Exit\n0\n");
+        fs::write(
+            root.join(".oms/artifacts/answer.md"),
+            straddling_bytes.as_bytes(),
+        )
+        .unwrap();
+        row["artifact_sha256"] = json!(oms_panel_core::digest(straddling_bytes.as_bytes()));
+        save(&row);
+        for page_num in [1, 2] {
+            let withheld = fetch_full(page_num).unwrap();
+            assert_eq!(
+                withheld,
+                json!({"attempt":"bound","section":"transcript","status":"outbound_withheld"})
+            );
+            let wire = withheld.to_string();
+            assert!(
+                !wire.contains(&left) && !wire.contains(right) && !wire.contains(&"a".repeat(32))
+            );
+            assert_eq!(
+                worker_answer_page(root, &attempt, page_num).unwrap(),
+                Some(Err(oms_scrub::OutboundWithheld))
+            );
+        }
+
+        let diff_header = "diff --git a/sample.txt b/sample.txt\n--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n+";
+        let straddling_patch = format!(
+            "{diff_header}{} {left}{right} {}\n",
+            "d".repeat(oms_scrub::OUTBOUND_PAGE_BYTES - diff_header.len() - 1 - left.len()),
+            "e".repeat(400)
+        );
+        fs::write(
+            root.join(".oms/artifacts/work.patch"),
+            straddling_patch.as_bytes(),
+        )
+        .unwrap();
+        row["patch_sha256"] = json!(oms_panel_core::digest(straddling_patch.as_bytes()));
+        save(&row);
+        for page_num in [1, 2] {
+            let withheld = read(
+                root,
+                &attempt,
+                "diff",
+                page_num,
+                true,
+                &svc,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(
+                withheld,
+                json!({"attempt":"bound","section":"diff","status":"outbound_withheld"})
+            );
+            let wire = withheld.to_string();
+            assert!(!wire.contains(&left) && !wire.contains(right));
+        }
+        fs::write(root.join(".oms/artifacts/work.patch"), patch).unwrap();
+        row["patch_sha256"] = json!(oms_panel_core::digest(patch));
+        save(&row);
         let changed = b"## Output\n## Answer\nnew retained answer\n## Exit\n0\n";
         fs::write(root.join(".oms/artifacts/answer.md"), changed).unwrap();
         assert!(
