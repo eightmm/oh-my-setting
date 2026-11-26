@@ -943,6 +943,9 @@ fn checkout(dir: &Path) -> PanelResult<bool> {
     Ok(false)
 }
 
+/// JSON-RPC envelope around a tool result: a request id of up to 1024 bytes may escape to six
+/// bytes per byte, plus the fixed `jsonrpc`/`id`/`result` keys.
+const FRAME_RESERVE: usize = 1024 * 6 + 256;
 pub(super) fn response(data: PanelResult<Value>) -> Value {
     match data.and_then(|data| {
         crate::output::outbound(data.to_string().as_bytes(), &Value::Null)
@@ -971,7 +974,7 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                     false,
                 )
                 .len()
-                    + 512
+                    + FRAME_RESERVE
                     > crate::OUTPUT_LIMIT
             {
                 text = if is_git_detail {
@@ -987,7 +990,7 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                     false,
                 )
                 .len()
-                    + 512
+                    + FRAME_RESERVE
                     > crate::OUTPUT_LIMIT
                 {
                     return response(Err(if is_git_detail {

@@ -21,6 +21,7 @@ const MAX_WORK_PAGES: usize = 10;
 const STATUS_DRIFT_LIMIT: usize = 50;
 const MISSING_LIMIT: usize = 20;
 const CANDIDATE_LIMIT: usize = 25;
+const CANDIDATES_WALK_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 const CANDIDATES_BYTES: usize = 10_000;
 const RECOMMENDATION_LIMIT: usize = 100;
 const RECOMMENDATIONS_BYTES: usize = 8_000;
@@ -1054,6 +1055,7 @@ fn walk_board_pages(
     slug: Option<&Slug>,
     expected_id: &str,
     classify: fn(i32, &[V]) -> Option<&'static str>,
+    deadline: Option<std::time::Instant>,
 ) -> crate::Result<BoardWalkOutcome> {
     crate::require(
         stable_id(&V::from(expected_id)).is_some(),
@@ -1170,6 +1172,11 @@ fn walk_board_pages(
             record_reason(&mut reason, "page_limit");
             break;
         }
+        // Stop before a read that could outlast the caller's deadline and report it as incomplete.
+        if deadline.is_some_and(|d| std::time::Instant::now() + READ_TIMEOUT > d) {
+            record_reason(&mut reason, "timeout");
+            break;
+        }
         after = Some(cursor);
     }
 
@@ -1215,7 +1222,9 @@ pub(super) fn candidates(
     expected_id: &str,
     observed_at: &str,
 ) -> crate::Result<V> {
-    let walk = match walk_board_pages(c, root, slug, expected_id, project_error)? {
+    // The MCP panel kills its child after 30 seconds; leave room for process start and encoding.
+    let deadline = std::time::Instant::now() + CANDIDATES_WALK_BUDGET;
+    let walk = match walk_board_pages(c, root, slug, expected_id, project_error, Some(deadline))? {
         BoardWalkOutcome::Ready(walk) => *walk,
         BoardWalkOutcome::Unavailable { status, reason } => {
             return Ok(candidates_empty(status, reason.as_deref(), observed_at));
@@ -1536,7 +1545,7 @@ pub(super) fn drift(
     expected_id: &str,
     observed_at: &str,
 ) -> crate::Result<V> {
-    let walk = match walk_board_pages(c, root, slug, expected_id, drift_error)? {
+    let walk = match walk_board_pages(c, root, slug, expected_id, drift_error, None)? {
         BoardWalkOutcome::Ready(walk) => *walk,
         BoardWalkOutcome::Unavailable { status, reason } => {
             return Ok(drift_empty(status, reason.as_deref(), observed_at));
