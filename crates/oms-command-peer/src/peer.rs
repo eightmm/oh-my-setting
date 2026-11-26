@@ -651,6 +651,7 @@ pub(crate) struct Seat {
     pub requested_model: String,
     pub artifact: PathBuf,
     pub answer: String,
+    pub findings: Option<crate::review::ParsedFindings>,
     pub code: i32,
     pub complete: bool,
     pub quality: String,
@@ -883,6 +884,7 @@ fn call_routed(
             route,
             artifact,
             answer: String::new(),
+            findings: None,
             code: 0,
             complete: false,
             quality: "empty".into(),
@@ -1117,6 +1119,13 @@ fn call_routed(
         }
     }
     let answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
+    let findings = if tool == "peer-review" {
+        Some(crate::review::seat_findings(&String::from_utf8_lossy(
+            &result.stdout,
+        )))
+    } else {
+        None
+    };
     let quality = if result.complete {
         providers::answer_quality(&answer).to_owned()
     } else {
@@ -1247,6 +1256,7 @@ fn call_routed(
         route,
         artifact,
         answer,
+        findings,
         code: result.code,
         complete: result.complete,
         quality,
