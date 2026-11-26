@@ -142,7 +142,10 @@ async function panel(projects, dashboard = {}, options = {}) {
     Object.assign(document, {hidden:false, addEventListener:(...args) => events.addEventListener(...args),
       show(visible) { document.hidden = !visible; events.dispatchEvent(new Event('visibilitychange')); }});
   }
-  const context = createContext({window, document, Option, TextEncoder, CSS:{supports:(_k,v)=>/^#[0-9a-f]{6}$/i.test(v)}, setTimeout, clearTimeout, crypto:{randomUUID},
+  const cssSupports=(k,v)=>typeof v==='string' && (k==='color'?/^#[0-9a-f]{6}$/i.test(v):
+    k==='border-radius'?v.trim().split(/\s+/).every((p,i)=>i<4 && /^(?:0|(?:\d+|\d*\.\d+)(?:px|r?em|%))$/i.test(p)):
+    k==='font-family' && v.split(',').every(f=>/^(?:"[^"]+"|'[^']+'|[a-z_-][a-z0-9_-]*(?:\s+[a-z_-][a-z0-9_-]*)*)$/i.test(f.trim())));
+  const context = createContext({window, document, Option, TextEncoder, CSS:{supports:cssSupports}, setTimeout, clearTimeout, crypto:{randomUUID},
     ...options.timers, ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
   runInContext(script, context);
   await setImmediate();
@@ -499,7 +502,21 @@ test('host appearance follows initialization and partial updates without reloadi
   change({theme:'light'});assert.equal(root.getAttribute('data-theme'),'light');assert.equal(color(ink),'#ffffff');
   change({styles:{variables:{[primary]:'url(https://invalid.example)',[ink]:'#222222'}}});
   assert.equal(color(primary),'');assert.equal(color(ink),'#222222');
-  change({theme:null,styles:null});assert.equal(root.getAttribute('data-theme'),null);assert.equal(color(ink),'');
+  const tokens={'--border-radius-lg':'12px','--font-mono':'"Host Mono", monospace','--color-background-inverse':'#0d0d0d','--color-text-inverse':'#fafafa'};
+  const unsafe={'--font-display':'Serif','--border-radius-md':'url(x)','--border-radius-sm':'1px;color:red','--font-sans':'x'.repeat(201),'--font-mono':5};
+  change({styles:{variables:{...tokens,...unsafe,'--font-mono':'expression(alert(1))'}}});
+  for(const k of Object.keys(unsafe))assert.equal(color(k),'',k);
+  change({styles:{variables:{...tokens,...unsafe,'--font-mono':tokens['--font-mono']}}});
+  for(const [k,v] of Object.entries(tokens))assert.equal(color(k),v);
+  for(const prior of [false,true]){
+    if(prior){change({styles:{variables:{...tokens,'--font-sans':'system-ui, sans-serif','--border-radius-md':'8px'}}});
+      assert.equal(color('--font-sans'),'system-ui, sans-serif');assert.equal(color('--border-radius-md'),'8px');}
+    change({styles:{variables:{...tokens,'--font-sans':'   ','--border-radius-md':'none'}}});
+    assert.equal(color('--font-sans'),'');assert.equal(color('--border-radius-md'),'');
+    for(const [k,v] of Object.entries(tokens))assert.equal(color(k),v);
+  }
+  change({styles:{variables:{...tokens,'--font-mono':5}}});assert.equal(color('--font-mono'),'');
+  change({theme:null,styles:null});assert.equal(root.getAttribute('data-theme'),null);assert.equal(color(ink),'');assert.equal(color('--border-radius-lg'),'');
   assert.equal(p.calls.length,calls);assert.equal(brief.value,'Keep keyboard focus');assert.equal(p.document.activeElement,brief);
   const malformed=await panel(['one'],dashboard,{hostContext:'unrecognized'});
   assert.equal(malformed.document.documentElement.getAttribute('data-theme'),null);
@@ -1116,11 +1133,20 @@ test('state badges carry a semantic tone and the progress bar follows the progre
   assert.equal(badge(claude.children[2]).getAttribute('data-tone'),'attention');
   assert.equal(badge(claude.children[2]).textContent,'! Blocked');
   assert.equal(agy.children[1].children.find(e=>e.className==='state').getAttribute('data-tone'),'muted');
+  const presence=slot=>slot.children.find(e=>e.className==='slot-heading').children.find(e=>e.className==='avatar').getAttribute('data-presence');
+  assert.deepEqual([codex,claude,agy].map(presence),['working','attention','idle']);
+  assert.equal(p.get('avatar').getAttribute('data-presence'),'working');
   assert.equal(p.get('progress-track').hidden,false);assert.equal(p.get('progress-fill').style.width,'25%');
   assert.equal(p.get('progress').textContent,'1 of 4 planned tasks verified');
   d.planProgress={total:4,verified:4};await p.event('refresh','click');assert.equal(p.get('progress-fill').style.width,'100%');
+  d.planProgress={total:5,verified:2};await p.event('refresh','click');
+  const segments=p.get('progress-track').children.filter(e=>e.className?.startsWith('seg'));
+  assert.equal(segments.length,5);assert.equal(p.get('progress-track').getAttribute('data-segments'),'true');
+  assert.deepEqual(['seg done','seg current'].map(c=>segments.filter(e=>e.className===c).length),[2,1]);
   d.planProgress={total:0,verified:0};await p.event('refresh','click');
   assert.equal(p.get('progress').hidden,true);assert.equal(p.get('progress-track').hidden,true);
+  d.conversationMain=undefined;await p.event('refresh','click');
+  assert.equal(p.get('avatar').textContent,'–');assert.equal(p.get('avatar').getAttribute('data-presence'),null);
 });
 test('the observed time localizes beside the goal while a clean status stays empty',async()=>{
   const stamp='2026-06-01T03:04:00Z', local=new Date(stamp);

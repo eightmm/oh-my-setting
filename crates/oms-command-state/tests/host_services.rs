@@ -148,6 +148,72 @@ fn state_uses_host_plan_services_and_task_status() {
 }
 
 #[test]
+fn state_and_run_list_project_spine_in_first_seen_order() {
+    let repo = TempRepo::new();
+    let spine = repo.path().join(".oms/runs/spine.jsonl");
+    fs::create_dir_all(spine.parent().unwrap()).unwrap();
+    let rows = br#"{"run_id":"run-z","ts":"2026-01-03T00:00:00Z","tool":"oms-run","event":"new"}
+{"run_id":"run-a","ts":"2026-01-05T00:00:00Z","tool":"zeta","event":"note"}
+{"run_id":"run-m","ts":"2026-01-06T00:00:00Z","tool":"oms-run","event":"new"}
+{"run_id":"run-z","ts":"2026-01-04T00:00:00Z","tool":"alpha","event":"close"}
+{"run_id":"run-m","ts":"2026-01-07T00:00:00Z","tool":"oms-run","event":"close"}
+{"invalid"
+{"run_id":"run-m","ts":"2026-01-01T00:00:00Z","tool":"alpha","event":"note"}
+{"run_id":"run-a","tool":"zeta","event":"note"}
+{"tool":"oms-run","event":"close"}
+"#;
+    fs::write(&spine, rows).unwrap();
+
+    let snapshot = state(repo.path(), &NoHostServices);
+    let runs = snapshot.get("runs");
+    let recent = json::parse(
+        br#"[
+            {"run_id":"run-z","closed":false,"last":"2026-01-04T00:00:00Z"},
+            {"run_id":"run-a","closed":false,"last":null},
+            {"run_id":"run-m","closed":true,"last":"2026-01-01T00:00:00Z"}
+        ]"#,
+    )
+    .unwrap();
+    assert_eq!(runs.get("healthy"), &json::Value::Bool(false));
+    assert_eq!(runs.get("recent"), &recent);
+    assert_eq!(
+        runs.get("open").array().unwrap(),
+        &recent.array().unwrap()[..2]
+    );
+
+    let list = |options: &[&str]| {
+        let mut argv = args(&["ls", "--json"]);
+        argv.extend(args(options));
+        let (code, out, err) = run_with_host(
+            "run",
+            &argv,
+            repo.path(),
+            &AtomicBool::new(false),
+            &mut Dummy,
+            &NoHostServices,
+        );
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        json::parse(&out).unwrap()
+    };
+    let all = json::parse(
+        br#"[
+            {"run_id":"run-z","first":"2026-01-03T00:00:00Z","last":"2026-01-04T00:00:00Z",
+                "closed":false,"events":2,"tools":["alpha","oms-run"]},
+            {"run_id":"run-a","first":"2026-01-05T00:00:00Z","last":null,
+                "closed":false,"events":2,"tools":["zeta"]},
+            {"run_id":"run-m","first":"2026-01-06T00:00:00Z","last":"2026-01-01T00:00:00Z",
+                "closed":true,"events":3,"tools":["alpha","oms-run"]}
+        ]"#,
+    )
+    .unwrap();
+    assert_eq!(list(&["0"]), all);
+    let all = all.array().unwrap();
+    assert_eq!(list(&["2"]).array().unwrap(), &all[1..]);
+    assert_eq!(list(&["1", "--open"]).array().unwrap(), &all[1..2]);
+    assert_eq!(fs::read(spine).unwrap(), rows);
+}
+
+#[test]
 fn state_verify_retirement_check_uses_host_plan_services() {
     let repo = TempRepo::new();
     seed(repo.path());
@@ -577,6 +643,95 @@ fn artifact_resolution_projection_preserves_invalid_row_accounting() {
 }
 
 #[test]
+fn dashboard_artifacts_share_the_state_observation_for_one_request() {
+    use std::io::Write as _;
+
+    struct AppendDuringRuntime;
+    impl HostServices for AppendDuringRuntime {
+        fn runtime_envelope(
+            &self,
+            repo: &Path,
+            _: &AtomicBool,
+        ) -> Option<oms_command_state::Result<json::Value>> {
+            let mut log = fs::OpenOptions::new()
+                .append(true)
+                .open(repo.join(".oms/artifacts/index.jsonl"))
+                .unwrap();
+            log.write_all(b"{\"event_id\":\"during\",\"kind\":\"review\",\"exit\":0}\n")
+                .unwrap();
+            None
+        }
+    }
+
+    let repo = TempRepo::new();
+    let path = repo.path().join(".oms/artifacts/index.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut rows = (0..10)
+        .map(|i| serde_json::json!({"event_id":format!("row-{i}"), "kind":"delegate", "exit":0}))
+        .collect::<Vec<_>>();
+    rows[1]["kind"] = "review".into();
+    for row in &mut rows[2..5] {
+        row["kind"] = "review-outcome".into();
+    }
+    rows[3]["exit"] = 1.into();
+    rows[4]["exit"] = serde_json::Value::Null;
+    let bytes = rows.iter().map(|r| format!("{r}\n")).collect::<String>() + "malformed\n";
+    fs::write(&path, bytes).unwrap();
+
+    let observed = state(repo.path(), &NoHostServices);
+    let artifacts = observed.get("artifacts");
+    assert_eq!(artifacts.get("invalid_rows").int().unwrap(), 1);
+    let state_recent = artifacts.get("latest").array().unwrap();
+    assert_eq!(
+        state_recent
+            .iter()
+            .map(|r| r.text("event_id"))
+            .collect::<Vec<_>>(),
+        ["row-9", "row-8", "row-7", "row-6", "row-5"]
+    );
+    assert!(state_recent.iter().all(|r| r.text("status") == "success"));
+
+    let (code, out, err) = run_with_host(
+        "dashboard",
+        &args(&["--json", "--repo", &repo.path().to_string_lossy()]),
+        repo.path(),
+        &AtomicBool::new(false),
+        &mut Dummy,
+        &AppendDuringRuntime,
+    );
+    assert_eq!(code, 1, "{}", String::from_utf8_lossy(&err));
+    let dashboard = json::parse(&out).unwrap();
+    let operations = dashboard.get("operations");
+    assert_eq!(operations.get("available"), &json::Value::Bool(false));
+    assert_eq!(operations.get("omitted").int().unwrap(), 2);
+    let dashboard_recent = operations.get("recent").array().unwrap();
+    assert_eq!(
+        dashboard_recent
+            .iter()
+            .map(|r| r.text("event_id"))
+            .collect::<Vec<_>>(),
+        [
+            "row-9", "row-8", "row-7", "row-6", "row-5", "row-4", "row-3", "row-2"
+        ]
+    );
+    assert!(dashboard_recent.iter().all(|r| r.opt("status").is_none()));
+    assert_eq!(
+        dashboard.get("reviews"),
+        &json::parse(br#"{"outcomes":3,"passed":1,"failed":1,"unknown":1,"seat_answers":1}"#)
+            .unwrap()
+    );
+
+    let next = view_json("dashboard", repo.path());
+    let operations = next.get("operations");
+    assert_eq!(
+        operations.get("recent").array().unwrap()[0].text("event_id"),
+        "during"
+    );
+    assert_eq!(operations.get("omitted").int().unwrap(), 3);
+    assert_eq!(next.get("reviews").get("seat_answers").int().unwrap(), 2);
+}
+
+#[test]
 fn artifact_repairs_preserve_inode_and_first_later_success() {
     use std::os::unix::fs::MetadataExt;
     let repo = TempRepo::new();
@@ -675,6 +830,92 @@ fn inbox_codes(repo: &Path) -> Vec<String> {
         .map(|i| i.text("code").to_owned())
         .collect()
 }
+
+#[test]
+fn inbox_projects_pending_memory_review_without_accepting_or_copying_notes() {
+    let repo = TempRepo::new();
+    seed(repo.path());
+    let flag = AtomicBool::new(false);
+    let (code, id, error) = oms_command_memory::append_project_note(
+        repo.path(),
+        "agent",
+        "task_close",
+        "private-review-fixture body stays in its owner",
+        &flag,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+    let id = String::from_utf8(id).unwrap().trim().to_owned();
+    let shared = repo.path().join(".oms/memory/shared.md");
+    let before = fs::read(&shared).unwrap();
+    let snapshot = view_json("state", repo.path());
+    assert!(snapshot.get("memory_review").get("healthy").truth());
+    assert!(snapshot.get("memory_review").get("pending").is_int(1));
+    assert!(!serde_like(&snapshot).contains("private-review-fixture"));
+    let inbox = view_json("inbox", repo.path());
+    let item = inbox
+        .get("items")
+        .array()
+        .unwrap()
+        .iter()
+        .find(|r| r.text("code") == "pending-memory-review")
+        .unwrap();
+    assert!(item.get("count").is_int(1));
+    assert!(item.text("command").starts_with("oms agent-memory --repo "));
+    assert!(item.text("command").ends_with(" review"));
+    assert!(!item.text("command").contains("--accept"));
+    let (_, _, _) = view("inbox", repo.path(), &["--fix-safe", "--json"]);
+    assert_eq!(fs::read(&shared).unwrap(), before);
+    assert!(!repo.path().join(".oms/memory/reviews.jsonl").exists());
+    assert!(
+        inbox_codes(repo.path())
+            .iter()
+            .any(|c| c == "pending-memory-review")
+    );
+    let (code, _, error) = oms_command_memory::run_with_source(
+        &args(&["review", "--accept", &id]),
+        repo.path(),
+        repo.path(),
+        &flag,
+    );
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&error));
+    assert_eq!(fs::read(&shared).unwrap(), before);
+    assert!(
+        !inbox_codes(repo.path())
+            .iter()
+            .any(|c| c == "pending-memory-review")
+    );
+
+    fs::write(
+        repo.path().join(".oms/memory/reviews.jsonl"),
+        b"{malformed receipt}\n",
+    )
+    .unwrap();
+    let snapshot = view_json("state", repo.path());
+    assert!(!snapshot.get("memory_review").get("healthy").truth());
+    assert_eq!(
+        snapshot.get("memory_review").get("pending"),
+        &json::Value::Null
+    );
+    assert!(
+        inbox_codes(repo.path())
+            .iter()
+            .any(|c| c == "memory-review-unavailable")
+    );
+    fs::remove_file(repo.path().join(".oms/memory/reviews.jsonl")).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&shared)
+        .unwrap()
+        .set_len(4 * 1024 * 1024 + 1)
+        .unwrap();
+    assert!(oms_command_memory::pending_review(repo.path(), &flag).is_err());
+    fs::remove_file(&shared).unwrap();
+    let target = repo.path().join("untrusted-memory.md");
+    fs::write(&target, &before).unwrap();
+    std::os::unix::fs::symlink(&target, &shared).unwrap();
+    assert!(oms_command_memory::pending_review(repo.path(), &flag).is_err());
+}
+
 fn put(repo: &Path, rel: &str, body: &str, mode: u32) {
     let path = repo.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();

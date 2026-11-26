@@ -171,12 +171,33 @@ fn sync_db(db: &mut Connection, s: &Store, flag: &AtomicBool) -> Result<()> {
         }
         tx.execute("delete from memory_entries where source=?", [source])?;
         for e in entries {
-            tx.execute("insert into memory_entries (event_id,source,ordinal,occurred_at,agent,kind,task_id,session_hash,git_sha,git_dirty,git_state,body,rendered) values (?,?,?,?,?,?,?,?,?,?,?,?,?)",params![e.event_id,e.source,e.ordinal as i64,e.occurred_at,e.agent,e.kind,e.task_id,e.session_hash,e.git_sha,e.git_dirty,e.git_state,e.body,e.rendered])?;
+            insert_entry(&tx, &e)?;
         }
         tx.execute("insert into memory_sources(source,path,size,mtime_ns,digest) values (?,cast(? as text),?,?,?) on conflict(source) do update set path=excluded.path,size=excluded.size,mtime_ns=excluded.mtime_ns,digest=excluded.digest",params![source,image.path.as_os_str().as_encoded_bytes(),image.size,image.mtime,image.digest])?;
     }
     tx.commit()?;
     Ok(())
+}
+fn insert_entry(db: &Connection, e: &Entry) -> Result<()> {
+    db.execute("insert into memory_entries (event_id,source,ordinal,occurred_at,agent,kind,task_id,session_hash,git_sha,git_dirty,git_state,body,rendered) values (?,?,?,?,?,?,?,?,?,?,?,?,?)",params![e.event_id,e.source,e.ordinal as i64,e.occurred_at,e.agent,e.kind,e.task_id,e.session_hash,e.git_sha,e.git_dirty,e.git_state,e.body,e.rendered])?;
+    Ok(())
+}
+/// Rank a bounded source snapshot without updating the persistent index or its
+/// access receipts. Selection below still applies the ordinary context policy.
+pub(crate) fn transient_ranked(
+    entries: &[Entry],
+    query: &str,
+    flag: &AtomicBool,
+) -> Result<Vec<Entry>> {
+    let mut db = Connection::open_in_memory()?;
+    schema(&db)?;
+    let tx = db.transaction()?;
+    for entry in entries {
+        check(flag)?;
+        insert_entry(&tx, entry)?;
+    }
+    tx.commit()?;
+    ranked(&db, query, "")
 }
 fn initialize(s: &Store, flag: &AtomicBool) -> Result<()> {
     s.ignore(flag)?;
@@ -363,31 +384,26 @@ pub(crate) struct Query<'a> {
     /// GitHub project mode sources; injected provider context keeps it off.
     pub github: bool,
 }
-pub(crate) fn query(s: &Store, opt: Query<'_>, flag: &AtomicBool) -> Result<Output> {
-    let _g = store::lock(&s.database, flag)?;
-    initialize(s, flag)?;
-    let mut db = connect(&s.database, false)?;
-    sync_db(&mut db, s, flag)?;
-    let (notes, pins) = s.logs()?;
-    let status = records::states(&notes, &pins);
-    let eligible = if opt.context_only {
-        Some(crate::review::context_filter(s)?)
-    } else {
-        None
-    };
+pub(crate) struct Selection {
+    pub entries: Vec<Entry>,
+    validation: HashMap<String, Value>,
+    status: HashMap<String, Value>,
+}
+pub(crate) fn select(
+    s: &Store,
+    opt: &Query<'_>,
+    mut entries: Vec<Entry>,
+    sources: (&[Entry], &[Entry]),
+    eligible: Option<&dyn Fn(&Entry) -> bool>,
+    flag: &AtomicBool,
+) -> Result<Selection> {
+    let (notes, pins) = sources;
+    let status = records::states(notes, pins);
     let by_id: HashMap<_, _> = notes
         .iter()
-        .chain(&pins)
+        .chain(pins)
         .map(|e| (e.event_id.as_str(), e))
         .collect();
-    let mut entries = if opt.recall {
-        ranked(&db, opt.query, opt.agent)?
-    } else {
-        all(&db, opt.agent)?
-            .into_iter()
-            .filter(|e| fold(&e.rendered).contains(&fold(opt.query)))
-            .collect()
-    };
     entries.retain(|e| {
         e.kind != "retirement" && (opt.include_superseded || !status.contains_key(&e.event_id))
     });
@@ -403,11 +419,7 @@ pub(crate) fn query(s: &Store, opt: Query<'_>, flag: &AtomicBool) -> Result<Outp
             continue;
         }
         let provenance = provenance.unwrap_or(&e);
-        if memory_source
-            && eligible
-                .as_ref()
-                .is_some_and(|eligible| !eligible(provenance))
-        {
+        if memory_source && eligible.is_some_and(|eligible| !eligible(provenance)) {
             continue;
         }
         if let Some(citation) = store::validate_citation(provenance, &s.repo, &mut cache, flag) {
@@ -440,6 +452,50 @@ pub(crate) fn query(s: &Store, opt: Query<'_>, flag: &AtomicBool) -> Result<Outp
     if opt.limit > 0 {
         chosen.truncate(opt.limit);
     }
+    Ok(Selection {
+        entries: chosen,
+        validation,
+        status,
+    })
+}
+pub(crate) fn query(s: &Store, opt: Query<'_>, flag: &AtomicBool) -> Result<Output> {
+    let _g = store::lock(&s.database, flag)?;
+    initialize(s, flag)?;
+    let mut db = connect(&s.database, false)?;
+    sync_db(&mut db, s, flag)?;
+    let (notes, pins) = s.logs()?;
+    let eligible = if opt.context_only {
+        Some(crate::review::context_filter(s)?)
+    } else {
+        None
+    };
+    let by_id: HashMap<_, _> = notes
+        .iter()
+        .chain(&pins)
+        .map(|e| (e.event_id.as_str(), e))
+        .collect();
+    let entries = if opt.recall {
+        ranked(&db, opt.query, opt.agent)?
+    } else {
+        all(&db, opt.agent)?
+            .into_iter()
+            .filter(|e| fold(&e.rendered).contains(&fold(opt.query)))
+            .collect()
+    };
+    let Selection {
+        entries: chosen,
+        validation,
+        status,
+    } = select(
+        s,
+        &opt,
+        entries,
+        (&notes, &pins),
+        eligible
+            .as_ref()
+            .map(|filter| filter as &dyn Fn(&Entry) -> bool),
+        flag,
+    )?;
     if opt.recall {
         touch(&db, &chosen);
     }

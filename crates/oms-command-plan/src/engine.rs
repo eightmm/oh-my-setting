@@ -414,6 +414,11 @@ pub struct Snapshot {
     pub(crate) github_cache: Option<std::result::Result<Vec<u8>, &'static str>>,
     pub(crate) github_origin: std::cell::OnceCell<Option<oms_github::Slug>>,
 }
+pub struct ReadinessSnapshot {
+    pub raw: Option<Vec<u8>>,
+    pub ready_ids: Option<BTreeSet<String>>,
+}
+
 impl Snapshot {
     pub fn tasks(&self) -> Result<&[(Vec<u8>, Value)]> {
         self.plan.get("tasks").object()
@@ -592,6 +597,36 @@ impl<'a> Plan<'a> {
             &req,
             &mut self.load_from_snapshot(self.read_locked_snapshot()?)?,
         )
+    }
+    /// Capture one guarded Plan file for consumers that join stored links with
+    /// canonical readiness. Historical links are still observable if scheduling
+    /// cannot validate the captured Plan.
+    pub fn readiness_with_locked_snapshot(&self) -> Result<ReadinessSnapshot> {
+        let captured = self.read_locked_snapshot()?;
+        let raw = captured.as_ref().map(|file| file.raw.clone());
+        let ids = self
+            .load_from_snapshot(captured)
+            .and_then(|mut snapshot| {
+                let (tasks, _, _, _) =
+                    self.scheduled(&Request::new(Action::Ready), &mut snapshot)?;
+                tasks
+                    .into_iter()
+                    .map(|task| {
+                        let id = task.text("id");
+                        require(
+                            valid_id(id) && snapshot.task(id).is_ok_and(|stored| stored == &task),
+                            "ready task ID does not match its stored key",
+                        )?;
+                        Ok(id.to_owned())
+                    })
+                    .collect()
+            })
+            .ok();
+        self.checkpoint()?;
+        Ok(ReadinessSnapshot {
+            raw,
+            ready_ids: ids,
+        })
     }
     /// Snapshot the Plan under its writer guard while a sibling publishes Review.
     fn read_locked_snapshot(&self) -> Result<Option<storage::FileSnapshot>> {

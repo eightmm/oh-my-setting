@@ -436,6 +436,9 @@ struct Job<'a> {
     cancel: StopReason,
     physical_call: Option<oms_supervisor::process::PhysicalCall>,
     desktop_main: bool,
+    /// Fixed supervisor-worker protocol. Keep launch custody until the worker
+    /// acknowledges its actual payload spawn, then await its cleanup receipt.
+    acknowledge_start: bool,
     channel: Option<&'a mut dyn OwnedDuplexConsumer>,
     launch_fence: Option<&'a oms_command_peer::process::LaunchFence>,
     plan_services: Option<&'a dyn oms_command_plan::Services>,
@@ -458,6 +461,7 @@ impl<'a> Job<'a> {
             cancel: StopReason::Cancelled,
             physical_call: None,
             desktop_main: false,
+            acknowledge_start: false,
             channel: None,
             launch_fence: None,
             plan_services: None,
@@ -476,7 +480,17 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     if job.argv.is_empty() || job.argv[0].is_empty() || job.argv.len() > MAX_ARGV {
         return Err("process argv must contain 1..256 arguments".into());
     }
-    if job.timeout.is_zero() || job.timeout > MAX_WALL || job.limit == 0 || job.limit > MAX_OUTPUT {
+    let max_output = if job.acknowledge_start {
+        MAX_OUTPUT.saturating_mul(4).saturating_add(256 * 1024)
+    } else {
+        MAX_OUTPUT
+    };
+    let max_wall = if job.acknowledge_start {
+        MAX_WALL + Duration::from_secs(30)
+    } else {
+        MAX_WALL
+    };
+    if job.timeout.is_zero() || job.timeout > max_wall || job.limit == 0 || job.limit > max_output {
         return Err("invalid process limits".into());
     }
     let program = job.argv.first().and_then(|a| Path::new(a).file_name());
@@ -527,6 +541,11 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
         (Scope::ProcessGroup, Reactor::new())
     };
     request.scope = scope;
+    if job.acknowledge_start {
+        // The inner WholeTree owner has its own two-second TERM grace. Never
+        // kill that owner before it can reap the escaped descendants.
+        request.terminate_grace = Duration::from_secs(7);
+    }
     request.deadline = Some(
         Instant::now()
             .checked_add(job.timeout)
@@ -540,13 +559,62 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     if !job.merged {
         request.stderr_capture = Some(request.capture.clone());
     }
-    let mut spawn = |request| -> Result<_, String> {
+    let mut cancelling = false;
+    let mut started_done = None;
+    let mut spawn = |request| -> Result<oms_supervisor::process::JobId, String> {
         if let Some(channel) = &channel {
             channel.check().map_err(|e| e.message)?;
         }
         let id = reactor.start(request).map_err(|e| e.to_string())?;
         if let Some(channel) = &mut channel {
             channel.note_spawned();
+        }
+        if job.acknowledge_start {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut failed = false;
+            loop {
+                if interrupted.load(Ordering::Acquire) && !cancelling {
+                    reactor.stop(id, job.cancel).map_err(|e| e.to_string())?;
+                    cancelling = true;
+                } else if !failed
+                    && (Instant::now() >= deadline
+                        || job
+                            .launch_fence
+                            .is_some_and(|fence| fence.check(interrupted).is_err()))
+                {
+                    reactor
+                        .stop(id, StopReason::SupervisorError)
+                        .map_err(|e| e.to_string())?;
+                    failed = true;
+                }
+                match reactor
+                    .poll(id, Duration::from_millis(20))
+                    .map_err(|e| e.to_string())?
+                {
+                    Progress::Pending(snapshot) => {
+                        if snapshot
+                            .stdout
+                            .bytes
+                            .starts_with(crate::services_control::SUPERVISE_STARTED)
+                        {
+                            break;
+                        }
+                        if !failed
+                            && snapshot.stdout.bytes.len()
+                                >= crate::services_control::SUPERVISE_STARTED.len()
+                        {
+                            reactor
+                                .stop(id, StopReason::SupervisorError)
+                                .map_err(|e| e.to_string())?;
+                            failed = true;
+                        }
+                    }
+                    Progress::Complete(done) => {
+                        started_done = Some(done);
+                        break;
+                    }
+                }
+            }
         }
         Ok(id)
     };
@@ -557,6 +625,9 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     } else {
         spawn(request)
     }?;
+    if let Some(done) = started_done {
+        return Ok((done, false));
+    }
     #[cfg(target_os = "linux")]
     let mut dispatch_observer = job.dispatch_observer;
     #[cfg(target_os = "linux")]
@@ -571,7 +642,6 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
             )
         })?;
     }
-    let mut cancelling = false;
     let mut channel_failed = false;
     let mut beat = Instant::now();
     let mut heartbeat_failed = false;
@@ -980,6 +1050,13 @@ impl PeerExecutor for CollabServices<'_> {
 }
 
 impl PeerProcessExecutor for CollabServices<'_> {
+    fn council_parallelism(&self) -> usize {
+        #[cfg(target_os = "linux")]
+        if self.control.supervise_worker().is_empty() {
+            return 1;
+        }
+        4
+    }
     fn plan_delegate_services(&self) -> Option<&dyn oms_command_plan::Services> {
         Some(&self.control)
     }
@@ -1087,14 +1164,41 @@ impl PeerProcessExecutor for CollabServices<'_> {
 impl CollabServices<'_> {
     fn execute_peer(
         &self,
-        input: Invocation,
+        mut input: Invocation,
         interrupted: &AtomicBool,
         #[cfg(target_os = "linux")] mut observer: Option<protected_dispatch::Provider>,
     ) -> oms_command_peer::Result<Completed> {
         let fail = |code, e: String| oms_command_peer::Error::new(code, e);
-        let argv = self.resolve_argv(input.argv).map_err(|e| fail(2, e))?;
+        let argv = self
+            .resolve_argv(std::mem::take(&mut input.argv))
+            .map_err(|e| fail(2, e))?;
         if let Some(fence) = &input.launch_fence {
             fence.check(interrupted)?;
+        }
+        #[cfg(target_os = "linux")]
+        if !self.control.supervise_worker().is_empty()
+            && !matches!(
+                argv.first()
+                    .and_then(|a| Path::new(a).file_name())
+                    .and_then(|n| n.to_str()),
+                Some("git" | "ssh")
+            )
+            // Failure to prove one thread must keep the isolated owner; it
+            // cannot authorize the direct reactor's process-group fallback.
+            && !std::fs::read_dir("/proc/self/task").is_ok_and(|entries| {
+                entries
+                    .take(2)
+                    .collect::<std::io::Result<Vec<_>>>()
+                    .is_ok_and(|tasks| tasks.len() == 1)
+            })
+        {
+            if observer.is_some() {
+                return Err(fail(
+                    75,
+                    "protected provider dispatch requires its direct process owner".into(),
+                ));
+            }
+            return self.execute_peer_supervised(input, argv, interrupted);
         }
         let (done, _) = supervise(
             Job {
@@ -1136,6 +1240,97 @@ impl CollabServices<'_> {
             cleanup_complete,
             owned_cleanup,
             elapsed: done.duration,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn execute_peer_supervised(
+        &self,
+        input: Invocation,
+        argv: Vec<OsString>,
+        interrupted: &AtomicBool,
+    ) -> oms_command_peer::Result<Completed> {
+        use crate::services_control::{
+            SUPERVISE_STARTED, Spawn, supervise_worker_request, supervise_worker_result,
+        };
+        let fail = |message: String| {
+            oms_command_peer::Error::new(
+                if interrupted.load(Ordering::Acquire) {
+                    130
+                } else {
+                    125
+                },
+                message,
+            )
+        };
+        if argv.is_empty()
+            || argv[0].is_empty()
+            || argv.len() > MAX_ARGV
+            || input.timeout.is_zero()
+            || input.timeout > MAX_WALL
+            || input.max_bytes == 0
+            || input.max_bytes > MAX_OUTPUT
+        {
+            return Err(fail("invalid isolated provider request".into()));
+        }
+        let cwd = std::fs::canonicalize(&input.cwd).map_err(|e| fail(e.to_string()))?;
+        let mut inner = Spawn::new(Scope::WholeTree, argv, input.timeout, input.max_bytes);
+        inner.cwd = Some(&cwd);
+        inner.stdin = input.input.unwrap_or_default();
+        inner.environment = input.environment;
+        inner.remove_environment = input.remove_environment;
+        inner.merged = input.merge;
+        let payload = supervise_worker_request(&inner, true).map_err(fail)?;
+        let (done, _) = supervise(
+            Job {
+                stdin: Some(payload),
+                physical_call: input.physical_call,
+                launch_fence: input.launch_fence.as_ref(),
+                plan_services: Some(&self.control),
+                acknowledge_start: true,
+                ..Job::new(
+                    self.control.supervise_worker().to_vec(),
+                    &cwd,
+                    input.timeout + Duration::from_secs(30),
+                    input.max_bytes.saturating_mul(4).saturating_add(256 * 1024),
+                )
+            },
+            interrupted,
+        )
+        .map_err(fail)?;
+        if !done.cleanup_complete() || !done.output_complete() || done.supervision_error.is_some() {
+            return Err(fail(
+                "isolated provider cleanup or completion is unconfirmed".into(),
+            ));
+        }
+        let report = done
+            .stdout
+            .bytes
+            .strip_prefix(SUPERVISE_STARTED)
+            .ok_or_else(|| {
+                fail("isolated provider start was not acknowledged; cleanup is unconfirmed".into())
+            })?;
+        // The trusted worker reports only after its exclusive WholeTree reactor
+        // has reaped every descendant. Never deserialize or synthesize its
+        // opaque proof: retain only the outer reactor's actual call/group proof.
+        let child = supervise_worker_result(report).map_err(fail)?;
+        let complete = done.stop.is_none()
+            && !child.timed_out
+            && !child.output_limited
+            && !child.cancelled
+            && child.code != 125;
+        Ok(Completed {
+            code: if done.stop.is_some() {
+                stop_code(&done)
+            } else {
+                child.code
+            },
+            stdout: child.stdout,
+            stderr: child.stderr,
+            complete,
+            cleanup_complete: Some(true),
+            owned_cleanup: done.owned_cleanup().cloned(),
+            elapsed: child.elapsed,
         })
     }
 }
@@ -3339,6 +3534,71 @@ mod tests {
             std::fs::metadata(&log).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn isolated_worker_start_ack_failure_and_cancellation_reap_the_owned_group() {
+        use oms_supervisor::process::PhysicalCall;
+        for cancel in [false, true] {
+            let dir = Fixture::new();
+            let ready = dir.path().join("ready");
+            let stop = AtomicBool::new(false);
+            let call = PhysicalCall::new("isolated-worker-ack-fixture").unwrap();
+            let script = if cancel {
+                ": > \"$OMS_WORKER_READY\"; exec sleep 30"
+            } else {
+                "printf '%s\\n' invalid-supervisor-start; exec sleep 30"
+            };
+            let done = std::thread::scope(|scope| {
+                if cancel {
+                    scope.spawn(|| {
+                        let deadline = Instant::now() + Duration::from_secs(3);
+                        while !ready.exists() && Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        stop.store(true, Ordering::Release);
+                        assert!(ready.exists(), "isolated worker fixture never started");
+                    });
+                }
+                supervise(
+                    Job {
+                        environment: vec![(
+                            "OMS_WORKER_READY".into(),
+                            ready.as_os_str().to_owned(),
+                        )],
+                        physical_call: Some(call.clone()),
+                        acknowledge_start: true,
+                        ..Job::new(sh(script), dir.path(), Duration::from_secs(5), 4096)
+                    },
+                    &stop,
+                )
+                .unwrap()
+                .0
+            });
+            assert_eq!(
+                done.stop,
+                Some(if cancel {
+                    StopReason::Cancelled
+                } else {
+                    StopReason::SupervisorError
+                })
+            );
+            assert!(done.cleanup_complete(), "{done:?}");
+            let proof = done.owned_cleanup().unwrap();
+            assert_eq!(proof.pid(), done.pid);
+            assert!(proof.matches(&call, Scope::ProcessGroup));
+            assert!(!proof.matches(&call, Scope::WholeTree));
+            // Cleanup of this actual outer group is genuine, but absent start
+            // acknowledgement/completion cannot become a provider cleanup claim.
+            assert!(
+                !done
+                    .stdout
+                    .bytes
+                    .starts_with(crate::services_control::SUPERVISE_STARTED)
+            );
+            assert!(crate::services_control::supervise_worker_result(&done.stdout.bytes).is_err());
+        }
     }
 
     #[test]

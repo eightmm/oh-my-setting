@@ -95,12 +95,15 @@ only when no higher-precedence cause, such as `page_limit`, was already recorded
   packet or to a Plan task in any other state than `ready`, `done`,
   `cancelled` or `failed` (including `landing` and a missing or unknown
   state) are listed with `state: "excluded"` and a reason. Links from done,
-  cancelled or failed tasks are ignored. A link from a `ready` Plan task keeps
-  the Issue ranked and adds `plan_task`, the lowest such task id, so
-  selecting it reuses that task; an excluding link on the same Issue wins.
-  A task id outside Plan's grammar (`[A-Za-z0-9._-]+`) leaves the plan
-  unverified. Issues with missing
-  or unverified evidence get `state: "unverified"`. The full reason list is in
+  cancelled or failed tasks are ignored. A linked `ready` task is reusable
+  when the canonical Plan scheduler includes it, accounting for unfinished
+  dependencies and conflicts with active writers' scopes or resources.
+  `plan_task` names the lowest eligible task ID. An Issue with only
+  unschedulable `ready` links is excluded with reason `plan_linked`.
+  An excluding active task or packet link on the same Issue takes precedence.
+  A task ID outside Plan's grammar (`[A-Za-z0-9._-]+`), unavailable Plan
+  readiness, or missing issue evidence can yield `state: "unverified"`.
+  The full reason list is in
   `crates/oms-command-landing/src/github_board.rs`.
 - **Ranking.** Candidates are sorted by Priority option order, then Phase
   option order, then Issue reference. The board's saved view order is ignored.
