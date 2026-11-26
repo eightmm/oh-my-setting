@@ -157,6 +157,9 @@ impl Plan<'_> {
             format!("# Task {}: {}", t.text("id"), t.text("title")),
             format!("state: {state}"),
         ];
+        if !t.text("brief").is_empty() {
+            lines.push(format!("\n{}", t.text("brief")));
+        }
         if v.get("completion_verified") == &Value::Bool(false) {
             lines.push("completion: not verified (stored state: done)".into());
         }
@@ -347,12 +350,24 @@ impl Plan<'_> {
                 "capacity_full"
             }));
         }
-        let selected = eligible.into_iter().next();
-        let Some(mut t) = selected else {
+        // A task without a work brief cannot be dispatched, so no selector may pick it.
+        let (briefed, unbriefed): (Vec<Value>, Vec<Value>) = eligible
+            .into_iter()
+            .partition(|t| !t.text("brief").trim().is_empty());
+        let Some(mut t) = briefed.into_iter().next() else {
             let mut response = Response {
                 code: 3,
                 ..Default::default()
             };
+            if !unbriefed.is_empty() {
+                response.stderr.extend(
+                    format!(
+                        "plan: {} ready task(s) lack a work brief; use agent-plan amend --id ID --brief-file PATH\n",
+                        unbriefed.len()
+                    )
+                    .as_bytes(),
+                );
+            }
             if s.contract.get("satisfied") != &Value::Bool(true) {
                 response.stderr.extend(
                     format!(
@@ -446,6 +461,7 @@ impl Plan<'_> {
                     ("title", t.get("title").clone()),
                     ("allowed", t.get("allowed_paths").clone()),
                     ("verify", t.get("verify").clone()),
+                    ("brief", string(t.text("brief"))),
                     ("depends", t.get("depends").clone()),
                     ("why_ready", string(why)),
                     ("task_sha256", string(json::hash(&t)?)),

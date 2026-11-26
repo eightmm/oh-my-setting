@@ -130,6 +130,176 @@ fn owns_only_agent_plan() {
 }
 
 #[test]
+fn brief_file_round_trip_and_bounds() {
+    if isolated("brief_file_round_trip_and_bounds") {
+        return;
+    }
+    let tmp = Tmp::new();
+    let r = repo(&tmp);
+    let file = tmp.0.join("brief.txt");
+    let path = file.to_str().unwrap();
+    fs::write(&file, "first work\nsecond line").unwrap();
+    assert_eq!(go(&r, &["init", "--goal", "brief test"]).0, 0);
+    let added = go(
+        &r,
+        &["add", "--id", "a", "--title", "work", "--brief-file", path],
+    );
+    assert_eq!(added.0, 0, "{:?}", added);
+    for action in ["brief", "show"] {
+        let out = go(&r, &[action, "--id", "a"]);
+        assert_eq!(out.0, 0, "{:?}", out);
+        assert!(out.1.contains("first work"));
+    }
+    let raw = fs::read(r.join(".oms/plan/tasks.json")).unwrap();
+    let doc = oms_command_plan::json::parse(&raw).unwrap();
+    let task_hash = oms_command_plan::json::hash(doc.get("tasks").get("a")).unwrap();
+    let plan_hash = oms_command_plan::json::sha(&raw);
+    fs::write(&file, "amended work").unwrap();
+    let amended = go(
+        &r,
+        &[
+            "amend",
+            "--id",
+            "a",
+            "--expected-plan-sha256",
+            &plan_hash,
+            "--expected-task-sha256",
+            &task_hash,
+            "--reason",
+            "more detail",
+            "--brief-file",
+            path,
+        ],
+    );
+    assert_eq!(amended.0, 0, "{:?}", amended);
+    for action in ["brief", "show"] {
+        assert!(go(&r, &[action, "--id", "a"]).1.contains("amended work"));
+    }
+    let raw = fs::read(r.join(".oms/plan/tasks.json")).unwrap();
+    let doc = oms_command_plan::json::parse(&raw).unwrap();
+    let task_hash = oms_command_plan::json::hash(doc.get("tasks").get("a")).unwrap();
+    let plan_hash = oms_command_plan::json::sha(&raw);
+    let history = doc.get("tasks").get("a").get("history").array().unwrap();
+    let amendment = history
+        .iter()
+        .find(|h| h.text("kind") == "amended")
+        .unwrap();
+    assert_eq!(
+        amendment.get("before").text("brief"),
+        "first work\nsecond line"
+    );
+    assert_eq!(amendment.get("after").text("brief"), "amended work");
+    let sensitive: String = ["sk-", &"a".repeat(48)].concat();
+    for bytes in [
+        vec![b'x'; 65537],
+        vec![0xff],
+        vec![],
+        b" \n\t".to_vec(),
+        sensitive.into_bytes(),
+    ] {
+        fs::write(&file, bytes).unwrap();
+        assert_ne!(
+            go(
+                &r,
+                &["add", "--id", "b", "--title", "bad", "--brief-file", path]
+            )
+            .0,
+            0
+        );
+        assert_ne!(
+            go(
+                &r,
+                &[
+                    "amend",
+                    "--id",
+                    "a",
+                    "--expected-plan-sha256",
+                    &plan_hash,
+                    "--expected-task-sha256",
+                    &task_hash,
+                    "--reason",
+                    "bad input",
+                    "--brief-file",
+                    path
+                ]
+            )
+            .0,
+            0
+        );
+        assert_eq!(fs::read(r.join(".oms/plan/tasks.json")).unwrap(), raw);
+    }
+    #[cfg(unix)]
+    {
+        let link = tmp.0.join("brief-link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_ne!(
+            go(
+                &r,
+                &[
+                    "add",
+                    "--id",
+                    "b",
+                    "--title",
+                    "bad",
+                    "--brief-file",
+                    link.to_str().unwrap()
+                ]
+            )
+            .0,
+            0
+        );
+    }
+    assert_eq!(go(&r, &["add", "--id", "0", "--title", "no brief"]).0, 0);
+    let preview = go(&r, &["next", "--provider", "codex", "--json"]);
+    assert_eq!(preview.0, 0, "{preview:?}");
+    assert_eq!(
+        oms_command_plan::json::parse(preview.1.as_bytes())
+            .unwrap()
+            .text("id"),
+        "a",
+        "a non-claiming selector must skip brief-less tasks too"
+    );
+    let next = go(&r, &["next", "--claim", "--provider", "codex", "--json"]);
+    assert_eq!(next.0, 0, "{next:?}");
+    assert_eq!(
+        oms_command_plan::json::parse(next.1.as_bytes())
+            .unwrap()
+            .text("id"),
+        "a"
+    );
+    // Batch rows carry a brief, and a replay with a different brief is not "already applied".
+    let batch = |brief: &str| {
+        let body = format!(
+            r#"{{"schema":1,"kind":"agent-plan-batch","tasks":[{{"id":"bt","title":"batch work","brief":"{brief}"}}]}}"#
+        );
+        let file = tmp.0.join("batch.json");
+        fs::write(&file, &body).unwrap();
+        let plan = oms_command_plan::json::sha(fs::read(r.join(".oms/plan/tasks.json")).unwrap());
+        go(
+            &r,
+            &[
+                "add-batch",
+                "--tasks",
+                file.to_str().unwrap(),
+                "--expected-tasks-sha256",
+                &oms_command_plan::json::sha(body.as_bytes()),
+                "--expected-plan-sha256",
+                &plan,
+            ],
+        )
+    };
+    let added = batch("batch brief");
+    assert_eq!(added.0, 0, "{added:?}");
+    assert!(go(&r, &["brief", "--id", "bt"]).1.contains("batch brief"));
+    let replay = batch("batch brief");
+    assert_eq!(replay.0, 0, "{replay:?}");
+    assert!(replay.1.contains("already applied"), "{replay:?}");
+    let changed = batch("other brief");
+    assert_ne!(changed.0, 0, "{changed:?}");
+    assert!(changed.2.contains("does not match batch"), "{changed:?}");
+}
+
+#[test]
 fn delegate_binding_keeps_the_issued_lease_and_fences_native_review() {
     if isolated("delegate_binding_keeps_the_issued_lease_and_fences_native_review") {
         return;
@@ -166,7 +336,9 @@ fn delegate_binding_keeps_the_issued_lease_and_fences_native_review() {
             )
             .unwrap();
         };
+        fs::write(r.join("brief.txt"), "Implement the fixture task").unwrap();
         let mut task = Request::new(Action::Add)
+            .with("brief-file", "brief.txt")
             .with("id", "t1")
             .with("title", "write a.txt")
             .with("allowed", "a.txt")
@@ -1967,7 +2139,23 @@ fn panel_acceptance_checks_canonical_claimed_and_running_expiry() {
     let tmp = Tmp::new();
     let repo = repo(&tmp);
     assert_eq!(go(&repo, &["init", "--goal", "g"]).0, 0);
-    assert_eq!(go(&repo, &["add", "--id", "a", "--title", "a"]).0, 0);
+    fs::write(repo.join("brief.txt"), "expiry fixture work").unwrap();
+    assert_eq!(
+        go(
+            &repo,
+            &[
+                "add",
+                "--id",
+                "a",
+                "--title",
+                "a",
+                "--brief-file",
+                "brief.txt"
+            ]
+        )
+        .0,
+        0
+    );
     let stop = AtomicBool::new(false);
     let claim = Request::new(Action::Claim)
         .with("id", "a")
@@ -4384,12 +4572,68 @@ fn github_issue_links_stay_local_same_repo_and_mode_gated() {
     assert_eq!(c, 2, "{e}");
     assert!(e.contains("must match every task issue"), "{e}");
     assert!(!p.join(".oms/plan/tasks.json").exists());
-    let (c, _, e) = proposal(r##""issue":"#21","##, r##","issue":"#21""##);
+    let (c, _, e) = proposal(
+        r##""issue":"#21","##,
+        r##","issue":"#21","brief":"reviewed work""##,
+    );
     assert_eq!(c, 0, "{e}");
     assert_eq!(task(&p, "p1").text("issue"), format!("{REPO}#21"));
-    let (c, o, e) = proposal("", r##","issue":"#21""##);
+    assert_eq!(task(&p, "p1").text("brief"), "reviewed work");
+    let (c, _, e) = proposal("", r##","issue":"#21""##);
+    assert_ne!(
+        c, 0,
+        "a replay without the reviewed brief must not count as applied"
+    );
+    assert!(e.contains("does not match reviewed proposal"), "{e}");
+    let (c, o, e) = proposal("", r##","issue":"#21","brief":"reviewed work""##);
     assert_eq!(c, 0, "{e}");
     assert!(o.contains("already applied"), "{o}");
+    let raw = fs::read(p.join(".oms/plan/tasks.json")).unwrap();
+    let doc = json::parse(&raw).unwrap();
+    let plan_hash = json::sha(&raw);
+    let task_hash = json::hash(doc.get("tasks").get("p1")).unwrap();
+    let brief_path = tmp.0.join("proposal-brief");
+    fs::write(&brief_path, "revised work").unwrap();
+    let path = brief_path.to_str().unwrap();
+    for extra in ["--allowed", "--verify"] {
+        let result = at(
+            &p,
+            &[
+                "amend",
+                "--id",
+                "p1",
+                "--expected-plan-sha256",
+                &plan_hash,
+                "--expected-task-sha256",
+                &task_hash,
+                "--reason",
+                "update",
+                "--brief-file",
+                path,
+                extra,
+                "true",
+            ],
+        );
+        assert_ne!(result.0, 0, "{result:?}");
+    }
+    let result = at(
+        &p,
+        &[
+            "amend",
+            "--id",
+            "p1",
+            "--expected-plan-sha256",
+            &plan_hash,
+            "--expected-task-sha256",
+            &task_hash,
+            "--reason",
+            "update",
+            "--brief-file",
+            path,
+        ],
+    );
+    assert_eq!(result.0, 0, "{result:?}");
+    assert_eq!(task(&p, "p1").text("brief"), "revised work");
     let (c, _, e) = at(
         &p,
         &["link", "--task", "p1", "--issue", "22", "--reason", "x"],

@@ -204,6 +204,13 @@ impl BoundDelegate {
         if allowed.is_empty() || task.text("verify").trim().is_empty() {
             return fail("Plan delegation requires frozen paths and a verifier");
         }
+        if task.text("brief").trim().is_empty() {
+            return fail(format!(
+                "task {} has no work brief; use agent-plan amend --id {} --brief-file PATH",
+                bound.binding.task_id(),
+                bound.binding.task_id()
+            ));
+        }
         let prompt = format!(
             "Goal: {}\n\n{}\n\nAllowed paths: {}\nForbidden paths: {}\nRequired verification: {}\nDone when: the frozen task is implemented and its required check passes. Return evidence; the owner retains landing and acceptance.",
             task.text("title"),

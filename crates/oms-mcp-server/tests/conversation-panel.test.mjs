@@ -106,7 +106,7 @@ async function panel(projects, dashboard = {}, options = {}) {
     if (method === 'tools/call') {
       try {
         const value = tool(params.name, params.arguments);
-        result = params.name==='oms_lead_conversation_status' && value._private ? {_meta:{leadConversation:value._private},structuredContent:{projectKey:value.projectKey,room:value.room,leads:value.leads}} : params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
+        result = params.name==='oms_lead_conversation_status' && value._private ? {_meta:{leadConversation:value._private},structuredContent:{projectKey:value.projectKey,room:value.room,leads:value.leads,turn:value.turn}} : params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0}} : {structuredContent:value};
       }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
       if ((params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) || host.delayTool === params.name) {
@@ -568,6 +568,113 @@ test('explicit control opens three managed Leads, preserves member chat and read
   await choose(p,'ko');assert.match(opener.textContent,/Claude 대화 열기/);
   assert.equal(p.host.messages.length,0);
 });
+test('managed Lead composes privately, keeps scoped drafts and reconciles a lost acknowledgement with the same turn',async()=>{
+  const send='oms_send_lead_message', older=randomUUID(), greeting={role:'claude',text:'Ready'};
+  const turns=[greeting];let status='not_found', sent;
+  const p=await panel(['one','two'],dashboard,{locale:'en',tools:{
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:a.before?[{role:'claude',text:'Earlier'}]:turns,
+        cursor:a.before?null:older,hasMore:!a.before}};
+      if(a.turnId)v.turn={turnId:a.turnId,status};
+      return v;
+    },
+    [send]:a=>{
+      if(!sent){sent={...a};throw Error('acknowledgement lost');}
+      assert.deepEqual({...a},sent);
+      status='replied';turns.push({role:'user',text:a.text,turnId:a.turnId},{role:'claude',text:'Here is the reply.',turnId:a.turnId});
+      return {...leadStatus(a,'ready'),turn:{turnId:a.turnId,status}};
+    }
+  }});
+  await p.open('input',{arguments:{project:'one'}});
+  const open=async()=>{const b=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');
+    b.dispatchEvent(new Event('click'));await setImmediate();};
+  const type=async value=>{p.get('chat-text').value=value;await p.event('chat-text','input');};
+  await open();await type('Draft');await p.event('chat-back','click');await open();assert.equal(p.get('chat-text').value,'Draft');
+  await p.event('chat-older','click');assert.equal(p.calls.at(-1).args.before,older);
+  assert.match(p.get('chat-messages').textContent,/Earlier.*Ready/);
+  for(const invalid of ['한'.repeat(1334),'text'+String.fromCharCode(0x85)]){await type(invalid);await p.event('chat-compose','submit');assert.ok(!sent);}
+  await type('My private question');await p.event('chat-compose','submit');
+  assert.deepEqual({...sent,turnId:''},{project:'one',room:main.room,projectKey:'b'.repeat(64),provider:'claude',
+    leadRequestId:leadStatus({provider:'claude'},'ready').leads[0].requestId,turnId:'',text:'My private question'});
+  assert.match(sent.turnId,/^[a-f0-9]{8}-[a-f0-9]{4}-4/);
+  assert.match(p.get('chat-check').textContent,/Retry original/);
+  await type('A new draft');await p.event('chat-compose','submit');
+  assert.equal(p.calls.filter(c=>c.name===send).length,1);
+  await p.event('chat-check','click');assert.equal(p.calls.filter(c=>c.name===send).length,2);
+  assert.equal(p.get('chat-text').value,'A new draft');
+  assert.match(p.get('chat-messages').textContent,/Earlier.*Ready.*YouMy private question.*ClaudeHere is the reply/);
+  assert.equal(p.host.messages.length,0);assert.equal(p.host.contexts.length,0);
+  await p.open('input',{arguments:{project:'two'}});
+  assert.equal(p.get('chat-text').value,'');assert.equal(p.get('chat-messages').textContent,'');
+  assert.ok(!p.get('conversation').open);
+});
+
+test('recorded Lead turns poll reads only while open and keep a draft typed while sending',async()=>{
+  let state='reserved',sent;const timers=new Map();
+  const p=await panel(['one'],dashboard,{locale:'en',timers:{
+    setTimeout(fn,ms){const id=Symbol();timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}
+  },tools:{
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[]}};
+      if(a.turnId)v.turn={turnId:a.turnId,status:state};
+      return v;
+    },
+    oms_send_lead_message:a=>{sent={...a};return {...leadStatus(a,'ready'),turn:{turnId:a.turnId,status:state}};}
+  }});
+  const polls=()=>[...timers.values()].filter(v=>v.ms===8000);
+  const open=p.get('leads').children[2].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
+  p.host.delayTool='oms_send_lead_message';p.get('chat-text').value='First';await p.event('chat-text','input');
+  await p.event('chat-compose','submit');await p.event('chat-compose','submit');
+  p.get('chat-text').value='Next';await p.event('chat-text','input');p.host.release();await setImmediate();
+  assert.equal(sent.provider,'agy');assert.equal(p.get('chat-text').value,'Next');
+  assert.equal(polls().length,1);assert.match(p.get('chat-delivery').textContent,/awaiting execution/);
+  state='running';polls()[0].fn();await setImmediate();assert.match(p.get('chat-delivery').textContent,/Waiting for the reply/);
+  const stale=polls()[0];await p.event('chat-back','click');const mark=p.calls.length;stale.fn();await setImmediate();assert.equal(p.calls.length,mark);
+  state='failed';open.dispatchEvent(new Event('click'));await setImmediate();assert.match(p.get('chat-delivery').textContent,/ended without a reply/);
+  assert.equal(p.get('chat-text').value,'Next');assert.equal(polls().length,0);
+  assert.equal(p.calls.filter(c=>c.name==='oms_send_lead_message').length,1);
+});
+
+test('a verified unresolved message from another view blocks a new dispatch until its turn settles',async()=>{
+  const id=randomUUID();let state='unconfirmed';
+  const p=await panel(['one'],dashboard,{locale:'en',tools:{[managedRead]:a=>{
+    const v=leadStatus(a,'ready');
+    if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'From another view',turnId:id,status:state},
+      ...(state==='replied'?[{role:'antigravity',text:'A bounded answer',turnId:id,truncated:true}]:[])]}};
+    return v;
+  }}});
+  const button=p.get('leads').children[2].children[1].children.find(e=>e.type==='button');button.dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-text').value='My draft';await p.event('chat-text','input');await p.event('chat-compose','submit');
+  assert.equal(p.get('chat-send').disabled,true);assert.match(p.get('chat-delivery').textContent,/previous message/);
+  state='replied';await p.event('chat-check','click');assert.equal(p.get('chat-send').disabled,false);
+  assert.match(p.get('chat-messages').textContent,/AGY.*A bounded answer.*Partial reply/);
+  assert.equal(p.get('chat-text').value,'My draft');assert.ok(!p.calls.some(c=>c.name==='oms_send_lead_message'));
+});
+
+test('a wrong receipt or late reply cannot authorize a fresh send or cross conversations',async()=>{
+  const send='oms_send_lead_message';let sent=0;
+  const p=await panel(['one','two'],dashboard,{tools:{
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[]}};
+      if(a.turnId)v.turn={turnId:randomUUID(),status:'replied'};
+      return v;
+    },
+    [send]:a=>{sent++;return {...leadStatus(a,'ready'),turn:{turnId:randomUUID(),status:'replied'}};}
+  }});
+  await p.open('input',{arguments:{project:'one'}});
+  const button=p.get('leads').children[0].children[1].children.find(e=>e.type==='button');
+  button.dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-text').value='ask once';await p.event('chat-text','input');await p.event('chat-compose','submit');
+  assert.equal(p.get('chat-text').value,'ask once');assert.equal(p.get('chat-send').disabled,true);
+  await p.event('chat-compose','submit');assert.equal(sent,1);
+  p.host.delayTool=managedRead;await p.event('chat-check','click');
+  await p.open('input',{arguments:{project:'two'}});p.host.release();await setImmediate();
+  assert.ok(!p.get('conversation').open);assert.equal(p.get('chat-text').value,'');assert.equal(sent,1);
+});
+
 test('only an exact explicit opener pair opts into this physical project and refresh never replays an uncertain write',async()=>{
   const memory=new Map(),storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
   const tools={[managedOpen]:()=>{throw Error('acknowledgement lost');}};
@@ -733,6 +840,41 @@ test('fixed roles keep distinct conversations together and leave unknown or unbo
   assert.equal(unbound.get('view').hidden,true);assert.equal(unbound.get('leads').children.length,0);
   assert.deepEqual(unbound.calls.map(c=>c.name),['oms_list_projects']);
 });
+test('workers nest under each verified Lead only and only matching Room members can open chat',async()=>{
+  const second={...lead,participant:'second',label:'Documentation'};
+  const worker={...lead,participant:'child-a',parent:lead.participant,provider:'agy',role:'worker',label:'Keyboard checks'};
+  const enrolled={...worker,participant:'child-b',parent:second.participant,label:'Copy review'};
+  const d={...dashboard,conversationMain:{...main,participants:[lead,second,worker,enrolled,{...enrolled,participant:'retired',joined:false}]},
+    conversationAttempts:[...dashboard.conversationAttempts,
+      {room:main.room,id:'l2',participant:second.participant,role:'lead',provider:'claude',state:'working'},
+      {room:main.room,id:'w1',participant:worker.participant,parentAttempt:'l',role:'worker',provider:'antigravity',state:'verifying'},
+      {room:main.room,id:'w3',participant:'retired',parentAttempt:'l2',role:'worker',provider:'agy',state:'done'},
+      {room:null,id:'w2',parentAttempt:'l2',role:'worker',provider:'codex',state:'running',task:'internal-task'},
+      ...[
+        {room:'foreign',parentAttempt:'l'}, {room:null,parentAttempt:'unrelated'},
+        {room:main.room,parentAttempt:'l2',participant:worker.participant},
+        {room:main.room,parentAttempt:'l',participant:worker.participant,provider:'pi'},
+        {room:main.room,parentAttempt:'l',role:'reviewer'}, {room:main.room,participant:'unowned'}
+      ].map((r,i)=>({id:'bad-'+i,role:'worker',taskTitle:'Unrelated',...r}))]};
+  const p=await panel(['one','two'],d,{locale:'en',tools:{oms_panel_chat:a=>({...a,source:'room',messages:[]})}});
+  await p.open('input',{arguments:{project:'one'}});
+  const [a,b]=p.get('leads').children[1].children.slice(2), elements=g=>g.children.filter(n=>n?.tagName), children=g=>elements(elements(g)[1]).map(n=>elements(n)[0]);
+  assert.equal(elements(a)[1].tagName,'ul');assert.equal(children(a).length,1);assert.equal(children(b).length,3);
+  const [verified]=children(a), [retired,observed,member]=children(b);
+  assert.equal(retired.tagName,'article');assert.match(retired.textContent,/AGY Worker.*Done/);
+  assert.match(verified.textContent,/Keyboard checks.*AGY Worker.*Verifying/);
+  assert.equal(observed.tagName,'article');assert.match(observed.textContent,/Codex Worker/);
+  assert.match(member.textContent,/Copy review.*AGY Worker.*Joined this room/);
+  assert.doesNotMatch(p.get('leads').textContent,/Unrelated|internal-task/);
+  assert.equal(p.calls.filter(c=>c.name==='oms_panel_chat').length,0);
+  verified.dispatchEvent(new Event('click'));await setImmediate();
+  assert.deepEqual({...p.calls.at(-1).args},{project:'one',room:main.room,participant:worker.participant});
+  await p.event('chat-back','click');assert.ok(verified.focused);
+  await choose(p,'ko');assert.match(verified.textContent,/AGY 워커/);
+  member.dispatchEvent(new Event('click'));await setImmediate();
+  await p.open('input',{arguments:{project:'two'}});assert.equal(p.get('conversation').open,false);
+});
+
 test('scoped transcript paginates only on demand and erases private data after switching projects',async()=>{
   const p=await panel(['one','two'],dashboard,{locale:'en',tools:{oms_panel_chat:a=>({...a,source:'room',messages:
     [{seq:a.before==null?3:1,text:a.before==null?'Latest message':'Prior message'}],nextBefore:a.before==null?3:null})}});
