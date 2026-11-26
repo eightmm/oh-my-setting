@@ -325,7 +325,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v22.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v23.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -334,7 +334,7 @@ fn cross_host_project_reads() {
             html.as_bytes(),
             include_bytes!("../src/conversation-panel.html")
         );
-        let legacy_uri = "ui://oms/conversation-panel/v21.html";
+        let legacy_uri = "ui://oms/conversation-panel/v22.html";
         let legacy = c.call("resources/read", json!({"uri":legacy_uri}));
         let legacy = &legacy["result"]["contents"][0];
         assert_eq!(legacy["uri"], legacy_uri);
@@ -1687,7 +1687,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v22.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v23.html");
     // Codex uses the stdio transport configuration to decide whether to reuse a running server.
     for package in [
         include_str!("../../../plugins/oms/mcp.json"),
@@ -1746,6 +1746,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v19.html"),
         json!("ui://oms/conversation-panel/v20.html"),
         json!("ui://oms/conversation-panel/v21.html"),
+        json!("ui://oms/conversation-panel/v22.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
