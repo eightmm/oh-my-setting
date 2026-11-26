@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 pub(crate) const MAX_DROP_WAIT: Duration = Duration::from_secs(5);
 const POST_EXIT_DRAIN: Duration = Duration::from_millis(250);
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -740,7 +741,11 @@ impl Reactor {
         job.turn(self.dedicated);
         if !job.finished && !budget.is_zero() {
             let now = Instant::now();
-            let mut wait = budget.min(Duration::from_millis(50));
+            // Keep the 50 ms floor even when `fds` is empty (pidfd unavailable
+            // with output closed, terminate grace cleanup, or full duplex
+            // output), bounded only by caller budget, execution deadline, and
+            // signal escalation instants rather than dropping to a 2 ms spin.
+            let mut wait = budget.min(POLL_INTERVAL);
             if job.stop.is_none()
                 && !job.exited_with_eof()
                 && let Some(deadline) = job.request.deadline
@@ -776,9 +781,6 @@ impl Reactor {
                 && let Some(fd) = &job.pidfd
             {
                 fds.push(PollFd::new(fd, PollFlags::IN));
-            }
-            if fds.is_empty() {
-                wait = wait.min(Duration::from_millis(2));
             }
             let timeout = Timespec {
                 tv_sec: wait.as_secs() as _,
@@ -2144,5 +2146,83 @@ mod tests {
         let done = finish(&mut reactor, id);
         assert!(!done.cleanup_complete());
         assert!(done.owned_cleanup().is_none());
+
+        // No-fd poll fallback keeps the 50 ms floor rather than spinning at 2 ms.
+        let mut no_fd = Request::new(vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "exec 0<&- 1>&- 2>&-; while :; do sleep 1; done".into(),
+        ]);
+        no_fd.scope = Scope::ProcessGroup;
+        no_fd.deadline = Some(Instant::now() + Duration::from_secs(5));
+        let id = reactor.start(no_fd).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            reactor.jobs.get_mut(&id).unwrap().pidfd = None;
+        }
+        let wait_eof = Instant::now() + Duration::from_secs(2);
+        while {
+            let snap = reactor.snapshot(id).unwrap();
+            !snap.stdout.eof || snap.stderr.as_ref().is_some_and(|s| !s.eof)
+        } {
+            assert!(Instant::now() < wait_eof, "stdio did not close");
+            reactor.poll(id, Duration::from_millis(10)).unwrap();
+        }
+        {
+            let job = reactor.jobs.get(&id).unwrap();
+            assert!(job.out.is_none() && job.err.is_none() && job.input.is_none());
+        }
+        let poll_started = Instant::now();
+        assert!(matches!(
+            reactor.poll(id, Duration::from_millis(50)).unwrap(),
+            Progress::Pending(_)
+        ));
+        assert!(
+            poll_started.elapsed() >= Duration::from_millis(35),
+            "no-fd poll spun instead of keeping the 50 ms floor: {:?}",
+            poll_started.elapsed()
+        );
+        reactor.stop(id, StopReason::Cancelled).unwrap();
+        let done = finish(&mut reactor, id);
+        assert!(done.cleanup_complete());
+
+        // Full duplex output queue with no input/pidfd also keeps the 50 ms floor.
+        let mut full_duplex = duplex_request("printf 'stdout flood'; while :; do sleep 1; done");
+        full_duplex.scope = Scope::ProcessGroup;
+        full_duplex.deadline = Some(Instant::now() + Duration::from_secs(5));
+        let options = full_duplex.duplex.as_mut().unwrap();
+        options.max_output_events = 1;
+        options.max_output_bytes = 32;
+        let id = reactor.start(full_duplex).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            reactor.jobs.get_mut(&id).unwrap().pidfd = None;
+        }
+        let wait_full = Instant::now() + Duration::from_secs(2);
+        while reactor
+            .snapshot(id)
+            .unwrap()
+            .duplex
+            .as_ref()
+            .unwrap()
+            .output_queued_events
+            == 0
+        {
+            assert!(Instant::now() < wait_full, "duplex output did not fill");
+            reactor.poll(id, Duration::from_millis(10)).unwrap();
+        }
+        let poll_started = Instant::now();
+        assert!(matches!(
+            reactor.poll(id, Duration::from_millis(50)).unwrap(),
+            Progress::Pending(_)
+        ));
+        assert!(
+            poll_started.elapsed() >= Duration::from_millis(35),
+            "full-duplex no-fd poll spun instead of keeping the 50 ms floor: {:?}",
+            poll_started.elapsed()
+        );
+        reactor.stop(id, StopReason::Cancelled).unwrap();
+        let done = finish(&mut reactor, id);
+        assert!(done.cleanup_complete());
     }
 }

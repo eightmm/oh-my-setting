@@ -5186,40 +5186,76 @@ mod tests {
                     )
                     .unwrap()
             });
-            let output = if mode == "protocol-prespawn-requalify" {
+            let (output, spawns) = if mode == "protocol-prespawn-requalify" {
                 let policy_path = repo.join("team-policy.json");
                 let saved_policy = std::fs::read(&policy_path).unwrap();
                 let staged_bad = repo.join("team-policy.json.invalid");
                 std::fs::write(&staged_bad, b"{}\n").unwrap();
-                let thread_path = repo.join(".oms/threads/room-team.jsonl");
-                let before_len = std::fs::metadata(&thread_path).unwrap().len();
-                let finished = AtomicBool::new(false);
-                let out = std::thread::scope(|scope| {
-                    scope.spawn(|| {
-                        while !finished.load(Ordering::Acquire) {
-                            if std::fs::metadata(&thread_path)
-                                .map(|m| m.len() > before_len)
-                                .unwrap_or(false)
-                            {
-                                let _ = std::fs::rename(&staged_bad, &policy_path);
-                                break;
-                            }
-                            std::thread::yield_now();
-                        }
-                    });
-                    let res = oms_command_peer::run_with_executor(
-                        "peer-ask", &args, &repo, source, &stop, &collab,
+                let enrolled_participant = std::sync::Mutex::new(None::<String>);
+                let collab = collab.with_after_team_room_join(|participant| {
+                    let raw = std::fs::read(repo.join(".oms/threads/room-team.jsonl")).unwrap();
+                    let rows: Vec<_> = raw
+                        .split(|b| *b == b'\n')
+                        .filter(|line| !line.is_empty())
+                        .map(|line| {
+                            oms_command_room::value::parse(line, oms_command_room::MAX_ROW).unwrap()
+                        })
+                        .collect();
+                    let state = oms_command_room::project(&rows).unwrap();
+                    let current = state
+                        .list("participants")
+                        .iter()
+                        .find(|p| p.text("participant") == participant)
+                        .expect("Room join must exist before second binding check");
+                    assert!(
+                        current.flag("joined"),
+                        "Room enrollment must be active before policy swap"
                     );
-                    finished.store(true, Ordering::Release);
-                    res
+                    *enrolled_participant.lock().unwrap() = Some(participant.to_owned());
+                    std::fs::rename(&staged_bad, &policy_path).unwrap();
                 });
+                let out = oms_command_peer::run_with_executor(
+                    "peer-ask", &args, &repo, source, &stop, &collab,
+                );
                 let _ = std::fs::remove_file(&staged_bad);
                 std::fs::write(&policy_path, saved_policy).unwrap();
-                out
+                let enrolled_name = enrolled_participant
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("pre-spawn requalification hook did not run");
+                let spawns = collab.team_child_spawns();
+                assert_eq!(
+                    spawns, 0,
+                    "pre-spawn requalification refusal must never spawn the provider"
+                );
+                assert!(
+                    !repo.join("prespawn-provider-spawned").exists(),
+                    "provider adapter ran despite pre-spawn requalification failure"
+                );
+                let raw = std::fs::read(repo.join(".oms/threads/room-team.jsonl")).unwrap();
+                let rows: Vec<_> = raw
+                    .split(|b| *b == b'\n')
+                    .filter(|line| !line.is_empty())
+                    .map(|line| {
+                        oms_command_room::value::parse(line, oms_command_room::MAX_ROW).unwrap()
+                    })
+                    .collect();
+                let after_state = oms_command_room::project(&rows).unwrap();
+                assert!(
+                    after_state
+                        .list("participants")
+                        .iter()
+                        .find(|p| p.text("participant") == enrolled_name)
+                        .is_some_and(|p| !p.flag("joined")),
+                    "pre-spawn requalification failure must leave Room enrollment for {enrolled_name}"
+                );
+                (out, spawns)
             } else {
-                oms_command_peer::run_with_executor(
+                let out = oms_command_peer::run_with_executor(
                     "peer-ask", &args, &repo, source, &stop, &collab,
-                )
+                );
+                (out, collab.team_child_spawns())
             };
             drop(issuance_lock);
             if let Some(handler) = handler {
@@ -5273,6 +5309,9 @@ mod tests {
             } else {
                 assert_ne!(output.0, 0, "{mode:?}: invalid protocol succeeded");
             }
+            if mode != "protocol-prespawn-requalify" {
+                assert_eq!(spawns, 1, "{mode:?} expected 1 spawn: {}", diagnostic());
+            }
             assert!(!stdout.contains("nonce"));
             assert!(!stderr.contains("nonce"));
             let (required, forbidden): (&[&str], &[&str]) = match mode.to_str().unwrap() {
@@ -5290,6 +5329,7 @@ mod tests {
                 "protocol-issuance-blocked" => (
                     &[
                         "Team channel issuance failed; pending intent retained (stage=issuance-lock)",
+                        "room-enrollment-retained; enrollment-stage=missing-cleanup-proof",
                     ],
                     &[],
                 ),
@@ -6408,6 +6448,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 prompt=$(cat "$prompt_file")
+case "$prompt" in *protocol-prespawn-requalify*) : > "$OMS_NATIVE_PHYSICAL_FIXTURE/prespawn-provider-spawned"; exit 99;; esac
 IFS= read -r hello
 field() { printf '%s' "${2-$hello}" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"; }
 num() { printf '%s' "$hello" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p"; }
@@ -6724,6 +6765,16 @@ done
             .env("OMS_ROOM_PARTICIPANT", &owner).env("OMS_PROVIDER_ADAPTER_DIR", &adapters)
             .status().unwrap();
         assert!(status.success(), "blocked Team issuance diagnostic failed");
+        let blocked_projection =
+            oms_command_room::project(&room.records("room-team").unwrap()).unwrap();
+        assert!(
+            blocked_projection
+                .list("participants")
+                .iter()
+                .rfind(|p| p.text("participant").starts_with("team-call_"))
+                .is_some_and(|p| p.flag("joined")),
+            "post-spawn issuance failure without OwnedCleanup must retain Room enrollment"
+        );
         assert_eq!(
             physical::load(repo.as_path(), &stop).unwrap().len(),
             physical_before + 21,

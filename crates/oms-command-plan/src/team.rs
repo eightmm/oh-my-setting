@@ -76,10 +76,95 @@ fn admission_time() -> Result<String> {
             .to_string(),
     )
 }
+pub const BOUNDED_LOCK_POLL: Duration = Duration::from_millis(20);
+
 #[derive(Clone, Copy, Debug)]
 pub struct AdmissionBounds {
     pub lock_wait: Duration,
     pub lock_hold: Duration,
+}
+
+impl AdmissionBounds {
+    pub fn wait_deadline(self, deadline: Instant) -> Instant {
+        Instant::now()
+            .checked_add(self.lock_wait)
+            .map_or(deadline, |d| deadline.min(d))
+    }
+
+    pub fn hold_deadline(self, deadline: Instant) -> Instant {
+        Instant::now()
+            .checked_add(self.lock_hold)
+            .map_or(deadline, |d| deadline.min(d))
+    }
+}
+
+/// Shared bounded-wait writer lock acquisition for interactive channel and
+/// Team admission paths: polls every 20 ms up to `wait_deadline` while honoring
+/// `interrupted` and the outer `deadline`.
+pub fn acquire_bounded_lock(
+    mut settings: oms_lock::Settings,
+    interrupted: &std::sync::atomic::AtomicBool,
+    deadline: Instant,
+    wait_deadline: Instant,
+    busy_message: &str,
+    build_lock: impl FnOnce(oms_lock::Settings) -> std::result::Result<oms_lock::Lock, oms_lock::Error>,
+) -> Result<oms_lock::Guard> {
+    let check = || {
+        if interrupted.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(crate::Error {
+                code: 130,
+                message: "team admission interrupted".into(),
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(crate::Error {
+                code: 75,
+                message: "team admission deadline expired".into(),
+            });
+        }
+        Ok(())
+    };
+    check()?;
+    let remaining = wait_deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        check()?;
+        return Err(crate::Error {
+            code: 75,
+            message: busy_message.into(),
+        });
+    }
+    settings.timeout = settings.timeout.min(remaining);
+    let lock_deadline = Instant::now()
+        .checked_add(settings.timeout)
+        .unwrap_or(wait_deadline);
+    let authority = build_lock(settings).map_err(|e| crate::Error {
+        code: e.exit_code(),
+        message: e.to_string(),
+    })?;
+    loop {
+        check()?;
+        match authority.try_acquire() {
+            Ok(guard) => return Ok(guard),
+            Err(oms_lock::Error::Busy) => {
+                if Instant::now() >= lock_deadline {
+                    check()?;
+                    return Err(crate::Error {
+                        code: 75,
+                        message: busy_message.into(),
+                    });
+                }
+                std::thread::sleep(
+                    BOUNDED_LOCK_POLL.min(lock_deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => {
+                return Err(crate::Error {
+                    code: error.exit_code(),
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
 }
 
 impl<'s> Plan<'s> {
@@ -128,7 +213,7 @@ impl<'s> Plan<'s> {
             "team admission requires an enrolled room",
         )?;
         admission_before(self, deadline)?;
-        let wait_deadline = bounds.map_or(deadline, |b| deadline.min(Instant::now() + b.lock_wait));
+        let wait_deadline = bounds.map_or(deadline, |b| b.wait_deadline(deadline));
         let mut locks = Vec::new();
         // Same writer order as Plan::locked; physical/campaign locks come later.
         for relative in [
@@ -137,54 +222,22 @@ impl<'s> Plan<'s> {
             ".oms/delegations/.marker-set-lock-target".into(),
             crate::storage::ACTIVE.into(),
         ] {
-            admission_before(self, deadline)?;
-            let remaining = wait_deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(crate::Error {
-                    code: 75,
-                    message: "team admission writer is busy".into(),
-                });
-            }
-            let mut settings = self.context.lock_settings.clone();
-            settings.timeout = settings.timeout.min(remaining);
-            let lock_deadline = Instant::now() + settings.timeout;
-            let authority =
-                oms_lock::Lock::for_file(&self.context.state_repo.join(relative), settings)
-                    .map_err(|e| crate::Error {
-                        code: e.exit_code(),
-                        message: e.to_string(),
-                    })?;
-            let guard = loop {
-                admission_before(self, deadline)?;
-                match authority.try_acquire() {
-                    Ok(guard) => break guard,
-                    Err(oms_lock::Error::Busy) => {
-                        if Instant::now() >= lock_deadline {
-                            return Err(crate::Error {
-                                code: 75,
-                                message: "team admission writer is busy".into(),
-                            });
-                        }
-                        std::thread::sleep(
-                            Duration::from_millis(20)
-                                .min(lock_deadline.saturating_duration_since(Instant::now())),
-                        );
-                    }
-                    Err(error) => {
-                        return Err(crate::Error {
-                            code: error.exit_code(),
-                            message: error.to_string(),
-                        });
-                    }
-                }
-            };
+            let target = self.context.state_repo.join(relative);
+            let guard = acquire_bounded_lock(
+                self.context.lock_settings.clone(),
+                self.interrupted,
+                deadline,
+                wait_deadline,
+                "team admission writer is busy",
+                |settings| oms_lock::Lock::for_file(&target, settings),
+            )?;
             locks.push(guard);
         }
         let lifecycle = self
             .services
             .lifecycle_writer_before(&self.context.state_repo, wait_deadline)
             .map_err(|error| admission_before(self, deadline).err().unwrap_or(error))?;
-        let hold_deadline = bounds.map_or(deadline, |b| deadline.min(Instant::now() + b.lock_hold));
+        let hold_deadline = bounds.map_or(deadline, |b| b.hold_deadline(deadline));
         let mut guard = AdmissionGuard {
             plan: self,
             request,

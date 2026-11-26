@@ -65,6 +65,9 @@ const DETACH_ERR_PREFIX: &str = "OMS_DETACH_ERR:";
 type Output = (i32, Vec<u8>, Vec<u8>);
 static WAKE_SEQ: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+type AfterTeamRoomJoinHook<'a> = Box<dyn FnOnce(&str) + Send + 'a>;
+
 pub(crate) struct CollabServices<'a> {
     control: ControlServices<'a>,
     interrupted: &'a Arc<AtomicBool>,
@@ -81,6 +84,10 @@ pub(crate) struct CollabServices<'a> {
     /// repository swept through this instance creates it; the file is removed
     /// when the instance drops, so each tick run starts clean.
     wake_once: PathBuf,
+    #[cfg(test)]
+    after_team_room_join: std::sync::Mutex<Option<AfterTeamRoomJoinHook<'a>>>,
+    #[cfg(test)]
+    team_child_spawns: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -311,6 +318,10 @@ impl<'a> CollabServices<'a> {
             protected_stage: None,
             detach_worker,
             wake_once,
+            #[cfg(test)]
+            after_team_room_join: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            team_child_spawns: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -356,6 +367,37 @@ impl<'a> CollabServices<'a> {
     fn with_native(mut self, native: Vec<OsString>) -> Self {
         self.native = native;
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_after_team_room_join(self, hook: impl FnOnce(&str) + Send + 'a) -> Self {
+        *self
+            .after_team_room_join
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(hook));
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn run_after_team_room_join(&self, participant: &str) {
+        if let Some(hook) = self
+            .after_team_room_join
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            hook(participant);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_team_child_spawn(&self) {
+        self.team_child_spawns.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn team_child_spawns(&self) -> usize {
+        self.team_child_spawns.load(Ordering::SeqCst)
     }
 
     /// Replace a leading bare `oms` with the staged launcher; fail closed when

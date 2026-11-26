@@ -1,7 +1,9 @@
 //! Native-owned read-only request channel. Public locators and capability declarations
 //! select data; only this actual New/child/pipe issuer creates a session.
 use super::{CollabServices, Job, prelaunch_error, supervise};
-use oms_command_peer::process::{Completed, Invocation, TeamLaunchBinding, TeamRequestAction};
+use oms_command_peer::process::{
+    Completed, Invocation, NATIVE_ADMISSION_BUDGET, TeamLaunchBinding, TeamRequestAction,
+};
 use oms_command_peer::{Error, Result};
 use oms_command_plan::{
     Action, Context, Plan, Request,
@@ -14,8 +16,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-const CHANNEL_LOCK_WAIT_BOUND: Duration = Duration::from_secs(2);
-const CHANNEL_LOCK_HOLD_BOUND: Duration = Duration::from_secs(10);
+// Derive channel bounds from the 10 s NATIVE_ADMISSION_BUDGET: hold equals the
+// full 10 s admission budget and lock wait takes 1/5 (2 s) across each writer
+// lock set. Each bounded critical section (`issuance`, `expiry`, `record`) can
+// block at most 2 s + 10 s = 12 s, so `start_owned` (`issuance` + `expiry`) and
+// one request frame in the supervisor loop (`expiry` + `record`) each block at
+// most 24 s (always capped by `deadline` and `expires_at`), far below the 900 s
+// (15 m) default `peer-ask` call timeout.
+const CHANNEL_LOCK_HOLD_BOUND: Duration = NATIVE_ADMISSION_BUDGET;
+const CHANNEL_LOCK_WAIT_BOUND: Duration =
+    Duration::from_millis((CHANNEL_LOCK_HOLD_BOUND.as_millis() / 5) as u64);
 
 fn channel_admission_bounds() -> oms_command_plan::team::AdmissionBounds {
     oms_command_plan::team::AdmissionBounds {
@@ -114,6 +124,15 @@ impl EnrollmentFailureStage {
 fn with_settlement_note(mut error: Error, stage: EnrollmentFailureStage) -> Error {
     error.message = format!(
         "{} (enrollment-unsettled; enrollment-stage={})",
+        error.message,
+        stage.name()
+    );
+    error
+}
+
+fn with_retained_enrollment_note(mut error: Error, stage: EnrollmentFailureStage) -> Error {
+    error.message = format!(
+        "{} (room-enrollment-retained; enrollment-stage={})",
         error.message,
         stage.name()
     );
@@ -595,22 +614,16 @@ impl<'a, 's> Channel<'a, 's> {
         let private = oms_panel_core::terminals::controller_store(&self.context.state_repo, true)
             .map_err(|e| err(e.message))?;
         let relative = PathBuf::from(format!("team-request-{}/session.json", self.session));
-        let wall_remaining = u64::try_from(self.expires_at)
-            .ok()
-            .and_then(|seconds| std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
-            .and_then(|expiry| expiry.duration_since(std::time::SystemTime::now()).ok())
-            .unwrap_or_default();
-        let remaining = self
-            .deadline
-            .saturating_duration_since(Instant::now())
-            .min(wall_remaining);
         self.issuance_stage = IssuanceStage::IssuanceLock;
+        let (window_deadline, bounds) = self.bounded_window();
         let locked = private
-            .lock_at(
+            .lock_at_bounded(
                 Path::new("team-request-issuance.lock"),
-                Duration::from_secs(1).min(remaining),
+                self.stop,
+                window_deadline,
+                bounds,
             )
-            .map_err(|e| err(e.message))?;
+            .map_err(|e| Error::new(e.code, e.message))?;
         self.issuance_stage = IssuanceStage::PrivatePublication;
         locked
             .write(&relative, &raw, true, 8192)
@@ -651,15 +664,31 @@ impl<'a, 's> Channel<'a, 's> {
         }
         self.send(reactor, job, &hello)
     }
+    fn bounded_window(&self) -> (Instant, oms_command_plan::team::AdmissionBounds) {
+        let window_deadline = if self.expires_at <= 0 {
+            Instant::now()
+        } else if let Ok(seconds) = u64::try_from(self.expires_at)
+            && let Some(expiry) = std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
+        {
+            let wall_remaining = expiry
+                .duration_since(std::time::SystemTime::now())
+                .unwrap_or_default();
+            Instant::now()
+                .checked_add(wall_remaining)
+                .map_or(self.deadline, |wall_deadline| {
+                    self.deadline.min(wall_deadline)
+                })
+        } else {
+            self.deadline
+        };
+        (window_deadline, channel_admission_bounds())
+    }
     fn expiry(&self) -> Result<i128> {
         let plan = Plan::open(self.context.clone(), &self.service.control, self.stop)
             .map_err(plan_error)?;
+        let (window_deadline, bounds) = self.bounded_window();
         let guard = plan
-            .team_admission_bounded(
-                self.admission.clone(),
-                self.deadline,
-                channel_admission_bounds(),
-            )
+            .team_admission_bounded(self.admission.clone(), window_deadline, bounds)
             .map_err(plan_error)?;
         if json::hash(guard.binding()).map_err(plan_error)? != self.binding_sha {
             return Err(err("Team channel contract changed"));
@@ -828,6 +857,7 @@ impl<'a, 's> Channel<'a, 's> {
         }
         let plan = Plan::open(self.context.clone(), &self.service.control, self.stop)
             .map_err(plan_error)?;
+        let (window_deadline, bounds) = self.bounded_window();
         let outcome = plan
             .record_team_request_bounded(
                 self.admission.clone(),
@@ -840,8 +870,8 @@ impl<'a, 's> Channel<'a, 's> {
                     room_sequence: self.enrollment,
                     private_binding_sha256: &sha(&private.raw),
                 },
-                self.deadline,
-                channel_admission_bounds(),
+                window_deadline,
+                bounds,
             )
             .map_err(plan_error)?;
         self.sequence += 1;
@@ -883,7 +913,7 @@ impl<'a, 's> Channel<'a, 's> {
     }
     fn settle_unspawned_enrollment(&self) -> std::result::Result<(), EnrollmentFailureStage> {
         if self.spawned {
-            return Ok(());
+            return Err(EnrollmentFailureStage::MissingCleanupProof);
         }
         self.controller
             .check()
@@ -897,6 +927,14 @@ impl<'a, 's> Channel<'a, 's> {
             self.deadline,
             Some(self.expires_at),
             || self.settle_unspawned_enrollment(),
+        )
+    }
+    fn fail_after_spawn(&self, error: Error) -> Error {
+        // Once `reactor.start` succeeds, leaving Room requires an `OwnedCleanup`
+        // proof that the process tree is quiescent; retain enrollment explicitly.
+        with_retained_enrollment_note(
+            prelaunch_error(error, self.stop, self.deadline, Some(self.expires_at)),
+            EnrollmentFailureStage::MissingCleanupProof,
         )
     }
     fn settle_enrollment(
@@ -991,6 +1029,8 @@ fn incomplete_cues(
 impl super::OwnedDuplexConsumer for Channel<'_, '_> {
     fn note_spawned(&mut self) {
         self.spawned = true;
+        #[cfg(test)]
+        self.service.record_team_child_spawn();
     }
 
     fn issuance_stage(&self) -> IssuanceStage {
@@ -1028,6 +1068,8 @@ impl CollabServices<'_> {
         }
         let deadline = Instant::now() + input.timeout;
         let mut channel = Channel::prepare(self, &binding, stop, deadline)?;
+        #[cfg(test)]
+        self.run_after_team_room_join(&channel.participant);
         if let Err(error) = binding.check(self, stop) {
             return Err(channel.fail_before_spawn(error));
         }
@@ -1065,7 +1107,12 @@ impl CollabServices<'_> {
         ) {
             Ok(done) => done,
             Err(message) => {
-                return Err(channel.fail_before_spawn(err(message)));
+                let error = err(message);
+                return Err(if channel.spawned {
+                    channel.fail_after_spawn(error)
+                } else {
+                    channel.fail_before_spawn(error)
+                });
             }
         };
         let enrollment_failure = done
@@ -1128,7 +1175,8 @@ impl CollabServices<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnrollmentFailureStage, classify_then_settle, enroll_room_before, err, incomplete_cues, now,
+        EnrollmentFailureStage, classify_then_settle, enroll_room_before, err, incomplete_cues,
+        now, with_retained_enrollment_note,
     };
     use std::path::Path;
     use std::sync::Arc;
@@ -1225,6 +1273,16 @@ mod tests {
         assert_eq!(
             already_expired.message,
             "Team policy changed (enrollment-unsettled; enrollment-stage=room-setup)"
+        );
+
+        let retained = with_retained_enrollment_note(
+            err("Team channel issuance failed; pending intent retained (stage=issuance-lock)"),
+            EnrollmentFailureStage::MissingCleanupProof,
+        );
+        assert_eq!(retained.code, 75);
+        assert_eq!(
+            retained.message,
+            "Team channel issuance failed; pending intent retained (stage=issuance-lock) (room-enrollment-retained; enrollment-stage=missing-cleanup-proof)"
         );
     }
 
