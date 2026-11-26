@@ -15,7 +15,8 @@ use std::{
 #[path = "lead_turns.rs"]
 mod lead_turns;
 
-const URI: &str = "ui://oms/conversation-panel/v25.html";
+const URI: &str = "ui://oms/conversation-panel/v26.html";
+const V25: &str = "ui://oms/conversation-panel/v25.html";
 const V24: &str = "ui://oms/conversation-panel/v24.html";
 const V23: &str = "ui://oms/conversation-panel/v23.html";
 const V22: &str = "ui://oms/conversation-panel/v22.html";
@@ -79,6 +80,8 @@ const DECIDE: &str = "oms_decide_approval";
 const RECORD_ISSUE: &str = "oms_record_reviewed_issue";
 const ISSUE_STATUS: &str = "oms_reviewed_issue_status";
 const OPEN_LEADS: &str = "oms_open_lead_conversations";
+const SETTINGS: &str = "oms_lead_settings";
+const UPDATE_SETTINGS: &str = "oms_update_lead_settings";
 const SEND_LEAD: &str = "oms_send_lead_message";
 const LEAD_STATUS: &str = "oms_lead_conversation_status";
 const LEAD_PROVIDERS: [&str; 3] = ["codex", "claude", "agy"];
@@ -117,7 +120,7 @@ fn checked_peer_directory(
     thread: &str,
     binding: &str,
     recovering: bool,
-    prompt_digest: Option<&str>,
+    message: Option<(&str, &Value)>,
 ) -> PanelResult<Option<PathBuf>> {
     use crate::storage::Directory;
     let dir = match Directory::run(repo, op, recovering) {
@@ -182,8 +185,14 @@ fn checked_peer_directory(
     if proof["operation"] != op
         || proof["thread"] != thread
         || proof["kind"] != "ask"
-        || prompt_digest.is_some_and(|digest| {
-            proof["lead_followup"] != true || proof["prompt_sha256"] != digest
+        || message.is_some_and(|(digest, route)| {
+            proof["lead_followup"] != true
+                || proof["prompt_sha256"] != digest
+                || if route["model"].is_null() {
+                    proof.get("lead_route").is_some()
+                } else {
+                    proof["lead_route"] != *route
+                }
         })
         || proof["panel_assignment"] != binding
         || (data["purpose"] == "provider-lead" && proof["answer_storage"] != "operation")
@@ -225,6 +234,8 @@ pub(super) fn runtime_request(request: &Value) -> bool {
                     | OPEN_LEADS
                     | LEAD_STATUS
                     | SEND_LEAD
+                    | SETTINGS
+                    | UPDATE_SETTINGS
             )
         )
 }
@@ -332,6 +343,38 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     );
     send["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true});
     send["_meta"]["ui"]["visibility"] = json!(["app"]);
+    let settings_scope = json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"}});
+    let mut settings = make(
+        SETTINGS,
+        "Read this Lead's saved model and effort for future messages, with host-cached or routing policy options.",
+        settings_scope.clone(),
+        &["projectKey", "room", "provider", "leadRequestId"],
+        false,
+    );
+    let mut choices = settings_scope;
+    choices["revision"] = json!({"type":"string","pattern":"^[0-9a-f]{64}$"});
+    for field in ["model", "effort"] {
+        choices[field] = json!({"type":["string","null"]});
+    }
+    let mut update = make(
+        UPDATE_SETTINGS,
+        "Set this Lead's model and effort for future messages at the observed revision. Clearing both restores OMS routing defaults.",
+        choices,
+        &[
+            "projectKey",
+            "room",
+            "provider",
+            "leadRequestId",
+            "revision",
+            "model",
+            "effort",
+        ],
+        true,
+    );
+    update["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false});
+    for t in [&mut settings, &mut update] {
+        t["_meta"]["ui"]["visibility"] = json!(["app"]);
+    }
     let all = json!([
         opener,
         chat,
@@ -340,6 +383,8 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         issue_status,
         open_leads,
         send,
+        settings,
+        update,
         make(
             LEAD_STATUS,
             "Read provider readiness in the current Main’s Room. A selected provider’s answer is visible only in the panel.",
@@ -1168,6 +1213,7 @@ impl Server<'_> {
                             | V22
                             | V23
                             | V24
+                            | V25
                     )
                 ) =>
             {
@@ -1187,6 +1233,17 @@ impl Server<'_> {
                     OPEN => &["project", "leadConversations"],
                     OPEN_LEADS => &["project", "room", "projectKey"],
                     LEAD_STATUS => &["project", "room", "provider", "turnId", "before"],
+                    SETTINGS => &["project", "room", "provider", "projectKey", "leadRequestId"],
+                    UPDATE_SETTINGS => &[
+                        "project",
+                        "room",
+                        "provider",
+                        "projectKey",
+                        "leadRequestId",
+                        "revision",
+                        "model",
+                        "effort",
+                    ],
                     SEND_LEAD => &[
                         "project",
                         "projectKey",
@@ -1262,12 +1319,15 @@ impl Server<'_> {
                 if name == GRAPH {
                     return self.graph_reply(id, params, result);
                 }
-                if matches!(name, LEAD_STATUS | SEND_LEAD) {
+                if matches!(name, LEAD_STATUS | SEND_LEAD | SETTINGS | UPDATE_SETTINGS) {
+                    let field = if matches!(name, SETTINGS | UPDATE_SETTINGS) {
+                        "leadSettings"
+                    } else {
+                        "leadConversation"
+                    };
                     match result {
                         Ok(mut data) => {
-                            let private = data
-                                .as_object_mut()
-                                .and_then(|o| o.remove("leadConversation"));
+                            let private = data.as_object_mut().and_then(|o| o.remove(field));
                             let mut result = response(Ok(data));
                             if let Some(private) = private {
                                 if crate::output::outbound(
@@ -1278,7 +1338,7 @@ impl Server<'_> {
                                 {
                                     return reply(id,response(Err("OMS withheld the Lead conversation during its outbound scan.".into())));
                                 }
-                                result["_meta"]["leadConversation"] = private;
+                                result["_meta"][field] = private;
                             }
                             result
                         }
@@ -1644,7 +1704,10 @@ impl Server<'_> {
                 .ok_or("A lowercase UUID requestId is required.")?;
             Ok(format!("oms-app-{key}"))
         };
-        if matches!(name, OPEN_LEADS | LEAD_STATUS | SEND_LEAD) {
+        if matches!(
+            name,
+            OPEN_LEADS | LEAD_STATUS | SEND_LEAD | SETTINGS | UPDATE_SETTINGS
+        ) {
             return self.lead_conversations(&repo, name, args, meta);
         }
         if matches!(name, RECORD_ISSUE | ISSUE_STATUS) {
@@ -2348,6 +2411,30 @@ impl Server<'_> {
         )
     }
 
+    fn lead_thread_open(&self, repo: &Path, operation: &str) -> PanelResult<bool> {
+        let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
+        let witness = self.command(
+            &[
+                "thread",
+                "--repo",
+                path,
+                "--id",
+                operation,
+                "context",
+                "--require-open",
+                "--notes-only",
+                "--turns",
+                "1",
+                "--max-bytes",
+                "256",
+            ],
+            repo,
+            Duration::from_secs(5),
+        )?;
+
+        Ok(witness.code == 0 && !witness.stdout.is_empty())
+    }
+
     fn lead_conversations(
         &self,
         repo: &Path,
@@ -2371,6 +2458,14 @@ impl Server<'_> {
                     .ok_or("Unsupported Lead provider.")
             })
             .transpose()?;
+        let settings = matches!(name, SETTINGS | UPDATE_SETTINGS);
+        if settings
+            && (selected.is_none()
+                || !args["projectKey"].is_string()
+                || !args["leadRequestId"].as_str().is_some_and(uuid))
+        {
+            return Err("Select the exact project and current Lead conversation.".into());
+        }
         lead_turns::validate(name, args, selected)?;
         let digest = crate::storage::hash(thread);
         let project_key = || self.project_key(repo, args);
@@ -2554,35 +2649,19 @@ impl Server<'_> {
                 // validates the log's exact ID and closed marker. A live thread
                 // created by start_bound_peer has its opening collaboration note.
                 bound()?;
-                let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
-                let witness = self.command(
-                    &[
-                        "thread",
-                        "--repo",
-                        path,
-                        "--id",
-                        operation.as_str(),
-                        "context",
-                        "--require-open",
-                        "--notes-only",
-                        "--turns",
-                        "1",
-                        "--max-bytes",
-                        "256",
-                    ],
-                    repo,
-                    Duration::from_secs(5),
-                )?;
-                if witness.code != 0 || witness.stdout.is_empty() {
+                if !self.lead_thread_open(repo, &operation)? {
                     return Ok(("unconfirmed", Value::Null));
                 }
                 Ok(("ready", transcript))
             };
             let (status, mut transcript) = resolve().unwrap_or(("unconfirmed", Value::Null));
-            if name == SEND_LEAD && args["leadRequestId"] != request {
+            if (settings || name == SEND_LEAD) && args["leadRequestId"] != request {
                 return Err("The selected Lead changed. Reopen its conversation.".into());
             }
-            if (name == SEND_LEAD || args.get("turnId").is_some() || args.get("before").is_some())
+            if (settings
+                || name == SEND_LEAD
+                || args.get("turnId").is_some()
+                || args.get("before").is_some())
                 && status != "ready"
             {
                 return Err("The original Lead conversation could not be verified.".into());
@@ -2600,11 +2679,23 @@ impl Server<'_> {
                     if !valid(&live)
                         || live["operation"] != kickoff
                         || live["assignedAt"] != prior["assignedAt"]
+                        || (settings && !self.lead_thread_open(repo, kickoff)?)
                     {
                         return Err("The original Lead receipt changed.".into());
                     }
                     Ok(())
                 };
+                if settings {
+                    let mut detail =
+                        conversation.settings(self, name == UPDATE_SETTINGS, args, &current)?;
+                    let mut summary = json!({"projectKey":key,"room":room,"provider":provider,"leadRequestId":request,"revision":detail["revision"]});
+                    for key in ["projectKey", "room", "provider", "leadRequestId"] {
+                        detail[key] = summary[key].clone();
+                    }
+                    summary["leadSettings"] = detail;
+                    bound()?;
+                    return Ok(summary);
+                }
                 turn = conversation.exchange(self, name, args, &mut transcript, current)?;
             }
             row["status"] = json!(status);
