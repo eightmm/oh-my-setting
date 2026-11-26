@@ -3219,6 +3219,33 @@ fn review_classification_and_validation() {
             false,
         );
         assert_eq!(fallback_rows.len(), 2);
+        assert_ne!(fallback_rows[0].get("id"), fallback_rows[1].get("id"));
+        let (_, later_rows) = review(
+            "```findings\n[oms-redacted:token-assignment]\n```\nGATE: fail",
+            ".oms/review-withheld-later",
+            0,
+            false,
+        );
+        assert_ne!(fallback_rows[0].get("id"), later_rows[0].get("id"));
+        let double_answer = format!(
+            "```findings\n{}\n{}\n```\nGATE: fail",
+            String::from_utf8(
+                finding("source.rs", 15, &sensitive, "one")
+                    .json(false)
+                    .unwrap()
+            )
+            .unwrap(),
+            String::from_utf8(
+                finding("source.rs", 15, &sensitive, "two")
+                    .json(false)
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        let (_, double_rows) = review(&double_answer, ".oms/review-redacted-double", 0, false);
+        assert_eq!(double_rows.len(), 2);
+        assert_ne!(double_rows[0].get("id"), double_rows[1].get("id"));
+
         for row in &fallback_rows {
             assert_eq!(row.get("withheld").text(), Some("redacted"));
             assert_eq!(row.get("severity").text(), Some("blocking"));

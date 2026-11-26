@@ -651,7 +651,7 @@ pub(crate) struct Seat {
     pub requested_model: String,
     pub artifact: PathBuf,
     pub answer: String,
-    pub findings: Option<Vec<crate::V>>,
+    pub findings: Option<Vec<(crate::V, Option<usize>)>>,
     pub code: i32,
     pub complete: bool,
     pub quality: String,
@@ -1097,14 +1097,15 @@ fn call_routed(
             );
         }
     }
+    let answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
     let findings = if tool == "peer-review" {
-        Some(crate::review::redacted_findings(&String::from_utf8_lossy(
-            &result.stdout,
-        ))?)
+        Some(crate::review::redacted_findings(
+            &String::from_utf8_lossy(&result.stdout),
+            &answer,
+        )?)
     } else {
         None
     };
-    let answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
     let quality = if result.complete {
         providers::answer_quality(&answer).to_owned()
     } else {
