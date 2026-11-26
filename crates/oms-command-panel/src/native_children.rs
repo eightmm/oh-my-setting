@@ -12,9 +12,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 #[cfg(target_os = "linux")]
+mod claude_wake;
+#[cfg(target_os = "linux")]
 mod codex_wake;
 #[cfg(target_os = "linux")]
+pub(crate) use claude_wake::SubagentsWatch as ClaudeSubagentsWatch;
+#[cfg(target_os = "linux")]
 pub(crate) use codex_wake::DayWatch as CodexDayWatch;
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub(crate) struct ClaudeWake {
+    pub(crate) source: Arc<ClaudeSubagentsWatch>,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct ClaudeWakeRequest<'a> {
+    pub(crate) previous: Option<&'a ClaudeWake>,
+}
 
 #[cfg(target_os = "linux")]
 #[derive(Clone)]
@@ -450,6 +465,34 @@ pub(crate) fn claude_in(home: &Path, pid: u32, repo: &Path) -> Option<Vec<Value>
 /// `state` is only what the transcript proved: "done" or "unknown".
 pub(crate) fn claude_child_row(agent: &str, title: &str, state: &str) -> Value {
     row("claude", agent, &safe(title, 80), "", "", "", state)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn claude_project_key(repo: &Path) -> Option<String> {
+    let key: String = repo
+        .to_str()?
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    (!key.is_empty() && key.len() <= 255).then_some(key)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn observe_claude_wake(
+    pid: u32,
+    birth: &str,
+    repo: &Path,
+    wake: ClaudeWakeRequest<'_>,
+) -> Option<ClaudeWake> {
+    let source = ClaudeSubagentsWatch::observe(
+        pid,
+        birth,
+        repo,
+        claude_wake::Request {
+            previous: wake.previous.map(|before| &before.source),
+        },
+    )?;
+    Some(ClaudeWake { source })
 }
 
 fn codex_turn(prompt: &str) -> Option<&str> {
@@ -4077,6 +4120,200 @@ mod tests {
         wake.replace(None);
         assert!(wake.fd().is_none());
         assert!(!wake.refresh(true, true, now + Duration::from_secs(2)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn claude_subagents_wake_tracks_child_creation_and_refuses_unsafe_directories() {
+        use crate::wakeup::{ChildWakeSource, FirstChildWake};
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+        use std::time::Duration;
+
+        const PID: u32 = 4242;
+        const BIRTH: &str = "fixture-boot:987654";
+        const SESSION: &str = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+        const OTHER_SESSION: &str = "1a1b2c3d-4e5f-6789-abcd-ef0123456789";
+        const OLD_CHILD: &str = "f0e1d2c3b4a59687";
+        const NEW_CHILD: &str = "a1b2c3d4e5f60718";
+
+        struct Temp(PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp_root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("oms-claude-wake-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&temp_root)
+            .unwrap();
+        let temp = Temp(temp_root);
+        let base = &temp.0;
+        let repo = base.join("repo");
+        let config = base.join("claude");
+        let sessions = config.join("sessions");
+        let project = config
+            .join("projects")
+            .join(claude_project_key(&repo).unwrap());
+        let session_dir = project.join(SESSION);
+        let subagents = session_dir.join("subagents");
+        let elsewhere = base.join("elsewhere");
+        for path in [
+            &repo,
+            &config,
+            &sessions,
+            &config.join("projects"),
+            &project,
+            &session_dir,
+            &elsewhere,
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let record_path = sessions.join(format!("{PID}.json"));
+        let write_record = |session: &str| {
+            std::fs::write(
+                &record_path,
+                json!({
+                    "pid": PID,
+                    "procStart": "987654",
+                    "sessionId": session,
+                    "cwd": repo.to_str().unwrap(),
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::set_permissions(&record_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        write_record(SESSION);
+
+        // Missing subagents directory falls back silently.
+        assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+
+        // Symlinked subagents directory falls back silently and never wakes.
+        symlink(&elsewhere, &subagents).unwrap();
+        assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+        std::fs::write(
+            elsewhere.join(format!("agent-{NEW_CHILD}.jsonl")),
+            b"ignored\n",
+        )
+        .unwrap();
+        std::fs::remove_file(&subagents).unwrap();
+
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&subagents)
+            .unwrap();
+        // Foreign uid and group/other-writable modes fall back silently.
+        let uid = rustix::process::geteuid().as_raw();
+        assert!(
+            ClaudeSubagentsWatch::prepare_for_uid(
+                &config,
+                PID,
+                BIRTH,
+                &repo,
+                claude_wake::Request { previous: None },
+                uid.wrapping_add(1),
+            )
+            .is_none()
+        );
+        for bad_mode in [0o775, 0o777] {
+            std::fs::set_permissions(&subagents, std::fs::Permissions::from_mode(bad_mode))
+                .unwrap();
+            assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+        }
+        if uid != 0 {
+            std::fs::set_permissions(&subagents, std::fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+        }
+        std::fs::set_permissions(&subagents, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Symlinked ancestor directory falls back silently.
+        let moved_session = base.join("moved-session");
+        std::fs::rename(&session_dir, &moved_session).unwrap();
+        symlink(&moved_session, &session_dir).unwrap();
+        assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+        std::fs::remove_file(&session_dir).unwrap();
+        std::fs::rename(&moved_session, &session_dir).unwrap();
+
+        let existing = subagents.join(format!("agent-{OLD_CHILD}.jsonl"));
+        std::fs::write(&existing, b"prior\n").unwrap();
+        let source = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        let same =
+            ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, Some(&source)).unwrap();
+        assert!(Arc::ptr_eq(&source, &same));
+
+        // Existing child appends and non-transcript files do not wake.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&existing)
+            .unwrap()
+            .write_all(b"more\n")
+            .unwrap();
+        std::fs::write(subagents.join("foreign.jsonl"), b"ignored\n").unwrap();
+        std::fs::write(subagents.join("agent-short.jsonl"), b"ignored\n").unwrap();
+        std::fs::write(
+            subagents.join(format!("agent-{NEW_CHILD}.meta.json")),
+            b"{}",
+        )
+        .unwrap();
+        std::fs::create_dir(subagents.join("nested")).unwrap();
+        assert_eq!(source.changed(), Some(false));
+
+        // Creating a child transcript wakes the Board without reading its content.
+        let now = Instant::now();
+        let mut wake = FirstChildWake::default();
+        wake.replace(Some(source.clone()));
+        let child_path = subagents.join(format!("agent-{NEW_CHILD}.jsonl"));
+        let mut child = File::create(&child_path).unwrap();
+        assert!(!wake.refresh(true, false, now));
+        assert!(wake.fd().is_none());
+        assert!(wake.refresh(false, true, now));
+        assert!(!wake.refresh(false, true, now + Duration::from_millis(100)));
+
+        // While unproved, follow-up writes remain eligible; once proven, streaming stays quiet.
+        child.write_all(b"reply\n").unwrap();
+        assert_eq!(source.changed(), Some(true));
+        source.record_proven([NEW_CHILD]);
+        child.write_all(b"streaming\n").unwrap();
+        drop(child);
+        assert_eq!(source.changed(), Some(false));
+
+        // Permission exposure, directory replacement, session switch and queue bounds retire.
+        std::fs::set_permissions(&subagents, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(!source.current());
+        assert_eq!(source.changed(), None);
+        std::fs::set_permissions(&subagents, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let reopened = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        for idx in 0..64 {
+            std::fs::write(
+                subagents.join(format!("agent-{idx:016x}.jsonl")),
+                b"burst\n",
+            )
+            .unwrap();
+        }
+        assert_eq!(reopened.changed(), None);
+
+        let reopened = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        write_record(OTHER_SESSION);
+        assert!(!reopened.current());
+        write_record(SESSION);
+
+        let reopened = ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        let retired = subagents.with_extension("old");
+        std::fs::rename(&subagents, &retired).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&subagents)
+            .unwrap();
+        assert!(!reopened.current());
+        assert_eq!(reopened.changed(), None);
     }
 
     pub(crate) fn seed_codex_chat_rollouts(

@@ -389,6 +389,8 @@ pub struct Observations {
     codex_bound_generation: Option<ChatPane>,
     #[cfg(target_os = "linux")]
     codex_child_watch: Option<(ChatPane, crate::native_children::CodexWake)>,
+    #[cfg(target_os = "linux")]
+    claude_child_watch: Option<(ChatPane, crate::native_children::ClaudeWake)>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -711,6 +713,15 @@ impl Observations {
             .map(|(_, wake)| wake.source.clone())
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn claude_roster_watch(
+        &self,
+    ) -> Option<std::sync::Arc<crate::native_children::ClaudeSubagentsWatch>> {
+        self.claude_child_watch
+            .as_ref()
+            .map(|(_, wake)| wake.source.clone())
+    }
+
     pub(crate) fn clear_chats(&mut self) {
         self.chats.clear();
         self.claude_versions.clear();
@@ -723,6 +734,7 @@ impl Observations {
         #[cfg(target_os = "linux")]
         {
             self.codex_child_watch = None;
+            self.claude_child_watch = None;
         }
     }
 
@@ -1248,6 +1260,8 @@ impl<'a> Panel<'a> {
         let mut bound_codex = None;
         #[cfg(target_os = "linux")]
         let previous_codex_watch = readings.codex_child_watch.take();
+        #[cfg(target_os = "linux")]
+        let previous_claude_watch = readings.claude_child_watch.take();
         readings.clear_chats();
         let mut codex_chat_pane = self
             .chat_pane_with_host("codex", host)
@@ -1441,6 +1455,29 @@ impl<'a> Panel<'a> {
                         sample.agy_parent.clear_roster_proof();
                         sample.agy_roster_scope = agy_roster_scope;
                     }
+                    #[cfg(target_os = "linux")]
+                    let claude_wake = chat_pane
+                        .as_ref()
+                        .filter(|chat_pane| {
+                            expected
+                                .is_some_and(|generation| generation.fences(chat_pane, "claude"))
+                                && same_pane_process
+                                && !self.stop.load(Ordering::Acquire)
+                                && self.has_live_report_scope(report)
+                        })
+                        .and_then(|chat_pane| {
+                            crate::native_children::observe_claude_wake(
+                                chat_pane.lead.pid,
+                                &chat_pane.lead.birth,
+                                &chat_pane.repo,
+                                crate::native_children::ClaudeWakeRequest {
+                                    previous: previous_claude_watch
+                                        .as_ref()
+                                        .filter(|(previous, _)| previous == chat_pane)
+                                        .map(|(_, wake)| wake),
+                                },
+                            )
+                        });
                     let mut observed = crate::native_children::observe(
                         provider,
                         pane.pid,
@@ -1460,6 +1497,7 @@ impl<'a> Panel<'a> {
                     if provider == "claude" {
                         use crate::claude_child_chat::ClaudeSelection;
                         let mut second = None;
+                        let mut second_sampled = false;
                         let sighting = chat_pane.as_ref().and_then(|chat_pane| {
                             let selected = selection
                                 .requested
@@ -1477,6 +1515,7 @@ impl<'a> Panel<'a> {
                                 self.repo,
                                 selected,
                                 || {
+                                    second_sampled = true;
                                     second = self.chat_pane_with_host(provider, host).ok();
                                 },
                             )
@@ -1530,6 +1569,31 @@ impl<'a> Panel<'a> {
                                 sighting,
                             );
                             observed.rows = rows;
+                            #[cfg(target_os = "linux")]
+                            if let Some(wake) = claude_wake {
+                                if second.as_ref() == Some(&chat_pane) {
+                                    wake.source.record_proven(located.iter().filter_map(
+                                        |(_, locator)| match locator {
+                                            NativeLocator::Claude(child) => {
+                                                Some(child.agent.as_str())
+                                            }
+                                            _ => None,
+                                        },
+                                    ));
+                                }
+                                let pane_current = if second_sampled {
+                                    second.as_ref() == Some(&chat_pane)
+                                } else {
+                                    self.chat_pane_with_host(provider, host).ok().as_ref()
+                                        == Some(&chat_pane)
+                                };
+                                if pane_current
+                                    && !self.stop.load(Ordering::Acquire)
+                                    && wake.source.current()
+                                {
+                                    readings.claude_child_watch = Some((chat_pane.clone(), wake));
+                                }
+                            }
                             if !located.is_empty() && second.as_ref() == Some(&chat_pane) {
                                 readings.chats.extend(located.into_iter().map(
                                     |(participant, locator)| {
