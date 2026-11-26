@@ -7365,6 +7365,43 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
             assert_eq!(item.get("plan_task").text(), expected, "{state}");
         }
     }
+    // A long valid task ID is emitted verbatim; a key outside Plan's grammar
+    // leaves the plan unverified instead of yielding a mutated task.
+    let long_id = "t".repeat(150);
+    fs::write(
+        &plan_file,
+        format!(r##"{{"tasks":{{"{long_id}":{{"issue":"#7","state":"ready"}}}}}}"##),
+    )
+    .unwrap();
+    let long = run_candidates();
+    assert_eq!(
+        long.get("github").get("candidates").get("items").array()[0]
+            .get("plan_task")
+            .text(),
+        Some(long_id.as_str())
+    );
+    for bad in ["   ", "a\\nb", "\\u200b"] {
+        fs::write(
+            &plan_file,
+            format!(r##"{{"tasks":{{"{bad}":{{"issue":"#7","state":"ready"}}}}}}"##),
+        )
+        .unwrap();
+        let doc = run_candidates();
+        let candidates = doc.get("github").get("candidates");
+        assert!(candidates.get("items").array().is_empty(), "{bad}");
+        assert_eq!(
+            candidates.get("reason").text(),
+            Some("plan_unverified"),
+            "{bad}"
+        );
+        assert!(
+            candidates.get("recommendations").array()[0]
+                .get("plan_task")
+                .text()
+                .is_none(),
+            "{bad}"
+        );
+    }
     fs::write(&plan_file, r##"{"tasks":{"missing":{"issue":"#7"}}}"##).unwrap();
     let missing = run_candidates();
     assert_eq!(

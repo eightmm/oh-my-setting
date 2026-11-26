@@ -239,15 +239,26 @@ fn plan_issue_links_with_state(raw: &[u8], origin: &Slug) -> Result<(StatefulIss
     let V::Obj(tasks) = plan.get("tasks") else {
         return Ok((vec![], false));
     };
+    // Task IDs are selectable, so they keep Plan's own grammar verbatim; any
+    // other key is a plan Plan itself would refuse to load.
+    let task_id = |id: &[u8]| {
+        (!id.is_empty()
+            && id
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(b)))
+        .then(|| String::from_utf8_lossy(id).into_owned())
+    };
     let complete = tasks
         .iter()
-        .all(|(id, task)| !id.is_empty() && matches!(task, V::Obj(_)));
+        .all(|(id, task)| task_id(id).is_some() && matches!(task, V::Obj(_)));
     let mut out = vec![];
     for (id, task) in tasks {
         if !task.has("issue") {
             continue;
         }
-        let id = freshness::sanitize(&String::from_utf8_lossy(id), 100);
+        let Some(id) = task_id(id) else {
+            continue;
+        };
         let issue = task
             .get("issue")
             .text()
