@@ -71,9 +71,12 @@ Options:
                        seat declares "none" under "Changed from previous
                        round:" — stability, not consensus: recorded
                        disagreements stand.
-                       Opening and rebuttal calls run with at most four active
+                       Native OMS opening/rebuttal calls use at most four active
                        seats; completed thread turns publish without waiting
                        for slower seats. Every started call is joined on error.
+                       Linux seats keep isolated whole-tree supervisors.
+                       Embedded executors run serially unless their host
+                       explicitly supports concurrent child cleanup.
   --until-agreement    Opt-in: debate until every answering seat (at least two)
                        shares one Verdict:/Recommendation:/Answer: line, or the
                        cap is reached. Replaces --debate; incompatible with

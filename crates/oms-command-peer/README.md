@@ -27,8 +27,16 @@ unavailable request remains unverified.
 
 ### Council rounds
 
-Opening answers and rebuttals run through scoped workers with at most four
-active seats. All selected routes are checked before the first seat starts;
+The native OMS host runs opening answers and rebuttals through scoped workers
+with at most four active seats. On Linux each concurrent provider call uses
+the existing isolated whole-tree supervisor, which acknowledges the actual
+payload spawn before the parent releases launch custody and reports completion
+only after reaping its descendants. The parent retains its own opaque
+process-group cleanup proof; it does not deserialize or invent a whole-tree proof.
+Single seats remain inline. Embedded executors, including `process::Native`,
+run seats serially unless they explicitly opt into `Executor::council_parallelism`
+with a concurrency-safe cleanup owner. `Sync` alone is not that capability.
+All selected routes are checked before the first seat starts;
 each seat keeps its own account route, disposable worktree, physical-call
 receipts and completed-turn publication. Every seat in a round receives the
 same immutable prompt, and the next round uses only the preceding round's

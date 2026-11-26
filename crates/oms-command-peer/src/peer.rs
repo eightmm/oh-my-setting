@@ -662,11 +662,28 @@ fn call_round(
     context: &Context<'_>,
 ) -> Result<Vec<Seat>> {
     let mut seats = Vec::with_capacity(targets.len());
-    for (targets, routes) in targets
-        .chunks(COUNCIL_CONCURRENCY)
-        .zip(routes.chunks(COUNCIL_CONCURRENCY))
-    {
+    let parallelism = context
+        .executor
+        .council_parallelism()
+        .clamp(1, COUNCIL_CONCURRENCY);
+    for (targets, routes) in targets.chunks(parallelism).zip(routes.chunks(parallelism)) {
         crate::check(context.interrupted)?;
+        if targets.len() == 1 {
+            seats.push(call_routed(
+                tool,
+                args,
+                repo,
+                dir,
+                run,
+                &targets[0],
+                body,
+                round,
+                warnings,
+                context,
+                routes[0].clone(),
+            )?);
+            continue;
+        }
         let outcomes = std::thread::scope(|scope| {
             let mut workers = Vec::with_capacity(targets.len());
             let mut launch_error = None;

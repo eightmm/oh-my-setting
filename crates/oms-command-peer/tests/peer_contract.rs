@@ -234,6 +234,9 @@ fn option_value<'a>(argv: &'a [OsString], name: &str) -> Option<&'a OsString> {
         .map(|pair| &pair[1])
 }
 impl Executor for ProviderProbe {
+    fn council_parallelism(&self) -> usize {
+        4
+    }
     fn execute(
         &self,
         request: Invocation,
@@ -562,6 +565,9 @@ fn automatic_planning_consumes_native_synthesis_and_retains_review_lineage() {
                 directory: Mutex<Option<PathBuf>>,
             }
             impl Executor for Host {
+                fn council_parallelism(&self) -> usize {
+                    self.provider.council_parallelism()
+                }
                 fn execute(
                     &self,
                     request: Invocation,
@@ -1233,6 +1239,9 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                 seat_count: usize,
             }
             impl Executor for CouncilProbe<'_> {
+                fn council_parallelism(&self) -> usize {
+                    self.provider.council_parallelism()
+                }
                 fn with_physical_contract(
                     &self,
                     attempt: &oms_command_peer::process::PhysicalAttempt<'_>,

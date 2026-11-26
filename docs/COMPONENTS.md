@@ -801,7 +801,7 @@ remains available, labeled as stale in the synthesis.
 ### Live council threads
 
 Councils with `--thread ID` publish every completed turn without waiting for slower
-seats. Opening answers and rebuttal rounds run with at most four active seats,
+seats. Native OMS opening answers and rebuttal rounds run with at most four active seats,
 with one prior-round
 evidence/notes snapshot and all-seat budget preflight per round. Coordinator
 notes/decisions use `thread context --notes-only` (2 KiB, eight turns); answers and
@@ -809,6 +809,11 @@ provider failure notes are not duplicated there. Notes arriving during a round a
 only if another configured round runs. MCP `kind=ask` returns a ready thread and accepts
 `debate_rounds=0..3` (default zero); its suggested operation wait is zero while
 exchanging messages.
+
+On Linux the native host gives each concurrent provider call an isolated
+whole-tree supervisor and waits for its descendant cleanup. Embedded executors
+retain serial seats unless they explicitly support concurrent cleanup; one
+seat runs inline. Both paths use the same round snapshots and publication rules.
 
 Threads stay open for authorized focused follow-up through `consult`; neither notes nor
 reads start new calls. CLI export-only does not create/publish turns. Closing a council
