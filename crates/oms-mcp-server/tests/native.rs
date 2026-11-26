@@ -1256,27 +1256,48 @@ fn worker_output_reader(c: &mut Client, source: &Path, key: &str, thread: &str) 
 
     let left = ["gh", "p_LeftHalf012345"].concat();
     let right = "RightHalf67890abcdef01";
+    let straddling_first_worker = format!(
+        "{} {left}{right} {}",
+        "w".repeat(8_192 - 1 - left.len()),
+        "y".repeat(8_800)
+    );
     let straddling_worker = format!(
         "{} {left}{right} {}",
         "w".repeat(16_384 - 1 - left.len()),
         "y".repeat(560)
     );
-    fixture_settings(
-        source,
-        json!({"pagedWorkerBody":straddling_worker,"room":args["room"],"leadAttempt":args["leadAttempt"],"workerAttempt":args["workerAttempt"]}),
+    let machine_left = ["/ho", "me/"].concat();
+    let machine_right = "runner/private-tree";
+    let straddling_machine_worker = format!(
+        "{} {machine_left}{machine_right} {}",
+        "w".repeat(8_192 - 1 - machine_left.len()),
+        "y".repeat(8_800)
     );
-    for cursor in [json!(""), c2, c3] {
-        let mut req = args.clone();
-        req["answerPage"] = cursor;
-        let refused = request(c, &req);
-        bad(&refused, "withheld");
-        let wire = refused.to_string();
-        assert!(
-            !wire.contains(&left)
-                && !wire.contains(right)
-                && !wire.contains(&"w".repeat(32))
-                && !wire.contains(&"y".repeat(32))
+    for tainted in [
+        &straddling_first_worker,
+        &straddling_worker,
+        &straddling_machine_worker,
+    ] {
+        fixture_settings(
+            source,
+            json!({"pagedWorkerBody":tainted,"room":args["room"],"leadAttempt":args["leadAttempt"],"workerAttempt":args["workerAttempt"]}),
         );
+        bad(&request(c, &args), "withheld");
+        for cursor in [json!(""), c2.clone(), c3.clone()] {
+            let mut req = args.clone();
+            req["answerPage"] = cursor;
+            let refused = request(c, &req);
+            bad(&refused, "withheld");
+            let wire = refused.to_string();
+            assert!(
+                !wire.contains(&left)
+                    && !wire.contains(right)
+                    && !wire.contains(&machine_left)
+                    && !wire.contains(machine_right)
+                    && !wire.contains(&"w".repeat(32))
+                    && !wire.contains(&"y".repeat(32))
+            );
+        }
     }
 }
 
@@ -1858,36 +1879,54 @@ fn desktop_lead_conversations() {
             std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
             bad(&call(&mut c, read, &full, owner), "changed");
 
-            // A secret beyond the preview that straddles an 8192-byte page boundary (5 * 8192 = 40960)
-            // withholds every page and marks latestTurn unavailable with outbound_withheld.
+            // Secrets or machine-tier paths straddling an 8192-byte page boundary (both at the first
+            // shareable page cut 8192 and beyond the preview at 40960) withhold every page and mark
+            // latestTurn unavailable with outbound_withheld.
             let left = ["gh", "p_LeftHalf012345"].concat();
             let right = "RightHalf67890abcdef01";
+            let straddling_first = format!(
+                "{} {left}{right} {}",
+                "a".repeat(8_192 - 1 - left.len()),
+                "z".repeat(25_000)
+            );
             let straddling = format!(
                 "{} {left}{right} {}",
                 "a".repeat(40_960 - 1 - left.len()),
                 "z".repeat(25_000)
             );
-            std::fs::write(&artifact, format!("## Output\n{straddling}\n## Exit\n0\n")).unwrap();
-            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
-            for cursor in [json!(""), first_cursor.clone()] {
-                let mut req = full.clone();
-                req["answerPage"] = cursor;
-                let refused = call(&mut c, read, &req, owner);
-                bad(&refused, "withheld");
-                let wire = refused.to_string();
-                assert!(
-                    !wire.contains(&left)
-                        && !wire.contains(right)
-                        && !wire.contains(&"a".repeat(32))
-                        && !wire.contains(&"z".repeat(32))
+            let machine_left = ["/ho", "me/"].concat();
+            let machine_right = "runner/private-tree";
+            let straddling_machine = format!(
+                "{} {machine_left}{machine_right} {}",
+                "a".repeat(8_192 - 1 - machine_left.len()),
+                "z".repeat(25_000)
+            );
+            for tainted in [&straddling_first, &straddling, &straddling_machine] {
+                std::fs::write(&artifact, format!("## Output\n{tainted}\n## Exit\n0\n")).unwrap();
+                std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+                for cursor in [json!(""), first_cursor.clone()] {
+                    let mut req = full.clone();
+                    req["answerPage"] = cursor;
+                    let refused = call(&mut c, read, &req, owner);
+                    bad(&refused, "withheld");
+                    let wire = refused.to_string();
+                    assert!(
+                        !wire.contains(&left)
+                            && !wire.contains(right)
+                            && !wire.contains(&machine_left)
+                            && !wire.contains(machine_right)
+                            && !wire.contains(&"a".repeat(32))
+                            && !wire.contains(&"z".repeat(32))
+                    );
+                }
+                let status_row = payload(&call(&mut c, read, &args, owner));
+                assert_eq!(status_row["leads"][0]["latestTurn"], Value::Null);
+                assert_eq!(
+                    status_row["leads"][0]["turnState"],
+                    json!({"status":"unavailable","reason":"outbound_withheld"})
                 );
             }
-            let status_row = payload(&call(&mut c, read, &args, owner));
-            assert_eq!(status_row["leads"][0]["latestTurn"], Value::Null);
-            assert_eq!(
-                status_row["leads"][0]["turnState"],
-                json!({"status":"unavailable","reason":"outbound_withheld"})
-            );
 
             // An answer exceeding MAX_ANSWER fails closed with invalid_answer_range, not outbound_withheld.
             let oversized = "b".repeat(8 * 1024 * 1024 + 64);
@@ -7172,32 +7211,46 @@ fn fake_oms() {
         let page = args
             .windows(2)
             .find(|pair| pair[0] == "--page")
-            .and_then(|pair| pair[1].to_str()?.parse::<usize>().ok())
-            .unwrap_or(1);
-        let out = match oms_scrub::outbound_page(
-            body,
-            1024 * 1024,
-            oms_scrub::PageSelector::Number(page),
-        ) {
-            Ok(part) => json!({
-                "room":cfg["room"],
-                "leadAttempt":cfg["leadAttempt"],
-                "workerAttempt":cfg["workerAttempt"],
-                "status":"complete",
-                "source":"indexed-answer",
-                "text":part.text,
-                "truncated":part.has_more,
-                "page":{
-                    "page":page,
-                    "offset":part.offset,
-                    "bytes":part.end - part.offset,
-                    "totalBytes":part.total_bytes,
-                    "digest":"d".repeat(64),
-                    "revision":"e".repeat(64),
-                    "hasMore":part.has_more,
-                    "nextPage":part.has_more.then_some(page + 1)
+            .and_then(|pair| pair[1].to_str()?.parse::<usize>().ok());
+        let selector = page.map_or(
+            oms_scrub::PageSelector::Offset(0),
+            oms_scrub::PageSelector::Number,
+        );
+        let out = match oms_scrub::outbound_page(body, 1024 * 1024, selector) {
+            Ok(part) => {
+                if let Some(page) = page {
+                    json!({
+                        "room":cfg["room"],
+                        "leadAttempt":cfg["leadAttempt"],
+                        "workerAttempt":cfg["workerAttempt"],
+                        "status":"complete",
+                        "source":"indexed-answer",
+                        "text":part.text,
+                        "truncated":part.has_more,
+                        "page":{
+                            "page":page,
+                            "offset":part.offset,
+                            "bytes":part.end - part.offset,
+                            "totalBytes":part.total_bytes,
+                            "digest":"d".repeat(64),
+                            "revision":"e".repeat(64),
+                            "hasMore":part.has_more,
+                            "nextPage":part.has_more.then_some(page + 1)
+                        }
+                    })
+                } else {
+                    let preview_end = body.floor_char_boundary(body.len().min(16 * 1024));
+                    json!({
+                        "room":cfg["room"],
+                        "leadAttempt":cfg["leadAttempt"],
+                        "workerAttempt":cfg["workerAttempt"],
+                        "status":"complete",
+                        "source":"indexed-answer",
+                        "text":&body[..preview_end],
+                        "truncated":preview_end < body.len()
+                    })
                 }
-            }),
+            }
             Err(oms_scrub::PageError::OutboundWithheld) => json!({
                 "room":cfg["room"],
                 "leadAttempt":cfg["leadAttempt"],

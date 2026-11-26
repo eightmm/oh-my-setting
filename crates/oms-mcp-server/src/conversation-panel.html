@@ -1224,7 +1224,7 @@ function clearWorkerOutput(){
   selectedOutput=undefined;
   for(const id of ['output-worker','output-status','output-body']){const e=el(id);bindings.delete(e);e.textContent='';}
   el('output-body').hidden=true;el('output-limited').hidden=true;
-  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=el('output-preview').hidden=true;put('output-copy-status',()=>'');
+  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=el('output-preview').hidden=true;el('output-preview').disabled=false;put('output-copy-status',()=>'');
 }
 function closeWorkerOutput(){
   if(el('worker-output').open)el('worker-output').close();
@@ -1266,7 +1266,7 @@ async function readWorkerOutput(s,paged=false){
     el('output-first').hidden=!paged || !s.start;
     put('output-more',paged?'answer.more':'answer.full');
   }catch{if(currentWorkerOutput(s)){s.text='';s.cursor=null;put('output-status',paged?'answer.changed':'out.unavailable');}}
-  finally{if(selectedOutput===s){s.loading=false;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=false;}}
+  finally{if(selectedOutput===s){s.loading=false;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=el('output-preview').disabled=false;}}
 }
 function openWorkerOutput(lead,worker,origin){
   if(!currentLeadControl(leadControl) || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
@@ -1315,7 +1315,7 @@ async function loadResultPage(ref,cursor,expected){
     const args={...scope,leadAttempt:ref.leadAttempt,workerAttempt:ref.workerAttempt,answerPage:cursor};
     const out=checkedWorkerOutput(await tool('oms_worker_output',args,expected),args,true);
     if(out.status!=='complete')throw uiError('answer.changed');
-    return {page:{...out.page,text:out.text},source:{kind:ref.kind,...scope,leadAttempt:ref.leadAttempt,workerAttempt:ref.workerAttempt,format:out.source}};
+    return {page:{...out.page,text:out.text},source:{kind:ref.kind,...scope,leadAttempt:ref.leadAttempt,workerAttempt:ref.workerAttempt,format:out.source,...(ref.summary?{summary:ref.summary}:{})}};
   }
   if(ref.kind==='lead-answer'){
     const args={...scope,provider:ref.provider,leadRequestId:ref.leadRequestId,turnId:ref.turnId,answerPage:cursor};
@@ -1328,8 +1328,8 @@ async function loadResultPage(ref,cursor,expected){
     const valid=handoff && handoff.room===ref.room && handoff.provider===ref.provider && handoff.leadRequestId===ref.leadRequestId &&
       handoff.turnId===ref.turnId && typeof handoff.participant==='string' && typeof handoff.operation==='string' &&
       /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.participant) && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.operation);
-    return {page:data.answer,source:valid?{kind:ref.kind,...scope,provider:ref.provider,leadRequestId:ref.leadRequestId,
-      turnId:ref.turnId,participant:handoff.participant,operation:handoff.operation,pageCursor:cursor}:null};
+    return {page:data.answer,source:valid?{kind:ref.kind,...scope,summary:[roleTitle('Lead',ref.provider),t('answer.title')].join(' · '),
+      provider:ref.provider,leadRequestId:ref.leadRequestId,turnId:ref.turnId,participant:handoff.participant,operation:handoff.operation,pageCursor:cursor}:null};
   }
   if(ref.kind!=='room-result')throw uiError('answer.changed');
   const args={...scope,participant:ref.participant,section:'transcript',attempt:ref.attempt,evidenceCursor:cursor};
@@ -1337,14 +1337,16 @@ async function loadResultPage(ref,cursor,expected){
   if(data?.source!=='room' || data.room!==ref.room || data.participant!==ref.participant ||
     data.projectKey!==ref.projectKey || result.structuredContent?.projectKey!==ref.projectKey ||
     data.evidence?.attempt!==ref.attempt || data.evidence.section!=='transcript')throw uiError('answer.changed');
-  return {page:data.evidence,source:{kind:ref.kind,...scope,participant:ref.participant,attempt:ref.attempt}};
+  return {page:data.evidence,source:{kind:ref.kind,...scope,participant:ref.participant,attempt:ref.attempt,
+    summary:ref.summary||[el('chat-title').textContent,t('answer.title')].filter(Boolean).join(' · ')}};
 }
 async function readFullAnswer(s){
   if(!currentFullAnswer(s) || s.loading)return;
   s.loading=true;el('answer-more').disabled=el('answer-first').disabled=true;put('answer-status','chatLoading');
   try{
     const ref=s.kind==='lead'?{kind:'lead-answer',projectKey:s.projectKey,room:s.c.ctl.room,provider:s.c.provider,leadRequestId:s.c.requestId,turnId:s.turnId}:
-      {kind:'room-result',projectKey:s.projectKey,room:s.member.room,participant:s.member.participant,attempt:s.attempt};
+      {kind:'room-result',projectKey:s.projectKey,room:s.member.room,participant:s.member.participant,attempt:s.attempt,
+        summary:[el('chat-title').textContent,t('answer.title')].filter(Boolean).join(' · ')};
     const cursor=s.cursor||'',{page,source}=await loadResultPage(ref,cursor,s.generation);
     if(!currentFullAnswer(s))return;
     acceptChunk(s,page);s.pageCursor=cursor;s.source=source;el('full-answer-body').textContent=s.text;
@@ -1952,31 +1954,33 @@ function resultTask(source,d=dashboardData){
   const attempt=matches.length===1?matches[0]:null;
   return typeof attempt?.task==='string' && /^[A-Za-z0-9._-]{1,160}$/.test(attempt.task)?attempt.task:null;
 }
+const resultSourceFields=['kind','projectKey','room','provider','participant','leadRequestId','turnId','operation','leadAttempt','workerAttempt','attempt','format','digest','pageCursor'];
 function prepareFollowup(source=null,finding=null){
   const main=joinedMain();if(!main || staleView || busy)return;
   clearFinding();
-  const focus=source?null:journeyFocus(dashboardData),task=source?resultTask(source):focus.task?.id||null;
-  followupDraft={project,projectKey:bindingKey,generation,room:main.room,owner:main.participant,mainProvider:main.provider,task,source,finding};
   const excerpt=(value,max)=>Array.from(value).length>max?Array.from(value).slice(0,max).join('')+'…':value;
-  const reference=source && [['Kind',source.kind],['Provider',source.provider],['Participant',source.participant],
-    ['Lead request',source.leadRequestId],['Turn',source.turnId],['Operation',source.operation],['Lead attempt',source.leadAttempt],
-    ['Worker attempt',source.workerAttempt],['Attempt',source.attempt],['Digest',source.digest]]
-    .filter(([,value])=>value).map(([label,value])=>label+': '+value).join(' · ');
-  el('followup-text').value=[t('followup.scope',{project:project||displayText(dashboardData.project,255)||'OMS',room:main.room}),
-    bindingKey&&'Project key: '+bindingKey,reference&&t('followup.reference',{v:reference}),task&&'Task: '+task,
-    t('followup.text',{goal:excerpt(displayText(dashboardData.goal,2000)||t('goalUnknown'),400),
-      item:excerpt(source?t('answer.title'):focus.summary||t('evidence.title'),200)})].filter(Boolean).join('\n');
+  const focus=source?null:journeyFocus(dashboardData),task=source?resultTask(source):focus.task?.id||null;
+  const goal=excerpt(displayText(dashboardData.goal,2000)||t('goalUnknown'),400);
+  const summary=excerpt(displayText(source?source.summary:focus.summary,512)||(source?t('answer.title'):t('evidence.title')),200);
+  const turnId=source && turnUuid(source.turnId)?source.turnId:null;
+  const cleanSource=source?Object.fromEntries(resultSourceFields.filter(k=>source[k]!==undefined).map(k=>[k,source[k]])):null;
+  followupDraft={project,projectKey:bindingKey,generation,room:main.room,owner:main.participant,mainProvider:main.provider,task,goal,summary,turnId,source:cleanSource,finding};
+  el('followup-text').value=[turnId&&t('followup.reference',{v:'Turn: '+turnId}),task&&'Task: '+task,
+    t('followup.text',{goal,item:summary})].filter(Boolean).join('\n');
   if(finding){
-    const selected=finding.selection;
+    const selected=finding.selection,reference=cleanSource && [['Kind',cleanSource.kind],['Provider',cleanSource.provider],
+      ['Participant',cleanSource.participant],['Lead request',cleanSource.leadRequestId],['Turn',cleanSource.turnId],
+      ['Operation',cleanSource.operation],['Lead attempt',cleanSource.leadAttempt],['Worker attempt',cleanSource.workerAttempt],
+      ['Attempt',cleanSource.attempt],['Digest',cleanSource.digest]].filter(([,value])=>value).map(([label,value])=>label+': '+value).join(' · ');
     el('finding-preview').hidden=false;el('finding-text').textContent=selected.text;
-    put('finding-scope',()=>t('followup.scope',{project:project||displayText(dashboardData.project,255)||'OMS',room:main.room})+' · '+reference);
+    put('finding-scope',()=>[t('project')+': '+(project||displayText(dashboardData.project,255)||'OMS'),'Room: '+main.room,reference].filter(Boolean).join(' · '));
     put('finding-range',()=>t('finding.range',{start:selected.offset+1,end:selected.offset+selected.bytes,total:selected.totalBytes,
       extent:t(selected.truncated?'finding.partial':'finding.complete')})+(selected.bytes<selected.displayedBytes?' · '+t('finding.limit',{n:selected.bytes}):''));
   }
   el('followup-panel').hidden=false;put('followup-status',()=>'');paintFollowup();el('followup-text').focus();
 }
 const FINDING_BYTES=4000;
-function findingScope(){return !disposed && !busy && !readOnly && !staleView && !!joinedMain() && /^[a-f0-9]{64}$/.test(bindingKey);}
+function findingScope(){return hasContext() && !disposed && !busy && !readOnly && !staleView && !!joinedMain() && /^[a-f0-9]{64}$/.test(bindingKey);}
 function utf8Prefix(text,limit){
   let result='',bytes=0;
   for(const char of text){const n=new TextEncoder().encode(char).length;if(bytes+n>limit)break;result+=char;bytes+=n;}
@@ -1995,8 +1999,9 @@ function selectedFinding(reader,displayed=reader.text){
 }
 onClick('output-preview',async()=>{
   const s=selectedOutput;if(!currentWorkerOutput(s) || s.loading || !s.text?.trim() || !findingScope())return;
-  const displayed=s.text,ref={kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,format:s.format};
-  s.loading=true;el('output-preview').disabled=true;
+  const displayed=s.text,ref={kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,
+    format:s.format,summary:[s.label(),t('out.title')].filter(Boolean).join(' · ')};
+  s.loading=true;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=el('output-preview').disabled=true;
   try{
     let reader=s,source=ref;
     if(!s.digest){
@@ -2008,16 +2013,18 @@ onClick('output-preview',async()=>{
     if(!currentWorkerOutput(s) || !findingScope())return;
     const finding=selectedFinding(reader,displayed);source={...source,digest:reader.digest};
     closeWorkerOutput();prepareFollowup(source,finding);
-  }catch{if(currentWorkerOutput(s)){s.text='';s.digest=null;el('output-body').textContent='';
-    el('output-preview').hidden=el('output-copy').hidden=el('output-followup').hidden=true;put('output-status','answer.changed');}}
-  finally{s.loading=false;el('output-preview').disabled=false;}
+  }catch{if(currentWorkerOutput(s)){
+    s.text='';s.cursor=null;s.digest=null;s.end=0;s.pageCursor=null;
+    el('output-body').hidden=true;el('output-body').textContent='';el('output-limited').hidden=true;
+    el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=el('output-preview').hidden=true;
+    put('output-copy-status',()=>'');put('output-status','answer.changed');
+  }}finally{if(selectedOutput===s){s.loading=false;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=el('output-preview').disabled=false;}}
 });
 onClick('answer-preview',()=>{
   const s=fullAnswer;if(!currentFullAnswer(s) || s.loading || !s.source || !s.text?.trim() || !findingScope())return;
   const finding=selectedFinding(s),source={...s.source,digest:s.digest};
   el('conversation').close();clearChat();prepareFollowup(source,finding);
 });
-const resultSourceFields=['kind','projectKey','room','provider','participant','leadRequestId','turnId','operation','leadAttempt','workerAttempt','attempt','format','digest','pageCursor'];
 async function verifiedFindingScope(draft){
   if(!currentFollowup(draft) || !findingScope())throw uiError('finding.changed');
   const registry=(await tool('oms_list_projects',{},draft.generation)).structuredContent;
@@ -2131,9 +2138,10 @@ function inspectTable(data,kind,page){
 const graphConfidence={EXTRACTED:['추출됨','Extracted'],INFERRED:['추정됨','Inferred'],AMBIGUOUS:['모호함','Ambiguous'],STRUCTURAL:['파일 구조','Structural']};
 function inspectGraph(data,args,s,ticket){
   if(data?.schema!==1 || data.kind!=='oms-panel-project-graph' || !['ready','partial','empty','not_found','unknown'].includes(data.status) ||
-    data.provenance?.readOnly!==true || data.provenance.wroteIndex!==false || !Array.isArray(data.nodes) || data.nodes.length>60 ||
-    !Array.isArray(data.edges) || data.edges.length>180 || (data.scope?.focusNode||null)!==(args.node||null) ||
-    (data.scope?.query||null)!==(args.query||null))throw uiError('inspect.failed');
+    data.provenance?.readOnly!==true || data.provenance.wroteIndex!==false || !['indexed','fallback','unavailable'].includes(data.provenance.mode) ||
+    !Array.isArray(data.nodes) || data.nodes.length>60 || !Array.isArray(data.edges) || data.edges.length>180 ||
+    (data.scope?.focusNode||null)!==(args.node||null) || (data.scope?.query||null)!==(args.query||null))throw uiError('inspect.failed');
+  if(data.provenance.mode==='unavailable' || data.status==='unknown')return {count:0,unavailable:true,partial:true};
   const content=el('inspect-content'),card=node('section','','inspect-card'),nodes=node('div','','inspect-nodes'),labels=new Map();
   card.append(node('h3',()=>data.provenance.mode==='fallback'?choice('기록된 파일 구조','Recorded file structure'):choice('캐시된 프로젝트 관계','Cached project relationships')),
     node('p',()=>choice('노드 ','Nodes ')+inspectedNumber(data.counts?.shown_nodes)+' / '+inspectedNumber(data.counts?.total_nodes)+' · '+
@@ -2154,7 +2162,7 @@ function inspectGraph(data,args,s,ticket){
     relationships.append(list);content.append(relationships);
   }
   return {count:data.nodes.length,partial:data.completeness!=='complete' || data.limits?.truncated===true || data.edges.length>40,
-    unavailable:data.status==='unknown' || data.status==='not_found'};
+    unavailable:data.status==='not_found'};
 }
 async function verifyInspectionBinding(s,ticket){
   if(!currentInspection(s,ticket))throw uiError('inspect.failed');

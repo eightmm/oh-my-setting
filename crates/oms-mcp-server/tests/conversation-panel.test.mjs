@@ -1437,6 +1437,7 @@ test('only an independently confirmed physical binding retains a public stale sn
 
 test('recorded Lead answer pages are lazy, digest-bound and prepare only an exact scoped draft',async()=>{
   const id=randomUUID(),copied=[],digest='d'.repeat(64);let changed=false,wrongHandoff=false;
+  const claudeReq=leadStatus({provider:'claude'},'ready').leads[0].requestId,askParticipant='ask-'+claudeReq;
   const d={...dashboard,goal:'한'.repeat(2000),
     planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]},
     conversationAttempts:[...dashboard.conversationAttempts,{room:main.room,id:'other-operation',participant:askParticipant,provider:'claude',task:'task-a'}]
@@ -1449,7 +1450,7 @@ test('recorded Lead answer pages are lazy, digest-bound and prepare only an exac
         v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Question',turnId:id,status:'replied'},{role:'claude',text:'Excerpt',turnId:id,truncated:true}]}};
         if(a.answerPage!==undefined)v._private.answer={turnId:id,text:a.answerPage?'tail':'한글',offset:a.answerPage?6:0,bytes:a.answerPage?4:6,totalBytes:10,
           digest:changed?'e'.repeat(64):digest,nextCursor:a.answerPage?null:'next-part',hasMore:!a.answerPage,source:'recorded-answer',
-          handoff:{room:a.room,participant:'lead-reader',provider:a.provider,leadRequestId:a.leadRequestId,turnId:id,operation:wrongHandoff?'other-operation':'recorded-operation'}};
+          handoff:{room:a.room,participant:askParticipant,provider:a.provider,leadRequestId:a.leadRequestId,turnId:id,operation:wrongHandoff?'other-operation':'recorded-operation'}};
       }
       return v;
     }
@@ -1752,6 +1753,89 @@ test('Inspect drops late views and private scope changes, and clears unverifiabl
   assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Could not verify/);
   p.host.tools.oms_panel_usage=()=>({scope:'repository-recent-attempts',providers:[],attempts:[]});
   p.get('inspect-kind').value='usage';await p.event('inspect-kind','change');assert.match(p.get('inspect-content').textContent,/No records/);
+});
+
+test('Inspect graph distinguishes unavailable provenance from zero cached relationships',async()=>{
+  const state={key:'b'.repeat(64)},tools=inspectionTools(state),good=tools.oms_panel_project_graph;
+  tools.oms_panel_project_graph=a=>({...good(a),status:'unknown',completeness:'unknown',
+    provenance:{source:'git-ls-files',mode:'unavailable',indexState:'unindexed',indexFreshness:'absent',verifiedRelationships:false,readOnly:true,wroteIndex:false},
+    counts:{shown_nodes:0,total_nodes:0,shown_edges:0,total_edges:0,confidence:{}},nodes:[],edges:[]});
+  const p=await panel(['one'],dashboard,{locale:'en',tools});
+  await p.open('input',{arguments:{project:'one'}});await p.event('inspect-open','click');
+  p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
+  assert.equal(p.get('inspect-content').textContent,'');
+  assert.doesNotMatch(p.get('inspect-content').textContent,/Cached project relationships|0 \/ 0|No records/);
+  assert.match(p.get('inspect-status').textContent,/Status unknown/);
+  await choose(p,'ko');assert.match(p.get('inspect-status').textContent,/상태 미확인/);
+});
+
+test('finding preview controls stay hidden on hosts without updateModelContext',async()=>{
+  const key='b'.repeat(64),id=randomUUID(),digest='d'.repeat(64);
+  const claudeReq=leadStatus({provider:'claude'},'ready').leads[0].requestId,askParticipant='ask-'+claudeReq;
+  const worker={id:'worker-0',parentAttempt:'l',provider:'codex',role:'worker',state:'done'};
+  const d={...dashboard,conversationAttempts:[...dashboard.conversationAttempts,worker]};
+  const p=await panel(['one'],d,{locale:'en',tools:{
+    oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
+    oms_worker_output:a=>{
+      const {project,...pair}=a,publicData={...pair,status:'complete'};
+      return {structuredContent:publicData,_meta:{workerOutput:{...publicData,text:'Worker answer',source:'indexed-answer',truncated:false}}};
+    },
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      if(a.provider){
+        v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Q',turnId:id,status:'replied'},{role:'claude',text:'A',turnId:id,truncated:true}]}};
+        if(a.answerPage!==undefined)v._private.answer={turnId:id,text:'Full Lead answer',offset:0,bytes:16,totalBytes:16,digest,nextCursor:null,hasMore:false,
+          source:'recorded-answer',handoff:{room:a.room,participant:askParticipant,provider:a.provider,leadRequestId:a.leadRequestId,turnId:id,operation:'recorded-operation'}};
+      }
+      return v;
+    },
+    oms_panel_chat:a=>a.section?{...a,projectKey:a.projectKey,source:'room',messages:[],evidence:{attempt:a.attempt,section:a.section,text:'Room full',offset:0,bytes:9,totalBytes:9,digest,nextCursor:null,hasMore:false}}:
+      {...a,source:'room',messages:[],result:{attempt:'l',text:'Room excerpt',truncated:true}}
+  }});
+  const group=p.get('leads').children[1].children[2],list=group.children.find(e=>e.tagName==='ul'),openWorker=list.children.find(e=>e.tagName==='li').children.find(e=>e.className?.includes('worker-output-link'));
+  openWorker.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('output-copy').hidden,false);assert.equal(p.get('output-followup').hidden,false);assert.equal(p.get('output-preview').hidden,true);
+  await p.event('output-close','click');
+  const openLead=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');openLead.dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button').dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('answer-copy').hidden,false);assert.equal(p.get('answer-followup').hidden,false);assert.equal(p.get('answer-preview').hidden,true);
+  await p.event('chat-back','click');
+  group.children.find(e=>e.className==='person').dispatchEvent(new Event('click'));await setImmediate();await p.event('chat-result-full','click');
+  assert.equal(p.get('answer-copy').hidden,false);assert.equal(p.get('answer-followup').hidden,false);assert.equal(p.get('answer-preview').hidden,true);
+});
+
+test('worker output preview failure hides body and controls, and superseded loads leave newer controls disabled',async()=>{
+  const key='b'.repeat(64),digest='d'.repeat(64);let failPage=true;
+  const workers=[0,1].map(i=>({id:'worker-'+i,parentAttempt:'l',provider:'codex',role:'worker',state:'done'}));
+  const d={...dashboard,conversationAttempts:[...dashboard.conversationAttempts,...workers]};
+  const p=await panel(['one'],d,{locale:'en',context:true,tools:{
+    oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
+    oms_worker_output:a=>{
+      const {project,answerPage,...pair}=a,publicData={...pair,status:'complete'};
+      const text=answerPage!==undefined?(failPage?'changed body':'Previewable output'):'Previewable output';
+      const out={...publicData,text,source:'indexed-answer',truncated:true};
+      if(answerPage!==undefined)out.page={offset:0,bytes:Buffer.byteLength(text),totalBytes:Buffer.byteLength(text)+4,digest,nextCursor:'next',hasMore:true};
+      return {structuredContent:publicData,_meta:{workerOutput:out}};
+    }
+  }});
+  const items=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li');
+  const open=i=>items[i].children.find(e=>e.className?.includes('worker-output-link'));
+  open(0).dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('output-body').hidden,false);assert.equal(p.get('output-limited').hidden,false);assert.equal(p.get('output-more').hidden,false);
+  await p.event('output-preview','click');
+  for(const id of ['output-body','output-limited','output-first','output-more','output-copy','output-followup','output-preview'])
+    assert.equal(p.get(id).hidden,true,id);
+  assert.match(p.get('output-status').textContent,/changed/);assert.equal(p.get('output-refresh').disabled,false);
+  failPage=false;await p.event('output-refresh','click');
+  p.host.delayTool='oms_worker_output';await p.event('output-preview','click');
+  const firstRelease=p.host.release;assert.equal(p.get('output-preview').disabled,true);
+  await p.event('output-close','click');open(1).dispatchEvent(new Event('click'));await setImmediate();
+  p.host.delayTool='oms_worker_output';await p.event('output-preview','click');
+  const secondRelease=p.host.release;assert.equal(p.get('output-preview').disabled,true);assert.equal(p.get('output-refresh').disabled,true);
+  firstRelease();await setImmediate();
+  assert.equal(p.get('output-preview').disabled,true);assert.equal(p.get('output-refresh').disabled,true);
+  secondRelease();await setImmediate();
+  assert.equal(p.get('worker-output').open,false);assert.equal(p.get('finding-preview').hidden,false);
 });
 
 test('pending-turn polling pauses visibly and slot badges change only after a confirmed metadata read',async()=>{
