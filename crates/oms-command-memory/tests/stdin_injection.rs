@@ -615,6 +615,54 @@ fn resume_context_preserves_scope_filters_global_fallback_and_child_boundary() {
             "{oversized_global}"
         );
     }
+
+    // When recall fails for project after pin selection, project pins are dropped before
+    // truncating to RESUME_RECORDS so all three surviving global pins still appear.
+    std::fs::write(
+        &global,
+        "## 2026-01-01T00:00:00Z agent\n\nscopetopic global fallback lesson\n",
+    )
+    .unwrap();
+    std::fs::write(
+        global.parent().unwrap().join("pins.md"),
+        "- 2026-01-01T00:00:00Z [agent] Global explicit pin one\n\
+         - 2026-01-02T00:00:00Z [agent] Global explicit pin two\n\
+         - 2026-01-03T00:00:00Z [agent] Global explicit pin three\n",
+    )
+    .unwrap();
+    for extra in ["Project newer pin two", "Project newer pin three"] {
+        let args: Vec<_> = ["pin", "--text", extra]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let (code, _, err) = oms_command_memory::run_with_source(&args, repo, repo, &flag);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    }
+    let project_shared = repo.join(".oms/memory/shared.md");
+    let shared_bytes = std::fs::read(&project_shared).unwrap();
+    let mut duplicated = shared_bytes.clone();
+    duplicated.push(b'\n');
+    duplicated.extend_from_slice(&shared_bytes);
+    std::fs::write(&project_shared, duplicated).unwrap();
+    let (code, out, err) = oms_command_memory::resume_context(repo, "scopetopic", &flag);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    let recall_failed_project = String::from_utf8(out).unwrap();
+    for expected in [
+        "Global explicit pin three",
+        "Global explicit pin two",
+        "Global explicit pin one",
+        "- unavailable project:",
+    ] {
+        assert!(
+            recall_failed_project.contains(expected),
+            "missing {expected:?}: {recall_failed_project}"
+        );
+    }
+    assert!(
+        !recall_failed_project.contains("Project explicit pin")
+            && !recall_failed_project.contains("Project newer pin"),
+        "{recall_failed_project}"
+    );
 }
 
 #[test]

@@ -142,13 +142,6 @@ fn resume(repo: &Path, query: &str, flag: &AtomicBool) -> Result<String> {
             }
         }
     }
-    pins.retain(|(scope, _)| !unavailable.iter().any(|(s, _)| s == scope));
-    pins.sort_by(|a, b| {
-        b.1.occurred_at
-            .cmp(&a.1.occurred_at)
-            .then(b.1.ordinal.cmp(&a.1.ordinal))
-    });
-    pins.truncate(RESUME_RECORDS);
     let mut recalled = Vec::new();
     if !query.is_empty() {
         for source in &sources {
@@ -173,12 +166,18 @@ fn resume(repo: &Path, query: &str, flag: &AtomicBool) -> Result<String> {
                 Ok(_) => {}
                 Err(Error(130, message)) => return Err(Error(130, message)),
                 Err(Error(_, message)) => {
-                    pins.retain(|(scope, _)| *scope != source.store.scope);
                     unavailable.push((source.store.scope.clone(), message));
                 }
             }
         }
     }
+    pins.retain(|(scope, _)| !unavailable.iter().any(|(s, _)| s == scope));
+    pins.sort_by(|a, b| {
+        b.1.occurred_at
+            .cmp(&a.1.occurred_at)
+            .then(b.1.ordinal.cmp(&a.1.ordinal))
+    });
+    pins.truncate(RESUME_RECORDS);
     within_budget()?;
     let count = pins.len() + recalled.len() + unavailable.len();
     if count == 0 {

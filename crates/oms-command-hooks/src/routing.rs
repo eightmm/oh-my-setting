@@ -417,7 +417,15 @@ fn memory_review_source_identity(repo: &Path) -> Option<(Value, bool)> {
                 any_present = true;
                 entries.insert(
                     name.into(),
-                    json!([meta.len(), meta.mtime(), meta.mtime_nsec(), meta.ino()]),
+                    json!([
+                        meta.dev(),
+                        meta.ino(),
+                        meta.len(),
+                        meta.mtime(),
+                        meta.mtime_nsec(),
+                        meta.ctime(),
+                        meta.ctime_nsec(),
+                    ]),
                 );
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1890,6 +1898,55 @@ mod tests {
             3,
             "unchanged empty queue with existing sources must also skip re-reading"
         );
+        {
+            use std::io::Write;
+            use std::os::unix::fs::MetadataExt;
+            let reviews_path = repo.join(".oms/memory/reviews.jsonl");
+            let reviews_raw = fs::read_to_string(&reviews_path).unwrap();
+            let before_meta = fs::symlink_metadata(&reviews_path).unwrap();
+            let replacement_id = {
+                let mut chars: Vec<char> = third.chars().collect();
+                let last = chars.last_mut().unwrap();
+                *last = if *last == '0' { '1' } else { '0' };
+                chars.into_iter().collect::<String>()
+            };
+            assert_eq!(replacement_id.len(), third.len());
+            let rewritten = reviews_raw.replacen(&third, &replacement_id, 1);
+            assert_eq!(rewritten.len(), reviews_raw.len());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let old_mtime = std::time::UNIX_EPOCH
+                + std::time::Duration::new(
+                    u64::try_from(before_meta.mtime()).unwrap(),
+                    u32::try_from(before_meta.mtime_nsec()).unwrap(),
+                );
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&reviews_path)
+                .unwrap();
+            file.write_all(rewritten.as_bytes()).unwrap();
+            file.flush().unwrap();
+            file.set_modified(old_mtime).unwrap();
+            drop(file);
+            let after_meta = fs::symlink_metadata(&reviews_path).unwrap();
+            assert_eq!(after_meta.dev(), before_meta.dev());
+            assert_eq!(after_meta.ino(), before_meta.ino());
+            assert_eq!(after_meta.len(), before_meta.len());
+            assert_eq!(after_meta.mtime(), before_meta.mtime());
+            assert_eq!(after_meta.mtime_nsec(), before_meta.mtime_nsec());
+            assert_ne!(
+                (after_meta.ctime(), after_meta.ctime_nsec()),
+                (before_meta.ctime(), before_meta.ctime_nsec()),
+            );
+            assert!(
+                hint_counted(&other).contains("1 pending proposal(s)"),
+                "same-inode, same-size rewrite with restored mtime must invalidate cache via ctime"
+            );
+            assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 4);
+            assert!(hint_counted(&other).is_empty());
+            assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 4);
+            fs::write(&reviews_path, reviews_raw).unwrap();
+        }
         assert!(memory_review_hint(&event, &repo, &ctx).is_empty());
         assert_eq!(
             oms_command_memory::pending_review(&repo, &cancel)

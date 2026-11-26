@@ -396,13 +396,14 @@ pub(super) fn enrich(
     state: &mut Value,
     include_dashboard: bool,
 ) -> Result<Option<DashboardArtifacts>> {
-    let task_text = storage::read(
+    let task_read = storage::read(
         &ctx.repo,
         Path::new(".oms/task/current.md"),
         storage::MAX_FILE,
         true,
-    )
-    .unwrap_or_default();
+    );
+    let packet_ok = task_read.is_ok();
+    let task_text = task_read.unwrap_or_default();
     let mut section = "";
     let mut goal = Vec::new();
     let mut next = Vec::new();
@@ -436,18 +437,19 @@ pub(super) fn enrich(
         (stale, dormant, idle)
     };
     if task.get("present").truth() {
-        let eligible = matches!(task.get("current_goal_eligible"), Value::Bool(true))
-            && (task_text.is_empty() && !is_stale && !is_dormant && idle_secs.is_some()
-                || oms_command_task::packet::current_goal_eligible(
-                    &task_text,
-                    oms_command_task::packet::PacketFreshness {
-                        idle_seconds: idle_secs,
-                        stale: is_stale,
-                        dormant: is_dormant,
-                    },
-                ) && oms_command_task::packet::metadata(&task_text, "task_id")
-                    .unwrap_or(b"legacy")
-                    == task.text("task_id").as_bytes());
+        let eligible = open
+            && packet_ok
+            && matches!(task.get("current_goal_eligible"), Value::Bool(true))
+            && oms_command_task::packet::current_goal_eligible(
+                &task_text,
+                oms_command_task::packet::PacketFreshness {
+                    idle_seconds: idle_secs,
+                    stale: is_stale,
+                    dormant: is_dormant,
+                },
+            )
+            && oms_command_task::packet::metadata(&task_text, "task_id").unwrap_or(b"legacy")
+                == task.text("task_id").as_bytes();
         task.set("current_goal_eligible", Value::Bool(eligible))?;
         task.set("stale", Value::Bool(is_stale))?;
         task.set("dormant", Value::Bool(is_dormant))?;

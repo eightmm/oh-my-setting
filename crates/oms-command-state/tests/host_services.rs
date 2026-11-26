@@ -2079,6 +2079,123 @@ fn state_projects_stale_task_packet_and_bounded_dated_plan() {
         "available"
     );
 
+    // Unreadable, symlinked, oversized, or concurrently removed packets must fail closed
+    // for current_goal_eligible even if an earlier task-status observation reported eligible.
+    {
+        struct PreReadEligibleHost(GroupPlan, Vec<u8>);
+        impl HostServices for PreReadEligibleHost {
+            fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+                &self.0
+            }
+            fn task_status(&self, _: &Path, _: &AtomicBool) -> Option<oms_command_state::Output> {
+                Some((0, self.1.clone(), Vec::new()))
+            }
+        }
+        let assert_not_eligible = |label: &str, snap: &json::Value| {
+            assert_ne!(
+                snap.get("task").get("current_goal_eligible"),
+                &json::Value::Bool(true),
+                "{label}: {snap:?}"
+            );
+            assert_eq!(
+                snap.get("runtime").get("objective").text("source"),
+                "plan",
+                "{label}: {snap:?}"
+            );
+            assert_eq!(
+                snap.get("runtime").get("objective").text("text"),
+                "Live plan goal",
+                "{label}: {snap:?}"
+            );
+        };
+        for task_id in ["task-fresh-state", "legacy"] {
+            let pre_read_host = PreReadEligibleHost(
+                GroupPlan,
+                format!(
+                    r#"{{"schema":1,"present":true,"task_id":"{task_id}","status":"active","last_activity":"{one_hour_ago}","stale":false,"dormant":false,"current_goal_eligible":true}}"#
+                )
+                .into_bytes(),
+            );
+
+            // 1. Unreadable packet (mode 0000 for non-root; non-regular directory under root).
+            if !rustix::process::geteuid().is_root() {
+                fs::write(&packet_path, &fresh_packet).unwrap();
+                fs::set_permissions(&packet_path, Permissions::from_mode(0o000)).unwrap();
+                let raced = state(repo.path(), &pre_read_host);
+                let direct = state(repo.path(), &host);
+                fs::set_permissions(&packet_path, Permissions::from_mode(0o600)).unwrap();
+                assert_eq!(
+                    raced.get("task").get("current_goal_eligible"),
+                    &json::Value::Bool(false),
+                    "unreadablechmod/{task_id}: {raced:?}"
+                );
+                assert_not_eligible("unreadable-raced", &raced);
+                assert_not_eligible("unreadable-direct", &direct);
+            } else {
+                fs::remove_file(&packet_path).unwrap();
+                fs::create_dir(&packet_path).unwrap();
+                let raced = state(repo.path(), &pre_read_host);
+                let direct = state(repo.path(), &host);
+                fs::remove_dir(&packet_path).unwrap();
+                assert_eq!(
+                    raced.get("task").get("current_goal_eligible"),
+                    &json::Value::Bool(false),
+                    "unreadabledir/{task_id}: {raced:?}"
+                );
+                assert_not_eligible("unreadable-dir-raced", &raced);
+                assert_not_eligible("unreadable-dir-direct", &direct);
+            }
+
+            // 2. Symlinked packet.
+            let symlink_target = repo.path().join("outside-packet.md");
+            fs::write(&symlink_target, &fresh_packet).unwrap();
+            let _ = fs::remove_file(&packet_path);
+            std::os::unix::fs::symlink(&symlink_target, &packet_path).unwrap();
+            let symlink_raced = state(repo.path(), &pre_read_host);
+            let symlink_direct = state(repo.path(), &host);
+            fs::remove_file(&packet_path).unwrap();
+            fs::remove_file(&symlink_target).unwrap();
+            assert_eq!(
+                symlink_raced.get("task").get("current_goal_eligible"),
+                &json::Value::Bool(false),
+                "symlink/{task_id}: {symlink_raced:?}"
+            );
+            assert_not_eligible("symlink-raced", &symlink_raced);
+            assert_not_eligible("symlink-direct", &symlink_direct);
+
+            // 3. Oversized packet (> 8 MiB state MAX_FILE, within 32 MiB task MAX_PACKET).
+            let mut oversized = fresh_packet.clone();
+            oversized.push_str(&"x".repeat(8 * 1024 * 1024 + 64));
+            oversized.push('\n');
+            fs::write(&packet_path, &oversized).unwrap();
+            let oversized_raced = state(repo.path(), &pre_read_host);
+            let oversized_direct = state(repo.path(), &host);
+            assert_eq!(
+                oversized_raced.get("task").get("current_goal_eligible"),
+                &json::Value::Bool(false),
+                "oversized-raced/{task_id}: {oversized_raced:?}"
+            );
+            assert_eq!(
+                oversized_direct.get("task").get("current_goal_eligible"),
+                &json::Value::Bool(false),
+                "oversized-direct/{task_id}: {oversized_direct:?}"
+            );
+            assert_not_eligible("oversized-raced", &oversized_raced);
+            assert_not_eligible("oversized-direct", &oversized_direct);
+
+            // 4. Concurrently removed packet.
+            fs::remove_file(&packet_path).unwrap();
+            let removed_raced = state(repo.path(), &pre_read_host);
+            assert_eq!(
+                removed_raced.get("task").get("current_goal_eligible"),
+                &json::Value::Bool(false),
+                "removed-raced/{task_id}: {removed_raced:?}"
+            );
+            assert_not_eligible("removed-raced", &removed_raced);
+        }
+        fs::write(&packet_path, &fresh_packet).unwrap();
+    }
+
     // Active attempts outrank newer review attempts in active_latest and activeAttempts,
     // and HostServices::scratch_activity projects worktree-labeled scratch attempts into
     // both `oms state` and `oms dashboard --json --panel-snapshot`.
