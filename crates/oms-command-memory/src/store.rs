@@ -241,7 +241,12 @@ pub(crate) fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
             max_bytes,
         },
     )
-    .map_err(|e| Error(2, format!("memory: unsafe or unreadable source ({e:?})")))
+    .map_err(|e| match e {
+        oms_safe_fs::ByteError::InputTooLarge => {
+            Error(2, format!("memory: source exceeds {max_bytes}-byte limit"))
+        }
+        _ => Error(2, format!("memory: unsafe or unreadable source ({e:?})")),
+    })
 }
 pub(crate) fn lock(path: &Path, flag: &AtomicBool) -> Result<oms_lock::Guard> {
     check(flag)?;
@@ -964,12 +969,12 @@ impl Store {
             format!("### {}\n{body}", self.scope)
         })
     }
-    pub(crate) fn rows(&self, name: &str) -> Result<Vec<Value>> {
+    pub(crate) fn rows_counted(&self, name: &str) -> Result<(Vec<Value>, usize)> {
         let p = self.shared.parent().unwrap().join(name);
-        Ok(records::failure_rows(&read(&p)?)
-            .into_iter()
-            .filter(|r| r["schema"] == 1 && r["id"].is_string())
-            .collect())
+        Ok(crate::review::parse_review_rows(&read(&p)?))
+    }
+    pub(crate) fn rows(&self, name: &str) -> Result<Vec<Value>> {
+        Ok(self.rows_counted(name)?.0)
     }
 }
 use records::{COMPLETE, START};

@@ -354,12 +354,23 @@ fn collect_snapshot(
     )?;
     let memory_review = match oms_command_memory::pending_review(&ctx.repo, ctx.interrupted) {
         Ok(summary) => object([
-            ("healthy", Value::Bool(true)),
+            ("healthy", Value::Bool(summary.skipped == 0)),
+            (
+                "status",
+                string(if summary.skipped == 0 {
+                    "ok"
+                } else {
+                    "partial"
+                }),
+            ),
             ("pending", number(summary.pending)),
+            ("skipped", number(summary.skipped)),
         ]),
         Err(_) => object([
             ("healthy", Value::Bool(false)),
+            ("status", string("unavailable")),
             ("pending", Value::Null),
+            ("skipped", Value::Null),
             ("error", string("status-unavailable")),
         ]),
     };

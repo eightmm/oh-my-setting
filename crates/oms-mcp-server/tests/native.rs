@@ -1354,6 +1354,7 @@ fn desktop_lead_conversations() {
             "oms_worker_output",
             "oms_lead_settings",
             "oms_update_lead_settings",
+            "oms_prepare_lead_plan_context",
         ] {
             let denied = call(&mut blocked, name, &args, owner);
             if child {
@@ -1538,6 +1539,61 @@ fn desktop_lead_conversations() {
         .unwrap();
     assert_eq!(schema["_meta"]["ui"]["visibility"], json!(["app"]));
     assert_eq!(schema["annotations"]["idempotentHint"], true);
+    let prepare = "oms_prepare_lead_plan_context";
+    let work_items = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "oms_panel_work_items")
+        .unwrap();
+    assert_eq!(
+        work_items["_meta"]["ui"]["visibility"],
+        json!(["app", "model"])
+    );
+    assert_eq!(work_items["annotations"]["readOnlyHint"], true);
+    let schema = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == prepare)
+        .unwrap();
+    assert_eq!(schema["_meta"]["ui"]["visibility"], json!(["app"]));
+    assert!(
+        schema["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("excerpt"))
+    );
+    assert!(
+        tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| {
+                t["_meta"]["ui"]["visibility"]
+                    .as_array()
+                    .is_some_and(|v| v.contains(&json!("model")))
+            })
+            .all(|t| {
+                t["name"] != prepare
+                    && t["inputSchema"]["properties"].get("excerpt").is_none()
+                    && t["inputSchema"]["properties"]
+                        .get("excerptSha256")
+                        .is_none()
+            }),
+        "no model-visible tool may accept or verify a guessed Lead excerpt"
+    );
+    for full in [false, true] {
+        let mut regular = Client::new(&source, &repo, full, false, false);
+        assert!(
+            !regular.call("tools/list", json!({}))["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == prepare)
+        );
+        assert_eq!(regular.tool(prepare, json!({}))["error"]["code"], -32602);
+    }
     let message = |seat: usize, n: usize| {
         json!({"room":"lead-room","projectKey":key,"provider":initial["leads"][seat]["provider"],
             "leadRequestId":initial["leads"][seat]["requestId"],"turnId":format!("10000000-0000-4000-8000-{n:012x}"),
@@ -1862,6 +1918,147 @@ fn desktop_lead_conversations() {
             }
             assert_eq!(text, long);
             assert_eq!(runs(), 4, "reading complete answers must not dispatch");
+            // An explicit Share payload contains the displayed text and both
+            // digests. Metadata alone cannot export a private answer.
+            let first = {
+                let mut read = full.clone();
+                read["answerPage"] = json!("");
+                read
+            };
+            let selected = call(&mut c, read, &first, owner)["result"]["_meta"]["leadConversation"]
+                ["answer"]
+                .clone();
+            let excerpt = "긴문장🙂";
+            let digest = |s: &str| oms_command_plan::json::sha(s);
+            let task = json!({"id":"reviewed-task","title":"Frozen implementation","brief":"Implement src with evidence","state":"ready","task_sha256":"a".repeat(64),"contract_stale":false,"allowed_paths":["src"],"forbidden_paths":[],"verify":"true","depends":[],"role":"implementation-worker","assignment":{"provider":"claude","model":"frozen-model","reasoning_effort":"high"}});
+            fixture_settings(&source, json!({"leadRoom":true,"leadContextTask":task}));
+            let share = json!({"kind":"oms-selected-finding","authority":"context-only","source":{"kind":"lead-answer","projectKey":key,"room":m["room"],"provider":m["provider"],"participant":selected["handoff"]["participant"],"leadRequestId":m["leadRequestId"],"turnId":m["turnId"],"operation":selected["handoff"]["operation"],"digest":selected["digest"],"pageCursor":""},"selection":{"text":excerpt,"offset":0,"bytes":excerpt.len(),"totalBytes":selected["totalBytes"],"digest":selected["digest"],"excerptSha256":digest(excerpt),"truncated":true,"displayedBytes":selected["bytes"]}});
+            let src = &share["source"];
+            let selection = &share["selection"];
+            let prepare_args = json!({"room":src["room"],"projectKey":src["projectKey"],"provider":src["provider"],"leadRequestId":src["leadRequestId"],"turnId":src["turnId"],"answerPage":src["pageCursor"],"answerSha256":src["digest"],"offset":selection["offset"],"bytes":selection["bytes"],"excerpt":selection["text"],"excerptSha256":selection["excerptSha256"],"taskId":task["id"],"taskSha256":task["task_sha256"],"executionProvider":"claude"});
+            let result = call(&mut c, prepare, &prepare_args, owner);
+            good(&result);
+            let result = payload(&result);
+            assert_eq!(result["status"], "prepared");
+            assert_eq!(result["findings"]["selection"]["text"], excerpt);
+            assert_eq!(result["execution"]["mode"], "managed-plan-run");
+            assert_eq!(result["execution"]["nativeLeadInput"], false);
+            assert_eq!(result["execution"]["startsTask"], false);
+            for command in ["previewCommand", "runCommand"] {
+                assert_eq!(result[command]["cwd"], repo.to_str().unwrap());
+                assert_eq!(result[command]["argv"][0], "panel");
+                assert_eq!(result[command]["argv"][1], "--repo");
+                assert_eq!(result[command]["argv"][2], repo.to_str().unwrap());
+                assert_eq!(result[command]["argv"][3], "--room");
+                assert_eq!(result[command]["argv"][4], m["room"]);
+            }
+            assert_eq!(result["findings"]["target"]["provider"], "claude");
+            assert_eq!(
+                result["findings"]["target"]["task_sha256"],
+                task["task_sha256"]
+            );
+            let pack_path = repo.join(result["contextPack"]["path"].as_str().unwrap());
+            let pack = std::fs::read(&pack_path).unwrap();
+            assert_eq!(
+                oms_command_plan::json::sha(&pack),
+                result["contextPack"]["sha256"]
+            );
+            let checked = oms_command_plan::reviewed_context::from_pack(&pack)
+                .unwrap()
+                .unwrap();
+            checked.check_project(&repo).unwrap();
+            assert_eq!(checked.value().get("selection").text("text"), excerpt);
+            assert_eq!(
+                payload(&call(&mut c, prepare, &prepare_args, owner)),
+                result,
+                "identical selection reuses the context pack"
+            );
+            assert_eq!(
+                runs(),
+                4,
+                "preparing context never dispatches or creates a transcript store"
+            );
+            let fixed_mismatch =
+                "The reviewed Lead excerpt or Plan task changed. Review them again.";
+            for (field, value, expect_fixed) in [
+                ("excerpt", Value::Null, true),
+                ("excerpt", json!("different caller text"), true),
+                ("excerpt", json!(" "), true),
+                ("offset", json!(1), true),
+                ("offset", json!(2), true),
+                ("offset", json!("긴문장".len() + 1), true),
+                ("bytes", json!(4097), true),
+                ("offset", json!(8192), true),
+                ("projectKey", json!("b".repeat(64)), false),
+                ("room", json!("another-room"), false),
+                ("taskSha256", json!("b".repeat(64)), true),
+                ("executionProvider", json!("antigravity"), true),
+                ("answerSha256", json!("b".repeat(64)), true),
+                ("excerptSha256", json!("b".repeat(64)), true),
+            ] {
+                let mut bad_args = prepare_args.clone();
+                bad_args[field] = value;
+                let refused = call(&mut c, prepare, &bad_args, owner);
+                assert_eq!(refused["result"]["isError"], true, "{refused}");
+                assert!(
+                    !refused.to_string().contains("긴문장"),
+                    "errors must not disclose actual source text"
+                );
+                if expect_fixed {
+                    assert_eq!(
+                        refused["result"]["content"][0]["text"], fixed_mismatch,
+                        "mismatch on {field} must return the fixed error without leaking boundaries"
+                    );
+                }
+            }
+            for count in 2..=16 {
+                let chunk = "긴문장🙂".repeat(count);
+                let mut more = prepare_args.clone();
+                more["bytes"] = json!(chunk.len());
+                more["excerpt"] = json!(chunk);
+                more["excerptSha256"] = json!(digest(&chunk));
+                good(&call(&mut c, prepare, &more, owner));
+            }
+            assert_eq!(
+                payload(&call(&mut c, prepare, &prepare_args, owner)),
+                result,
+                "existing pack with same digest is reused even at the per-operation cap"
+            );
+            let overflow = "긴문장🙂".repeat(17);
+            let mut over_args = prepare_args.clone();
+            over_args["bytes"] = json!(overflow.len());
+            over_args["excerpt"] = json!(overflow);
+            over_args["excerptSha256"] = json!(digest(&overflow));
+            bad(
+                &call(&mut c, prepare, &over_args, owner),
+                "maximum 16 prepared context packs",
+            );
+            let pack_files = std::fs::read_dir(&child)
+                .unwrap()
+                .filter_map(|e| e.ok().and_then(|d| d.file_name().into_string().ok()))
+                .filter(|name| name.starts_with("lead-plan-context-") && name.ends_with(".json"))
+                .count();
+            assert_eq!(pack_files, 16);
+            let mut changed_task = task.clone();
+            changed_task["state"] = json!("claimed");
+            fixture_settings(
+                &source,
+                json!({"leadRoom":true,"leadContextTask":changed_task}),
+            );
+            bad(&call(&mut c, prepare, &prepare_args, owner), "changed");
+            fixture_settings(&source, json!({"leadRoom":true,"leadContextTask":task}));
+            std::fs::write(&artifact, "## Output\nchanged source\n## Exit\n0\n").unwrap();
+            let refused = call(&mut c, prepare, &prepare_args, owner);
+            assert_eq!(refused["result"]["isError"], true);
+            assert_eq!(refused["result"]["content"][0]["text"], fixed_mismatch);
+            assert!(!refused.to_string().contains("changed source"));
+            std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
+            let mut bad_zero = prepare_args.clone();
+            bad_zero["bytes"] = json!(0);
+            let refused_zero = call(&mut c, prepare, &bad_zero, owner);
+            assert_eq!(refused_zero["result"]["isError"], true);
+            assert_eq!(refused_zero["result"]["content"][0]["text"], fixed_mismatch);
+            setup(false);
             full["answerPage"] = first_cursor.clone();
             let mut wrong = full.clone();
             wrong["leadRequestId"] = initial["leads"][1]["requestId"].clone();
@@ -2832,7 +3029,7 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 24);
+    assert_eq!(tools.as_array().unwrap().len(), 25);
     assert_eq!(tools[0]["name"], "oms_open_panel");
     assert_eq!(
         tools[0]["description"],
@@ -6929,6 +7126,14 @@ fn fake_oms() {
     let tmp = source.join(format!(".call-{}", std::process::id()));
     std::fs::write(&tmp, record.to_string()).unwrap();
     std::fs::rename(tmp, source.join("last-call.json")).unwrap();
+    if cfg["leadRoom"] == true && args.first().is_some_and(|a| a == "agent-plan") {
+        assert_eq!(args.len(), 6);
+        assert_eq!(args[1], "--repo");
+        assert_eq!(args[3], "evidence-snapshot");
+        assert_eq!(args[4], "--id");
+        println!("{}", cfg["leadContextTask"]);
+        return;
+    }
     if cfg["leadRoom"] == true && args.first().is_some_and(|a| a == "models") {
         assert_eq!(args.len(), 4);
         assert_eq!(args[1], "--providers");
