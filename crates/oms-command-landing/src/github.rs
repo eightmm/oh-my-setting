@@ -224,12 +224,15 @@ fn plan_issue_links(raw: &[u8], origin: &Slug) -> Result<(Vec<(String, IssueRef)
 /// (display id, verbatim selectable id, issue, state).
 type StatefulIssueLinks = Vec<(String, Option<String>, IssueRef, Option<String>)>;
 
-fn candidate_plan_issue_evidence(root: &Path, origin: &Slug) -> Result<(StatefulIssueLinks, bool)> {
-    let Some(raw) = read_optional(root, PLAN_REL, PLAN_MAX)? else {
+fn candidate_plan_issue_evidence(
+    raw: Option<&[u8]>,
+    origin: &Slug,
+) -> Result<(StatefulIssueLinks, bool)> {
+    let Some(raw) = raw else {
         return Ok((vec![], true));
     };
-    let (links, complete) = plan_issue_links_with_state(&raw, origin)?;
-    Ok((links, complete && oms_json::parse_strict(&raw).is_ok()))
+    let (links, complete) = plan_issue_links_with_state(raw, origin)?;
+    Ok((links, complete && oms_json::parse_strict(raw).is_ok()))
 }
 
 fn plan_issue_links_with_state(raw: &[u8], origin: &Slug) -> Result<(StatefulIssueLinks, bool)> {

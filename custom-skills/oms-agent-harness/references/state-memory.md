@@ -163,8 +163,15 @@ id and repository. Do not join unrelated work through the global CURRENT pointer
   not again through the hook. A hook must run for
   delivery to happen: it cannot interrupt a model thinking or a long tool call.
   Clients without those hooks use the same explicit incremental read.
-- Reuse plan leases, isolated worktrees, change guards, and exact patch landing
-  for overlap; write dispatches refuse overlapping write scopes of calls whose results are undelivered and unread, and omitted scope uses plan paths or the repository. A message cannot grant a worker another path, lease, or permission.
+- Run one-off work with `oms panel --dispatch ROLE --task-id LABEL`. A write
+  dispatch needs a brief and verification command, refuses overlapping write
+  scopes, and defaults to the whole repository (`.`) when `--scope` is omitted.
+  Inspect the recorded result with `oms panel --results --task-id LABEL --json`.
+  Continue a recorded write dispatch with `oms panel --continue LABEL --brief-file F`.
+  For canonical Plan work, choose a ready task and let `oms plan-run --to PROVIDER --id TASK`
+  or the supported panel route claim it. Keep the issued scope, verification,
+  worktree isolation, and patch admission through landing. A message cannot
+  grant a worker another path, lease, or permission.
   Delegated workers retain their existing restrictions; the parent coordinates
   their results. Independent worktrees use explicit `--repo` to read the chosen
   canonical log; separate machines still require an authorized transport.

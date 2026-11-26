@@ -255,7 +255,7 @@ impl Plan<'_> {
             _ => Err(error("not a read action")),
         }
     }
-    fn scheduled(
+    pub(crate) fn scheduled(
         &self,
         req: &Request,
         s: &mut Snapshot,
