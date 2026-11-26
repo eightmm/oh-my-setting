@@ -52,13 +52,18 @@ fn split(raw: &[u8]) -> Vec<FilePatch> {
 fn command(
     command: &str,
     path: &str,
-    tree: &Path,
+    tree: &Worktree,
     deadline: Instant,
     context: &Context<'_>,
 ) -> Result<process::Completed> {
+    let mut environment = vec![
+        ("OMS_RED_CHECK".into(), "1".into()),
+        ("OMS_RED_CHECK_FILE".into(), path.into()),
+    ];
+    let cargo_guard = tree.cargo_env("", &mut environment);
     let quoted = format!("'{}'", path.replace('\'', "'\\''"));
     let command = command.replace("{file}", &quoted);
-    context.executor.execute(
+    let result = context.executor.execute(
         process::Invocation {
             argv: vec![
                 "bash".into(),
@@ -67,12 +72,9 @@ fn command(
                 "-c".into(),
                 command.into(),
             ],
-            cwd: tree.to_owned(),
+            cwd: tree.path.clone(),
             input: None,
-            environment: vec![
-                ("OMS_RED_CHECK".into(), "1".into()),
-                ("OMS_RED_CHECK_FILE".into(), path.into()),
-            ],
+            environment,
             remove_environment: std::env::vars_os()
                 .filter_map(|(key, _)| {
                     key.to_str()
@@ -92,7 +94,9 @@ fn command(
             merge: true,
         },
         context.interrupted,
-    )
+    );
+    drop(cargo_guard);
+    result
 }
 fn remove(tree: Worktree, context: &Context<'_>, report: &mut V) {
     let leftover = tree.path.to_string_lossy().into_owned();
@@ -138,7 +142,7 @@ pub(crate) fn run(
     let mut control_problem = None;
     match Worktree::create(repo, base, context) {
         Ok(tree) => {
-            match command(verify, "", &tree.path, deadline, context) {
+            match command(verify, "", &tree, deadline, context) {
                 Ok(result) if result.complete => {
                     report.set("control_exit", V::Num(result.code.to_string()));
                     if result.code != 0 {
@@ -198,7 +202,7 @@ pub(crate) fn run(
                     {
                         entry.set("detail", "the test change does not apply on the base");
                     } else {
-                        match command(verify, path, &tree.path, deadline, context) {
+                        match command(verify, path, &tree, deadline, context) {
                             Ok(result) if result.complete && ![126, 127].contains(&result.code) => {
                                 entry.set(
                                     "result",
