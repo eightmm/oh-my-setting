@@ -3320,6 +3320,53 @@ case \"$*\" in *'rev-parse HEAD'*) if [ -f \"${{0%/*}}/gate\" ]; then printf ent
         .unwrap()
         .check()
         .unwrap();
+    {
+        use oms_command_plan::team::AdmissionBounds;
+        // Short lock_wait bound aborts quickly when a writer lock is held,
+        // even when the outer call deadline is far in the future.
+        let active_lock = oms_lock::Lock::for_file(
+            &r.join(".oms/plan/tasks.json"),
+            oms_lock::Settings::from_env().unwrap(),
+        )
+        .unwrap();
+        let held = active_lock.try_acquire().unwrap();
+        let started = std::time::Instant::now();
+        let busy = admission_plan
+            .team_admission_bounded(
+                admission.clone(),
+                started + std::time::Duration::from_secs(30),
+                AdmissionBounds {
+                    lock_wait: std::time::Duration::from_millis(120),
+                    lock_hold: std::time::Duration::from_secs(5),
+                },
+            )
+            .err()
+            .unwrap();
+        assert_eq!(busy.code, 75, "{busy}");
+        assert!(busy.message.contains("busy"), "{busy}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        drop(held);
+
+        // Short lock_hold bound aborts a hung critical section and releases all
+        // four writer locks instead of stalling up to the outer 30s/300s deadline.
+        fs::write(git_bin.join("gate"), b"wait").unwrap();
+        let started = std::time::Instant::now();
+        let hold_expired = admission_plan
+            .team_admission_bounded(
+                admission.clone(),
+                started + std::time::Duration::from_secs(30),
+                AdmissionBounds {
+                    lock_wait: std::time::Duration::from_secs(2),
+                    lock_hold: std::time::Duration::from_millis(200),
+                },
+            )
+            .err()
+            .unwrap();
+        assert_eq!(hold_expired.code, 75, "{hold_expired}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        fs::remove_file(git_bin.join("gate")).unwrap();
+        active_lock.try_acquire().unwrap().check().unwrap();
+    }
     for field in [
         "spec",
         "member",

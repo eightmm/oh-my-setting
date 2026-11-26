@@ -277,6 +277,30 @@ impl Plan<'_> {
     ) -> Result<Value> {
         validate_request(request)?;
         let guard = self.team_admission_before(admission.clone(), deadline)?;
+        self.record_team_request_with_guard(&guard, &admission, expected_binding, request, source)
+    }
+    pub fn record_team_request_bounded(
+        &self,
+        admission: AdmissionRequest,
+        expected_binding: &str,
+        request: &Value,
+        source: &RequestEnrollment<'_>,
+        deadline: Instant,
+        bounds: crate::team::AdmissionBounds,
+    ) -> Result<Value> {
+        validate_request(request)?;
+        let guard = self.team_admission_bounded(admission.clone(), deadline, bounds)?;
+        self.record_team_request_with_guard(&guard, &admission, expected_binding, request, source)
+    }
+    fn record_team_request_with_guard(
+        &self,
+        guard: &crate::team::AdmissionGuard<'_, '_>,
+        admission: &AdmissionRequest,
+        expected_binding: &str,
+        request: &Value,
+        source: &RequestEnrollment<'_>,
+    ) -> Result<Value> {
+        let deadline = guard.deadline();
         require(
             guard.binding().get("member").text("role") == "lead" && !admission.write,
             "Team requests require a read-only lead",
