@@ -3359,6 +3359,19 @@ handoff list/read, peer start/result/operations, and graph render/query/trace/
 affected, plus `oms_output_read` for retained output captures. Set
 `OMS_MCP_TOOL_PROFILE=full` in the MCP server's environment and restart its
 connection to discover all 33 tools; `core` is the default.
+For managed registrations, select the profile with
+`oms install-mcp --mcp-tool-profile full` (Claude and Codex),
+`oms install-agy-plugin --mcp-tool-profile full` (Antigravity), or
+`oms install --mcp-tool-profile full` (enabled MCP components).
+Use `core` to return to Core discovery. The installer stores the choice in each
+host's existing registration. Reapply, update reconciliation and
+`oms doctor --repair` retain that choice when the option is omitted; hosts may
+keep different selections. `oms doctor --integrations` recognizes both profiles,
+and uninstall removes either owned registration. Additional environment keys,
+unknown profile values and third-party commands are refused. Use the installer
+option for Antigravity because manual manifest edits invalidate its ownership
+fingerprint. These options do not select the separate ChatGPT panel or MCP App
+profiles.
 The profile is fixed at process startup, so cached discovery is stable.
 Unlisted registered tools remain callable for existing clients: this setting
 reduces discovery overhead, not permissions. Schemas, annotations, UI resources,

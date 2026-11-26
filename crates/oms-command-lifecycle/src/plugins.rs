@@ -610,12 +610,7 @@ pub(crate) fn apply(
     let source = paths.source.join("plugins/antigravity");
     let target = paths.home.join(".gemini/config/plugins/oh-my-setting");
     let marker = crate::install::marker(&target);
-    if (r::exists(&target) || r::exists(&marker))
-        && !crate::install::owned(&source, &target)?
-        && (r::exists(&marker) || !owned_legacy_agy(paths, &source, &target)?)
-    {
-        return r::fail("unmanaged or modified Antigravity plugin; takeover refused");
-    }
+    let mcp = agy_mcp(paths, options, &source, &target)?;
     if remove {
         tx.remove(&target)?;
         if r::exists(&marker) {
@@ -624,6 +619,47 @@ pub(crate) fn apply(
         return agy_statusline(paths, tx, true);
     }
     crate::payload::verify(paths, flag)?.recheck()?;
+    write_agy_plugin(paths, tx, &source, &target, &mcp)
+}
+
+fn agy_mcp(
+    paths: &Paths,
+    options: &Options,
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<serde_json::Value> {
+    let marker = crate::install::marker(target);
+    if (r::exists(target) || r::exists(&marker))
+        && !crate::install::owned(source, target)?
+        && (r::exists(&marker) || !owned_legacy_agy(paths, source, target)?)
+    {
+        return r::fail("unmanaged or modified Antigravity plugin; takeover refused");
+    }
+    let file = target.join("mcp_config.json");
+    let current = if r::exists(&file) {
+        let mcp = r::value(&file)?;
+        if !mcp.as_object().is_some_and(|o| o.len() == 1)
+            || !mcp["mcpServers"]
+                .as_object()
+                .is_some_and(|o| o.len() == 1 && o.contains_key("oh-my-setting"))
+        {
+            return r::fail("unmanaged Antigravity MCP configuration; takeover refused");
+        }
+        Some(mcp["mcpServers"]["oh-my-setting"].clone())
+    } else {
+        None
+    };
+    let entry = crate::integrations::managed_mcp_entry(paths, options, current.as_ref(), false)?;
+    Ok(json!({"mcpServers":{"oh-my-setting":entry}}))
+}
+
+fn write_agy_plugin(
+    paths: &Paths,
+    tx: &mut Transaction,
+    source: &std::path::Path,
+    target: &std::path::Path,
+    mcp: &serde_json::Value,
+) -> Result<()> {
     let mut plugin = r::value(&source.join("plugin.json"))?;
     if plugin["name"] != "oh-my-setting" {
         return r::fail("invalid Antigravity plugin template");
@@ -633,7 +669,6 @@ pub(crate) fn apply(
             .map_err(|_| r::Error(2, "invalid plugin VERSION".into()))?
             .trim()
     );
-    let mcp = json!({"mcpServers":{"oh-my-setting":{"command":paths.home.join(".local/bin/oms"),"args":["mcp-server"]}}});
     let explicit = std::env::var_os("OH_MY_SETTING_AGY_HOOKS").is_some_and(|v| v == "1");
     let certified = crate::agy_surface::verified(paths)? || explicit;
     let tool_certified = crate::agy_surface::tool_hooks_verified(paths)? || explicit;
@@ -654,7 +689,7 @@ pub(crate) fn apply(
     }
     let hooks = json!({"oh-my-setting": entry});
     let plugin_raw = r::bytes(&plugin)?;
-    let mcp_raw = r::bytes(&mcp)?;
+    let mcp_raw = r::bytes(mcp)?;
     let hooks_raw = r::bytes(&hooks)?;
     let mut files = vec![
         ("plugin.json", plugin_raw.as_slice(), 0o600),
@@ -663,9 +698,9 @@ pub(crate) fn apply(
     if certified {
         files.push(("hooks.json", hooks_raw.as_slice(), 0o600));
     }
-    tx.files(&target, &files)?;
-    let row = json!({"schema":1,"kind":"directory","source":source,"sha256":transaction::identity(&target)?});
-    tx.write(&marker, &r::bytes(&row)?, 0o600)?;
+    tx.files(target, &files)?;
+    let row = json!({"schema":1,"kind":"directory","source":source,"sha256":transaction::identity(target)?});
+    tx.write(&crate::install::marker(target), &r::bytes(&row)?, 0o600)?;
     if crate::integrations::hud_enabled("OH_MY_SETTING_AGY_HUD") {
         agy_statusline(paths, tx, false)?;
     }
@@ -710,6 +745,133 @@ mod tests {
     }
     fn read(file: &PathBuf) -> Value {
         serde_json::from_slice(&fs::read(file).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn antigravity_mcp_profiles_reapply_with_owned_directory_identity() {
+        let (_dir, paths, _) = fixture("mcp-profiles");
+        let source = paths.source.join("plugins/antigravity");
+        let target = paths.home.join(".gemini/config/plugins/oh-my-setting");
+        let file = target.join("mcp_config.json");
+        let marker = crate::install::marker(&target);
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("plugin.json"),
+            br#"{"name":"oh-my-setting","version":"template","description":"fixture"}"#,
+        )
+        .unwrap();
+        fs::write(paths.source.join("VERSION"), b"1.0.0\n").unwrap();
+        let options = |args: &[&str]| {
+            crate::cli::parse(
+                "install-agy-plugin",
+                &args
+                    .iter()
+                    .map(std::ffi::OsString::from)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let bare = options(&[]);
+        let full = options(&["--mcp-tool-profile", "full"]);
+        let converge = |selected: &Options| -> Result<()> {
+            let mcp = agy_mcp(&paths, selected, &source, &target)?;
+            let mut tx = Transaction::begin(&paths)?;
+            // Production writer after its independent payload validation gate.
+            write_agy_plugin(&paths, &mut tx, &source, &target, &mcp)?;
+            tx.commit()
+        };
+        converge(&bare).unwrap();
+        assert!(
+            read(&file)["mcpServers"]["oh-my-setting"]
+                .get("env")
+                .is_none()
+        );
+        for profile in ["full", "core"] {
+            converge(&options(&["--mcp-tool-profile", profile])).unwrap();
+            assert_eq!(
+                read(&file)["mcpServers"]["oh-my-setting"]["env"]["OMS_MCP_TOOL_PROFILE"],
+                profile
+            );
+            assert!(crate::install::owned(&source, &target).unwrap());
+            let saved = (fs::read(&file).unwrap(), fs::read(&marker).unwrap());
+            converge(&bare).unwrap();
+            assert_eq!(
+                (fs::read(&file).unwrap(), fs::read(&marker).unwrap()),
+                saved
+            );
+        }
+        // Even a valid profile edit cannot bypass the native directory digest.
+        let saved = (fs::read(&file).unwrap(), fs::read(&marker).unwrap());
+        let mut changed = read(&file);
+        changed["mcpServers"]["oh-my-setting"]["env"]["OMS_MCP_TOOL_PROFILE"] = json!("full");
+        fs::write(&file, r::bytes(&changed).unwrap()).unwrap();
+        let edited = fs::read(&file).unwrap();
+        assert!(converge(&full).is_err());
+        assert_eq!(fs::read(&file).unwrap(), edited);
+        assert_eq!(fs::read(&marker).unwrap(), saved.1);
+
+        // A known directory identity cannot authorize dropping unknown env or
+        // adopting another executable within its MCP registration.
+        for replacement in [
+            json!({"env":{"OMS_MCP_TOOL_PROFILE":"unknown"}}),
+            json!({"env":{"OMS_MCP_TOOL_PROFILE":"full","USER_CUSTOM":"1"}}),
+            json!({"command":"other-mcp","env":{"OMS_MCP_TOOL_PROFILE":"full"}}),
+        ] {
+            let mut changed = r::parse(&saved.0).unwrap();
+            changed["mcpServers"]["oh-my-setting"]
+                .as_object_mut()
+                .unwrap()
+                .extend(replacement.as_object().unwrap().clone());
+            fs::write(&file, r::bytes(&changed).unwrap()).unwrap();
+            let mut recorded = r::parse(&saved.1).unwrap();
+            recorded["sha256"] = json!(transaction::identity(&target).unwrap());
+            fs::write(&marker, r::bytes(&recorded).unwrap()).unwrap();
+            assert!(crate::install::owned(&source, &target).unwrap());
+            let before = (fs::read(&file).unwrap(), fs::read(&marker).unwrap());
+            assert!(converge(&full).is_err());
+            assert_eq!(
+                (fs::read(&file).unwrap(), fs::read(&marker).unwrap()),
+                before
+            );
+        }
+        fs::write(&file, &saved.0).unwrap();
+        fs::write(&marker, &saved.1).unwrap();
+        converge(&full).unwrap();
+        let mut tx = Transaction::begin(&paths).unwrap();
+        apply(
+            &paths,
+            &options(&["--remove"]),
+            &mut tx,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert!(!target.exists());
+        assert!(!marker.exists());
+
+        // Exact legacy plugin directories can retain the known profile while
+        // moving to the native command and current ownership sidecar.
+        fs::create_dir_all(&target).unwrap();
+        fs::copy(source.join("plugin.json"), target.join("plugin.json")).unwrap();
+        fs::write(
+            &file,
+            r::bytes(&json!({"mcpServers":{"oh-my-setting":{
+                "command":"python3","args":[paths.source.join("scripts/oms-mcp-server.py")],
+                "env":{"OMS_MCP_TOOL_PROFILE":"full"}
+            }}}))
+            .unwrap(),
+        )
+        .unwrap();
+        converge(&bare).unwrap();
+        assert_eq!(
+            read(&file)["mcpServers"]["oh-my-setting"]["env"]["OMS_MCP_TOOL_PROFILE"],
+            "full"
+        );
+        assert_eq!(
+            read(&file)["mcpServers"]["oh-my-setting"]["args"],
+            json!(["mcp-server"])
+        );
+        assert!(crate::install::owned(&source, &target).unwrap());
     }
 
     #[test]
