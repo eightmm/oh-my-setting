@@ -17,10 +17,12 @@ its existence is not a fresh execution result from this documentation audit.
 ## Public interfaces and native reuse
 
 `state` exposes a bounded `memory_review` health/count projection from the
-existing memory review owner. `inbox` adds `pending-memory-review` with the
-read-only `oms agent-memory review` action. Unreadable or oversized sources
-produce `memory-review-unavailable` and an unknown count. No proposal text is
-copied into state, and `--fix-safe` never accepts memory proposals.
+existing memory review owner, including `skipped` counts when partial invalid
+rows are ignored. `inbox` adds `pending-memory-review` with the read-only
+`oms agent-memory review` action and `memory-review-partial` when invalid rows
+were skipped. Unreadable or oversized sources produce `memory-review-unavailable`
+and an unknown count. No proposal text is copied into state, and `--fix-safe`
+never accepts memory proposals.
 
 Existing `owns`, `run`, `run_with_source` signatures remain unchanged.
 `run_with_services` accepts Runs services; `run_with_runtime` accepts a

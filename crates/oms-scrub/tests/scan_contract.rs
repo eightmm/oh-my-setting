@@ -1,6 +1,7 @@
 use oms_scrub::{
-    Error, MAX_ENV_BYTES, MAX_ENV_ENTRIES, MAX_HITS, MAX_INPUT_BYTES, Tier,
-    first_unpaired_key_end_line, redact, scan,
+    Error, MAX_ENV_BYTES, MAX_ENV_ENTRIES, MAX_HITS, MAX_INPUT_BYTES, OUTBOUND_PAGE_BYTES,
+    PageError, PageSelector, Tier, first_unpaired_key_end_line, outbound_page_with_env, redact,
+    scan,
 };
 
 #[test]
@@ -296,6 +297,100 @@ fn secret_only_does_not_charge_machine_hits() {
     let input = row.repeat(MAX_HITS + 1);
     assert!(oms_scrub::scan_secret(&input, &[]).unwrap().is_empty());
     assert_eq!(scan(&input, &[]), Err(Error::TooManyHits));
+}
+
+#[test]
+fn outbound_page_scans_whole_body_before_slicing_pages() {
+    let left = ["gh", "p_LeftHalf012345"].concat();
+    let right = "RightHalf67890abcdef01";
+    let straddling = format!(
+        "{} {left}{right} {}",
+        "a".repeat(OUTBOUND_PAGE_BYTES - 1 - left.len()),
+        "b".repeat(512)
+    );
+    assert!(
+        scan(&straddling.as_bytes()[..OUTBOUND_PAGE_BYTES], &[])
+            .unwrap()
+            .is_empty(),
+        "first half alone would pass a per-page scan"
+    );
+    assert!(
+        scan(&straddling.as_bytes()[OUTBOUND_PAGE_BYTES..], &[])
+            .unwrap()
+            .is_empty(),
+        "second half alone would pass a per-page scan"
+    );
+    for selector in [
+        PageSelector::Offset(0),
+        PageSelector::Offset(OUTBOUND_PAGE_BYTES),
+        PageSelector::Number(1),
+        PageSelector::Number(2),
+    ] {
+        assert_eq!(
+            outbound_page_with_env(&straddling, 64 * 1024, selector, &[]),
+            Err(PageError::OutboundWithheld)
+        );
+    }
+
+    let machine = ["/", "ho", "me/fixture_account/work"].concat();
+    let machine_body = format!(
+        "{} {machine} {}",
+        "m".repeat(OUTBOUND_PAGE_BYTES - 4),
+        "n".repeat(256)
+    );
+    for selector in [PageSelector::Number(1), PageSelector::Number(2)] {
+        assert_eq!(
+            outbound_page_with_env(&machine_body, 64 * 1024, selector, &[]),
+            Err(PageError::OutboundWithheld)
+        );
+    }
+
+    let env_name = [b"FIXTURE_".as_slice(), b"TOKEN"].concat();
+    let env_val = b"splitvalue12345678";
+    let env_body = format!(
+        "{}{}{}",
+        "q".repeat(OUTBOUND_PAGE_BYTES - 6),
+        std::str::from_utf8(env_val).unwrap(),
+        "r".repeat(256)
+    );
+    for selector in [
+        PageSelector::Offset(0),
+        PageSelector::Offset(OUTBOUND_PAGE_BYTES),
+    ] {
+        assert_eq!(
+            outbound_page_with_env(
+                &env_body,
+                64 * 1024,
+                selector,
+                &[(env_name.as_slice(), env_val.as_slice())]
+            ),
+            Err(PageError::OutboundWithheld)
+        );
+    }
+
+    let clean = format!("{}끝", "긴문장🙂".repeat(1500));
+    let mut by_offset = String::new();
+    let mut offset = 0;
+    let mut page_no = 1;
+    loop {
+        let a =
+            outbound_page_with_env(&clean, 64 * 1024, PageSelector::Offset(offset), &[]).unwrap();
+        let b =
+            outbound_page_with_env(&clean, 64 * 1024, PageSelector::Number(page_no), &[]).unwrap();
+        assert_eq!(a, b);
+        assert!(a.text.len() <= OUTBOUND_PAGE_BYTES);
+        by_offset.push_str(a.text);
+        if !a.has_more {
+            break;
+        }
+        offset = a.end;
+        page_no += 1;
+    }
+    assert_eq!(by_offset, clean);
+    assert_eq!(
+        outbound_page_with_env(&clean, clean.len() - 1, PageSelector::Number(1), &[]),
+        Err(PageError::InvalidRange)
+    );
 }
 
 /// Self-review gate: every regular tracked file that can enter diff or prompt

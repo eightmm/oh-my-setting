@@ -2,7 +2,6 @@
 use crate::value::{self, Value};
 use crate::{Server, ToolError, ToolResult, delegated};
 use oms_output_capture::{CaptureError, RequestError};
-use std::os::unix::ffi::OsStrExt;
 
 fn failure(code: &'static str, message: impl Into<String>) -> CaptureError {
     CaptureError {
@@ -25,25 +24,7 @@ pub(super) fn outbound(snapshot: &[u8], args: &Value) -> Result<(), CaptureError
             "stored capture or search text failed the outbound content scan; content withheld",
         )
     };
-    let mut pairs = Vec::new();
-    let mut total = 0usize;
-    for (key, value) in std::env::vars_os() {
-        total = total
-            .saturating_add(key.as_bytes().len())
-            .saturating_add(value.as_bytes().len());
-        if pairs.len() >= oms_scrub::MAX_ENV_ENTRIES || total > oms_scrub::MAX_ENV_BYTES {
-            return Err(withheld());
-        }
-        pairs.push((key.as_bytes().to_vec(), value.as_bytes().to_vec()));
-    }
-    let refs: Vec<_> = pairs
-        .iter()
-        .map(|(key, value)| (key.as_slice(), value.as_slice()))
-        .collect();
-    let check = |bytes: &[u8]| match oms_scrub::scan(bytes, &refs) {
-        Ok(hits) if hits.is_empty() => Ok(()),
-        _ => Err(withheld()),
-    };
+    let check = |bytes: &[u8]| oms_scrub::check_outbound(bytes).map_err(|_| withheld());
     check(snapshot)?;
     // Search literals can be echoed in continuations and compact batch results.
     // Repository metadata is already authorized and is needed to reuse cursors.
@@ -126,5 +107,56 @@ impl Server<'_> {
             )));
         }
         Ok(response.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use oms_scrub::{OUTBOUND_PAGE_BYTES, PageError, PageSelector, outbound_page_with_env};
+
+    #[test]
+    fn shared_page_helper_withholds_all_pages_when_fixture_straddles_boundary() {
+        let left = ["gh", "p_LeftHalf012345"].concat();
+        let right = "RightHalf67890abcdef01";
+        let body = format!(
+            "{} {left}{right} {}",
+            "a".repeat(OUTBOUND_PAGE_BYTES - 1 - left.len()),
+            "z".repeat(256)
+        );
+        for selector in [
+            PageSelector::Offset(0),
+            PageSelector::Offset(OUTBOUND_PAGE_BYTES),
+            PageSelector::Number(1),
+            PageSelector::Number(2),
+        ] {
+            assert_eq!(
+                outbound_page_with_env(&body, 64 * 1024, selector, &[]),
+                Err(PageError::OutboundWithheld)
+            );
+        }
+        let env_key = [b"FIXTURE_API_".as_slice(), b"KEY"].concat();
+        let env_val = b"alpha1234beta5678";
+        let env_body = format!(
+            "{}{}{}",
+            "a".repeat(OUTBOUND_PAGE_BYTES - 5),
+            std::str::from_utf8(env_val).unwrap(),
+            "z".repeat(256)
+        );
+        for selector in [
+            PageSelector::Offset(0),
+            PageSelector::Offset(OUTBOUND_PAGE_BYTES),
+            PageSelector::Number(1),
+            PageSelector::Number(2),
+        ] {
+            assert_eq!(
+                outbound_page_with_env(
+                    &env_body,
+                    64 * 1024,
+                    selector,
+                    &[(env_key.as_slice(), env_val.as_slice())]
+                ),
+                Err(PageError::OutboundWithheld)
+            );
+        }
     }
 }

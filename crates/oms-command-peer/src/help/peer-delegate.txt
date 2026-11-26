@@ -117,6 +117,10 @@ Options:
   --context-pack FILE  Typed Project Graph orientation pack (validated before
                        the worktree exists). Renders file/test pointers into
                        the brief; takes precedence over --graph-context.
+                       Reviewed Lead excerpts are reference data bound to an
+                       issued Plan task and the original project/Room.
+  --expected-context-pack-sha256 SHA
+                       Pin exact pack bytes; required for reviewed Lead excerpts.
   --graph-context      Opt in to bounded file/test orientation from the worker
                        snapshot when relationships or change impact are unclear.
                        No source bodies; default: off (direct source discovery).
