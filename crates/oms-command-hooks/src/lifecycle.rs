@@ -1401,12 +1401,21 @@ fn handoff_line(
     v: &Value,
     ctx: &Context<'_>,
 ) -> Option<(String, String)> {
+    // Resume is line-oriented and strips carriage returns; do not rewrite paths.
+    let repo_text = repo.to_str()?;
+    if repo_text.contains(['\r', '\n']) {
+        return None;
+    }
     let head = git(repo, &["rev-parse", "HEAD"], ctx).unwrap_or_default();
     let digest = hash(task);
     let mut candidates = Vec::new();
     for entry in fs::read_dir(repo.join(".oms/handoffs")).ok()?.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
         if !entry.file_type().ok()?.is_file()
-            || !entry.file_name().to_string_lossy().ends_with(".md")
+            || !name.ends_with(".md")
+            || name.contains(['\r', '\n'])
         {
             continue;
         }
@@ -1440,7 +1449,6 @@ fn handoff_line(
         } else {
             "historical/unbound reference"
         };
-        let name = entry.file_name().to_string_lossy().into_owned();
         candidates.push((matched, current, std::cmp::Reverse(age), name, label, age));
     }
     let (_, _, _, name, label, age) = candidates.into_iter().max_by(|a, b| {
@@ -1464,11 +1472,13 @@ fn handoff_line(
             }
         }
     }
+    let path = repo.join(".oms/handoffs").join(&name);
     Some((
         format!(
-            "- handoff ({label}; {}h old{pickup}): oms session-handoff show {}",
+            "- handoff ({label}; {}h old{pickup}): oms session-handoff show {} --cwd {}",
             age / 3600,
-            shlex::try_quote(&name).ok()?
+            shlex::try_quote(path.to_str()?).ok()?,
+            shlex::try_quote(repo_text).ok()?
         ),
         name,
     ))
@@ -2548,6 +2558,104 @@ mod tests {
         let status_text = String::from_utf8(status_bytes).expect("utf8");
         assert!(status_text.contains("stale: no\n"), "{status_text}");
         assert!(status_text.contains("dormant: yes\n"), "{status_text}");
+    }
+
+    #[test]
+    fn resume_handoff_command_reads_exact_digest_from_other_working_directories() {
+        if run_isolated_resume_test(
+            "lifecycle::tests::resume_handoff_command_reads_exact_digest_from_other_working_directories",
+            None,
+        ) {
+            return;
+        }
+        let tmp = TempDir::new("handoff-command");
+        let repo = tmp.0.join("repo with 'quote");
+        let nested = repo.join("nested directory");
+        let outside = tmp.0.join("other checkout");
+        let directory = repo.join(".oms/handoffs");
+        for path in [&nested, &outside, &directory] {
+            fs::create_dir_all(path).expect("mkdir fixture");
+        }
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .expect("git init")
+                .success()
+        );
+        let name = "handoff with 'quote.md";
+        let body = b"# Session handoff\n\nStored handoff detail.\n";
+        fs::write(directory.join(name), body).expect("write digest");
+        for cwd in [&repo, &nested, &outside] {
+            fs::write(cwd.join(name), b"unrelated same-name file\n").expect("write decoy");
+        }
+        let cancel = AtomicBool::new(false);
+        let host = MockHost::default();
+        let snapshot = Snapshot::default();
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let ctx = Context {
+            snapshot: &snapshot,
+            provider: Some("claude"),
+            cwd: &outside,
+            source,
+            interrupted: &cancel,
+            host: &host,
+        };
+        let (code, stdout, stderr) = resume(&json!({"cwd": nested}), &ctx);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        let rendered = String::from_utf8(stdout).expect("utf8 resume");
+        assert!(!rendered.contains("Stored handoff detail"));
+        let command = rendered
+            .lines()
+            .find(|line| line.starts_with("- handoff ("))
+            .and_then(|line| line.split_once(": oms "))
+            .map(|(_, command)| format!("oms {command}"))
+            .expect("handoff command");
+        let words = shlex::split(&command).expect("shell-safe handoff command");
+        assert_eq!(&words[..2], ["oms", "session-handoff"]);
+        let args = words[2..].iter().map(OsString::from).collect::<Vec<_>>();
+        for cwd in [&repo, &nested, &outside] {
+            let result =
+                oms_command_peer::run_with_source("session-handoff", &args, cwd, source, &cancel);
+            assert_eq!(result.0, 0, "{}", String::from_utf8_lossy(&result.2));
+            assert_eq!(result.1, body, "caller cwd: {}", cwd.display());
+        }
+        assert!(
+            words
+                .windows(2)
+                .any(|pair| pair[0] == "--cwd" && Path::new(&pair[1]) == repo),
+            "{command}"
+        );
+        let consumed = fs::read(directory.join("consumed.jsonl")).expect("pickup receipt");
+        let receipt = consumed
+            .split(|byte| *byte == b'\n')
+            .find_map(document)
+            .expect("pickup row");
+        assert_eq!(text(&receipt, "handoff"), name);
+
+        let leading_dash = directory.join("--handoff.md");
+        fs::rename(directory.join(name), &leading_dash).expect("rename digest");
+        let (line, _) = handoff_line(&repo, "", &[], &json!({}), &ctx).expect("leading dash hint");
+        let (_, command) = line.split_once(": oms ").expect("leading dash command");
+        let words = shlex::split(command).expect("parse leading dash command");
+        let args = words[1..].iter().map(OsString::from).collect::<Vec<_>>();
+        let result =
+            oms_command_peer::run_with_source("session-handoff", &args, &outside, source, &cancel);
+        assert_eq!(result.0, 0, "{}", String::from_utf8_lossy(&result.2));
+        assert_eq!(result.1, body);
+        fs::remove_file(leading_dash).expect("remove digest");
+        for name in ["line\nbreak.md", "carriage\rreturn.md"] {
+            let path = directory.join(name);
+            fs::write(&path, body).expect("write control-character name");
+            assert!(handoff_line(&repo, "", &[], &json!({}), &ctx).is_none());
+            fs::remove_file(path).expect("remove control-character name");
+        }
+        let control_repo = tmp.0.join("repo\rwith\ncontrols");
+        fs::create_dir_all(control_repo.join(".oms/handoffs")).expect("mkdir control repo");
+        fs::write(control_repo.join(".oms/handoffs/digest.md"), body)
+            .expect("write control repo digest");
+        assert!(handoff_line(&control_repo, "", &[], &json!({}), &ctx).is_none());
     }
 
     #[test]
