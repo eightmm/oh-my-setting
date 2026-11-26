@@ -964,11 +964,43 @@ fn gate(
     if out.0 != 0 {
         return Err(r::Error(
             out.0,
-            format!("incoming native lifecycle {phase:?} failed; provider output withheld"),
+            format!(
+                "incoming native lifecycle {phase:?} failed; provider output withheld{}",
+                authored_lines(&out.2)
+            ),
         ));
     }
     r::check(flag)?;
     Ok(out)
+}
+
+/// The last OMS-authored `error: `/`hint: ` lines of a failed child, redacted
+/// and bounded, each preceded by a newline. All other stderr stays withheld, as
+/// does everything when the redaction scan cannot run.
+fn authored_lines(stderr: &[u8]) -> String {
+    use std::os::unix::ffi::OsStringExt;
+    let text = String::from_utf8_lossy(stderr);
+    let mut lines: Vec<_> = text
+        .lines()
+        .rev()
+        .filter(|line| line.starts_with("error: ") || line.starts_with("hint: "))
+        .take(4)
+        .collect();
+    lines.reverse();
+    let env: Vec<_> = std::env::vars_os()
+        .map(|(name, value)| (name.into_vec(), value.into_vec()))
+        .collect();
+    let env: Vec<_> = env
+        .iter()
+        .map(|(name, value)| (name.as_slice(), value.as_slice()))
+        .collect();
+    let Ok(redacted) = oms_scrub::redact(lines.join("\n").as_bytes(), &env) else {
+        return String::new();
+    };
+    String::from_utf8_lossy(&redacted.bytes)
+        .lines()
+        .map(|line| format!("\n{}", line.chars().take(300).collect::<String>()))
+        .collect()
 }
 
 struct PostRefresh {
