@@ -1227,7 +1227,12 @@ pub(super) fn candidates(
     let walk = match walk_board_pages(c, root, slug, expected_id, project_error, Some(deadline))? {
         BoardWalkOutcome::Ready(walk) => *walk,
         BoardWalkOutcome::Unavailable { status, reason } => {
-            return Ok(candidates_empty(status, reason.as_deref(), observed_at));
+            // An unclassified failure still needs a typed incomplete reason.
+            return Ok(candidates_empty(
+                status,
+                Some(reason.as_deref().unwrap_or("unavailable")),
+                observed_at,
+            ));
         }
     };
     let slug = slug.expect("walk_board_pages returned Ready without slug");
