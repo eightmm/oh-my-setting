@@ -1717,11 +1717,6 @@ repository patches and returns findings for owner `--finalize --outcome complete
 judgment (never `accepted`). The same role routes are available without opening
 the panel; see [Without the panel](#without-the-panel).
 
-Write dispatches with `--task-id` warn when the shared-plan task has no verifier
-or its verifier differs from `--verify` (ignoring only outer whitespace). The
-warning changes neither command nor plan claims; write dispatch still requires
-a scoped brief and a verifier.
-
 `--workload light|routine|deep|frontier` overrides the tier for one dispatch and
 `--reasoning-effort` overrides one dispatch's effort.
 
@@ -1883,7 +1878,7 @@ starts.
 A delegated run also fingerprints the user-level files that decide what the next
 session runs: the Claude `settings.json`, the Codex `config.toml` and `rules/`,
 the Antigravity `settings.json`, shell start files and the git config. When one
-differs after the run, `oms delegate` prints
+differs after the run, `oms peer-delegate` prints
 `warning: user-level configuration changed during this run: <names>` and adds a
 section to the artifact. It names files only, restores nothing and never fails
 the run, strict mode included: a provider CLI may update its own settings and a
@@ -1923,12 +1918,11 @@ oms panel --repo . --room team --dispatch advisor --owner claude --main opus-mai
 
 #### Carry findings into a dispatch
 
-`oms panel --dispatch ROLE --task-id T --brief-file F` or `--continue` appends
-up to five newest settled read-only findings for T from each artifact's
-Output section, with repo-relative references; repeat `--from-task ID` to carry
-findings from other tasks into the same brief; `--dry-run` appends none. A carried
-block that the outbound scan flags, or that holds a machine path, is replaced by
-an omission line naming its artifact, so reviewer text never blocks the dispatch.
+Add `--from-task ID` to a dispatch or continuation that uses `--brief-file F`
+to carry settled read-only findings from that task. Repeat the flag for multiple
+tasks. The brief includes up to five recent findings from artifact Findings
+sections or Summary lines, with repo-relative references. An omission line
+points to the artifact when the outbound scan withholds a finding.
 
 
 #### Bind the dispatch to its main
@@ -1942,17 +1936,24 @@ itself.
 
 #### Shared-plan task transitions
 
-A `--task-id` that names a shared-plan task moves it for the calling main: a
-write dispatch claims and starts a ready task (a read-only one leaves it ready), a claimed one is started, and later workers
-of the same main reuse the running lease. A task another provider or main holds,
-or one already in review or done, is left unchanged with a warning; `--dry-run`
-never moves it. Stderr names the next verbs, `oms agent-plan review` after
-acceptance and `finish --landed-commit SHA` after `oms land`. The panel never
-passes `--plan-task`, whose per-worker transitions assume one worker per task.
-After a call's exit is verified, dispatch prints the next dependency-ready plan
-task ID with `oms agent-plan claim --id ID --provider PROVIDER` and
-`oms panel --dispatch ROLE --owner PROVIDER --task-id ID` hints when one exists.
-These hints leave claiming and dispatch to the main.
+For one-off work, `oms panel --dispatch ROLE --task-id LABEL` records a label
+for the worker and its results. A direct write needs a brief and verifier.
+Repeat `--scope PATH` to declare its paths. With no paths supplied, its scope
+is the entire repository (`.`). Inspect the retained result with
+`oms panel --results --task-id LABEL --json` before deciding whether to
+[continue a recorded write dispatch](#continue-a-write-task).
+
+For canonical Plan work, select a task with `oms agent-plan ready` and let
+the execution route claim it. Run `oms plan-run --to PROVIDER --id TASK`
+directly. In a managed Room, the Main can instead use
+`oms panel --room ROOM --orchestrator PROVIDER --task-id TASK` with `claude`
+or `antigravity`. This route pins the ready task and uses its saved scope
+and verifier. For an existing ordinary Codex Lead, use the
+[bound native assignment](#retain-a-bound-native-report).
+
+After an unknown Plan return, inspect `oms agent-plan show --id TASK` and
+`oms panel --results --task-id TASK --json` before using Plan recovery.
+The default `plan-run` stops at review.
 
 #### Continue a write task
 
@@ -1963,9 +1964,9 @@ role may continue (a builder session can become a refactorer), while reviewer, v
 security-auditor, critic and the other read-only roles never resume. The short form `oms
 panel --repo . --owner claude --continue TASK_ID --brief-file next.md` takes the role,
 `--access write`, workload, every `--scope` and `--verify` from the task's newest
-recorded write dispatch in this main's lineage; any flag you pass overrides its recorded
-value, except that `--scope` adds to the inherited scope (a plan-bound dispatch's
-declared scope also covers the plan task's allowed paths).
+recorded write dispatch in this main's lineage. Explicit flags override their
+recorded values. Supply repeatable `--scope` flags to replace the inherited
+scope.
 
 A recorded explicit model also inherits its provider and model; a recorded explicit
 reasoning effort is inherited independently. Historical records without these markers
@@ -2563,8 +2564,8 @@ Main's native provider session and may start a model turn. Import, reconciliatio
 and Lead dispatch remain explicit Main actions, while approved goal-drive/autopilot
 contracts own their existing bounded automatic execution.
 
-Typed binding currently supports ordinary Codex Leads. Other native providers and
-alternate Codex use managed `--dispatch ROLE --task-id TASK` for canonical work.
+Typed binding currently supports ordinary Codex Leads. For other providers or
+alternate Codex, use the [Plan execution routes](#shared-plan-task-transitions).
 Explicit `--unbound --task TEXT` permits conversation without canonical task credit.
 
 ### Results reader
@@ -3287,8 +3288,9 @@ Mains declare what they are editing so their dispatches and other sessions can s
 docs/TERMINAL-PANEL.md` replaces that participant's declared scopes and `--clear`
 empties them. Only the participant itself may declare (the inherited
 `OMS_ROOM_PARTICIPANT` must match; workers cannot); at most sixteen normalized
-repo-relative scopes; advisors and reviewers own none. A write dispatch takes repeatable
-`--scope PATH`; omitted scope uses the plan task’s allowed paths or the whole repository (`.`), and the worker records its task id with its scopes.
+repo-relative scopes; advisors and reviewers own none. A direct write dispatch
+takes repeatable `--scope PATH` and defaults to the whole repository (`.`).
+Its Room worker record includes the task label and declared scopes.
 
 Two scopes overlap when one equals the other or is a path-component prefix of it.
 For example, `crates/oms-command-room` overlaps `crates/oms-command-room/src/lib.rs`.
@@ -3297,8 +3299,9 @@ The prefix `crates/oms-command-ro` is a different path component. The scope
 Write dispatches, including `--dry-run` (also from a rebound main whose environment lost its room id), refuse overlaps with a joined main's declaration or with a call's joined write declaration until the controller records that call's structured call result or its parent main reads the call's result handoff; a same-task `--continue` waits the same way.
 An unread handoff is not delivery. A rollover carries exactly the calls still holding a declaration, so the successor room's participants are the whole lock. A call whose parent main left holds nothing, because nobody remains to integrate it. Liveness is read from joined state, never from join order: a superseded main that never left, and its calls, keep their declarations (an over-lock, never an under-lock). Once its process has stopped, a stale declaration clears with `OMS_ROOM_PARTICIPANT= oms room scope --repo PATH --id ROOM --participant ID --clear`; the refusal prints that exact command. A finished write call's id is single-use: rejoining it with a declaration is refused, so old delivery evidence never releases a new declaration.
 Delivery releases the declaration even while the result awaits the owner's decision: the WIP limit, not the lock, paces undecided results.
-A write dispatch first delivers its own main's finished calls, then checks declarations, and rolls the room over only after they pass. A call cannot leave the room as itself: its parent main records the departure, including the controller's rollback of an unstarted call.
-A dispatch that loses the atomic check at enrollment keeps its plan claim and prints the lease and the exact `oms agent-plan release` command: releasing automatically could race another dispatch of the same task on the shared lease.
+A write dispatch checks current declarations before launching, and Room enrollment
+checks them again under the writer lock. The parent Main records a call's
+departure, including the controller's rollback of an unstarted call.
 The refusal identifies each blocking task, participant and scope; there is no override. The main detail view shows `Scope: …`. Finalizing as
 `accepted` refuses write-worker patches outside their declared scopes (including rename
 sources and destinations), using glob-aware path matching; `completed` remains allowed,
