@@ -13,6 +13,7 @@ class Element extends EventTarget {
   value = '';
   children = [];
   attributes = new Map();
+  style = {};
   scrollTop = 0;
   get scrollHeight() { return this.children.length; }
   get textContent() { return this.children.map(child => child?.textContent ?? child).join(''); }
@@ -134,11 +135,17 @@ async function panel(projects, dashboard = {}, options = {}) {
   const document = {documentElement:root,getElementById:get, createElement:tag => createdElement(tag, elements), title:'',
     querySelectorAll: selector => staticNodes.filter(node => node.attributes.has(selector.slice(1, -1)))};
   class Option extends Element { tagName = 'option'; constructor(text = '', value = text) { super(); this.textContent = text; this.value = value; } }
+  // Opt-in only: the default document stays plain so the panel's optional calls stay exercised.
+  if (options.visibility) {
+    const events = new EventTarget();
+    Object.assign(document, {hidden:false, addEventListener:(...args) => events.addEventListener(...args),
+      show(visible) { document.hidden = !visible; events.dispatchEvent(new Event('visibilitychange')); }});
+  }
   const context = createContext({window, document, Option, TextEncoder, CSS:{supports:(_k,v)=>/^#[0-9a-f]{6}$/i.test(v)}, setTimeout, clearTimeout, crypto:{randomUUID},
     ...options.timers, ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
   runInContext(script, context);
   await setImmediate();
-  return {get, elements, calls, host, notify, staticNodes, document, run: expression => runInContext(expression, context),
+  return {get, elements, calls, host, notify, staticNodes, document, window, run: expression => runInContext(expression, context),
     async event(id, type) {
       get(id).dispatchEvent(new Event(type, {cancelable:true}));
       if (type === 'click') get(id).onclick?.();
@@ -797,4 +804,114 @@ test('partial approval retrieval stays visible without a decision button or a fa
   p.host.tools.oms_list_approvals=()=>{throw Error('failed read');};await p.event('refresh','click');
   assert.equal(p.get('approval-card').hidden,false);assert.equal(p.get('approvals').children[0].tagName,'p');
   assert.ok(!p.calls.some(c=>c.name==='oms_decide_approval'));
+});
+
+test('state badges carry a semantic tone and the progress bar follows the progress text',async()=>{
+  const d={...dashboard,planProgress:{total:4,verified:1}};
+  const p=await panel(['one'],d,{locale:'en'});
+  const [codex,claude,agy]=p.get('leads').children;
+  const badge=entry=>entry.children.find(e=>e.className==='state');
+  assert.equal(badge(codex.children[2]).getAttribute('data-tone'),'active');
+  assert.equal(badge(claude.children[2]).getAttribute('data-tone'),'attention');
+  assert.equal(badge(claude.children[2]).textContent,'! Blocked');
+  assert.equal(agy.children[1].children.find(e=>e.className==='state').getAttribute('data-tone'),'muted');
+  assert.equal(p.get('progress-track').hidden,false);assert.equal(p.get('progress-fill').style.width,'25%');
+  assert.equal(p.get('progress').textContent,'1 of 4 planned tasks verified');
+  d.planProgress={total:4,verified:4};await p.event('refresh','click');assert.equal(p.get('progress-fill').style.width,'100%');
+  d.planProgress={total:0,verified:0};await p.event('refresh','click');
+  assert.equal(p.get('progress').hidden,true);assert.equal(p.get('progress-track').hidden,true);
+});
+test('the observed time localizes beside the goal while a clean status stays empty',async()=>{
+  const stamp='2026-06-01T03:04:00Z', local=new Date(stamp);
+  const time=[local.getHours(),local.getMinutes()].map(n=>String(n).padStart(2,'0')).join(':');
+  const d={updated:stamp};
+  const p=await panel(['one'],d,{locale:'ko'});
+  assert.equal(p.get('observed-at').textContent,'관측 '+time);assert.equal(p.get('observed-at').hidden,false);
+  await choose(p,'en');assert.equal(p.get('observed-at').textContent,'Updated '+time);
+  assert.equal(p.get('status').textContent,'');
+  d.degraded=true;await p.event('refresh','click');assert.equal(p.get('status').getAttribute('data-tone'),'warn');
+  d.updated='not a time';d.degraded=false;await p.event('refresh','click');
+  assert.equal(p.get('observed-at').hidden,true);assert.equal(p.get('observed-at').textContent,'');
+  assert.equal(p.get('status').textContent,'');
+});
+test('chat refresh rereads the open Room or managed Lead conversation in place',async()=>{
+  let version=1;
+  const p=await panel(['one'],dashboard,{locale:'en',tools:{
+    oms_panel_chat:a=>({...a,source:'room',messages:[{seq:1,text:'Room '+version,...(version>1&&{at:'2026-06-01T03:04:00Z'})}]}),
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      if(a.provider)v._private={...v.leads[0],room:a.room,transcript:{turns:[{role:'claude',text:'Lead '+version}]}};
+      return v;
+    }
+  }});
+  const slot=p.get('leads').children[1], messages=()=>p.get('chat-messages');
+  for(const [opener,label,tool] of [[slot.children[2],'Room ','oms_panel_chat'],
+    [slot.children[1].children.find(e=>e.type==='button'),'Lead ',managedRead]]){
+    version=1;opener.dispatchEvent(new Event('click'));await setImmediate();
+    assert.match(messages().textContent,new RegExp(label+'1'));
+    const mark=p.calls.length;version=2;await p.event('chat-refresh','click');
+    assert.deepEqual(p.calls.slice(mark).map(c=>c.name),[tool]);
+    assert.match(messages().textContent,new RegExp(label+'2'));
+    assert.equal(messages().children.length,1);assert.equal(messages().scrollTop,1);
+    assert.equal(p.get('conversation').open,true);
+    assert.equal(messages().children[0].children.some(e=>e.tagName==='time'),label==='Room ');
+    // Backdrop clicks close; a press that began inside the content does not.
+    p.get('conversation').dispatchEvent(new Event('click'));assert.equal(p.get('conversation').open,false);
+    assert.ok(opener.focused);
+  }
+});
+test('opt-in auto refresh persists, pauses and clears, and r refreshes only outside typing and dialogs',async()=>{
+  let now=1000;
+  const jobs=new Map(), memory=new Map();
+  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
+  const autos=()=>[...jobs].filter(([,job])=>job.ms===20000);
+  const p=await panel(['one'],{},{locale:'en',timers,storage,visibility:true});
+  const reads=()=>p.calls.filter(c=>c.name==='oms_panel_snapshot').length;
+  assert.equal(autos().length,0);assert.equal(p.get('auto-refresh').getAttribute('aria-pressed'),'false');
+  await p.event('auto-refresh','click');
+  assert.equal(memory.get('oms.panel.auto-refresh.v1'),'on');assert.equal(p.get('auto-refresh').getAttribute('aria-pressed'),'true');
+  assert.equal(autos().length,1);
+  let mark=reads();const [id,job]=autos()[0];jobs.delete(id);job.fn();await setImmediate();
+  assert.equal(reads(),mark+1);assert.equal(autos().length,1);
+  p.document.show(false);assert.equal(autos().length,0);
+  // A return within 15 seconds only rearms; a stale return rereads once.
+  mark=reads();p.document.show(true);await setImmediate();assert.equal(reads(),mark);assert.equal(autos().length,1);
+  now+=15000;p.window.dispatchEvent(new Event('focus'));await setImmediate();assert.equal(reads(),mark+1);
+  await p.event('new-goal','click');assert.equal(autos().length,0);
+  const press=async(extra={})=>{p.window.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'r',...extra}));await setImmediate();};
+  mark=reads();now+=15000;await press();p.window.dispatchEvent(new Event('focus'));await setImmediate();assert.equal(reads(),mark);
+  await p.event('close-launch','click');assert.equal(autos().length,1);
+  p.document.activeElement=p.get('brief');await press();assert.equal(reads(),mark);
+  p.document.activeElement=undefined;
+  for(const modifier of ['ctrlKey','metaKey','altKey'])await press({[modifier]:true});
+  assert.equal(reads(),mark);await press();assert.equal(reads(),mark+1);
+  await p.event('auto-refresh','click');assert.equal(autos().length,0);assert.equal(memory.get('oms.panel.auto-refresh.v1'),'off');
+  await p.event('auto-refresh','click');
+  const reopened=await panel(['one'],{},{timers:{...timers,setTimeout:()=>Symbol(),clearTimeout(){}},storage});
+  assert.equal(reopened.get('auto-refresh').getAttribute('aria-pressed'),'true');
+  p.notify({method:'ui/resource-teardown',id:'close-auto-refresh',params:{}});assert.equal(autos().length,0);
+  mark=reads();await press();assert.equal(reads(),mark);assert.equal(p.get('refresh').getAttribute('aria-busy'),'false');
+});
+test('the launcher counts and normalizes the brief, and the container width selects compact density',async()=>{
+  const p=await panel(['one'],{},{locale:'ko',hostContext:{locale:'ko',displayMode:'inline',containerDimensions:{maxWidth:360}}});
+  const root=p.document.documentElement, brief=p.get('brief'), count=p.get('brief-count');
+  const change=params=>p.notify({method:'ui/notifications/host-context-changed',params});
+  assert.equal(root.getAttribute('data-compact'),'true');assert.equal(root.getAttribute('data-display-mode'),'inline');
+  change({theme:'light'});assert.equal(root.getAttribute('data-compact'),'true');
+  for(const [dimensions,expected] of [[{width:421},null],[{width:420},'true'],[{},null],[{width:320},'true'],[null,null]]){
+    change({containerDimensions:dimensions});assert.equal(root.getAttribute('data-compact'),expected);
+  }
+  assert.match(brief.getAttribute('placeholder'),/^예: Auth/);
+  await choose(p,'en');assert.match(brief.getAttribute('placeholder'),/^e\.g\., Fix auth tests/);
+  assert.equal(count.textContent,'0 / 2,000');
+  brief.value='x'.repeat(2000);await p.event('brief','input');
+  assert.equal(count.textContent,'2,000 / 2,000');assert.equal(count.getAttribute('data-tone'),'muted');
+  p.get('lead-claude').checked=true;await p.event('lead-claude','change');
+  assert.equal(count.getAttribute('data-tone'),'warn');
+  brief.value='';
+  const paste=Object.assign(new Event('paste',{cancelable:true}),{clipboardData:{getData:()=>'Fix auth\r\n\r\n\tand tests\n'}});
+  brief.dispatchEvent(paste);
+  assert.equal(paste.defaultPrevented,true);assert.equal(brief.value,'Fix auth and tests');
+  assert.equal(count.textContent,'18 / 2,000');
 });
