@@ -4677,10 +4677,40 @@ fn peer_status_tasks() {
         payload(&c.tool("oms_peer_operations", json!({})))["operations"][0]["cancellation"],
         json!({"requested_at":pinned_at,"state":"requested"})
     );
+    let legacy_bytes =
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request"}).to_string();
+    std::fs::write(dir.join("cancel-request.json"), &legacy_bytes).unwrap();
+    let legacy_get = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(legacy_get["cancellation_requested"], true);
+    assert_eq!(
+        legacy_get["cancellation"],
+        json!({"requested_at":Value::Null,"state":"requested"})
+    );
+    assert_eq!(
+        legacy_get["statusMessage"],
+        "Cancellation requested; awaiting provider cleanup."
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_result", json!({"operation":op})))["cancellation"],
+        json!({"requested_at":Value::Null,"state":"requested"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"][0]["cancellation"],
+        json!({"requested_at":Value::Null,"state":"requested"})
+    );
+    assert_eq!(
+        c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+        json!({"resultType":"complete"})
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("cancel-request.json")).unwrap(),
+        legacy_bytes
+    );
     for bytes in [
         "not json".to_owned(),
         json!({"schema":1,"task_id":"foreign","kind":"mcp-task-cancel-request","requested_at":first_at}).to_string(),
-        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request"}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":Value::Null}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":123}).to_string(),
         json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":""}).to_string(),
         json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":"not-rfc3339"}).to_string(),
         json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":"2020-01-01T09:00:05+09:00"}).to_string(),
@@ -4859,7 +4889,7 @@ fn peer_status_tasks() {
     );
     assert_eq!(
         payload(&c.tool("oms_peer_operations", json!({})))["operations"][0]["cancellation"],
-        json!({"requested_at":pinned_at,"state":"completed_first"})
+        json!({"requested_at":pinned_at,"state":"requested"})
     );
     assert_eq!(
         c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["error"]["code"],
@@ -5006,7 +5036,7 @@ fn peer_status_tasks() {
             .iter()
             .find(|r| r["operation"] == owner_op)
             .unwrap()["cancellation"],
-        json!({"requested_at":pinned_at,"state":"unknown"})
+        json!({"requested_at":pinned_at,"state":"requested"})
     );
 
     use std::os::unix::fs::PermissionsExt;
@@ -5106,6 +5136,76 @@ fn peer_status_tasks() {
     assert_eq!(
         seat_snap["statusMessage"],
         "Peer consultation completed with exit 1 before cancellation took effect."
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["operation"] == seat_op)
+            .unwrap()["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
+    );
+
+    let legacy_guard_op = "consult-20200101T000004Z-44444444";
+    let legacy_guard_dir = run_dir(
+        &repo,
+        legacy_guard_op,
+        json!({"answer_storage":"operation","cancellation_supported":true}),
+        None,
+    );
+    std::fs::write(
+        legacy_guard_dir.join("launch.json"),
+        json!({"kind":"consult","targets":["claude"],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        legacy_guard_dir.join("cancel-request.json"),
+        json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":legacy_guard_op}).to_string(),
+    )
+    .unwrap();
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+    let guard_log = std::fs::File::create(legacy_guard_dir.join("run.log")).unwrap();
+    let guard_err = guard_log.try_clone().unwrap();
+    let guard_out = Command::new(&owner_bin)
+        .args([
+            source.as_os_str(),
+            repo.as_os_str(),
+            legacy_guard_op.as_ref(),
+            source.join("bin/oms").as_os_str(),
+        ])
+        .env("PATH", "")
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .stdout(guard_log)
+        .stderr(guard_err)
+        .status()
+        .unwrap();
+    assert!(guard_out.success());
+    assert!(!source.join("last-call.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(legacy_guard_dir.join("status")).unwrap(),
+        "125\n"
+    );
+    assert!(legacy_guard_dir.join("cancel-observed.json").is_file());
+    let guard_snap = c.call(
+        "tasks/get",
+        json!({"taskId":legacy_guard_op,"_meta":modern()}),
+    )["result"]
+        .clone();
+    assert_eq!(guard_snap["status"], "cancelled");
+    assert_eq!(
+        guard_snap["cancellation"],
+        json!({"requested_at":Value::Null,"state":"confirmed"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["operation"] == legacy_guard_op)
+            .unwrap()["cancellation"],
+        json!({"requested_at":Value::Null,"state":"confirmed"})
     );
 }
 fn peer_start_threads() {
@@ -5530,6 +5630,7 @@ fn cancellation_concurrency() {
             c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation"],
             json!({"requested_at":row["requested_at"],"state":"requested"})
         );
+        assert!(dir.join("cancel-request.lock").is_file());
         assert_eq!(
             std::fs::read_dir(&dir)
                 .unwrap()

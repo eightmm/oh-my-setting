@@ -149,15 +149,14 @@ pub(crate) fn receipt(dir: &Path, name: &str) -> Option<Value> {
                 && v["kind"] == format!("mcp-task-{name}")
                 && (name != "cancel-request"
                     || v.get("requested_at")
-                        .and_then(Value::as_str)
-                        .is_some_and(rfc3339_utc))
+                        .is_none_or(|ts| ts.as_str().is_some_and(rfc3339_utc)))
         })
 }
 pub(crate) fn valid_receipt(dir: &Path, name: &str) -> bool {
     receipt(dir, name).is_some()
 }
-pub(crate) fn cancel_request(dir: &Path) -> Option<String> {
-    receipt(dir, "cancel-request").and_then(|v| {
+pub(crate) fn cancel_request(dir: &Path) -> Option<Option<String>> {
+    receipt(dir, "cancel-request").map(|v| {
         v.get("requested_at")
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -285,6 +284,17 @@ pub(crate) struct Directory {
 fn flags() -> OFlags {
     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
 }
+fn noreplace_rename(dir: &OwnedFd, from: &str, to: &str) -> rustix::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        fs::renameat_with(dir, from, dir, to, fs::RenameFlags::NOREPLACE)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (dir, from, to);
+        Err(rustix::io::Errno::NOSYS)
+    }
+}
 fn err(e: impl std::fmt::Display) -> String {
     format!("error: operation directory: {e}")
 }
@@ -343,7 +353,15 @@ impl Directory {
         self.publish(name, data, true)
     }
     pub fn record_cancel_request(&self, data: &[u8]) -> Result<(), String> {
-        if cancel_request(&self.path).is_some() {
+        self.record_cancel_request_with(data, noreplace_rename)
+    }
+    fn record_cancel_request_with(
+        &self,
+        data: &[u8],
+        noreplace: impl FnOnce(&OwnedFd, &str, &str) -> rustix::io::Result<()>,
+    ) -> Result<(), String> {
+        let _guard = self.lock_named("cancel-request.lock", fs::FlockOperation::LockExclusive)?;
+        if valid_receipt(&self.path, "cancel-request") {
             fs::fsync(&self.fd).map_err(err)?;
             return Ok(());
         }
@@ -358,39 +376,40 @@ impl Directory {
             let mut file = self.exclusive(&temp)?;
             file.write_all(data).map_err(err)?;
             file.sync_all().map_err(err)?;
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            let first = fs::renameat_with(
-                &self.fd,
-                temp.as_str(),
-                &self.fd,
-                name,
-                fs::RenameFlags::NOREPLACE,
-            );
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-            let first = fs::linkat(&self.fd, temp.as_str(), &self.fd, name, AtFlags::empty());
-            match first {
-                Ok(()) => {
-                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                    let _ = fs::unlinkat(&self.fd, temp.as_str(), AtFlags::empty());
-                    fs::fsync(&self.fd).map_err(err)?;
-                }
-                Err(e) if e == rustix::io::Errno::EXIST => {
-                    if cancel_request(&self.path).is_none() {
-                        let _guard = self
-                            .lock_named("cancel-request.lock", fs::FlockOperation::LockExclusive)?;
-                        if cancel_request(&self.path).is_none() {
-                            fs::renameat(&self.fd, temp.as_str(), &self.fd, name).map_err(err)?;
-                        } else {
-                            let _ = fs::unlinkat(&self.fd, temp.as_str(), AtFlags::empty());
+            let published = match noreplace(&self.fd, temp.as_str(), name) {
+                Ok(()) => Ok(()),
+                // NOTSUP and OPNOTSUPP share one value on Linux but differ on macOS.
+                Err(e)
+                    if [
+                        rustix::io::Errno::INVAL,
+                        rustix::io::Errno::NOSYS,
+                        rustix::io::Errno::OPNOTSUPP,
+                        rustix::io::Errno::NOTSUP,
+                    ]
+                    .contains(&e) =>
+                {
+                    match fs::linkat(&self.fd, temp.as_str(), &self.fd, name, AtFlags::empty()) {
+                        Ok(()) => {
+                            fs::unlinkat(&self.fd, temp.as_str(), AtFlags::empty()).map_err(err)?;
+                            Ok(())
                         }
-                        fs::fsync(&self.fd).map_err(err)?;
-                    } else {
+                        Err(e) => Err(e),
+                    }
+                }
+                Err(e) => Err(e),
+            };
+            match published {
+                Ok(()) => {}
+                Err(rustix::io::Errno::EXIST) => {
+                    if valid_receipt(&self.path, "cancel-request") {
                         let _ = fs::unlinkat(&self.fd, temp.as_str(), AtFlags::empty());
-                        fs::fsync(&self.fd).map_err(err)?;
+                    } else {
+                        fs::renameat(&self.fd, temp.as_str(), &self.fd, name).map_err(err)?;
                     }
                 }
                 Err(e) => return Err(err(e)),
             }
+            fs::fsync(&self.fd).map_err(err)?;
             Ok(())
         })();
         let _ = fs::unlinkat(&self.fd, temp.as_str(), AtFlags::empty());
@@ -528,7 +547,7 @@ mod tests {
                 "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"{valid}\"}}\n"
             );
             std::fs::write(dir.path.join("cancel-request.json"), &body).unwrap();
-            assert_eq!(cancel_request(&dir.path).as_deref(), Some(valid));
+            assert_eq!(cancel_request(&dir.path), Some(Some(valid.to_owned())));
             assert!(valid_receipt(&dir.path, "cancel-request"));
             dir.record_cancel_request(
                 format!(
@@ -541,11 +560,28 @@ mod tests {
                 std::fs::read_to_string(dir.path.join("cancel-request.json")).unwrap(),
                 body
             );
+            assert!(dir.path.join("cancel-request.lock").is_file());
         }
+
+        let legacy =
+            format!("{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\"}}\n");
+        std::fs::write(dir.path.join("cancel-request.json"), &legacy).unwrap();
+        assert_eq!(cancel_request(&dir.path), Some(None));
+        assert!(valid_receipt(&dir.path, "cancel-request"));
+        dir.record_cancel_request(
+            format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"2020-01-01T00:00:59Z\"}}\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path.join("cancel-request.json")).unwrap(),
+            legacy
+        );
 
         for invalid in [
             "not json".to_owned(),
-            format!("{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\"}}"),
             format!(
                 "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":null}}"
             ),
@@ -600,7 +636,7 @@ mod tests {
                 &std::fs::read(dir.path.join("cancel-request.json")).unwrap(),
                 winner
             );
-            assert!(cancel_request(&dir.path).is_some());
+            assert!(cancel_request(&dir.path).is_some_and(|ts| ts.is_some()));
             assert_eq!(
                 std::fs::read_dir(&dir.path)
                     .unwrap()
@@ -610,5 +646,102 @@ mod tests {
                 0
             );
         }
+
+        // Portable link+unlink fallback when renameat2(RENAME_NOREPLACE) is rejected.
+        for injected in [
+            rustix::io::Errno::INVAL,
+            rustix::io::Errno::NOSYS,
+            rustix::io::Errno::OPNOTSUPP,
+            rustix::io::Errno::NOTSUP,
+        ] {
+            let _ = std::fs::remove_file(dir.path.join("cancel-request.json"));
+            let ts = "2020-01-01T00:00:11Z";
+            let body = format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"{ts}\"}}\n"
+            );
+            dir.record_cancel_request_with(body.as_bytes(), |_, _, _| Err(injected))
+                .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path.join("cancel-request.json")).unwrap(),
+                body
+            );
+            assert_eq!(cancel_request(&dir.path), Some(Some(ts.to_owned())));
+            // Another writer wins between rejected NOREPLACE and link(2) (EEXIST).
+            std::fs::remove_file(dir.path.join("cancel-request.json")).unwrap();
+            let raced_ts = "2020-01-01T00:00:12Z";
+            let raced_body = format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"{raced_ts}\"}}\n"
+            );
+            let dir_path = dir.path.clone();
+            let raced_copy = raced_body.clone();
+            dir.record_cancel_request_with(body.as_bytes(), move |_, _, _| {
+                std::fs::write(dir_path.join("cancel-request.json"), &raced_copy).unwrap();
+                Err(injected)
+            })
+            .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path.join("cancel-request.json")).unwrap(),
+                raced_body
+            );
+            // Invalid existing file is still replaced when link(2) sees EEXIST.
+            std::fs::write(dir.path.join("cancel-request.json"), "corrupt").unwrap();
+            dir.record_cancel_request_with(body.as_bytes(), |_, _, _| Err(injected))
+                .unwrap();
+            assert_eq!(
+                std::fs::read_to_string(dir.path.join("cancel-request.json")).unwrap(),
+                body
+            );
+            assert_eq!(
+                std::fs::read_dir(&dir.path)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
+                    .count(),
+                0
+            );
+        }
+
+        // Concurrent fallback writers serialize on cancel-request.lock and keep first-wins.
+        std::fs::remove_file(dir.path.join("cancel-request.json")).unwrap();
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+        for idx in 0..8 {
+            let repo = root.clone();
+            let gate = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let handle = Directory::run(&repo, op, true).unwrap();
+                let row = format!(
+                    "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"2020-01-01T00:00:2{idx}Z\"}}\n"
+                );
+                gate.wait();
+                handle
+                    .record_cancel_request_with(row.as_bytes(), |_, _, _| {
+                        Err(rustix::io::Errno::INVAL)
+                    })
+                    .unwrap();
+                std::fs::read(handle.path.join("cancel-request.json")).unwrap()
+            }));
+        }
+        let observed: Vec<Vec<u8>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let winner = &observed[0];
+        for seen in &observed[1..] {
+            assert_eq!(seen, winner);
+        }
+
+        // Genuine I/O errors are not masked by the rename-flag fallback.
+        std::fs::remove_file(dir.path.join("cancel-request.json")).unwrap();
+        assert!(
+            dir.record_cancel_request_with(legacy.as_bytes(), |_, _, _| Err(rustix::io::Errno::IO))
+                .is_err()
+        );
+        assert!(!dir.path.join("cancel-request.json").exists());
+        assert_eq!(
+            std::fs::read_dir(&dir.path)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
+                .count(),
+            0
+        );
     }
 }
