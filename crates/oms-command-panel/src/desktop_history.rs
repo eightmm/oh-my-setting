@@ -47,6 +47,16 @@ pub(super) fn bound_room_from_events(
     digest: &str,
     events: &[Value],
 ) -> Result<Option<String>> {
+    Ok(bound_main_from_events(reader, digest, events)?["room"]
+        .as_str()
+        .map(str::to_owned))
+}
+
+pub(super) fn bound_main_from_events(
+    reader: &room::Room<'_>,
+    digest: &str,
+    events: &[Value],
+) -> Result<room::value::Value> {
     let attempts = events
         .iter()
         .filter(|r| r["tool"] == "panel-main")
@@ -64,10 +74,10 @@ pub(super) fn bound_room_from_events(
     let result = reader
         .conversation_main(digest, attempts)
         .map_err(|_| Error::new("Room lookup unavailable"))?;
-    Ok(result["conversationMain"]["room"]
-        .as_str()
-        .filter(|_| result["conversationBinding"].as_str() == Some("matched"))
-        .map(str::to_owned))
+    if result["conversationBinding"].as_str() != Some("matched") {
+        return Ok(room::value::Value::Null);
+    }
+    Ok(result["conversationMain"].clone())
 }
 
 /// Recheck the exact request binding on the same snapshot that supplies the rows.
