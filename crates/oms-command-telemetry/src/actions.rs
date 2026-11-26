@@ -1129,9 +1129,20 @@ fn migrate(
             };
             let path = Path::new(&value);
             let candidate = root.physical_root().join(path);
+            // Presence, not digestibility: published payloads may be hard
+            // links that the single-link digest refuses (#589).
             if let Ok(canonical) = std::fs::canonicalize(&candidate)
                 && canonical.starts_with(root.physical_root())
-                && digest_path(&canonical).is_some()
+                && matches!(
+                    path_state(
+                        root,
+                        &canonical
+                            .strip_prefix(root.physical_root())
+                            .unwrap()
+                            .to_string_lossy()
+                    ),
+                    PathState::Present
+                )
             {
                 r[key] = canonical
                     .strip_prefix(root.physical_root())
@@ -1187,7 +1198,11 @@ fn migrate(
             let mut primary = None;
             for key in ["artifact", "patch"] {
                 if let Some(p) = r[key].text().filter(|s| !s.is_empty()) {
-                    primary = digest_path(Path::new(p)).or(primary);
+                    let recorded = r[&format!("{key}_sha256")]
+                        .text()
+                        .filter(|s| valid_digest(s))
+                        .map(str::to_string);
+                    primary = recorded.or_else(|| digest_path(Path::new(p))).or(primary);
                 }
             }
             r["artifact_id"] = format!(

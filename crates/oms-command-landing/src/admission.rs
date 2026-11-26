@@ -783,10 +783,27 @@ pub(crate) fn admit(
         )?;
     }
     storage::write_external(&report, None, body.as_bytes(), c.interrupted)?;
-    let report_rel = report
-        .strip_prefix(&state)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| report.to_string_lossy().into_owned());
+    // An index row never records an absolute path: a report outside the state
+    // root is named by its digest, as other external receipts are.
+    let report_field = match report.strip_prefix(&state) {
+        Ok(rel) => ("artifact", rel.to_string_lossy().into_owned().into()),
+        Err(_) => (
+            "artifact_external",
+            obj([
+                (
+                    "name",
+                    report
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                        .into(),
+                ),
+                ("owned", false.into()),
+                ("sha256", digest(body.as_bytes()).into()),
+            ]),
+        ),
+    };
     let coverage_status = if verdict && !policy.verify.is_empty() {
         "verified"
     } else if verdict {
@@ -810,7 +827,7 @@ pub(crate) fn admit(
             format!("sha256:{}", digest(body.as_bytes())).into(),
         ),
         ("exit", usize::from(!verdict).into()),
-        ("artifact", report_rel.into()),
+        report_field,
         ("artifact_sha256", digest(body.as_bytes()).into()),
         ("patch_sha256", digest(&bytes).into()),
         (

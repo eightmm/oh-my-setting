@@ -948,6 +948,15 @@ fn landing_authorities_see_the_frozen_patch_and_recorded_coverage() {
         }
         assert_eq!(row.text("provider"), "local");
     }
+    let land = rows
+        .iter()
+        .find(|r| r.text("kind") == "patch-land")
+        .unwrap();
+    assert_eq!(land.text("operation_id"), land.text("landing_id"));
+    assert_eq!(
+        land.text("artifact_id"),
+        format!("sha256:{}", land.text("patch_sha256"))
+    );
     let proof = oms_command_plan::panel_composition::verify_landing(
         &rows,
         &oms_command_plan::json::parse(&manifest_raw).unwrap(),
@@ -970,6 +979,34 @@ fn patch_admit_runs_locally_without_services() {
     // the private capture lives outside the repository and must be readable
     let (code, out, err) = iso.run("patch-admit", &repo, &["--patch", patch]);
     assert_eq!((code, out.as_str()), (0, "ADMIT\n"), "{err}");
+    // A report outside the state root is named by digest, never by an absolute path.
+    let report = iso.tmp.join("outside-admission.md");
+    let (code, _, err) = iso.run(
+        "patch-admit",
+        &repo,
+        &["--patch", patch, "--report", report.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{err}");
+    let rows = fs::read(repo.join(".oms/artifacts/index.jsonl")).unwrap();
+    let rows = oms_command_plan::storage::rows(&rows).unwrap();
+    let (local, external) = (&rows[0], &rows[1]);
+    let local_report = fs::read(repo.join(local.text("artifact"))).unwrap();
+    assert_eq!(
+        local.text("artifact_id"),
+        format!("sha256:{}", oms_command_plan::json::sha(local_report))
+    );
+    let sha = oms_command_plan::json::sha(fs::read(&report).unwrap());
+    assert!(external.opt("artifact").is_none());
+    assert_eq!(external.get("artifact_external").text("sha256"), sha);
+    assert_eq!(
+        external.get("artifact_external").text("name"),
+        "outside-admission.md"
+    );
+    assert_eq!(external.text("artifact_id"), format!("sha256:{sha}"));
+    for row in [local, external] {
+        assert_eq!(row.text("provider"), "local");
+        assert!(row.text("operation_id").starts_with("att_"));
+    }
 }
 
 #[test]
