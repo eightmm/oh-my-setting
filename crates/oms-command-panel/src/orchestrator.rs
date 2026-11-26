@@ -140,6 +140,8 @@ fn orchestrator_command(
     }
     if provider == "claude" {
         command.extend(commands::strings(&[
+            "--name",
+            "OMS Lead · Claude",
             "--append-system-prompt",
             STARTUP_PROMPT,
         ]));
@@ -8210,7 +8212,7 @@ pub(crate) mod tests {
         ] {
             let mut expected = vec![program, "--model", model, permission_flag];
             if provider == "claude" {
-                expected.extend([prompt_option, STARTUP_PROMPT]);
+                expected.extend(["--name", "OMS Lead · Claude", prompt_option, STARTUP_PROMPT]);
             }
             assert_eq!(
                 orchestrator_command(
@@ -8259,7 +8261,7 @@ pub(crate) mod tests {
                     }
                 }
                 if provider == "claude" {
-                    expected.extend([prompt_option, STARTUP_PROMPT]);
+                    expected.extend(["--name", "OMS Lead · Claude", prompt_option, STARTUP_PROMPT]);
                 }
                 assert_eq!(command.unwrap(), expected);
                 expected.remove(3);
@@ -10975,6 +10977,8 @@ pub(crate) mod tests {
                 "--dangerously-skip-permissions".into(),
                 "--effort".into(),
                 "xhigh".into(),
+                "--name".into(),
+                "OMS Lead · Claude".into(),
                 "--append-system-prompt".into(),
                 STARTUP_PROMPT.into(),
             ]));

@@ -1397,9 +1397,9 @@ fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
             assert_eq!(fs::read(&log).unwrap(), before);
             let mut requests = std::collections::BTreeSet::new();
             for (provider, canonical, title) in [
-                ("codex", "codex", "Codex Lead"),
-                ("claude", "claude", "Claude Lead"),
-                ("agy", "antigravity", "AGY Lead"),
+                ("codex", "codex", "OMS Lead · Codex"),
+                ("claude", "claude", "OMS Lead · Claude"),
+                ("agy", "antigravity", "OMS Lead · AGY"),
             ] {
                 let before = fs::read(&log).unwrap();
                 let empty = success(lead("desktop-lead-status", &digest, provider, &[]));
@@ -1427,6 +1427,17 @@ fn desktop_assignment_is_owner_proofed_idempotent_and_unforgeable() {
                 assert_eq!(first.text("participant"), format!("ask-{request}"));
                 assert_eq!(first.text("status"), "assigned");
                 assert!(first["thread"].is_null() && first.flag("readOnly"));
+                if provider == "claude" {
+                    // Pre-upgrade joins remain bound to the same provider and replay byte-for-byte.
+                    let current = fs::read_to_string(&log).unwrap();
+                    let legacy = current.replace(title, "Claude Lead");
+                    assert_ne!(current, legacy);
+                    fs::write(&log, legacy.replace("Claude Lead", "Codex Lead")).unwrap();
+                    assert_ne!(lead("desktop-lead-status", &digest, provider, &[]).0, 0);
+                    fs::write(&log, &legacy).unwrap();
+                    assert_eq!(open().text("title"), "Claude Lead");
+                    assert_eq!(fs::read_to_string(&log).unwrap(), legacy);
+                }
                 let op = format!("fixture-{canonical}");
                 let linked = success(run(
                     &repo,

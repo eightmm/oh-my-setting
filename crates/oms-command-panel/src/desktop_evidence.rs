@@ -49,6 +49,89 @@ fn unique_row<'a>(
         .then_some(first)
 }
 
+fn recorded_answer(
+    store: &Store,
+    id: &str,
+    attempt: &Value,
+    native: Option<&Value>,
+    index: &[Value],
+) -> Result<Option<Body>> {
+    if let Some(report) = native {
+        return report["summary"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .map(|text| {
+                Ok(Body {
+                    text: oms_panel_core::redact(text.as_bytes())?,
+                    source: "native-report",
+                    digest: attempt["refs"]["native_result_sha256"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                })
+            })
+            .transpose();
+    }
+    let eligible = |r: &Value| {
+        matches!(
+            r["kind"].as_str(),
+            Some("ask" | "call" | "consult" | "delegate" | "review")
+        ) && !matches!(r["answer_quality"].as_str(), Some("empty" | "no_answer"))
+    };
+    if !index
+        .iter()
+        .any(|r| r["attempt_id"] == id && eligible(r) && r["artifact"].is_string())
+    {
+        return Ok(None);
+    }
+    let row = unique_row(index, id, "artifact_sha256", eligible)
+        .ok_or_else(|| Error::new("ambiguous worker answer"))?;
+    let text = results::indexed_answer(store, row)?;
+    if !matches!(text.lines().next(), Some("## Answer" | "## Findings"))
+        || !text.lines().skip(1).any(|l| !l.trim().is_empty())
+    {
+        return Ok(None);
+    }
+    Ok(Some(Body {
+        text: oms_panel_core::redact(text.as_bytes())?,
+        source: "indexed-answer",
+        digest: row["artifact_sha256"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    }))
+}
+
+/// Read just the retained answer of an already authority-checked attempt, without opening its patch.
+pub(super) fn worker_answer(
+    repo: &Path,
+    attempt: &Value,
+) -> Result<Option<(String, &'static str, bool)>> {
+    let store = Store::open(repo)?;
+    let id = attempt["attempt_id"]
+        .as_str()
+        .ok_or_else(|| Error::new("missing attempt"))?;
+    let native = if attempt["tool"] == "panel-native-assignment" {
+        native_results::read(&store, attempt)?
+    } else {
+        None
+    };
+    let index = if native.is_none() {
+        results::index_rows(repo)?
+    } else {
+        Vec::new()
+    };
+    Ok(
+        recorded_answer(&store, id, attempt, native.as_ref(), &index)?.map(|body| {
+            let mut text = body.text;
+            let length = text.len();
+            text.truncate(text.floor_char_boundary(16 * 1024));
+            let truncated = text.len() != length;
+            (text, body.source, truncated)
+        }),
+    )
+}
+
 fn retained(repo: &Path, attempt: &Value) -> Retained {
     let mut result = Retained::default();
     let (Ok(store), Some(id)) = (Store::open(repo), attempt["attempt_id"].as_str()) else {
@@ -60,35 +143,9 @@ fn retained(repo: &Path, attempt: &Value) -> Retained {
         None
     };
     let index = results::index_rows(repo).unwrap_or_default();
-    if let Some(report) = native.as_ref() {
-        if let Some(text) = report["summary"].as_str().filter(|s| !s.is_empty())
-            && let Ok(text) = oms_panel_core::redact(text.as_bytes())
-        {
-            result.answer = Some(Body {
-                text,
-                source: "native-report",
-                digest: attempt["refs"]["native_result_sha256"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-            });
-        }
-    } else if let Some(row) = unique_row(&index, id, "artifact_sha256", |r| {
-        matches!(
-            r["kind"].as_str(),
-            Some("ask" | "call" | "consult" | "delegate" | "review")
-        ) && !matches!(r["answer_quality"].as_str(), Some("empty" | "no_answer"))
-    }) && let Some(text) = indexed_answer(&store, row)
-    {
-        result.answer = Some(Body {
-            text,
-            source: "indexed-answer",
-            digest: row["artifact_sha256"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned(),
-        });
-    }
+    result.answer = recorded_answer(&store, id, attempt, native.as_ref(), &index)
+        .ok()
+        .flatten();
     let native_patch = native.as_ref().and_then(|r| {
         Some(json!({"patch":r["patch"]["path"].as_str()?,"patch_sha256":r["patch"]["sha256"].as_str()?}))
     });

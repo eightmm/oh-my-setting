@@ -325,7 +325,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v25.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v26.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -334,7 +334,7 @@ fn cross_host_project_reads() {
             html.as_bytes(),
             include_bytes!("../src/conversation-panel.html")
         );
-        let legacy_uri = "ui://oms/conversation-panel/v24.html";
+        let legacy_uri = "ui://oms/conversation-panel/v25.html";
         let legacy = c.call("resources/read", json!({"uri":legacy_uri}));
         let legacy = &legacy["result"]["contents"][0];
         assert_eq!(legacy["uri"], legacy_uri);
@@ -1057,6 +1057,98 @@ fn desktop_reviewed_issue() {
     bad(&c.read(), "OMS_PANEL_REPO");
 }
 
+fn worker_output_reader(c: &mut Client, source: &Path, key: &str, thread: &str) {
+    let name = "oms_worker_output";
+    let args = json!({"projectKey":key,"room":"lead-room","leadAttempt":"lead-fixture","workerAttempt":"worker-fixture"});
+    let request = |c: &mut Client, a: &Value| {
+        c.call(
+            "tools/call",
+            json!({"name":name,"arguments":a,"_meta":{"threadId":thread}}),
+        )
+    };
+    let tools = c.call("tools/list", json!({}));
+    let tool = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == name)
+        .unwrap();
+    assert_eq!(tool["_meta"]["ui"]["visibility"], json!(["app"]));
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
+    bad(&c.tool(name, args.clone()), "bound conversation");
+    for (field, value, want) in [
+        ("projectKey", "obsolete", "project"),
+        ("workerAttempt", "../other", "Invalid"),
+        ("leadAttempt", "worker-fixture", "under its Lead"),
+    ] {
+        let mut invalid = args.clone();
+        invalid[field] = value.into();
+        bad(&request(c, &invalid), want);
+    }
+    let mut extra = args.clone();
+    extra["path"] = "private-local-path".into();
+    assert_eq!(request(c, &extra)["error"]["code"], -32602);
+    let base = json!({"room":args["room"],"leadAttempt":args["leadAttempt"],"workerAttempt":args["workerAttempt"],"status":"complete",
+        "source":"native-report","text":"verification finished in private worker","truncated":false,
+        "untrusted":"fixture-source-hidden"});
+    let configure = |v: &Value| fixture_settings(source, json!({"stdout":v.to_string()}));
+    configure(&base);
+    let r = request(c, &args);
+    good(&r);
+    let meta = &r["result"]["_meta"]["workerOutput"];
+    assert_eq!(meta["text"], base["text"]);
+    assert_eq!(meta["projectKey"], key);
+    assert_eq!(meta["source"], "native-report");
+    assert!(!r.to_string().contains("fixture-source-hidden"));
+    for k in ["content", "structuredContent"] {
+        assert!(!r["result"][k].to_string().contains("verification finished"));
+    }
+    let argv = record(source)["argv"].clone();
+    assert_eq!(argv[3], "--desktop-worker-output");
+    assert_eq!(argv[8], args["leadAttempt"]);
+    assert_eq!(argv[10], args["workerAttempt"]);
+    assert_eq!(argv[11], "--conversation-digest");
+    assert_eq!(argv[12].as_str().unwrap().len(), 32);
+    assert!(!argv.to_string().contains(thread));
+    for status in ["running", "not_recorded", "unavailable"] {
+        let mut r = base.clone();
+        r["status"] = status.into();
+        r["text"] = Value::Null;
+        r["source"] = Value::Null;
+        configure(&r);
+        let answer = request(c, &args);
+        good(&answer);
+        assert_eq!(payload(&answer)["status"], status);
+        assert!(answer["result"]["_meta"]["workerOutput"]["text"].is_null());
+    }
+    for (k, v) in [
+        ("workerAttempt", json!("other")),
+        ("room", json!("other")),
+        ("leadAttempt", json!("other")),
+        ("text", Value::Null),
+        ("text", json!("z".repeat(16 * 1024 + 1))),
+        ("source", json!("arbitrary-path")),
+        ("status", json!("running")),
+    ] {
+        let mut r = base.clone();
+        r[k] = v;
+        configure(&r);
+        let refused = request(c, &args);
+        bad(&refused, "could not be verified");
+        assert!(refused["result"]["_meta"]["workerOutput"].is_null());
+    }
+    let mut withheld = base.clone();
+    withheld["text"] = json!(concat!("gh", "p_", "0123456789abcdef0123456789abcdef0123"));
+    configure(&withheld);
+    let refused = request(c, &args);
+    bad(&refused, "withheld");
+    assert!(
+        !refused
+            .to_string()
+            .contains(withheld["text"].as_str().unwrap())
+    );
+}
+
 fn desktop_lead_conversations() {
     let t = Temp::new();
     let source = t.source();
@@ -1103,7 +1195,14 @@ fn desktop_lead_conversations() {
             child,
             if child { "1" } else { "0" }.as_ref(),
         );
-        for name in [open, read, "oms_send_lead_message"] {
+        for name in [
+            open,
+            read,
+            "oms_send_lead_message",
+            "oms_worker_output",
+            "oms_lead_settings",
+            "oms_update_lead_settings",
+        ] {
             let denied = call(&mut blocked, name, &args, owner);
             if child {
                 bad(&denied, "parent app");
@@ -1133,6 +1232,10 @@ fn desktop_lead_conversations() {
     );
     let key = initial["projectKey"].as_str().unwrap();
     assert_eq!(key.len(), 64);
+    // The worker reader and Lead chat must agree on the current physical checkout.
+    worker_output_reader(&mut c, &source, key, owner);
+    setup(true);
+
     bad(
         &call(
             &mut c,
@@ -1342,7 +1445,109 @@ fn desktop_lead_conversations() {
     );
     assert_eq!(runs(), 3);
 
+    // The native models call reads host evidence only. Claude currently has
+    // policy aliases and no model catalog; a global effort list proves no pair.
+    std::fs::create_dir_all(source.join("config")).unwrap();
+    std::fs::write(
+        source.join("config/panel-routing.json"),
+        json!({"schema":2,"tiers":{"deep":[{"provider":"claude","model":"opus","effort":"high"}]}})
+            .to_string(),
+    )
+    .unwrap();
+    let preferences = "oms_lead_settings";
+    let change = "oms_update_lead_settings";
+    let settings_address = |seat: usize| json!({"projectKey":key,"room":"lead-room","leadRequestId":initial["leads"][seat]["requestId"],"provider":initial["leads"][seat]["provider"]});
+    let change_to = |seat: usize, revision: &Value, model: Value, effort: Value| {
+        let mut req = settings_address(seat);
+        req["revision"] = revision.clone();
+        req["model"] = model;
+        req["effort"] = effort;
+        req
+    };
+    for name in [preferences, change] {
+        let schema = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap();
+        assert_eq!(schema["_meta"]["ui"]["visibility"], json!(["app"]));
+        assert_eq!(schema["annotations"]["readOnlyHint"], name == preferences);
+        bad(
+            &call(
+                &mut c,
+                name,
+                &settings_address(0),
+                "01900000-0000-7000-8000-0000000000aa",
+            ),
+            "current Main",
+        );
+        let mut wrong = settings_address(0);
+        wrong["leadRequestId"] = initial["leads"][1]["requestId"].clone();
+        bad(&call(&mut c, name, &wrong, owner), "selected Lead changed");
+        wrong["projectKey"] = json!("f".repeat(64));
+        bad(&call(&mut c, name, &wrong, owner), "project changed");
+    }
     for seat in 0..3 {
+        let view = call(&mut c, preferences, &settings_address(seat), owner);
+        good(&view);
+        let public = payload(&view);
+        let settings = &view["result"]["_meta"]["leadSettings"];
+        assert_eq!(settings["selection"], json!({"model":null,"effort":null}));
+        assert_eq!(public["revision"], settings["revision"]);
+        assert!(settings["lastServed"].is_null() && settings["nativeTitle"].is_null());
+        let model = ["gpt-6-astra", "opus", "gemini-4-carbon"][seat];
+        let row = settings["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["model"] == model)
+            .unwrap();
+        assert_eq!(row["source"], if seat == 1 { "policy" } else { "catalog" });
+        assert_eq!(row["efforts"], json!(["high"]));
+        assert_eq!(row["requiresEffort"], seat == 2);
+        assert!(!public.to_string().contains(model));
+        if seat == 2 {
+            let fixed = settings["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["model"] == "gemini-pro-orchestrator")
+                .unwrap();
+            assert_eq!(fixed["fixed"], true);
+            for (model, effort) in [
+                (model, Value::Null),
+                ("gemini-pro-orchestrator", json!("high")),
+            ] {
+                bad(
+                    &call(
+                        &mut c,
+                        change,
+                        &change_to(seat, &public["revision"], json!(model), effort),
+                        owner,
+                    ),
+                    "not available",
+                );
+            }
+        }
+        bad(
+            &call(
+                &mut c,
+                change,
+                &change_to(seat, &public["revision"], json!(model), json!("ultra")),
+                owner,
+            ),
+            "not available",
+        );
+        let set = change_to(seat, &public["revision"], json!(model), json!("high"));
+        let changed = call(&mut c, change, &set, owner);
+        good(&changed);
+        assert_ne!(payload(&changed)["revision"], public["revision"]);
+        assert_eq!(
+            changed["result"]["_meta"]["leadSettings"]["selection"],
+            json!({"model":model,"effort":"high"})
+        );
+        bad(&call(&mut c, change, &set, owner), "settings changed");
         let m = message(seat, seat + 1);
         if seat == 0 {
             fixture_settings(&source, json!({"leadRoom":true,"gate":true}));
@@ -1363,6 +1568,20 @@ fn desktop_lead_conversations() {
             setup(false);
         }
         await_reply(&mut c, &m);
+        let reset = change_to(
+            seat,
+            &payload(&changed)["revision"],
+            Value::Null,
+            Value::Null,
+        );
+        let restored = call(&mut c, change, &reset, owner);
+        good(&restored);
+        assert_ne!(
+            payload(&restored)["revision"],
+            public["revision"],
+            "reset cannot revive a stale revision"
+        );
+        // Replaying the turn after reset must re-observe its original route.
         good(&call(&mut c, send, &m, owner));
         assert_eq!(
             runs(),
@@ -1865,7 +2084,7 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 21);
+    assert_eq!(tools.as_array().unwrap().len(), 24);
     assert_eq!(tools[0]["name"], "oms_open_panel");
     assert_eq!(
         tools[0]["description"],
@@ -1876,7 +2095,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v25.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v26.html");
     // Codex uses the stdio transport configuration to decide whether to reuse a running server.
     for package in [
         include_str!("../../../plugins/oms/mcp.json"),
@@ -1938,6 +2157,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v22.html"),
         json!("ui://oms/conversation-panel/v23.html"),
         json!("ui://oms/conversation-panel/v24.html"),
+        json!("ui://oms/conversation-panel/v25.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -5309,6 +5529,34 @@ fn fake_oms() {
     let tmp = source.join(format!(".call-{}", std::process::id()));
     std::fs::write(&tmp, record.to_string()).unwrap();
     std::fs::rename(tmp, source.join("last-call.json")).unwrap();
+    if cfg["leadRoom"] == true && args.first().is_some_and(|a| a == "models") {
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[1], "--providers");
+        assert_eq!(args[3], "--json");
+        let p = args[2].to_str().unwrap();
+        let mut row = json!({"provider":p,"present":true,"exact_model_override":true,"catalog_probe":"ok","catalog_age_seconds":42,
+            "effort_values":["low","high","ultra"]});
+        match p {
+            "codex" => {
+                row["catalog_models"] = json!(["gpt-6-astra", "unrouted"]);
+                row["routable"] = json!(["gpt-6-astra"]);
+                row["model_effort_scales"] = json!({"gpt-6-astra":["high"]});
+            }
+            "claude" => row["catalog_probe"] = "unsupported".into(),
+            "antigravity" => {
+                row["catalog_models"] = json!([
+                    "gemini-4-carbon-high",
+                    "gemini-4-carbon-low",
+                    "gemini-pro-orchestrator"
+                ]);
+                row["routable"] = json!(["gemini-4-carbon-high", "gemini-pro-orchestrator"]);
+                row["selectors"] = json!({"gemini-4-carbon":{"high":"gemini-4-carbon-high","low":"gemini-4-carbon-low"}});
+            }
+            _ => panic!("unknown provider in catalog request"),
+        }
+        println!("{}", json!({"schema":1,"providers":[row]}));
+        return;
+    }
     if cfg["snapshotGate"] == true {
         if args.first().is_some_and(|v| v == "dashboard") {
             std::fs::write(source.join("snapshot-ready"), "").unwrap();
@@ -5375,6 +5623,27 @@ fn fake_oms() {
                     };
                     let thread = field("--thread");
                     let provider = field("--providers");
+                    let explicit = matches!(
+                        prompt,
+                        "Private fixture follow-up 1"
+                            | "Private fixture follow-up 2"
+                            | "Private fixture follow-up 3"
+                    );
+                    assert_eq!(args.iter().any(|a| a == "--model"), explicit);
+                    assert_eq!(args.iter().any(|a| a == "--reasoning-effort"), explicit);
+                    if explicit {
+                        assert_eq!(
+                            field("--model"),
+                            match provider {
+                                "codex" => "gpt-6-astra",
+                                "claude" => "opus",
+                                "antigravity" => "gemini-4-carbon",
+                                _ => panic!(),
+                            }
+                        );
+                        assert_eq!(field("--reasoning-effort"), "high");
+                    }
+
                     let owner: Value = serde_json::from_slice(
                         &std::fs::read(source.join(format!(
                             "lead-fixture-{}",

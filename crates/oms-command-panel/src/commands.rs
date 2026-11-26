@@ -842,6 +842,20 @@ pub(crate) fn run_mode(
             .ok_or_else(|| Error::new("desktop view needs a selected repository"))?;
         return crate::desktop_board::run(&repo, &execution, source, options, services, stop);
     }
+    if options.has("desktop-worker-output") {
+        let selected = cwd
+            .join(options.required("repo")?)
+            .canonicalize()
+            .map_err(Error::new)?;
+        let (state, _) = resolve_repositories(options, cwd, None, false)?;
+        require(
+            state.as_ref() == Some(&selected),
+            "worker output needs an exact project root",
+        )?;
+        return output(crate::desktop_detail::worker_output(
+            &selected, options, services, stop,
+        )?);
+    }
     if options.has("desktop-work-items") {
         // The desktop connection selects the checkout independently of process-wide Room variables.
         let (state, _) = resolve_repositories(options, cwd, None, false)?;

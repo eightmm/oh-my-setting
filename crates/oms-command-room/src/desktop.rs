@@ -431,13 +431,18 @@ pub(crate) fn request_uuid(value: &str) -> bool {
 
 const LEAD_TASK: &str = "Acknowledge availability as this Room's provider Lead, then wait for explicit work. Do not inspect or change the repository, use tools, or delegate.";
 
-fn lead_title(provider: &str) -> Option<&'static str> {
+fn lead_titles(provider: &str) -> Option<(&'static str, &'static str)> {
     match provider {
-        "codex" => Some("Codex Lead"),
-        "claude" => Some("Claude Lead"),
-        "antigravity" => Some("AGY Lead"),
+        "codex" => Some(("OMS Lead · Codex", "Codex Lead")),
+        "claude" => Some(("OMS Lead · Claude", "Claude Lead")),
+        "antigravity" => Some(("OMS Lead · AGY", "AGY Lead")),
         _ => None,
     }
+}
+
+fn has_lead_title(member: &Value) -> bool {
+    lead_titles(member.text("provider"))
+        .is_some_and(|(new, old)| [new, old].contains(&member.text("label")))
 }
 
 impl Room<'_> {
@@ -555,7 +560,8 @@ impl Room<'_> {
         let room = self.assignment_owner_with(id, consumer, operations.as_ref())?;
         drop(operations);
         let provider = self.services.canonical_provider(provider)?;
-        let title = lead_title(&provider).ok_or_else(|| Error::new("unsupported Lead provider"))?;
+        let (title, _) =
+            lead_titles(&provider).ok_or_else(|| Error::new("unsupported Lead provider"))?;
         let request = self.lead_request(&room, consumer, &provider);
         if pinned.is_some_and(|pin| pin != request) {
             return Err(Error::new(
@@ -569,6 +575,8 @@ impl Room<'_> {
         if !open {
             return Ok(retained);
         }
+        // Replay the exact recorded join, including its original display name.
+        let title = retained["title"].as_str().unwrap_or(title);
         self.record_assignment(&room, consumer, &request, &provider, title, LEAD_TASK)
     }
 
@@ -617,7 +625,7 @@ impl Room<'_> {
                     p.flag("joined")
                         && p.text("parent") == room.text("owner")
                         && p.text("role") == "worker"
-                        && lead_title(p.text("provider")) == Some(p.text("label"))
+                        && has_lead_title(p)
                         && p.list("owns").is_empty()
                         && self.lead_request(room, consumer, p.text("provider")) == request
                 }))
@@ -778,7 +786,7 @@ impl Room<'_> {
         let lead = enrolled.text("role") == "worker"
             && enrolled.list("owns").is_empty()
             && self.lead_request(state, consumer, enrolled.text("provider")) == request
-            && lead_title(enrolled.text("provider")) == Some(enrolled.text("label"));
+            && has_lead_title(enrolled);
         let ok = request_uuid(request)
             && !self.session.child
             && self.session.participant.is_none()
