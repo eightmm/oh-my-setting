@@ -38,6 +38,12 @@ AH/CP/CC/RF owner를 GitHub Issue·Project와 연결하는 delivery view다. 같
 capability 계약과 읽기 전용 UI부터 진행하며, 이 큐와 기존 lifecycle 우선순위를 대체하지
 않는다. Project 상태는 실행·승인 권한이 아니고 CP-13 원격 mutation은 계약 검토 전 보류한다.
 
+2026-11-26 [Platform API 경계 제안](PLATFORM-API-ARCHITECTURE.md)은 기존 producer를
+재사용하는 typed facade, remote contract와 platform adapter의 상세 설계다. 문서 내
+OMS-01~16은 이 큐와 위 로드맵의 기존 owner에 연결하는 추적 ID이며 별도 필수 큐가 아니다.
+첫 원격 변경 후보는 #437의 scoped cancellation이다. Persistent host·broker·SDK·multi-tenant
+운영은 수요와 앞선 검증에 따른 조건부이며 이 문서 추가는 runtime 구현 완료를 뜻하지 않는다.
+
 ## 1. PR 지도
 
 | PR / 작업 | 실제 변경 | 조사 시점 상태 / 후속 |
