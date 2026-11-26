@@ -31,7 +31,7 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 
 ## 기존 API와 연결
 
-패널 리소스와 두 플러그인 manifest는 `ui://oms/conversation-panel/v33.html`을 사용하며,
+패널 리소스와 두 플러그인 manifest는 `ui://oms/conversation-panel/v34.html`을 사용하며,
 이전 버전의 리소스 읽기 별칭을 유지한다.
 
 | 경로 | 추가 입력·출력 | UI 사용 |
@@ -44,8 +44,9 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 | `oms_panel_chat` | transcript/diff·attempt에 `evidenceCursor`; 이 모드는 exact `projectKey` 필수 | 선택한 Room 결과를 읽는다. public/private projectKey와 Room·participant·attempt·section이 모두 일치해야 표시한다. 기존 메시지·legacy page 읽기는 유지한다. |
 | `oms_worker_output` | `answerPage`, private `page` metadata | 확인된 projectKey·Room·Lead attempt·worker attempt 쌍의 원문만 읽는다. |
 | `ui/update-model-context` | `oms-followup-draft`의 선택적 `project` 별칭·`goal`·`summary`·선택적 `task`·선택적 `turnId`·`text`; 선택 공유에는 `oms-selected-finding`의 `authority: context-only`·선택적 `project` 별칭·선택적 `task`·선택적 `turnId`·표시용 `source`(`kind`·`summary`)·`selection`·`text` (두 문맥 모두 `projectKey`·`Room`·`owner`와 내부 `source` 식별자·`digest`·`pageCursor`는 생략) | 참조만 추가하는 클릭과 발췌문을 공유하는 클릭을 분리한다. Main 수신이나 실행의 증거로 사용하지 않는다. |
-| `oms_panel_usage` | 기존 `repository-recent-attempts` projection | 더 살펴보기의 사용량 화면에서만 공급자 관측·쿼터 창·최근 시도의 보고된 값과 출처를 읽는다. |
+| `oms_panel_usage` | 기존 `repository-recent-attempts` projection | 남은 사용량 카드가 첫 화면 뒤 한 번 읽고, 더 살펴보기의 사용량 화면은 매번 새로 읽어 카드 값도 갱신한다. 공급자 관측·쿼터 창·최근 시도의 보고된 값과 출처를 표시한다. |
 | `oms_panel_project_graph` | 기존 `node` 또는 `query`, `limit: 20`, `depth: 2` | 노드와 confidence가 붙은 관계를 표시하고, 선택한 노드 주변이나 검색 결과만 다시 읽는다. |
+| `oms_panel_git_status` | 기존 git·GitHub projection | 더 보기의 PR · CI를 펼칠 때만 읽는다. |
 | `oms_panel_tui_view` | 기존 `view: routes` 또는 `modelcatalog`, `page` | 최대 20행의 카드를 표시하고 이전·다음 페이지를 명시적으로 읽는다. 예상 라우팅과 캐시 관측의 한계를 함께 표시한다. |
 
 답변은 private `_meta` 경로로 전달하며 초기 public snapshot에 본문을 넣지 않는다.
@@ -93,10 +94,21 @@ Lead 연결 설정은 접힌 메뉴로 옮기고, 결과 미리보기 대신 결
 물리 프로젝트 key를 확인한다. 화면·프로젝트·Room 전환 뒤 늦은 응답은 표시하지 않는다.
 허용한 필드만 이름을 붙인 카드로 보여 주며 raw JSON이나 진단 응답을 그대로 펼치지 않는다.
 
+v34는 Leads 아래에 남은 사용량 카드와 더 보기(PR · CI, 더 살펴보기)를 둔다.
+사용량은 첫 화면이 그려진 뒤(초기 `_meta` 화면 포함) 1.5초에 한 번 읽고, 자동 새로고침은 다시 읽지 않으며 ↻만 다시 읽는다.
+공급자마다 가장 많이 쓴 창의 남은 비율을 막대로 그리고, 20% 이하는 경고 색, 오래된 값은 흐린 막대와
+나이로 구분한다. 창이 없으면 점선 빈 막대와 "기록 없음"으로 두고 0%로 그리지 않는다.
+PR · CI는 처음 펼칠 때 기존 읽기 도구를 한 번 호출하고, 같은 범위(세대·프로젝트·물리 key·Room)
+안에서는 결과를 재사용한다. 읽은 뒤 registry의 물리 key를 다시 확인하고, 범위가 바뀌면 캐시를 비우고 접는다.
+PR은 실패 › 진행 › 통과 순으로 정렬하고 실패한 check 이름을 최대 3개 보이며, GitHub 정식 URL과 같을 때만
+링크로 연다. 호스트가 도구 호출을 거부하면 사용량과 PR · CI는 읽지 않는다.
+#631의 작업·결과 기록 구역과 새 목표 창(§5: 입력란, 보드 후보, 2×2 Main 카드, Lead 칩, 시작 버튼)은
+패널 HTML이 240 KiB 상한(`native.rs`)에 닿아 이번 범위에서 뺐고, 후속 PR에서 공간을 확보한 뒤 다룬다.
+
 ## 검증과 남은 확인
 
 프런트엔드의 기존 `node:test` + VM/DOM fixture를 확장했다.
-다음 명령으로 84개 테스트를 실행한다(목표·결과 흐름의 70개를 확장하고 선택 공유·더 살펴보기·첫 화면 12개, v33 화면 정리 2개 시나리오 추가).
+다음 명령으로 86개 테스트를 실행한다(목표·결과 흐름의 70개를 확장하고 선택 공유·더 살펴보기·첫 화면 12개, v33 화면 정리 2개, v34 사용량·더 보기 2개 시나리오 추가).
 
 ```sh
 node --test crates/oms-mcp-server/tests/conversation-panel.test.mjs
