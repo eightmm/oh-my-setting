@@ -53,7 +53,7 @@ async function panel(projects, dashboard = {}, options = {}) {
   const window = new EventTarget();
   window.scrollTo = (_x,y) => { window.scrollY = y; };
   const calls = [];
-  const host = {modes:[],contexts:[],status:null, failStart:true, replies:[], links:[], messages:[], notices:[], tools:options.tools};
+  const host = {modes:[],contexts:[],status:null, failStart:true, replies:[], links:[], messages:[], notices:[], tools:options.tools, toolError:options.toolError};
   function notify(payload) {
     window.dispatchEvent(Object.assign(new Event('message'), {
       source:window.parent, origin:'https://oms.example', data:{jsonrpc:'2.0', ...payload}
@@ -105,6 +105,8 @@ async function panel(projects, dashboard = {}, options = {}) {
       result = {isError:host.rejectMessage === true};
     }
     if (method === 'tools/call') {
+      const rpcError = typeof host.toolError === 'function' ? host.toolError(params) : host.toolError;
+      if (rpcError) { queueMicrotask(() => notify({id, error:rpcError})); return; }
       try {
         const value = tool(params.name, params.arguments);
         if(['oms_worker_output','oms_lead_settings','oms_update_lead_settings'].includes(params.name))result=value;
@@ -1676,7 +1678,7 @@ test('pending finding Share is fenced by project changes, teardown, source-scope
   assertPrivateFindingOmitted(text,[key,digest,main.room,main.participant,'worker-1','indexed-answer']);
 });
 
-test('worker task attribution falls back to rendered Lead workers for member-parent links and snapshots without conversationAttempts',async()=>{
+test('worker task attribution resolves Share rechecks only from the fresh snapshot and refuses unattributable snapshots',async()=>{
   const key='b'.repeat(64),digest='d'.repeat(64);
   const memberWorkers=[0,1].map(i=>({room:main.room,participant:'member-worker-'+i,parent:lead.participant,role:'worker',provider:'codex',joined:true}));
   const workerAttempts=[{room:main.room,id:'mw-0',participant:'member-worker-0',role:'worker',provider:'codex',state:'done',task:'task-member'},
@@ -1695,22 +1697,23 @@ test('worker task attribution falls back to rendered Lead workers for member-par
       return {structuredContent:publicData,_meta:{workerOutput:out}};
     }
   }});
-  const items=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li');
-  const open=i=>items[i].children.find(e=>e.className?.includes('worker-output-link'));
+  const open=i=>p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li')[i]
+    .children.find(e=>e.className?.includes('worker-output-link'));
   open(0).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');
   assert.match(p.get('followup-text').value,/^Task: task-member$/m);
   assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
   await p.event('followup-add','click');
   assert.equal(p.host.contexts.at(-1).structuredContent.task,'task-member');
   assert.equal(Object.hasOwn(p.host.contexts.at(-1).structuredContent,'project'),false);
+  // Fresh snapshot with member-parent workers resolves task-member from its own rows[].workers.
   open(0).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
-  snapshot={conversationBinding:'matched',conversationMain:d.conversationMain};
   await p.event('finding-share','click');
   const sharedMember=p.host.contexts.at(-1);
   assert.equal(sharedMember.structuredContent.kind,'oms-selected-finding');
   assert.equal(sharedMember.structuredContent.task,'task-member');
   assert.equal(Object.hasOwn(sharedMember.structuredContent,'project'),false);
   assertPrivateFindingOmitted(sharedMember,[key,digest,main.room,main.participant,'mw-0','member-worker-0','indexed-answer']);
+  // Fresh snapshot confirms unattributed member-parent worker when present with task: null.
   open(1).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
   assert.doesNotMatch(p.get('followup-text').value,/^Task:|task-a|Review task A/m);
   await p.event('followup-add','click');
@@ -1720,15 +1723,24 @@ test('worker task attribution falls back to rendered Lead workers for member-par
   assert.equal(sharedUnattributed.structuredContent.kind,'oms-selected-finding');
   assert.equal(Object.hasOwn(sharedUnattributed.structuredContent,'task'),false);
   assertPrivateFindingOmitted(sharedUnattributed,[key,digest,main.room,main.participant,'mw-1','member-worker-1','indexed-answer']);
-  snapshot=d;await p.event('refresh','click');
-  const refreshedItems=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li');
-  refreshedItems[0].children.find(e=>e.className?.includes('worker-output-link')).dispatchEvent(new Event('click'));
-  await setImmediate();await p.event('output-preview','click');
-  snapshot={...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='mw-0'?{...a,task:'task-a'}:a)};
-  const sharedBefore=p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length;
-  await p.event('finding-share','click');
-  assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length,sharedBefore);
-  assert.match(p.get('followup-status').textContent,/Nothing was shared/);
+  // Fresh snapshot without conversationAttempts (or missing the worker, or changed parent/task) refuses Share as changed instead of reading rendered rows.
+  for(const [index,fresh] of [
+    [0,{conversationBinding:'matched',conversationMain:d.conversationMain}],
+    [1,{conversationBinding:'matched',conversationMain:d.conversationMain}],
+    [1,{...d,conversationAttempts:d.conversationAttempts.filter(a=>a.id!=='mw-1')}],
+    [0,{...d,conversationMain:{...d.conversationMain,participants:[lead,{...memberWorkers[0],parent:'other-lead'},memberWorkers[1]]}}],
+    [0,{...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='mw-0'?{...a,task:'task-a'}:a)}],
+    [1,{...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='mw-1'?{...a,task:'task-a'}:a)}]
+  ]){
+    snapshot=d;await p.event('refresh','click');
+    open(index).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-preview','click');
+    snapshot=fresh;
+    const sharedBefore=p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length;
+    await p.event('finding-share','click');
+    assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length,sharedBefore);
+    assert.equal(p.get('finding-text').textContent,'');
+    assert.match(p.get('followup-status').textContent,/Nothing was shared/);
+  }
 });
 
 const inspectReads=['oms_panel_usage','oms_panel_tui_view','oms_panel_project_graph'];
@@ -1955,4 +1967,179 @@ test('pending-turn polling pauses visibly and slot badges change only after a co
   assert.doesNotMatch(p.get('leads').children[2].textContent,/withheld|unreadable|unconfirmed/);
   open.dispatchEvent(new Event('click'));await setImmediate();await p.event('chat-back','click');assert.match(p.get('leads').children[1].textContent,/Reply read/);
   assert.ok(!p.calls.some(c=>c.name==='oms_send_lead_message'));
+});
+
+test('auto-refresh pauses while the follow-up preview or finding Share is active and resumes on close without weakening rechecks',async()=>{
+  let now=1000;
+  const jobs=new Map(),memory=new Map([['oms.panel.auto-refresh.v1','on']]),key='b'.repeat(64),digest='d'.repeat(64),body='Scoped worker finding';
+  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
+  const autos=()=>[...jobs].filter(([,job])=>job.ms===20000);
+  const d={...dashboard,conversationAttempts:[...dashboard.conversationAttempts,{id:'worker-0',parentAttempt:'l',provider:'codex',role:'worker',state:'done',task:'task-b'}]};
+  let snapshot=d;
+  const p=await panel(['one'],d,{locale:'en',context:true,timers,storage,visibility:true,tools:{
+    oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
+    oms_panel_snapshot:()=>({dashboard:snapshot}),
+    oms_worker_output:a=>{
+      const {project,answerPage,...pair}=a,publicData={...pair,status:'complete'};
+      const out={...publicData,text:body,source:'indexed-answer',truncated:false};
+      if(answerPage!==undefined)out.page={offset:0,bytes:Buffer.byteLength(body),totalBytes:Buffer.byteLength(body),digest,nextCursor:null,hasMore:false};
+      return {structuredContent:publicData,_meta:{workerOutput:out}};
+    }
+  }});
+  await p.open('input',{arguments:{project:'one'}});
+  assert.equal(autos().length,1);
+  const staleCallback=autos()[0][1].fn;
+  const open=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.find(e=>e.tagName==='li')
+    .children.find(e=>e.className?.includes('worker-output-link'));
+  open.dispatchEvent(new Event('click'));await setImmediate();
+  await p.event('output-preview','click');
+  assert.equal(p.get('followup-panel').hidden,false);
+  assert.equal(p.get('finding-preview').hidden,false);
+  assert.equal(autos().length,0);
+  // Stale focus/visibility and timer callbacks skip while the preview and pending Share are active.
+  now+=25000;
+  p.host.delayTool='oms_worker_output';
+  await p.event('finding-share','click');
+  assert.equal(p.get('finding-share').disabled,true);
+  const callsDuringShare=p.calls.length;
+  staleCallback();
+  p.window.dispatchEvent(new Event('focus'));
+  p.document.show(false);p.document.show(true);
+  p.run('autoReload()');
+  await setImmediate();
+  assert.equal(p.calls.length,callsDuringShare);
+  assert.equal(p.run('busy'),false);
+  assert.equal(p.get('finding-text').textContent,body);
+  p.host.release();await setImmediate();
+  assert.equal(p.host.contexts.at(-1)?.structuredContent?.kind,'oms-selected-finding');
+  assert.equal(p.host.contexts.at(-1)?.structuredContent?.task,'task-b');
+  assert.equal(p.get('finding-preview').hidden,false);
+  assert.equal(autos().length,0);
+  // Post-load verifiedFindingScope still enforces exact recheck.
+  p.host.delayTool='oms_worker_output';
+  await p.event('finding-share','click');
+  snapshot={...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='worker-0'?{...a,task:'task-changed'}:a)};
+  p.host.release();await setImmediate();
+  assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length,1);
+  assert.equal(p.get('finding-text').textContent,'');
+  assert.match(p.get('followup-status').textContent,/Nothing was shared/);
+  await p.event('followup-close','click');
+  assert.equal(autos().length,1);
+});
+
+test('a host that rejects every tools/call with a JSON-RPC error renders the initial open dashboard, disables tool controls and clears on a later success',async()=>{
+  const ipcUnavailable={code:-32603,message:'IPC not available for MCP tool call'};
+  const timers=new Map(),memory=new Map([['oms.panel.auto-refresh.v1','on']]),key='b'.repeat(64);
+  const p=await panel(['one','two'],{...dashboard,goal:'Live snapshot from tools/call'},{
+    locale:'en',
+    context:true,
+    storage:{getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)},
+    timers:{setTimeout(fn,ms){const id=Symbol();timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}},
+    tools:{oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:key,two:'c'.repeat(64)}})},
+    toolError:ipcUnavailable
+  });
+  assert.equal(p.run('hostToolsUnavailable'),true);
+  assert.equal(p.get('refresh').disabled,true);
+  assert.equal(p.get('auto-refresh').disabled,true);
+
+  await p.open('input',{arguments:{project:'one'}});
+  await p.open('result',{structuredContent:{
+    panel:'OMS',project:'one',readOnly:false,
+    dashboard:{...dashboard,project:'one',goal:'Rendered from initial open'}
+  }});
+  assert.equal(p.get('view').hidden,false);
+  assert.equal(p.get('project').textContent,'one');
+  assert.equal(p.get('goal').textContent,'Rendered from initial open');
+  assert.equal(p.get('main-name').textContent,'OMS Main · Codex');
+  assert.equal(p.run('hostToolsUnavailable'),true);
+  assert.equal(p.get('refresh').disabled,true);
+  assert.equal(p.get('auto-refresh').disabled,true);
+  assert.equal(p.get('new-goal').disabled,true);
+  assert.equal(p.get('header-main').disabled,true);
+  assert.equal(p.get('inspect-open').disabled,true);
+  assert.equal(p.get('open-leads').disabled,true);
+  const memberButton=p.get('leads').children[1].children[2];
+  assert.equal(memberButton.disabled,true);
+  assert.equal([...timers.values()].filter(t=>t.ms===20000).length,0);
+  assert.match(p.get('status').textContent,/Refresh and actions are unavailable in this host.*Request a refresh in the conversation/);
+  await choose(p,'ko');
+  assert.match(p.get('status').textContent,/새로고침과 작업을 사용할 수 없습니다.*대화에서 새로고침을 요청하세요/);
+  await choose(p,'en');
+
+  const mark=p.calls.length;
+  await p.event('refresh','click');
+  await p.event('auto-refresh','click');
+  await p.event('new-goal','click');
+  await p.event('header-main','click');
+  await p.event('inspect-open','click');
+  memberButton.dispatchEvent(new Event('click'));await setImmediate();
+  p.window.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'r',altKey:true}));await setImmediate();
+  assert.equal(p.calls.length,mark);
+  assert.equal(p.get('goal').textContent,'Rendered from initial open');
+  assert.equal(p.get('launcher').open ?? false,false);
+  assert.equal(p.get('conversation').open ?? false,false);
+  assert.equal(p.get('inspection').open ?? false,false);
+
+  // Existing hostRejected classification for -32601/-32602 keeps its meaning.
+  p.host.toolError={code:-32601,message:'Method not found'};
+  const rejected=await p.run(`request('tools/call',{name:'oms_list_projects',arguments:{}}).then(()=>null,e=>({hostRejected:e.hostRejected,message:e.message}))`);
+  assert.equal(rejected.hostRejected,true);
+  p.host.toolError=ipcUnavailable;
+  const generic=await p.run(`request('tools/call',{name:'oms_list_projects',arguments:{}}).then(()=>null,e=>({hostRejected:e.hostRejected,message:e.message}))`);
+  assert.equal(generic.hostRejected,false);
+
+  // A later successful tools/call clears hostToolsUnavailable, re-enables controls and clears the note.
+  p.host.toolError=null;
+  await p.open('input',{arguments:{project:'two'}});
+  assert.equal(p.run('hostToolsUnavailable'),false);
+  assert.equal(p.get('project').textContent,'two');
+  assert.equal(p.get('goal').textContent,'Live snapshot from tools/call');
+  assert.equal(p.get('refresh').disabled,false);
+  assert.equal(p.get('auto-refresh').disabled,false);
+  assert.equal(p.get('new-goal').disabled,false);
+  assert.equal(p.get('inspect-open').disabled,false);
+  assert.equal(p.get('status').textContent,'');
+
+  // Once a newer snapshot from a successful tools/call has rendered for the same project and generation,
+  // a late open result dashboard does not overwrite it.
+  await p.open('result',{structuredContent:{panel:'OMS',project:'two',dashboard:{project:'two',goal:'Stale open dashboard'}}});
+  assert.equal(p.get('goal').textContent,'Live snapshot from tools/call');
+
+  // Tool results with isError do not set hostToolsUnavailable, while a later JSON-RPC error keeps the last snapshot
+  // and a newer open result clears the flag again.
+  const approval={id:'r-1',version:1,digest:'a'.repeat(64),summary:'Approve?',action:'Main scope decision',object:main.room};
+  const q=await panel(['one'],{...dashboard,goal:'Initial live'},{locale:'en',context:true,tools:{
+    oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
+    oms_list_approvals:()=>({approvals:[approval]})
+  }});
+  const approveButton=()=>q.get('approvals').children[0].children.at(-1).children.at(-1).children.find(b=>b.type==='button');
+  assert.equal(approveButton().disabled,false);
+  await q.event('followup-open','click');
+  assert.equal(q.get('followup-main').disabled,false);
+  q.host.tools.oms_panel_snapshot=()=>{throw new Error('server tool error');};
+  await q.event('refresh','click');
+  assert.equal(q.run('hostToolsUnavailable'),false);
+  q.host.tools.oms_panel_snapshot=args=>({dashboard:{...dashboard,project:args.project,goal:'Recovered live'}});
+  await q.event('refresh','click');
+  assert.equal(q.get('goal').textContent,'Recovered live');
+  await q.event('followup-open','click');
+  q.host.toolError=ipcUnavailable;
+  await q.event('refresh','click');
+  assert.equal(q.run('hostToolsUnavailable'),true);
+  assert.equal(q.get('view').hidden,false);
+  assert.equal(q.get('goal').textContent,'Recovered live');
+  assert.equal(q.get('refresh').disabled,true);
+  assert.equal(q.get('inspect-open').disabled,true);
+  assert.equal(q.get('followup-main').disabled,true);
+  assert.equal(approveButton().disabled,true);
+  assert.match(q.get('status').textContent,/Refresh and actions are unavailable in this host/);
+  await q.open('result',{structuredContent:{panel:'OMS',project:'one',dashboard:{...dashboard,project:'one',goal:'Refreshed via conversation'}}});
+  assert.equal(q.run('hostToolsUnavailable'),false);
+  assert.equal(q.get('goal').textContent,'Refreshed via conversation');
+  assert.equal(q.get('refresh').disabled,false);
+  assert.equal(q.get('inspect-open').disabled,false);
+  assert.equal(q.get('followup-main').disabled,false);
+  assert.equal(approveButton().disabled,false);
+  assert.equal(q.get('status').textContent,'');
 });

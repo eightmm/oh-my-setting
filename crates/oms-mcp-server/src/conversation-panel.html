@@ -338,7 +338,7 @@ header{gap:8px;padding-bottom:8px}
 <section id="full-answer" hidden><div class="section-head"><h3 data-i18n="answer.title">기록된 출력</h3><button id="answer-close" type="button" data-i18n="close">닫기</button></div><pre id="full-answer-body"></pre><p id="answer-status" class="note" role="status"></p><div class="actions"><button id="answer-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="answer-more" type="button" data-i18n="answer.more" hidden>다음 부분 읽기</button><button id="answer-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="answer-preview" type="button" data-i18n="finding.preview" hidden>Main에 공유할 부분 미리보기</button><button id="answer-followup" type="button" data-i18n="followup.result" hidden>이 결과로 요청 초안 준비</button></div></section></div>
 <form id="chat-compose" hidden><label for="chat-text" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000" aria-describedby="chat-count chat-delivery"></textarea><span id="chat-count" class="count"></span>
 <div class="actions"><span id="chat-delivery" role="status"></span><button id="chat-check" type="button" hidden></button><button id="chat-send" type="submit" data-i18n="chatSend">보내기</button></div></form></dialog>
-<dialog id="inspection" aria-labelledby="inspect-title"><div class="dialog-body"><div class="section-head"><h2 id="inspect-title" data-i18n="inspect.title">프로젝트 더 살펴보기</h2><button id="inspect-close" type="button" data-i18n="close">닫기</button></div><div class="actions"><label for="inspect-kind" class="sr-only" data-i18n="inspect.choose">살펴볼 항목</label><select id="inspect-kind"><option value="usage" data-i18n="inspect.usage">사용량과 쿼터</option><option value="graph" data-i18n="inspect.graph">프로젝트 관계</option><option value="routes" data-i18n="inspect.routes">예상 라우팅</option><option value="modelcatalog" data-i18n="inspect.modelcatalog">모델 카탈로그</option></select><button id="inspect-refresh" type="button" data-i18n="refresh">새로고침</button></div><form id="inspect-graph-form" class="actions" hidden><label for="inspect-query" class="sr-only" data-i18n="inspect.searchLabel">이름 또는 경로</label><input id="inspect-query" maxlength="256" placeholder="이름 또는 경로"><button type="submit" data-i18n="inspect.search">찾기</button><button id="inspect-root" type="button" data-i18n="inspect.root">전체 범위</button></form><p id="inspect-note" class="note"></p><p id="inspect-status" class="note" role="status"></p><div id="inspect-content"></div><div class="actions"><button id="inspect-prev" type="button" data-i18n="inspect.prev" hidden>이전 페이지</button><button id="inspect-next" type="button" data-i18n="inspect.next" hidden>다음 페이지</button></div></div></dialog>
+<dialog id="inspection" aria-labelledby="inspect-title"><div class="dialog-body"><div class="section-head"><h2 id="inspect-title" data-i18n="inspect.title">프로젝트 더 살펴보기</h2><button id="inspect-close" type="button" data-i18n="close">닫기</button></div><div class="actions"><label for="inspect-kind" class="sr-only" data-i18n="inspect.choose">살펴볼 항목</label><select id="inspect-kind"><option value="usage" data-i18n="inspect.usage">사용량과 쿼터</option><option value="graph" data-i18n="inspect.graph">프로젝트 관계</option><option value="routes" data-i18n="inspect.routes">예상 라우팅</option><option value="modelcatalog" data-i18n="inspect.modelcatalog">모델 카탈로그</option></select><button id="inspect-refresh" type="button" data-i18n="refresh">새로고침</button></div><form id="inspect-graph-form" class="actions" hidden><label for="inspect-query" class="sr-only" data-i18n="inspect.searchLabel">이름 또는 경로</label><input id="inspect-query" maxlength="256" placeholder="이름 또는 경로"><button id="inspect-search" type="submit" data-i18n="inspect.search">찾기</button><button id="inspect-root" type="button" data-i18n="inspect.root">전체 범위</button></form><p id="inspect-note" class="note"></p><p id="inspect-status" class="note" role="status"></p><div id="inspect-content"></div><div class="actions"><button id="inspect-prev" type="button" data-i18n="inspect.prev" hidden>이전 페이지</button><button id="inspect-next" type="button" data-i18n="inspect.next" hidden>다음 페이지</button></div></div></dialog>
 </main><script>
 'use strict';
 const el=id=>document.getElementById(id);
@@ -432,6 +432,7 @@ const messages = {
   "host.collapse": ["축소", "Collapse"],
   "host.expand": ["확대", "Expand"],
   "hostFail": ["앱이 요청을 처리하지 못했습니다.", "The app could not process the request."],
+  "hostToolsUnavailable": ["이 호스트에서는 새로고침과 작업을 사용할 수 없습니다. 대화에서 새로고침을 요청하세요.", "Refresh and actions are unavailable in this host. Request a refresh in the conversation."],
   "issueVersion": ["확인한 버전 · {revision}", "Reviewed version · {revision}"],
   "joined": ["작업방에 참여 중", "Joined this room"],
   "launchMain": ["이 목표로 새 Main 시작", "Start a new Main"],
@@ -706,8 +707,12 @@ const pending = new Map();
 let sequence = 0;
 let hostOrigin = '*';
 let initializing;
-let busy = false;
+let busy = false, busyWriting = false;
 let disposed = false;
+let hostToolsUnavailable = false, hostToolsFailedOpen = -1, hostToolsErrorSeq = 0, seenOpenResult = false;
+let snapshotClock = 0, renderedToolSnapshot = {seq:0, generation:-1, project:null};
+const personButtons = [], approvalButtons = [], turnAnswerButtons = [], inspectNodeButtons = [];
+let issueReviewBusy = false, chatReading = false;
 const AUTO_KEY='oms.panel.auto-refresh.v1';
 let autoRefresh=false, autoTimer, lastLoadedAt=0;
 // A retained public snapshot never restores write authority; retries stay bounded.
@@ -761,7 +766,7 @@ function request(method, params, timeout = 90000) {
       pending.delete(id);
       reject(uiError('timeout'));
     }, timeout);
-    pending.set(id, {resolve, reject, timer});
+    pending.set(id, {resolve, reject, timer, method});
     send({id, method, params});
   });
 }
@@ -825,7 +830,7 @@ window.addEventListener('message', event => {
     seenInputOrManual = true;
     leadIntent=undefined;
     switchProject(target);
-    pendingOpens.push({id:++openSeq,target,explicit,generation,room:joinedMain()?.room,owner:joinedMain()?.participant});
+    pendingOpens.push({id:++openSeq,seq:++snapshotClock,target,explicit,generation,room:joinedMain()?.room,owner:joinedMain()?.participant});
     return;
   }
   if (msg.method === 'ui/notifications/tool-result') {
@@ -839,13 +844,15 @@ window.addEventListener('message', event => {
     }
     const result = msg.params?.structuredContent;
     if (result?.panel === 'OMS') {
+      const priorOpen = seenOpenResult;
+      seenOpenResult = true;
       const target = projectArgument(result.project);
       let index = -1;
       for (let i = pendingOpens.length - 1; i >= 0; i--) {
         if (pendingOpens[i].target === target) { index = i; break; }
       }
+      const opened = index >= 0 ? pendingOpens[index] : null;
       if (index >= 0) {
-        const opened=pendingOpens[index];
         const authorized=opened.explicit && opened.id===openSeq && opened.generation===generation &&
           pendingOpens.length===1 && !pendingErrors.length && result.leadConversations===true && result.readOnly!==true;
         pendingOpens.splice(index, 1);
@@ -858,6 +865,36 @@ window.addEventListener('message', event => {
       } else {
         switchProject(target);
       }
+      if (target !== invalidProject && requestedProject === target) {
+        const hadSnapshot = priorOpen || renderedToolSnapshot.seq > 0;
+        if (hadSnapshot && hostToolsUnavailable && (!opened || hostToolsFailedOpen < opened.id)) {
+          setHostToolsUnavailable(false);
+        }
+        const d = result.dashboard;
+        if (d && typeof d === 'object' && !Array.isArray(d)) {
+          const scope = target || project || (typeof d.project === 'string' && d.project) || null;
+          const openBaseline = opened ? opened.seq : (priorOpen || hostToolsErrorSeq > renderedToolSnapshot.seq ? snapshotClock : 0);
+          const hasNewerSnapshot = renderedToolSnapshot.generation === generation &&
+            renderedToolSnapshot.project === scope &&
+            renderedToolSnapshot.seq > openBaseline;
+          if (!hasNewerSnapshot) {
+            if (renderedToolSnapshot.generation !== generation) readOnly = result.readOnly === true;
+            if (!project && typeof target === 'string') project = target;
+            staleView = false;
+            resetAutoRetry();
+            const savedIntent = busy ? leadIntent : undefined;
+            render(d);
+            if (savedIntent && !leadIntent) leadIntent = savedIntent;
+            lastLoadedAt = Date.now();
+            syncHostTools();
+            if (hostToolsUnavailable) setStatus('hostToolsUnavailable', 'warn');
+            else {
+              const notice = snapshotNotice(d);
+              setStatus(() => notice ? t(notice) : '', notice ? 'warn' : 'info');
+            }
+          }
+        }
+      }
     }
     return;
   }
@@ -869,9 +906,14 @@ window.addEventListener('message', event => {
   if (msg.error) {
     const error = msg.error.message ? new Error(msg.error.message) : uiError('hostFail');
     error.hostRejected = [-32601,-32602].includes(msg.error.code);
+    if (call.method === 'tools/call') setHostToolsUnavailable(true);
     call.reject(error);
+  } else {
+    if (call.method === 'tools/call' && msg.result && !msg.result.isError && hostToolsUnavailable) {
+      setHostToolsUnavailable(false);
+    }
+    call.resolve(msg.result);
   }
-  else call.resolve(msg.result);
 });
 
 async function tool(name, args = {}, expected = generation) {
@@ -931,7 +973,7 @@ function chooseProject(aliases) {
     return false;
   }
   const selected = target || (aliases.length === 1 ? aliases[0] : '');
-  if (selected !== project) clearProject();
+  if (selected !== project && !(project === '' && dashboardData && (!dashboardData.project || dashboardData.project === selected))) clearProject();
   project = selected;
   if (aliases.length > 1) select.add(selectProjectOption());
   for (const alias of aliases) select.add(new Option(alias, alias));
@@ -1060,14 +1102,14 @@ function nativeMainUri(page,member) {
 
 function roleTitle(role,provider){return 'OMS '+role+' · '+providerName(provider);}
 function assignmentLabel(row) { return row.role==='lead'?roleTitle('Lead',row.provider):providerName(row.provider)+choice(' 배정',' assignment'); }
-function attemptMember(row) {
+function attemptMember(row,list=members) {
   // Native Codex assignments enrol the exact attempt ID as the Room participant.
-  return members.find(m => m.room === row.room && (row.participant ? m.participant === row.participant :
+  return list.find(m => m.room === row.room && (row.participant ? m.participant === row.participant :
     row.tool === 'panel-native-assignment' && row.provider === 'codex' && m.provider === 'codex' && m.role === 'worker' && m.participant === row.id));
 }
 
 function clearChat() {
-  clearSettings();el('settings-toggle').hidden=true;
+  clearSettings();el('settings-toggle').hidden=true;turnAnswerButtons.length=0;
   clearTimeout(managedChat?.timer);selectedChat=undefined;managedChat=undefined;chatCursor=null;chatPage++;
   el('chat-compose').hidden=true;el('chat-avatar').hidden=true;el('chat-text').value='';el('chat-delivery').textContent='';
   el('chat-messages').replaceChildren();el('chat-result').textContent='';
@@ -1082,10 +1124,11 @@ function closeDialogs() {
   clearChat();
 }
 function resetIssue() {
-  issueTicket++;reviewedIssue=null;el('issue-record').hidden=true;el('issue-evidence').textContent='';
-  el('issue-review').hidden=!issueInput() || !issueOwner();el('issue-review').disabled=false;
+  issueTicket++;issueReviewBusy=false;reviewedIssue=null;el('issue-record').hidden=true;el('issue-evidence').textContent='';
+  el('issue-review').hidden=!issueInput() || !issueOwner();el('issue-review').disabled=hostToolsUnavailable || disposed;
 }
 function clearProject() {
+  personButtons.length=0;approvalButtons.length=0;
   staleView=false;bindingKey=null;lastGoodBinding=null;lastGoodGeneration=-1;clearFollowup();
   resetLeadControl();leadSlots.clear();paintLeadControls();
   dashboardData=undefined;members=[];rows=[];retryStart=undefined;approvalState.clear();approvedScope++;
@@ -1109,7 +1152,7 @@ function issueOwner() {
   const m=joinedMain();
   return m?.provider==='codex' && typeof m.incomplete==='boolean' ? m : null;
 }
-function verifiedLeads(main,d) {
+function verifiedLeads(main,d,list=members) {
   const scoped=Array.isArray(d.conversationAttempts), active=Array.isArray(d.activeAttempts)?d.activeAttempts:[];
   const records=scoped?d.conversationAttempts:[...active,...(d.attempts||[])];
   // A panel-main row projects its harness as provider, which may differ from the Room's dispatch provider.
@@ -1121,7 +1164,7 @@ function verifiedLeads(main,d) {
   const seen=new Set(), leads=[];
   for(const r of scoped?records:active) {
     if(!r || !isLead(r) || r.room!==main.room || r.participant===main.participant)continue;
-    const member=attemptMember(r);
+    const member=attemptMember(r,list);
     if(member && (member.joined===false || (member.parent && member.parent!==main.participant) ||
       !['lead','worker'].includes(member.role) || (member.provider && r.provider && providerName(member.provider)!==providerName(r.provider))))continue;
     if(r.parentAttempt ? !owners.has(r.parentAttempt) : member?.parent!==main.participant)continue;
@@ -1136,7 +1179,7 @@ function verifiedLeads(main,d) {
   return {leads,ownerRun:ownerRecords[0],partial:(source!=null && source!=='ok') || main.incomplete!==false || !Array.isArray(main.participants) || main.participantsOmitted>0 ||
     (scoped?d.conversationAttemptsOmitted>0 || d.conversationAttemptsTrimmed>0:!Array.isArray(d.activeAttempts)||d.activeAttemptsTrimmed>0 || d.active!==active.length)};
 }
-function workersForLead(lead,records) {
+function workersForLead(lead,records,list=members) {
   const workers=[], seen=new Set();
   const parent=lead.member?.participant;
   const add=(attempt,member)=>{
@@ -1146,7 +1189,7 @@ function workersForLead(lead,records) {
   for(const r of records){
     if(!r?.id || r.id===lead.attempt.id || r.role && r.role!=='worker' || isMain(r) || isLead(r))continue;
     if(r.room!=null && r.room!==lead.attempt.room)continue;
-    const member=r.participant && members.find(m=>m.participant===r.participant);
+    const member=r.participant && list.find(m=>m.participant===r.participant);
     const memberParent=Boolean(parent && member?.parent===parent);
     if(r.parentAttempt ? r.parentAttempt!==lead.attempt.id : !memberParent || !r.room)continue;
     if(member && (member.role!=='worker' || member.joined!==true && !r.parentAttempt || member.parent && !memberParent ||
@@ -1154,11 +1197,22 @@ function workersForLead(lead,records) {
     if(r.role==='worker' || member?.role==='worker')add(r,memberParent && member.joined===true?member:null);
   }
   // A joined member proves membership even before an attempt records its state.
-  for(const m of members){
+  for(const m of list){
     if(parent && m.parent===parent && m.role==='worker' && m.joined===true &&
       !records.some(r=>r?.participant===m.participant || r?.id===m.participant))add({provider:m.provider},m);
   }
   return workers;
+}
+function snapshotMembers(main){
+  const list=main && Array.isArray(main.participants)?main.participants.filter(m=>m?.room===main.room && m.participant):[];
+  if(main && !list.some(m=>m.participant===main.participant))list.push(main);
+  return list;
+}
+function snapshotRows(main,d){
+  const list=snapshotMembers(main),{leads,partial,ownerRun}=main?verifiedLeads(main,d,list):{leads:[],partial:false};
+  const records=Array.isArray(d?.conversationAttempts)?d.conversationAttempts:[];
+  for(const lead of leads)lead.workers=workersForLead(lead,records,list);
+  return {list,leads,partial,ownerRun};
 }
 function paintAvatar(element,provider) {
   element.setAttribute('data-provider',provider==='antigravity'?'agy':provider||'');
@@ -1191,7 +1245,8 @@ function personEntry({attempt,member},kind) {
   if(member){
     if(selectedChat?.room===member.room && selectedChat.participant===member.participant &&
        selectedChat.parent===member.parent && selectedChat.provider===member.provider)chatOrigin=entry;
-    entry.type='button';const arrow=node('span','›','arrow');arrow.setAttribute('aria-hidden','true');entry.append(arrow);
+    entry.type='button';entry.disabled=hostToolsUnavailable || disposed;personButtons.push(entry);
+    const arrow=node('span','›','arrow');arrow.setAttribute('aria-hidden','true');entry.append(arrow);
     entry.append(node('span',message('openChat'),'sr-only'));
     entry.addEventListener('click',()=>openConversation(member,identity,entry));
   }
@@ -1241,7 +1296,7 @@ function checkedWorkerOutput(result,args,paged){
   return out;
 }
 async function readWorkerOutput(s,paged=false){
-  if(!s || s!==selectedOutput || s.loading)return;
+  if(hostToolsUnavailable || !s || s!==selectedOutput || s.loading)return;
   const args={projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt},cursor=paged?s.cursor||'':null;
   if(paged)args.answerPage=cursor;else{s.cursor=null;s.digest=null;s.end=0;s.pageCursor=null;}
   el('output-body').hidden=true;el('output-body').textContent='';el('output-limited').hidden=true;
@@ -1266,13 +1321,13 @@ async function readWorkerOutput(s,paged=false){
     el('output-first').hidden=!paged || !s.start;
     put('output-more',paged?'answer.more':'answer.full');
   }catch{if(currentWorkerOutput(s)){s.text='';s.cursor=null;put('output-status',paged?'answer.changed':'out.unavailable');}}
-  finally{if(selectedOutput===s){s.loading=false;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=el('output-preview').disabled=false;}}
+  finally{if(selectedOutput===s){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=el('output-preview').disabled=blocked;}}
 }
 function openWorkerOutput(lead,worker,origin){
-  if(!currentLeadControl(leadControl) || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
+  if(hostToolsUnavailable || !currentLeadControl(leadControl) || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
   const label=()=>[workerName(worker),worker.attempt.taskTitle].filter(Boolean).join(' · ');
   const s={ctl:leadControl,room:leadControl.room,projectKey:leadControl.projectKey,leadAttempt:lead.attempt.id,workerAttempt:worker.attempt.id,label,origin};
-  selectedOutput=s;el('output-refresh').disabled=false;
+  selectedOutput=s;el('output-refresh').disabled=hostToolsUnavailable || disposed;
   put('output-worker',label);
   el('worker-output').showModal();el('output-close').focus();armAuto();readWorkerOutput(s);
 }
@@ -1341,7 +1396,7 @@ async function loadResultPage(ref,cursor,expected){
     summary:ref.summary||[el('chat-title').textContent,t('answer.title')].filter(Boolean).join(' · ')}};
 }
 async function readFullAnswer(s){
-  if(!currentFullAnswer(s) || s.loading)return;
+  if(hostToolsUnavailable || !currentFullAnswer(s) || s.loading)return;
   s.loading=true;el('answer-more').disabled=el('answer-first').disabled=true;put('answer-status','chatLoading');
   try{
     const ref=s.kind==='lead'?{kind:'lead-answer',projectKey:s.projectKey,room:s.c.ctl.room,provider:s.c.provider,leadRequestId:s.c.requestId,turnId:s.turnId}:
@@ -1355,25 +1410,26 @@ async function readFullAnswer(s){
     el('answer-preview').hidden=!source || !s.text.trim() || !findingScope();
   }catch{
     if(currentFullAnswer(s)){s.text='';s.cursor=null;s.source=null;el('full-answer-body').textContent='';el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=el('answer-preview').hidden=true;put('answer-status','answer.changed');}
-  }finally{if(currentFullAnswer(s)){s.loading=false;el('answer-more').disabled=el('answer-first').disabled=false;}}
+  }finally{if(currentFullAnswer(s)){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('answer-more').disabled=el('answer-first').disabled=el('answer-preview').disabled=blocked;}}
 }
 function openFullAnswer(selection){
-  if(selection.kind==='lead'?!currentManaged(selection.c):!canChat(selection.member) || !/^[a-f0-9]{64}$/.test(bindingKey))return;
+  if(hostToolsUnavailable || (selection.kind==='lead'?!currentManaged(selection.c):!canChat(selection.member) || !/^[a-f0-9]{64}$/.test(bindingKey)))return;
   clearFullAnswer();fullAnswer={...selection,projectKey:selection.kind==='room'?bindingKey:selection.c.ctl.projectKey,generation,cursor:null,end:0};el('full-answer').hidden=false;
   el('answer-close').focus();readFullAnswer(fullAnswer);
 }
 onClick('answer-close',()=>{const s=fullAnswer;clearFullAnswer();s?.origin?.focus();});
 onClick('answer-more',()=>readFullAnswer(fullAnswer));
-onClick('answer-first',()=>{const s=fullAnswer;if(currentFullAnswer(s) && !s.loading){s.cursor=null;s.digest=null;s.end=0;readFullAnswer(s);}});
+onClick('answer-first',()=>{const s=fullAnswer;if(!hostToolsUnavailable && currentFullAnswer(s) && !s.loading){s.cursor=null;s.digest=null;s.end=0;readFullAnswer(s);}});
 onClick('answer-copy',()=>{const s=fullAnswer;copyDisplayed(s?.text,'answer-status',()=>currentFullAnswer(s));});
 onClick('answer-followup',()=>{
   const s=fullAnswer;if(!currentFullAnswer(s) || !s.source)return;
   const source={...s.source,digest:s.digest};el('conversation').close();clearChat();prepareFollowup(source);
 });
 onClick('chat-result-full',()=>{
-  if(selectedChat && roomResult?.attempt)openFullAnswer({kind:'room',member:selectedChat,attempt:roomResult.attempt,origin:el('chat-result-full')});
+  if(!hostToolsUnavailable && selectedChat && roomResult?.attempt)openFullAnswer({kind:'room',member:selectedChat,attempt:roomResult.attempt,origin:el('chat-result-full')});
 });
 function renderLeadSlots(leads,complete) {
+  personButtons.length=0;
   const list=el('leads');list.replaceChildren();leadSlots.clear();
   const providerOf=record=>record.attempt.provider==='antigravity'?'agy':record.attempt.provider;
   for(const provider of providers) {
@@ -1411,18 +1467,18 @@ function rememberLeads(ctl,on) {
   try {const key=preferenceKey(ctl);if(key)localStorage.setItem(key,on?'on':'off');} catch {}
 }
 function paintLeadControls(){
-  const ctl=leadControl, known=currentLeadControl(ctl);
-  for(const lead of rows)for(const worker of lead.workers)if(worker.outputButton)worker.outputButton.disabled=!(known && ctl.observed && ctl.projectKey);
+  const ctl=leadControl, known=currentLeadControl(ctl), blocked=hostToolsUnavailable || disposed;
+  for(const lead of rows)for(const worker of lead.workers)if(worker.outputButton)worker.outputButton.disabled=blocked || !(known && ctl.observed && ctl.projectKey);
   if(selectedOutput && !currentWorkerOutput(selectedOutput))closeWorkerOutput();
   const opener=el('open-leads');
-  opener.hidden=!known;opener.disabled=!known || !ctl.observed || ctl.reading || ctl.writing;
+  opener.hidden=!known;opener.disabled=blocked || !known || !ctl.observed || ctl.reading || ctl.writing;
   const auto=known && autoLeads(ctl);
   el('lead-auto-label').hidden=!known;el('lead-auto').checked=Boolean(auto);
-  el('lead-auto').disabled=!known || !ctl.observed;
+  el('lead-auto').disabled=blocked || !known || !ctl.observed;
   el('lead-opt-in-note').hidden=!known;
   const pendingTurn=known && [...ctl.items.values()].some(r=>['reserved','running','unconfirmed'].includes(r.latestTurn?.status) || r.turnState);
   el('lead-refresh').hidden=!known || !(ctl.failed || ctl.pollPaused || pendingTurn);
-  el('lead-refresh').disabled=!known || ctl.reading || ctl.writing;
+  el('lead-refresh').disabled=blocked || !known || ctl.reading || ctl.writing;
   if(managedChat && (!known || ctl.items.get(managedChat.provider)?.requestId!==managedChat.requestId ||
       ctl.items.get(managedChat.provider)?.status!=='ready')){
     el('conversation').close();clearChat();
@@ -1436,10 +1492,10 @@ function paintLeadControls(){
     if(key)put(slot.status,key);else slot.status.textContent='';
     slot.avatar.setAttribute('data-presence',slot.attention || stateTone(row?.status)==='attention'?'attention':slot.working || row?.status==='starting'?'working':ready?'live':'idle');
     slot.open.hidden=!ready;
-    slot.open.disabled=!known || !ctl.observed || ctl.writing;
+    slot.open.disabled=blocked || !known || !ctl.observed || ctl.writing;
     if(ready)put(slot.open,()=>t('lead.ready',{provider:names[provider]}));else slot.open.textContent='';
     slot.connect.hidden=!known || row?.status!=='not_started';
-    slot.connect.disabled=!known || !ctl.observed || ctl.reading || ctl.writing;
+    slot.connect.disabled=blocked || !known || !ctl.observed || ctl.reading || ctl.writing;
     if(!slot.connect.hidden)put(slot.connect,()=>t('lead.connect',{provider:names[provider]}));else slot.connect.textContent='';
     const latest=row?.latestTurn,turnState=row?.turnState;
     put(slot.turn,()=>!latest?(turnState?t(Object.hasOwn(messages,'turn.'+turnState.reason)?'turn.'+turnState.reason:'turn.unconfirmed'):''):['reserved','running','unconfirmed'].includes(latest.status)?t('lead.waitingReply'):
@@ -1486,16 +1542,16 @@ function scheduleLeadRead(ctl){
   clearTimeout(ctl.pollTimer);
   const waiting=currentLeadControl(ctl) && [...ctl.items.values()].some(r=>r.status==='starting');
   if(!waiting){if(ctl)ctl.pollPaused=false;return;}
-  if(ctl.reading || ctl.writing || managedChat)return;
+  if(hostToolsUnavailable || ctl.reading || ctl.writing || managedChat)return;
   const delay=ctl.pollDelay;
   if(Date.now()+delay>ctl.pollUntil){ctl.pollPaused=true;paintLeadControls();return;}
   ctl.pollDelay=Math.min(delay+4000,15000);
   ctl.pollTimer=setTimeout(()=>{
-    if(currentLeadControl(ctl) && Date.now()<=ctl.pollUntil)observeLeads(ctl,true);
+    if(!hostToolsUnavailable && currentLeadControl(ctl) && Date.now()<=ctl.pollUntil)observeLeads(ctl,true);
   },delay);
 }
 async function observeLeads(ctl,poll=false){
-  if(!currentLeadControl(ctl) || ctl.reading || ctl.writing)return;
+  if(hostToolsUnavailable || !currentLeadControl(ctl) || ctl.reading || ctl.writing)return;
   clearTimeout(ctl.pollTimer);
   if(!poll){ctl.pollUntil=Date.now()+120000;ctl.pollDelay=8000;ctl.pollPaused=false;}
   ctl.reading=true;paintLeadControls();
@@ -1511,7 +1567,7 @@ async function observeLeads(ctl,poll=false){
   }}
 }
 async function writeLeads(ctl,selection=providers){
-  if(!currentLeadControl(ctl) || !ctl.observed || ctl.writing || ctl.reading)return;
+  if(hostToolsUnavailable || !currentLeadControl(ctl) || !ctl.observed || ctl.writing || ctl.reading)return;
   if(!Array.isArray(selection) || !selection.length || selection.some(p=>!providers.includes(p)) || new Set(selection).size!==selection.length)return;
   clearTimeout(ctl.pollTimer);
   ctl.attempted=true;ctl.writing=true;ctl.failed=false;paintLeadControls();
@@ -1529,14 +1585,14 @@ async function writeLeads(ctl,selection=providers){
 }
 onClick('open-leads',()=>{
   const ctl=leadControl;
-  if(currentLeadControl(ctl) && ctl.observed && !ctl.reading && !ctl.writing){
+  if(!hostToolsUnavailable && currentLeadControl(ctl) && ctl.observed && !ctl.reading && !ctl.writing){
     writeLeads(ctl);
   }
 });
-on('lead-auto','change',()=>{if(currentLeadControl(leadControl) && leadControl.observed){
+on('lead-auto','change',()=>{if(!hostToolsUnavailable && currentLeadControl(leadControl) && leadControl.observed){
   rememberLeads(leadControl,el('lead-auto').checked);leadControl.autoOnVisit=false;paintLeadControls();
 }});
-onClick('lead-refresh',()=>observeLeads(leadControl));
+onClick('lead-refresh',()=>{if(!hostToolsUnavailable)observeLeads(leadControl);});
 const turnUuid=v=>typeof v==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v);
 function currentManaged(c){
   return c && c===managedChat && currentLeadControl(c.ctl) && el('conversation').open &&
@@ -1607,16 +1663,18 @@ function paintSettings(c){
   const option=data?.options.find(o=>o.model===model);
   const allowed=model===null?!effort:option && (effort? !option.fixed && option.efforts.includes(effort):!option.requiresEffort);
   const changed=data && (model!==data.selection.model || effort!==data.selection.effort);
+  const blocked=hostToolsUnavailable || disposed;
   el('settings-fields').hidden=el('settings-save').hidden=!data;
   el('settings-actual').hidden=!data || !el('settings-actual').textContent || p.observedTurn!==c.latestTurn ||
     !c.verified || !!c.session.pending || !!c.session.writing || !!c.previous;
-  el('settings-fields').disabled=p.busy || c.session.settingsSaving;
-  el('settings-save').disabled=!changed || !allowed || p.busy || c.session.settingsSaving || c.session.writing || !c.verified;
+  el('settings-fields').disabled=blocked || p.busy || c.session.settingsSaving;
+  el('settings-save').disabled=blocked || !changed || !allowed || p.busy || c.session.settingsSaving || c.session.writing || !c.verified;
   el('settings-read').hidden=!!data || !!p.busy || c.session.settingsSaving;
+  el('settings-read').disabled=blocked || Boolean(p.busy || c.session.settingsSaving);
   put('settings-status',()=>p.status?t(p.status):'');
 }
 async function loadSettings(c,p){
-  if(!currentManaged(c) || c.settings!==p || p.busy || c.session.settingsSaving)return;
+  if(hostToolsUnavailable || !currentManaged(c) || c.settings!==p || p.busy || c.session.settingsSaving)return;
   const observedTurn=c.latestTurn;
   p.busy=true;p.status='prefs.loading';paintSettings(c);
   try{
@@ -1661,7 +1719,7 @@ function closeSettings(){
 onClick('settings-toggle',()=>{
   const c=managedChat;if(!currentManaged(c))return;
   if(c.settings){closeSettings();return;}
-  if(!c.verified)return;
+  if(hostToolsUnavailable || !c.verified)return;
   const p={status:c.session.settingsSaving?'prefs.saving':'prefs.loading'};c.settings=p;
   el('settings-toggle').setAttribute('aria-expanded','true');el('chat-settings').hidden=false;el('chat-settings').focus();
   paintSettings(c);loadSettings(c,p);
@@ -1670,22 +1728,23 @@ on('conversation','cancel',e=>{if(managedChat?.settings){e.preventDefault();clos
 on('settings-model','change',()=>{const c=managedChat;if(currentManaged(c) && c.settings?.data){effortChoices(c);c.settings.status='';paintSettings(c);}});
 on('settings-effort','change',()=>{const c=managedChat;if(currentManaged(c) && c.settings?.data){c.settings.status='';paintSettings(c);}});
 onClick('settings-save',saveSettings);
-onClick('settings-read',()=>{const c=managedChat;if(currentManaged(c) && c.settings)loadSettings(c,c.settings);});
+onClick('settings-read',()=>{const c=managedChat;if(!hostToolsUnavailable && currentManaged(c) && c.settings)loadSettings(c,c.settings);});
 function validText(text){
   return typeof text==='string' && text.trim().length>0 && !/\p{Cc}/u.test(text.replace(/[\n\t]/g,'')) && new TextEncoder().encode(text).length<=4000;
 }
 function paintComposer(c){
   if(!currentManaged(c))return;
-  const s=c.session,p=s.pending;
+  const s=c.session,p=s.pending,blocked=hostToolsUnavailable || disposed;
   el('chat-compose').hidden=!c.verified && !p && !c.failed;
   el('settings-toggle').hidden=!c.verified && !c.settings;
+  el('settings-toggle').disabled=blocked && !c.settings;
   if(c.settings)paintSettings(c);
-  el('chat-send').disabled=!c.verified || c.reading || s.settingsSaving || s.writing || !!p || !!c.previous || !validText(s.draft);
+  el('chat-send').disabled=blocked || !c.verified || c.reading || s.settingsSaving || s.writing || !!p || !!c.previous || !validText(s.draft);
   const state=s.writing?'sending':c.previous?'previous':p?.status || s.outcome;
   const bytes=new TextEncoder().encode(s.draft||'').length;
   put('chat-count',()=>t('chat.bytes',{n:bytes.toLocaleString(lang)}));el('chat-count').setAttribute('data-tone',bytes>4000?'warn':'muted');
   put('chat-delivery',()=>c.pollPaused?t('poll.paused'):s.draft && !validText(s.draft)?t('turn.limit'):state?t('turn.'+state):'');
-  const check=el('chat-check');check.hidden=!p && !c.failed && !c.previous || s.writing;check.disabled=c.reading;
+  const check=el('chat-check');check.hidden=!p && !c.failed && !c.previous || s.writing;check.disabled=blocked || c.reading;
   put(check,p?.status==='not_found' && !c.previous?'turn.retry':p || c.previous?'turn.check':'refresh');
 }
 function settleTurn(c,result,p){
@@ -1712,7 +1771,7 @@ function paintTurns(c,page,before){
   const fresh=incoming.filter(r=>!c.keys.has(key(r)));
   const overlap=fresh.length<incoming.length;
   const replace=!before && (!c.keys.size || !overlap && fresh.length>0);
-  if(replace){list.replaceChildren();c.keys.clear();c.visited.clear();}
+  if(replace){list.replaceChildren();c.keys.clear();c.visited.clear();turnAnswerButtons.length=0;}
   const add=replace?incoming:fresh, nodes=[];
   for(const r of add){
     if(c.keys.has(key(r)))continue;
@@ -1728,7 +1787,8 @@ function paintTurns(c,page,before){
     if(r.truncated===true)row.append(node('small',message('turn.partial')));
     if(!user && turnUuid(r.turnId)){
       const button=node('button',message('answer.full'),'subtle');button.type='button';
-      button.addEventListener('click',()=>openFullAnswer({kind:'lead',c,turnId:r.turnId,origin:button}));row.append(button);
+      button.disabled=hostToolsUnavailable || disposed;turnAnswerButtons.push(button);
+      button.addEventListener('click',()=>{if(!hostToolsUnavailable)openFullAnswer({kind:'lead',c,turnId:r.turnId,origin:button});});row.append(button);
     }
     nodes.push(row);
   }
@@ -1778,16 +1838,16 @@ async function readManaged(c,before=null){
     if(currentManaged(c)){c.verified=false;c.failed=true;if(p)p.status='unconfirmed';put('chat-status','chatMismatch');}
   }finally{
     if(currentManaged(c)){
-      c.reading=false;el('chat-older').disabled=false;paintComposer(c);
+      c.reading=false;el('chat-older').disabled=hostToolsUnavailable || disposed;paintComposer(c);
       const waiting=['reserved','running'].includes(c.previous || c.session.pending?.status);
       c.pollPaused=waiting && Date.now()>=c.until;
-      if(waiting && !c.pollPaused)c.timer=setTimeout(()=>readManaged(c),8000);
+      if(!hostToolsUnavailable && waiting && !c.pollPaused)c.timer=setTimeout(()=>readManaged(c),8000);
       paintComposer(c);paintLeadControls();
     }
   }
 }
 async function sendManaged(c,retry=false){
-  if(!currentManaged(c) || !c.verified || c.reading || c.session.settingsSaving || c.session.writing || c.previous)return;
+  if(hostToolsUnavailable || !currentManaged(c) || !c.verified || c.reading || c.session.settingsSaving || c.session.writing || c.previous)return;
   const s=c.session;
   if(retry ? s.pending?.status!=='not_found' : !!s.pending || !validText(s.draft))return;
   const p=retry?s.pending:{id:crypto.randomUUID(),text:s.draft,status:'unconfirmed'};
@@ -1818,7 +1878,7 @@ function chatRow(from,text,record){
   return row;
 }
 async function openManagedChat(ctl,provider,origin){
-  if(!currentLeadControl(ctl) || ctl.items.get(provider)?.status!=='ready')return;
+  if(hostToolsUnavailable || !currentLeadControl(ctl) || ctl.items.get(provider)?.status!=='ready')return;
   clearTimeout(ctl.pollTimer);ctl.pollTimer=undefined;
   const requestId=ctl.items.get(provider).requestId;
   ctl.sessions??=new Map();
@@ -1837,7 +1897,7 @@ on('chat-text','input',()=>{const c=managedChat;if(currentManaged(c)){
 on('chat-compose','submit',e=>{e.preventDefault();sendManaged(managedChat);});
 on('chat-text','keydown',e=>{if(e.key==='Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing){e.preventDefault();sendManaged(managedChat);}});
 onClick('chat-check',()=>{
-  const c=managedChat;if(!currentManaged(c))return;
+  const c=managedChat;if(hostToolsUnavailable || !currentManaged(c))return;
   if(c.session.pending?.status==='not_found' && !c.previous)sendManaged(c,true);
   else{c.until=Date.now()+120000;c.pollPaused=false;readManaged(c);}
 });
@@ -1923,11 +1983,11 @@ function currentFollowup(d){
     main?.room===d.room && main.participant===d.owner && !el('followup-panel').hidden;
 }
 function paintFollowup(){
-  const current=currentFollowup(followupDraft),valid=validText(el('followup-text').value);
+  const current=currentFollowup(followupDraft),valid=validText(el('followup-text').value),blocked=disposed || hostToolsUnavailable;
   el('followup-add').hidden=!hasContext();el('followup-add').disabled=!current || !valid || followupDraft?.pending;
   put('followup-add',followupDraft?.finding?'followup.referencesOnly':'followup.add');
-  el('finding-share').hidden=!hasContext();el('finding-share').disabled=!current || !valid || !findingScope() || !followupDraft?.finding || followupDraft.pending;
-  el('followup-copy').disabled=!current || !valid;el('followup-main').disabled=!current;
+  el('finding-share').hidden=!hasContext();el('finding-share').disabled=blocked || !current || !valid || !findingScope() || !followupDraft?.finding || followupDraft.pending;
+  el('followup-copy').disabled=!current || !valid;el('followup-main').disabled=blocked || !current;
   if(current && !valid)put('followup-status','turn.limit');
   else if(current && el('followup-status').textContent===t('turn.limit'))put('followup-status',()=>'');
 }
@@ -1944,26 +2004,37 @@ onClick('evidence-toggle',()=>{
   el('evidence-toggle').setAttribute('aria-expanded',String(show));put('evidence-toggle',show?'evidence.close':'evidence.open');
   if(show)paintEvidence();
 });
-function resultTask(source,d=dashboardData){
-  if(source.projectKey!==bindingKey || source.room!==joinedMain()?.room)return null;
-  const hasAttempts=Array.isArray(d?.conversationAttempts),records=hasAttempts?d.conversationAttempts:[];
+const validTaskId=v=>typeof v==='string' && /^[A-Za-z0-9._-]{1,160}$/.test(v)?v:null;
+function resolveResultTask(source,d=dashboardData){
+  const m=d===dashboardData?joinedMain():(d?.conversationBinding==='matched' && d.conversationMain?.source==='room-session' &&
+    d.conversationMain.state==='joined' && d.conversationMain.room && d.conversationMain.participant &&
+    Object.hasOwn(names,d.conversationMain.provider)?d.conversationMain:null);
+  if(!source || source.projectKey!==bindingKey || !m || source.room!==m.room || !Array.isArray(d?.conversationAttempts))return {known:false,task:null};
+  const records=d.conversationAttempts;
   const id=source.kind==='worker-output'?source.workerAttempt:source.kind==='room-result'?source.attempt:source.kind==='lead-answer'?source.operation:null;
-  const matches=records.filter(r=>id && r?.id===id && (source.kind==='worker-output'
-    ? (r.room==null || r.room===source.room) && r.parentAttempt===source.leadAttempt
-    : r.room===source.room && (r.participant||r.id)===source.participant && (!source.provider || providerName(r.provider)===providerName(source.provider))));
-  let attempt=matches.length===1?matches[0]:null;
-  if(!matches.length && source.kind==='worker-output'){
-    const lead=rows.find(r=>r.attempt.id===source.leadAttempt),fallback=lead?.workers.find(r=>r.attempt.id===source.workerAttempt)?.attempt;
-    if(fallback && (!hasAttempts || d===dashboardData))attempt=fallback;
-    else if(fallback){
-      const linked=records.filter(r=>r?.id===id && r.room===source.room && !r.parentAttempt && fallback.participant && r.participant===fallback.participant);
-      const membersOk=!Array.isArray(d?.conversationMain?.participants) || d.conversationMain.participants.some(m=>m?.room===source.room &&
-        m.participant===fallback.participant && m.parent===lead.member?.participant && m.role==='worker' && m.joined===true);
-      if(linked.length===1 && membersOk)attempt=linked[0];
-    }
+  if(!id)return {known:false,task:null};
+  if(source.kind==='worker-output'){
+    const direct=records.filter(r=>r?.id===id && (r.room==null || r.room===source.room) && r.parentAttempt===source.leadAttempt);
+    if(direct.length>1)return {known:false,task:null};
+    const {leads}=snapshotRows(m,d),lead=leads.find(r=>r.attempt.id===source.leadAttempt);
+    const worker=lead?.workers.find(w=>w.attempt.id===source.workerAttempt)?.attempt;
+    const sameId=records.filter(r=>r?.id===id && (r.room==null || r.room===source.room));
+    const attempt=direct[0] || (worker && sameId.length===1?worker:null);
+    if(!attempt || !lead || !worker || (attempt.task!=null && !validTaskId(attempt.task)))return {known:false,task:null};
+    return {known:true,task:validTaskId(attempt.task)};
   }
-  return typeof attempt?.task==='string' && /^[A-Za-z0-9._-]{1,160}$/.test(attempt.task)?attempt.task:null;
+  const matches=records.filter(r=>r?.id===id && r.room===source.room && (r.participant||r.id)===source.participant &&
+    (!source.provider || providerName(r.provider)===providerName(source.provider)));
+  if(matches.length===1){
+    if(matches[0].task!=null && !validTaskId(matches[0].task))return {known:false,task:null};
+    return {known:true,task:validTaskId(matches[0].task)};
+  }
+  if(matches.length>1)return {known:false,task:null};
+  const incomplete=d.conversationAttemptsOmitted>0 || d.conversationAttemptsTrimmed>0 ||
+    (d.observation?.sources?.attempts!=null && d.observation.sources.attempts!=='ok');
+  return {known:!incomplete,task:null};
 }
+function resultTask(source,d=dashboardData){return resolveResultTask(source,d).task;}
 const resultSourceFields=['kind','projectKey','room','provider','participant','leadRequestId','turnId','operation','leadAttempt','workerAttempt','attempt','format','digest','pageCursor'];
 function prepareFollowup(source=null,finding=null){
   const main=joinedMain();if(!main || staleView || busy)return;
@@ -1987,10 +2058,10 @@ function prepareFollowup(source=null,finding=null){
     put('finding-range',()=>t('finding.range',{start:selected.offset+1,end:selected.offset+selected.bytes,total:selected.totalBytes,
       extent:t(selected.truncated?'finding.partial':'finding.complete')})+(selected.bytes<selected.displayedBytes?' · '+t('finding.limit',{n:selected.bytes}):''));
   }
-  el('followup-panel').hidden=false;put('followup-status',()=>'');paintFollowup();el('followup-text').focus();
+  el('followup-panel').hidden=false;armAuto();put('followup-status',()=>'');paintFollowup();el('followup-text').focus();
 }
 const FINDING_BYTES=4000;
-function findingScope(){return hasContext() && !disposed && !busy && !readOnly && !staleView && !!joinedMain() && /^[a-f0-9]{64}$/.test(bindingKey);}
+function findingScope(){return hasContext() && !disposed && !hostToolsUnavailable && !busy && !readOnly && !staleView && !!joinedMain() && /^[a-f0-9]{64}$/.test(bindingKey);}
 function utf8Prefix(text,limit){
   let result='',bytes=0;
   for(const char of text){const n=new TextEncoder().encode(char).length;if(bytes+n>limit)break;result+=char;bytes+=n;}
@@ -2028,7 +2099,7 @@ onClick('output-preview',async()=>{
     el('output-body').hidden=true;el('output-body').textContent='';el('output-limited').hidden=true;
     el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=el('output-preview').hidden=true;
     put('output-copy-status',()=>'');put('output-status','answer.changed');
-  }}finally{if(selectedOutput===s){s.loading=false;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=el('output-preview').disabled=false;}}
+  }}finally{if(selectedOutput===s){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=el('output-preview').disabled=blocked;}}
 });
 onClick('answer-preview',()=>{
   const s=fullAnswer;if(!currentFullAnswer(s) || s.loading || !s.source || !s.text?.trim() || !findingScope())return;
@@ -2041,13 +2112,14 @@ async function verifiedFindingScope(draft){
   const key=draft.project?registry?.projectKeys?.[draft.project]:registry?.projectKey;
   if(registry?.readOnly===true || key!==draft.projectKey || !currentFollowup(draft) || !findingScope())throw uiError('finding.changed');
   const response=await tool('oms_panel_snapshot',{},draft.generation),d=response.structuredContent?.dashboard||response._meta?.dashboard,m=d?.conversationMain;
+  const resolved=resolveResultTask(draft.source,d);
   if(d?.conversationBinding!=='matched' || m?.source!=='room-session' || m.state!=='joined' || m.room!==draft.room ||
-    m.participant!==draft.owner || m.provider!==draft.mainProvider || resultTask(draft.source,d)!==draft.task || !currentFollowup(draft))throw uiError('finding.changed');
+    m.participant!==draft.owner || m.provider!==draft.mainProvider || !resolved.known || resolved.task!==draft.task || !currentFollowup(draft))throw uiError('finding.changed');
 }
 onClick('finding-share',async()=>{
   const draft=followupDraft,text=el('followup-text').value,finding=draft?.finding;
-  if(!currentFollowup(draft) || !finding || draft.pending || !findingScope() || !hasContext() || !validText(text))return;
-  draft.pending=true;paintFollowup();put('followup-status','finding.checking');
+  if(hostToolsUnavailable || !currentFollowup(draft) || !finding || draft.pending || !findingScope() || !hasContext() || !validText(text))return;
+  draft.pending=true;stopAuto();paintFollowup();put('followup-status','finding.checking');
   try{
     await verifiedFindingScope(draft);
     const {page,source}=await loadResultPage(draft.source,finding.cursor,draft.generation),selected=finding.selection;
@@ -2064,13 +2136,13 @@ onClick('finding-share',async()=>{
       ()=>currentFollowup(draft) && findingScope() && hasContext() && el('followup-text').value===text && draft.finding===finding);
     if(currentFollowup(draft))put('followup-status',delivered?'finding.done':'followup.failed');
   }catch{if(currentFollowup(draft)){draft.finding=null;clearFinding();put('followup-status','finding.changed');}}
-  finally{if(currentFollowup(draft)){draft.pending=false;paintFollowup();}}
+  finally{if(currentFollowup(draft)){draft.pending=false;paintFollowup();armAuto();}}
 });
 onClick('followup-open',()=>prepareFollowup());
 on('followup-text','input',paintFollowup);
-onClick('followup-close',()=>{clearFollowup();el('followup-open').focus();});
+onClick('followup-close',()=>{clearFollowup();armAuto();el('followup-open').focus();});
 onClick('followup-copy',()=>{const draft=followupDraft;copyDisplayed(el('followup-text').value,'followup-status',()=>currentFollowup(draft));});
-onClick('followup-main',()=>{const m=joinedMain();if(currentFollowup(followupDraft))openConversation(m,()=>conversationMainName(m),el('followup-main'));});
+onClick('followup-main',()=>{const m=joinedMain();if(!hostToolsUnavailable && currentFollowup(followupDraft))openConversation(m,()=>conversationMainName(m),el('followup-main'));});
 onClick('followup-add',async()=>{
   const draft=followupDraft,text=el('followup-text').value;
   if(!currentFollowup(draft) || draft.pending || !validText(text) || !hasContext())return;
@@ -2079,7 +2151,7 @@ onClick('followup-add',async()=>{
   if(currentFollowup(draft)){draft.pending=false;put('followup-status',delivered?'followup.done':'followup.failed');paintFollowup();}
 });
 const inspectionKinds=['usage','graph','routes','modelcatalog'];
-function canInspect(){return !disposed && !busy && !staleView && dashboardData && !el('view').hidden && /^[a-f0-9]{64}$/.test(bindingKey);}
+function canInspect(){return !disposed && !busy && !hostToolsUnavailable && !staleView && dashboardData && !el('view').hidden && /^[a-f0-9]{64}$/.test(bindingKey);}
 function inspectionRoom(){const m=dashboardData?.conversationMain;return [m?.room||null,m?.participant||null].join(':');}
 function currentInspection(s,ticket=s?.ticket){
   return s && s===inspection && !disposed && !staleView && s.generation===generation && s.project===project &&
@@ -2161,8 +2233,8 @@ function inspectGraph(data,args,s,ticket){
   for(const n of data.nodes){
     if(!n || !displayText(n.id,512))throw uiError('inspect.failed');
     const label=displayText(n.label,512)||displayText(n.path,512)||n.id;labels.set(n.id,label);
-    const button=node('button',label);button.type='button';
-    button.addEventListener('click',()=>{if(currentInspection(s,ticket))readInspection(s,{node:n.id});});nodes.append(button);
+    const button=node('button',label);button.type='button';button.disabled=disposed || hostToolsUnavailable || Boolean(s.loading);inspectNodeButtons.push(button);
+    button.addEventListener('click',()=>{if(!hostToolsUnavailable && currentInspection(s,ticket))readInspection(s,{node:n.id});});nodes.append(button);
   }
   card.append(nodes);content.append(card);
   if(data.edges.length){
@@ -2182,10 +2254,11 @@ async function verifyInspectionBinding(s,ticket){
   if(!currentInspection(s,ticket) || (s.project?data?.projectKeys?.[s.project]:data?.projectKey)!==s.projectKey)throw uiError('inspect.failed');
 }
 async function readInspection(s,graph=s.graph||{}){
-  if(!currentInspection(s) || !inspectionKinds.includes(s.kind))return;
+  if(hostToolsUnavailable || !currentInspection(s) || !inspectionKinds.includes(s.kind))return;
   const ticket=++s.ticket,kind=s.kind,page=s.page;s.graph=kind==='graph'?graph:{};s.loading=true;s.next=null;
+  inspectNodeButtons.length=0;
   el('inspect-content').replaceChildren();el('inspect-prev').hidden=el('inspect-next').hidden=true;
-  el('inspect-refresh').disabled=true;el('inspect-graph-form').hidden=kind!=='graph';
+  syncInspectControls();el('inspect-graph-form').hidden=kind!=='graph';
   put('inspect-note','inspect.'+kind+'Note');put('inspect-status','chatLoading');
   try{
     await verifyInspectionBinding(s,ticket);
@@ -2198,8 +2271,8 @@ async function readInspection(s,graph=s.graph||{}){
     put('inspect-status',()=>summary.unavailable?t('statusUnknown'):
       [(['routes','modelcatalog'].includes(kind)?t('inspect.page',{page,n:summary.count}):''),summary.partial?t('inspect.partial'):''].filter(Boolean).join(' · '));
     s.next=summary.next||null;el('inspect-next').hidden=!s.next;el('inspect-prev').hidden=!['routes','modelcatalog'].includes(kind) || page<=1;
-  }catch{if(currentInspection(s,ticket)){el('inspect-content').replaceChildren();put('inspect-status','inspect.failed');}}
-  finally{if(currentInspection(s,ticket)){s.loading=false;el('inspect-refresh').disabled=false;}}
+  }catch{if(currentInspection(s,ticket)){inspectNodeButtons.length=0;el('inspect-content').replaceChildren();put('inspect-status','inspect.failed');}}
+  finally{if(currentInspection(s,ticket)){s.loading=false;syncInspectControls();}}
 }
 onClick('inspect-open',()=>{
   if(!canInspect())return;
@@ -2210,21 +2283,22 @@ onClick('inspect-open',()=>{
 onClick('inspect-close',()=>el('inspection').close());
 on('inspection','close',()=>{
   if(el('inspection').open)return;
-  inspection=null;el('inspect-content').replaceChildren();el('inspect-query').value='';put('inspect-status',()=>'');put('inspect-note',()=>'');
+  inspection=null;inspectNodeButtons.length=0;el('inspect-content').replaceChildren();el('inspect-query').value='';put('inspect-status',()=>'');put('inspect-note',()=>'');
   el('inspect-prev').hidden=el('inspect-next').hidden=true;armAuto();if(!disposed)el('inspect-open').focus();
 });
 on('inspect-kind','change',()=>{
-  const s=inspection;if(!currentInspection(s) || !inspectionKinds.includes(el('inspect-kind').value))return;
-  s.kind=el('inspect-kind').value;s.page=1;el('inspect-query').value='';readInspection(s,{});
+  const s=inspection;if(!hostToolsUnavailable && currentInspection(s) && inspectionKinds.includes(el('inspect-kind').value)){
+    s.kind=el('inspect-kind').value;s.page=1;el('inspect-query').value='';readInspection(s,{});
+  }
 });
-onClick('inspect-refresh',()=>{if(currentInspection(inspection) && !inspection.loading)readInspection(inspection);});
-onClick('inspect-next',()=>{const s=inspection;if(currentInspection(s) && !s.loading && s.next){s.page=s.next;readInspection(s);}});
-onClick('inspect-prev',()=>{const s=inspection;if(currentInspection(s) && !s.loading && s.page>1){s.page--;readInspection(s);}});
+onClick('inspect-refresh',()=>{if(!hostToolsUnavailable && currentInspection(inspection) && !inspection.loading)readInspection(inspection);});
+onClick('inspect-next',()=>{const s=inspection;if(!hostToolsUnavailable && currentInspection(s) && !s.loading && s.next){s.page=s.next;readInspection(s);}});
+onClick('inspect-prev',()=>{const s=inspection;if(!hostToolsUnavailable && currentInspection(s) && !s.loading && s.page>1){s.page--;readInspection(s);}});
 on('inspect-graph-form','submit',event=>{
   event.preventDefault();const s=inspection,query=el('inspect-query').value.trim();
-  if(currentInspection(s) && s.kind==='graph' && (!query || displayText(query,256)))readInspection(s,query?{query}:{});
+  if(!hostToolsUnavailable && currentInspection(s) && s.kind==='graph' && (!query || displayText(query,256)))readInspection(s,query?{query}:{});
 });
-onClick('inspect-root',()=>{const s=inspection;if(currentInspection(s) && s.kind==='graph'){el('inspect-query').value='';readInspection(s,{});}});
+onClick('inspect-root',()=>{const s=inspection;if(!hostToolsUnavailable && currentInspection(s) && s.kind==='graph'){el('inspect-query').value='';readInspection(s,{});}});
 
 function render(d) {
   for(const element of bindings.keys())if(element.isConnected===false)bindings.delete(element);
@@ -2253,17 +2327,14 @@ function render(d) {
   put('main-name',()=>main?conversationMainName(main):owner?.provider?roleTitle('Main',owner.provider):t('unknownMain'));
   if(main && selectedChat?.room===main.room && selectedChat.participant===main.participant)put('chat-title',()=>conversationMainName(main));
   el('header-main').hidden=!main;
-  members=main && Array.isArray(main.participants)?main.participants.filter(m=>m?.room===main.room && m.participant):[];
-  if(main && !members.some(m=>m.participant===main.participant))members.push(main);
-  const {leads,partial,ownerRun}=main?verifiedLeads(main,d):{leads:[],partial:false};
+  const {list,leads,partial,ownerRun}=snapshotRows(main,d);
+  members=list;
   const mainTone=stateTone((main?ownerRun:owner)?.state);
   // An unknown Main shows the '–' placeholder and no presence; a joined Main with an unrecognised harness stays present.
   if(!main && !owner?.provider)el('avatar').removeAttribute('data-presence');
   else el('avatar').setAttribute('data-presence',mainTone==='attention'?'attention':mainTone==='active'?'working':main?'live':'idle');
   put('main-status',()=>main ? [ownerRun?.state?stateLabel(ownerRun.state):t('joined'),ownerRun?.taskTitle].filter(Boolean).join(' · ') :
     owner?stateLabel(owner.state):t(readOnly?'noRecordedMain':'noJoinedMain'));
-  const records=Array.isArray(d.conversationAttempts)?d.conversationAttempts:[];
-  for(const lead of leads)lead.workers=workersForLead(lead,records);
   rows=leads;
   renderLeadSlots(leads,Boolean(main) && !partial);
   if(managedChat)chatOrigin=leadSlots.get(managedChat.provider)?.open;
@@ -2284,7 +2355,7 @@ function canChat(member) {
       entry.member.parent===member.parent && entry.member.provider===member.provider))));
 }
 async function openConversation(member,label,origin) {
-  if(!canChat(member) || disposed)return;
+  if(!canChat(member) || disposed || hostToolsUnavailable)return;
   clearChat();selectedChat=member;chatOrigin=origin;put('chat-title',label);
   showChat();
   await readChat(null,member.participant===joinedMain()?.participant && canOpenLinks);
@@ -2293,7 +2364,7 @@ async function readChat(before,openNative=false) {
   const m=selectedChat,expected=generation,ticket=++chatPage;
   if(!canChat(m))return;
   const current=()=>ticket===chatPage && expected===generation && canChat(m) && el('conversation').open;
-  put('chat-status','chatLoading');el('chat-older').disabled=true;
+  chatReading=true;put('chat-status','chatLoading');el('chat-older').disabled=true;
   try {
     const response=await tool('oms_panel_chat',{room:m.room,participant:m.participant,...(before==null?{}:{before})},expected);
     if(!current())return;
@@ -2315,6 +2386,7 @@ async function readChat(before,openNative=false) {
       el('chat-result').textContent=page.result?.text||'';
       el('chat-result-limited').hidden=page.result?.truncated!==true;
       el('chat-result-full').hidden=!roomResult || !/^[a-f0-9]{64}$/.test(bindingKey);
+      el('chat-result-full').disabled=hostToolsUnavailable || disposed;
     }
     if(first || before!=null)chatCursor=Number.isSafeInteger(page.nextBefore) && page.messages.length && page.nextBefore<=page.messages[0].seq && (before==null || page.nextBefore<before)?page.nextBefore:null;
     if(chatCursor==null && document.activeElement===el('chat-older'))scroll.focus({preventScroll:true});
@@ -2325,14 +2397,15 @@ async function readChat(before,openNative=false) {
     roomPageSeen=true;
     put('chat-status',()=>!list.children.length && !el('chat-result').textContent?t('emptyChat'):t('main.records'));
   } catch {if(current())put('chat-status','chatMismatch');}
-  finally {if(current())el('chat-older').disabled=false;}
+  finally {chatReading=false;if(current())el('chat-older').disabled=hostToolsUnavailable || disposed;}
 }
-onClick('header-main',()=>{const m=joinedMain();if(m)openConversation(m,()=>conversationMainName(m),el('header-main'));});
-onClick('chat-older',()=>{if(managedChat?.cursor)readManaged(managedChat,managedChat.cursor);else if(chatCursor!=null)readChat(chatCursor);});
+onClick('header-main',()=>{const m=joinedMain();if(m && !hostToolsUnavailable)openConversation(m,()=>conversationMainName(m),el('header-main'));});
+onClick('chat-older',()=>{if(hostToolsUnavailable)return;if(managedChat?.cursor)readManaged(managedChat,managedChat.cursor);else if(chatCursor!=null)readChat(chatCursor);});
 function closeChat(){el('conversation').close();(chatOrigin?.isConnected===false?el('main-name'):chatOrigin)?.focus();}
 function closeLauncher(){el('launcher').close();el('new-goal').focus();}
 onClick('chat-back',closeChat);
 onClick('chat-refresh',()=>{
+  if(hostToolsUnavailable)return;
   if(managedChat){managedChat.until=Date.now()+120000;readManaged(managedChat);}
   else if(selectedChat)readChat(null,false);
 });
@@ -2347,7 +2420,7 @@ on('conversation','close',()=>{
   clearChat();if(leadControl)scheduleLeadRead(leadControl);armAuto();
   if(!el('view').hidden && !el('launcher').open && !disposed && (document.activeElement===document.body || document.activeElement===el('chat-back')))(chatOrigin?.isConnected===false?el('main-name'):chatOrigin)?.focus();
 });
-onClick('new-goal',()=>{if(!readOnly && !staleView && !busy && !el('view').hidden){el('launcher').showModal();el('brief').focus();resetIssue();syncBriefCount();armAuto();}});
+onClick('new-goal',()=>{if(!readOnly && !staleView && !busy && !hostToolsUnavailable && !el('view').hidden){el('launcher').showModal();el('brief').focus();resetIssue();syncBriefCount();armAuto();}});
 onClick('close-launch',closeLauncher);
 on('launcher','close',()=>{if(!el('launcher').open){resetIssue();armAuto();}});
 onClick('goal-expand',()=>{
@@ -2374,11 +2447,11 @@ function sameIssue(p) {
 function paintIssue(p) {
   if(!sameIssue(p))return;
   put('issue-evidence',()=>p.reference+'\n'+t('issueVersion',{revision:p.revision})+'\n'+t(p.state));
-  el('issue-record').hidden=false;el('issue-record').disabled=p.pending || p.state==='received';
+  el('issue-record').hidden=false;el('issue-record').disabled=hostToolsUnavailable || disposed || p.pending || p.state==='received';
   put('issue-record',p.state==='absent'?'recordIssue':'checkReceipt');
 }
 async function receiptStatus(p,write=false) {
-  if(!sameIssue(p) || p.pending || p.state==='received' || (write && (busy || p.state!=='absent' || !p.id)))return;
+  if(hostToolsUnavailable || !sameIssue(p) || p.pending || p.state==='received' || (write && (busy || p.state!=='absent' || !p.id)))return;
   p.pending=true;paintIssue(p);
   const address={room:p.room,owner:p.owner},source={issue:p.issue,sha256:p.sha256};
   try {
@@ -2404,7 +2477,7 @@ onClick('issue-review',async()=>{
   resetIssue();const ticket=issueTicket,expected=generation;
   const current=()=>ticket===issueTicket && expected===generation && issueInput()?.url===source.url && el('launcher').open &&
     issueOwner()?.room===owner.room && issueOwner()?.participant===owner.participant;
-  el('issue-review').disabled=true;put('issue-evidence','readingIssue');
+  issueReviewBusy=true;el('issue-review').disabled=true;put('issue-evidence','readingIssue');
   try{
     const {structuredContent}=await tool('oms_panel_git_status',{issuePreview:source.number},expected);
     if(!current())return;
@@ -2415,7 +2488,7 @@ onClick('issue-review',async()=>{
     reviewedIssue={...source,...v,issue:m[1]+'#'+m[2],room:owner.room,owner:owner.participant,state:'readingIssue'};
     await receiptStatus(reviewedIssue);
   }catch{if(current())put('issue-evidence','unverifiedIssue');}
-  finally{if(current())el('issue-review').disabled=false;}
+  finally{issueReviewBusy=false;if(current())el('issue-review').disabled=hostToolsUnavailable || disposed;}
 });
 onClick('issue-record',()=>receiptStatus(reviewedIssue,reviewedIssue?.state==='absent'));
 function briefChanged(){briefInvalid=false;el('brief').setCustomValidity('');resetIssue();syncBriefCount();}
@@ -2433,34 +2506,86 @@ on('brief','paste',event=>{
   input.setSelectionRange?.(start+clean.length,start+clean.length);
   briefChanged();
 });
-function setBusy(value,writing=false) {
-  busy=value;el('refresh').disabled=value;el('project-choice').disabled=value && writing;
-  el('controls').disabled=value || staleView;el('view').ariaBusy=String(value);
-  el('new-goal').disabled=value || staleView;el('header-main').disabled=staleView;
-  el('followup-open').disabled=value || staleView;
+function syncInspectControls() {
+  const inspectBusy=disposed || hostToolsUnavailable || Boolean(inspection?.loading);
+  for(const id of ['inspect-kind','inspect-refresh','inspect-search','inspect-root','inspect-prev','inspect-next'])el(id).disabled=inspectBusy;
+  for(const b of inspectNodeButtons)b.disabled=inspectBusy;
+}
+function syncHostTools() {
+  const blocked=disposed || hostToolsUnavailable;
+  el('refresh').disabled=busy || blocked;
+  el('auto-refresh').disabled=blocked;
+  el('project-choice').disabled=(busy && busyWriting) || blocked;
+  el('controls').disabled=busy || staleView || blocked;
+  el('start').disabled=busy || staleView || blocked;
+  el('new-goal').disabled=busy || staleView || blocked;
+  el('header-main').disabled=staleView || blocked;
+  el('followup-open').disabled=busy || staleView;
   el('inspect-open').disabled=!canInspect();
+  el('issue-review').disabled=blocked || issueReviewBusy;
+  if(reviewedIssue)paintIssue(reviewedIssue);else el('issue-record').disabled=blocked;
+  const outBusy=blocked || Boolean(selectedOutput?.loading);
+  for(const id of ['output-refresh','output-more','output-first','output-preview'])el(id).disabled=outBusy;
+  const ansBusy=blocked || Boolean(fullAnswer?.loading);
+  for(const id of ['answer-more','answer-first','answer-preview'])el(id).disabled=ansBusy;
+  el('chat-result-full').disabled=blocked;
+  for(const b of turnAnswerButtons)b.disabled=blocked;
+  el('chat-refresh').disabled=blocked;
+  el('chat-older').disabled=blocked || Boolean(managedChat?.reading || chatReading);
+  el('settings-toggle').disabled=blocked && !managedChat?.settings;
+  el('settings-read').disabled=blocked || Boolean(managedChat?.settings?.busy || managedChat?.session?.settingsSaving);
+  syncInspectControls();
   if(followupDraft)paintFollowup();
-  for(const b of el('approvals').querySelectorAll('button'))b.disabled=value || staleView;
-  el('refresh').setAttribute('aria-busy',String(value && !disposed));
+  for(const b of el('approvals').querySelectorAll('button'))b.disabled=busy || staleView || blocked;
+  for(const b of approvalButtons)b.disabled=busy || staleView || blocked;
+  for(const b of personButtons)b.disabled=blocked;
+  paintLeadControls();
+  if(managedChat && currentManaged(managedChat))paintComposer(managedChat);
   armAuto();
+}
+function setHostToolsUnavailable(next) {
+  if(next){hostToolsFailedOpen=openSeq;hostToolsErrorSeq=++snapshotClock;}
+  if(hostToolsUnavailable===next){
+    if(next && !disposed){stopAuto();clearTimeout(leadControl?.pollTimer);clearTimeout(managedChat?.timer);syncHostTools();setStatus('hostToolsUnavailable','warn');}
+    return;
+  }
+  hostToolsUnavailable=next;
+  if(next){
+    stopAuto();resetAutoRetry();clearTimeout(leadControl?.pollTimer);clearTimeout(managedChat?.timer);
+    syncHostTools();
+    if(!disposed)setStatus('hostToolsUnavailable','warn');
+  }else{
+    syncHostTools();
+    if(!disposed){
+      if(busy)setStatus(dashboardData?'refreshing':'connecting');
+      else if(staleView)setStatus('snapshot.stale','warn');
+      else{const notice=dashboardData?snapshotNotice(dashboardData):'';setStatus(()=>notice?t(notice):'',notice?'warn':'info');}
+    }
+  }
+}
+function setBusy(value,writing=false) {
+  busy=value;busyWriting=writing;el('view').ariaBusy=String(value);
+  el('refresh').setAttribute('aria-busy',String(value && !disposed));
+  syncHostTools();
 }
 function panelIdle() {
   return Boolean(!disposed && !el('conversation').open && !el('launcher').open && !el('worker-output').open && !el('inspection').open &&
+    !(followupDraft && el('followup-panel').hidden===false) && !followupDraft?.pending &&
     (transientError?autoRetryCount<AUTO_RETRY_LIMIT:dashboardData && !el('view').hidden));
 }
 function resetAutoRetry(){transientError=false;autoRetryCount=0;}
-function autoReload(){if(transientError)autoRetryCount+=1;refresh();}
-function manualRefresh(){autoRetryCount=0;refresh();}
+function autoReload(){if(hostToolsUnavailable || disposed || followupDraft?.pending)return;if(transientError)autoRetryCount+=1;refresh();}
+function manualRefresh(){if(hostToolsUnavailable || disposed)return;autoRetryCount=0;refresh();}
 function stopAuto(){clearTimeout(autoTimer);autoTimer=undefined;}
 function armAuto() {
   stopAuto();
-  if(!autoRefresh || busy || !panelIdle() || document?.hidden)return;
+  if(!autoRefresh || busy || hostToolsUnavailable || !panelIdle() || document?.hidden)return;
   // Stays above the 8-15s Lead status poll cadence.
-  autoTimer=setTimeout(()=>{autoTimer=undefined;if(autoRefresh && panelIdle() && !document?.hidden)autoReload();},20000);
+  autoTimer=setTimeout(()=>{autoTimer=undefined;if(autoRefresh && !hostToolsUnavailable && panelIdle() && !document?.hidden)autoReload();},20000);
   autoTimer?.unref?.();
 }
 function refetchStale() {
-  if(!autoRefresh || document?.hidden || lastLoadedAt<=0 || Date.now()-lastLoadedAt<15000 || busy || !panelIdle())return; autoReload();
+  if(!autoRefresh || hostToolsUnavailable || document?.hidden || lastLoadedAt<=0 || Date.now()-lastLoadedAt<15000 || busy || !panelIdle())return; autoReload();
 }
 function paintAuto(){el('auto-refresh').setAttribute('aria-pressed',String(autoRefresh));}
 function isTyping(target) {
@@ -2491,24 +2616,30 @@ async function loadStatus(expected,recover=true) {
     const snapshot=await tool('oms_panel_snapshot',{},expected), d=snapshot.structuredContent?.dashboard||snapshot._meta?.dashboard;
     if(!d || typeof d!=='object' || Array.isArray(d))throw uiError('status.badSnapshot');
     staleView=false;render(d);lastGoodBinding=confirmedBinding;lastGoodGeneration=generation;
-    resetAutoRetry();lastLoadedAt=Date.now();const notice=snapshotNotice(d);setStatus(()=>notice?t(notice):'',notice?'warn':'info');
-    if(readOnly){retryStart=undefined;el('approval-card').hidden=true;el('approvals').replaceChildren();return;}
+    renderedToolSnapshot={seq:++snapshotClock,generation:expected,project:project||(typeof d.project==='string'&&d.project)||null};
+    syncHostTools();resetAutoRetry();lastLoadedAt=Date.now();const notice=snapshotNotice(d);setStatus(()=>notice?t(notice):'',notice?'warn':'info');
+    if(readOnly){retryStart=undefined;el('approval-card').hidden=true;el('approvals').replaceChildren();approvalButtons.length=0;return;}
     try{
       const response=await tool('oms_list_approvals',{},expected);
       if(!Array.isArray(response.structuredContent?.approvals))throw uiError('appr.bad');
       renderApprovals(response.structuredContent.approvals,response.structuredContent.incomplete);
-    }catch{if(expected===generation){approvedScope++;el('approval-card').hidden=false;put('approvals-heading','appr.list');el('approvals').replaceChildren(node('p',message('appr.bad')));}}
-    if(expected===generation && leadControl)observeLeads(leadControl);
-    if(expected===generation && recover && retryStart){
-      try{await recoverStart(expected);}catch{if(expected===generation)launchNotice('start.unknown');}
+    }catch{if(expected===generation && !hostToolsUnavailable){approvedScope++;approvalButtons.length=0;el('approval-card').hidden=false;put('approvals-heading','appr.list');el('approvals').replaceChildren(node('p',message('appr.bad')));}}
+    if(expected===generation && !hostToolsUnavailable && leadControl)observeLeads(leadControl);
+    if(expected===generation && !hostToolsUnavailable && recover && retryStart){
+      try{await recoverStart(expected);}catch{if(expected===generation && !hostToolsUnavailable)launchNotice('start.unknown');}
     }
   }catch{if(expected===generation && !disposed){
+    if(hostToolsUnavailable){
+      resetAutoRetry();clearTimeout(leadControl?.pollTimer);clearTimeout(managedChat?.timer);
+      leadIntent=undefined;syncHostTools();setStatus('hostToolsUnavailable','warn');
+      return;
+    }
     transientError=true;
     const retained=dashboardData && confirmedBinding && confirmedBinding===lastGoodBinding && lastGoodGeneration===expected;
     staleView=Boolean(retained);
     resetLeadControl();leadIntent=undefined;paintLeadControls();
-    members=[];approvedScope++;closeDialogs();resetIssue();clearFollowup();updateContext(null);
-    if(!retained){dashboardData=undefined;rows=[];el('view').hidden=true;}
+    members=[];approvedScope++;approvalButtons.length=0;closeDialogs();resetIssue();clearFollowup();updateContext(null);
+    if(!retained){dashboardData=undefined;rows=[];personButtons.length=0;el('view').hidden=true;}
     else{el('view').hidden=false;el('approvals').replaceChildren();el('approval-card').hidden=true;paintObserved();}
     setStatus(retained?'snapshot.stale':'connectionFailed','warn');
   }}
@@ -2527,6 +2658,7 @@ function renderApprovals(rows, incomplete) {
     }
   }
   list.replaceChildren();
+  approvalButtons.length = 0;
   if (incomplete) list.append(node('p', message('appr.partial'), 'muted'));
   for (const row of rows) {
     const details = document.createElement('details');
@@ -2554,9 +2686,9 @@ function renderApprovals(rows, incomplete) {
     for (const decision of ['approve', 'deny']) {
       const button = node('button', () => t(decision === 'approve' ? 'appr.approve' : 'appr.deny'), decision === 'approve' ? 'review' : '');
       button.type = 'button';
-      button.disabled = busy;
+      button.disabled = busy || staleView || hostToolsUnavailable || disposed;
       button.addEventListener('click', async () => {
-        if(readOnly || staleView || scope!==approvedScope || disposed || expected!==generation || !row.id || !row.digest || !Number.isSafeInteger(row.version))return;
+        if(readOnly || staleView || hostToolsUnavailable || scope!==approvedScope || disposed || expected!==generation || !row.id || !row.digest || !Number.isSafeInteger(row.version))return;
         const hadFocus = document.activeElement === button;
         let acknowledged = false;
         await mutate(
@@ -2575,7 +2707,7 @@ function renderApprovals(rows, incomplete) {
         const next = Array.from(list.children).find(child => child._approvalId && child._approvalId !== row.id);
         (next?.children[0] || el(card.hidden ? 'main-name' : 'approvals-heading')).focus();
       });
-      if (!readOnly) buttons.append(button);
+      if (!readOnly) { buttons.append(button); approvalButtons.push(button); }
     }
     body.append(buttons);
     details.append(summary, body);
@@ -2592,7 +2724,7 @@ async function refresh() {
 }
 
 async function mutate(action, onSuccess, expected = generation, recoverAfter = () => true) {
-  if (busy || staleView || readOnly || expected !== generation || el('view').hidden) return;
+  if (busy || hostToolsUnavailable || staleView || readOnly || expected !== generation || el('view').hidden) return;
   setBusy(true, true);
   el('receipt').className = '';
   launchNotice('mutate.working');
@@ -2605,7 +2737,7 @@ async function mutate(action, onSuccess, expected = generation, recoverAfter = (
     launchNotice( () => error.message);
   } finally {
     if (expected === generation) {
-      try { await loadStatus(expected, recoverAfter()); } finally { if (expected === generation) setBusy(false); }
+      try { if (!hostToolsUnavailable) await loadStatus(expected, recoverAfter()); } finally { if (expected === generation) setBusy(false); }
     }
   }
 }
@@ -2622,7 +2754,7 @@ function finishStart(request) {
 }
 on('launch','submit', event => {
   event.preventDefault();
-  if (readOnly || staleView || busy || el('view').hidden) return;
+  if (readOnly || staleView || busy || hostToolsUnavailable || el('view').hidden) return;
   const draft = launchDraft(), {main, goal} = draft;
   if (!goal || Array.from(goal).length > 2000 || /[\x00-\x1f\x7f]/u.test(goal)) {
     if(!el('launcher').open){el('launcher').showModal();armAuto();}
@@ -2675,7 +2807,7 @@ on('project-choice','change', () => {
 onClick('display-mode',()=>{const n=nextDisplayMode();if(n)requestDisplayMode(n.mode);});
 onClick('refresh', manualRefresh);
 onClick('auto-refresh',()=>{
-  if(disposed)return;
+  if(disposed || hostToolsUnavailable)return;
   autoRefresh=!autoRefresh;
   if(autoRefresh)autoRetryCount=0;
   try{globalThis.localStorage?.setItem(AUTO_KEY,autoRefresh?'on':'off');}catch{}
@@ -2690,7 +2822,7 @@ window.addEventListener('keydown',event=>{
   // WCAG 2.1.4: never a bare character key. The physical code covers layouts where Alt composes another character.
   if(!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat || event.isComposing || event.defaultPrevented ||
      !(event.code==='KeyR' || event.key==='r' || event.key==='R'))return;
-  if(busy || disposed || el('conversation').open || el('launcher').open || el('worker-output').open || el('inspection').open || isTyping(event.target) || isTyping(document.activeElement))return;
+  if(busy || disposed || hostToolsUnavailable || el('conversation').open || el('launcher').open || el('worker-output').open || el('inspection').open || isTyping(event.target) || isTyping(document.activeElement))return;
   event.preventDefault();manualRefresh();
 });
 on('language-choice','change', () => { const value = el('language-choice').value; if (LANGS.includes(value)) setLanguage(value, true); });

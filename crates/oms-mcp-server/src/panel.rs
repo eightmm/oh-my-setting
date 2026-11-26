@@ -18,7 +18,8 @@ mod lead_plan_context;
 mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
-const URI: &str = "ui://oms/conversation-panel/v31.html";
+const URI: &str = "ui://oms/conversation-panel/v32.html";
+const V31: &str = "ui://oms/conversation-panel/v31.html";
 const V30: &str = "ui://oms/conversation-panel/v30.html";
 const V29: &str = "ui://oms/conversation-panel/v29.html";
 const V28: &str = "ui://oms/conversation-panel/v28.html";
@@ -1219,7 +1220,8 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                 };
             let mut text = data.to_string();
             let is_git_detail = data["git"].is_object() && data["github"].is_object();
-            if (data["dashboard"]["managedScratch"].is_object() || is_git_detail)
+            if (data.get("panel").is_none() && data["dashboard"]["managedScratch"].is_object()
+                || is_git_detail)
                 && crate::value::encode(
                     &json!({"content":[{"type":"text","text":&text}],"structuredContent":&data,"isError":false}),
                     true,
@@ -1375,6 +1377,7 @@ impl Server<'_> {
                             | V28
                             | V29
                             | V30
+                            | V31
                     )
                 ) =>
             {
@@ -1885,6 +1888,16 @@ impl Server<'_> {
             }
             if self.config.profile == ToolProfile::McpApp {
                 result["readOnly"] = json!(true);
+            }
+            if let Ok(repo) = self.panel_repo(args)
+                && let Ok(dashboard) = self.panel_snapshot_projection(&repo, meta)
+            {
+                let encoded = dashboard.to_string();
+                if encoded.len() > 128 * 1024 {
+                    result["snapshotOmitted"] = json!("size");
+                } else if crate::output::outbound(encoded.as_bytes(), &Value::Null).is_ok() {
+                    result["dashboard"] = dashboard;
+                }
             }
             return Ok(result);
         }
@@ -3519,6 +3532,14 @@ impl Server<'_> {
     }
 
     pub(super) fn panel_snapshot(&self, repo: &Path, meta: &Value) -> PanelResult<Value> {
+        let dashboard = self.panel_snapshot_projection(repo, meta)?;
+        if dashboard.to_string().len() > crate::OUTPUT_LIMIT {
+            return Err("OMS panel snapshot exceeds its output limit.".into());
+        }
+        Ok(dashboard)
+    }
+
+    fn panel_snapshot_projection(&self, repo: &Path, meta: &Value) -> PanelResult<Value> {
         let mut argv = vec![
             "dashboard".into(),
             "--repo".into(),
@@ -3577,9 +3598,6 @@ impl Server<'_> {
                 }
                 dashboard["observation"]["revision"] = Value::Null;
             }
-        }
-        if dashboard.to_string().len() > crate::OUTPUT_LIMIT {
-            return Err("OMS panel snapshot exceeds its output limit.".into());
         }
         Ok(dashboard)
     }

@@ -353,7 +353,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v31.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v32.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -362,7 +362,7 @@ fn cross_host_project_reads() {
             html.as_bytes(),
             include_bytes!("../src/conversation-panel.html")
         );
-        let legacy_uri = "ui://oms/conversation-panel/v28.html";
+        let legacy_uri = "ui://oms/conversation-panel/v31.html";
         let legacy = c.call("resources/read", json!({"uri":legacy_uri}));
         let legacy = &legacy["result"]["contents"][0];
         assert_eq!(legacy["uri"], legacy_uri);
@@ -378,10 +378,9 @@ fn cross_host_project_reads() {
             view["result"]["contents"][0]["_meta"]["ui"]["preferredDisplayMode"],
             "fullscreen"
         );
-        assert_eq!(
-            payload(&c.tool("oms_open_panel", json!({})))["readOnly"],
-            true
-        );
+        let unbound_open = payload(&c.tool("oms_open_panel", json!({})));
+        assert_eq!(unbound_open["readOnly"], true);
+        assert!(unbound_open.get("dashboard").is_none());
     }
     assert_eq!(
         payload(&c.tool("oms_list_projects", json!({})))["binding"],
@@ -511,6 +510,27 @@ fn cross_host_project_reads() {
             .contains("conversation-digest")
     );
     assert!(!record(&source)["argv"].to_string().contains("00000000-"));
+    let opened = c.tool("oms_open_panel", json!({"project":"fixture"}));
+    good(&opened);
+    assert_eq!(
+        opened["result"]["structuredContent"]["dashboard"],
+        reply["result"]["structuredContent"]["dashboard"]
+    );
+    assert_eq!(payload(&opened)["dashboard"], payload(&reply)["dashboard"]);
+    assert_eq!(payload(&opened)["readOnly"], true);
+    let unresolvable = c.tool("oms_open_panel", json!({}));
+    good(&unresolvable);
+    assert!(payload(&unresolvable).get("dashboard").is_none());
+    fixture_settings(&source, json!({"exit":2,"stderr":"snapshot failed"}));
+    let failed_snapshot_open = c.tool("oms_open_panel", json!({"project":"fixture"}));
+    good(&failed_snapshot_open);
+    assert!(payload(&failed_snapshot_open).get("dashboard").is_none());
+    let oversized_snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","goal":"g".repeat(132 * 1024)}});
+    fixture_settings(&source, json!({"stdout":oversized_snapshot.to_string()}));
+    let oversized_open = c.tool("oms_open_panel", json!({"project":"fixture"}));
+    good(&oversized_open);
+    assert!(payload(&oversized_open).get("dashboard").is_none());
+    assert_eq!(payload(&oversized_open)["snapshotOmitted"], "size");
     // Fail-closed: exit-1 partial response contradicting a complete observation cannot claim complete revision.
     fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
     let degraded = c.tool("oms_panel_snapshot", json!({"project":"fixture"}));
@@ -1329,6 +1349,8 @@ fn desktop_lead_conversations() {
         c.tool("oms_open_panel", json!({"leadConversations":"yes"}))["result"]["isError"],
         true
     );
+    assert_eq!(record(&source)["argv"][0], "dashboard");
+    std::fs::remove_file(source.join("last-call.json")).unwrap();
     assert_eq!(
         call(
             &mut c,
@@ -3040,7 +3062,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v31.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v32.html");
     for name in [
         "oms_panel_usage",
         "oms_panel_project_graph",
@@ -3123,6 +3145,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v28.html"),
         json!("ui://oms/conversation-panel/v29.html"),
         json!("ui://oms/conversation-panel/v30.html"),
+        json!("ui://oms/conversation-panel/v31.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -3136,7 +3159,9 @@ fn conversation_panel() {
         )["error"]["code"],
         -32602
     );
-    assert!(c.tool("oms_open_panel", json!({}))["result"].is_object());
+    let unbound_open = c.tool("oms_open_panel", json!({}));
+    good(&unbound_open);
+    assert!(payload(&unbound_open).get("dashboard").is_none());
     assert!(c.tool("oms_peer_start", json!({}))["error"].is_object());
     assert!(c.tool("oms_panel_snapshot", json!({"repo":source}))["error"].is_object());
     assert!(
@@ -3163,6 +3188,12 @@ fn conversation_panel() {
         record(&source)["argv"],
         json!(["dashboard", "--repo", repo, "--json", "--panel-snapshot"])
     );
+    let opened = c.tool("oms_open_panel", json!({"leadConversations":true}));
+    good(&opened);
+    assert_eq!(opened["result"]["structuredContent"]["dashboard"], *data);
+    assert_eq!(payload(&opened)["dashboard"], *data);
+    assert_eq!(payload(&opened)["leadConversations"], true);
+    assert!(payload(&opened).get("readOnly").is_none());
     // Keep one runtime command blocked while the host opens and reads its tab.
     // A queued project call must stay behind the snapshot and emit its own ID.
     fixture_settings(
@@ -7164,8 +7195,14 @@ fn fake_oms() {
     }
     if cfg["snapshotGate"] == true {
         if args.first().is_some_and(|v| v == "dashboard") {
-            std::fs::write(source.join("snapshot-ready"), "").unwrap();
-            until(|| source.join("snapshot-release").exists());
+            if std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(source.join("snapshot-ready"))
+                .is_ok()
+            {
+                until(|| source.join("snapshot-release").exists());
+            }
         } else if args.get(1).is_some_and(|v| v == "desktop-requests") {
             println!("{}", json!({"approvals":[],"incomplete":false}));
             return;
