@@ -166,7 +166,13 @@ impl<'s> Plan<'s> {
             locks,
         };
         guard.binding = guard.current()?;
-        guard.check()?;
+        if guard.request.is_some() {
+            require(
+                parse_ts(guard.binding.text("expires_at")) > parse_ts(&admission_time()?),
+                "team contract expired",
+            )?;
+        }
+        guard.check_pinned()?;
         Ok(guard)
     }
 }

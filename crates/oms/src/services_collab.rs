@@ -81,6 +81,7 @@ pub(crate) struct CollabServices<'a> {
     /// repository swept through this instance creates it; the file is removed
     /// when the instance drops, so each tick run starts clean.
     wake_once: PathBuf,
+    controller: std::sync::OnceLock<oms_reference::controller::Controller>,
 }
 
 impl Drop for CollabServices<'_> {
@@ -163,7 +164,20 @@ impl<'a> CollabServices<'a> {
             protected_stage: None,
             detach_worker,
             wake_once,
+            controller: std::sync::OnceLock::new(),
         })
+    }
+
+    pub(super) fn controller(&self) -> Result<oms_reference::controller::Controller, String> {
+        if let Some(controller) = self.controller.get() {
+            controller.check().map_err(|e| e.to_string())?;
+            return Ok(controller.clone());
+        }
+        let captured =
+            oms_reference::controller::Controller::capture_current().map_err(|e| e.to_string())?;
+        let _ = self.controller.set(captured.clone());
+        captured.check().map_err(|e| e.to_string())?;
+        Ok(captured)
     }
 
     #[cfg(target_os = "linux")]
@@ -242,6 +256,7 @@ pub(crate) fn prelaunch_error(
 
 trait OwnedDuplexConsumer {
     fn check(&self) -> oms_command_peer::Result<()>;
+    fn note_spawned(&mut self) {}
     fn issuance_stage(&self) -> team_requests::IssuanceStage {
         team_requests::IssuanceStage::Unavailable
     }
@@ -376,11 +391,15 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
     if !job.merged {
         request.stderr_capture = Some(request.capture.clone());
     }
-    let mut spawn = |request| {
+    let mut spawn = |request| -> Result<_, String> {
         if let Some(channel) = &channel {
             channel.check().map_err(|e| e.message)?;
         }
-        reactor.start(request).map_err(|e| e.to_string())
+        let id = reactor.start(request).map_err(|e| e.to_string())?;
+        if let Some(channel) = &mut channel {
+            channel.note_spawned();
+        }
+        Ok(id)
     };
     let id = if let Some(fence) = job.launch_fence {
         fence
@@ -444,9 +463,15 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
             while let Some(event) = reactor.receive(id).map_err(|e| e.to_string())? {
                 if !channel_failed && channel.event(&mut reactor, id, event).is_err() {
                     channel_failed = true;
-                    reactor
-                        .stop(id, StopReason::SupervisorError)
-                        .map_err(|e| e.to_string())?;
+                    let reason = if interrupted.load(Ordering::Acquire) {
+                        cancelling = true;
+                        job.cancel
+                    } else if channel.check().is_err() {
+                        StopReason::Deadline
+                    } else {
+                        StopReason::SupervisorError
+                    };
+                    reactor.stop(id, reason).map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -1007,7 +1032,6 @@ struct RoomOperations<'a> {
     repo: PathBuf,
     attempts: Vec<oms_command_room::Attempt>,
     fingerprint: String,
-    deadline: Option<Instant>,
     stop: &'a AtomicBool,
     _guard: Box<dyn oms_command_plan::services::LifecycleGuard + 'a>,
 }
@@ -1037,12 +1061,10 @@ impl oms_command_room::OperationsRead for RoomOperations<'_> {
         &self.attempts
     }
     fn check(&self) -> oms_command_room::Result<()> {
-        if self.stop.load(Ordering::Acquire) || self.deadline.is_some_and(|at| Instant::now() >= at)
-        {
-            return Err(oms_command_room::Error::new(
-                "room operation interrupted or deadline expired",
-            ));
+        if self.stop.load(Ordering::Acquire) {
+            return Err(oms_command_room::Error::new("room operation interrupted"));
         }
+        self._guard.check().map_err(room_error)?;
         if room_operations_projection(&self.repo)?.0 != self.fingerprint {
             return Err(oms_command_room::Error::new(
                 "operations changed during room publication",
@@ -1050,6 +1072,31 @@ impl oms_command_room::OperationsRead for RoomOperations<'_> {
         }
         Ok(())
     }
+}
+
+pub(super) fn room_operations_before<'a, S: oms_command_plan::Services>(
+    control: &'a S,
+    repo: &Path,
+    deadline: Instant,
+    stop: &'a AtomicBool,
+) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>> {
+    if stop.load(Ordering::Acquire) {
+        return Err(room_error("interrupted"));
+    }
+    let guard = control
+        .lifecycle_writer_before(repo, deadline)
+        .map_err(room_error)?;
+    let (fingerprint, attempts) = room_operations_projection(repo)?;
+    if Instant::now() >= deadline {
+        return Err(room_error("native Room operation deadline expired"));
+    }
+    Ok(Box::new(RoomOperations {
+        repo: repo.to_owned(),
+        attempts,
+        fingerprint,
+        stop,
+        _guard: guard,
+    }))
 }
 
 fn room_delivery_receipt(
@@ -1122,7 +1169,6 @@ impl oms_command_room::Services for CollabServices<'_> {
             repo: repo.to_owned(),
             attempts,
             fingerprint,
-            deadline: None,
             stop: self.interrupted,
             _guard: guard,
         }))
@@ -1133,21 +1179,7 @@ impl oms_command_room::Services for CollabServices<'_> {
         deadline: Instant,
     ) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>> {
         self.check(self.interrupted).map_err(room_error)?;
-        let guard =
-            oms_command_plan::Services::lifecycle_writer_before(&self.control, repo, deadline)
-                .map_err(room_error)?;
-        let (fingerprint, attempts) = room_operations_projection(repo)?;
-        if Instant::now() >= deadline {
-            return Err(room_error("native Room operation deadline expired"));
-        }
-        Ok(Box::new(RoomOperations {
-            repo: repo.to_owned(),
-            attempts,
-            fingerprint,
-            deadline: Some(deadline),
-            stop: self.interrupted,
-            _guard: guard,
-        }))
+        room_operations_before(&self.control, repo, deadline, self.interrupted)
     }
     fn delivery_available(&self, _: oms_command_room::App) -> bool {
         // This is availability of the compiled producer, not proof of a live

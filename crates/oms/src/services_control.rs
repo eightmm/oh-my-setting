@@ -301,7 +301,7 @@ fn text_of(value: &Value, key: &str) -> String {
 
 /// Explicit `OMS_STATE_REPO` wins; otherwise the room producer resolves the
 /// physical work root and refuses unverified managed scratch worktrees.
-fn state_repository_for(work: &Path) -> Result<PathBuf, String> {
+pub(crate) fn state_repository_for(work: &Path) -> Result<PathBuf, String> {
     if let Some(state) = std::env::var_os("OMS_STATE_REPO").filter(|v| !v.is_empty()) {
         return std::fs::canonicalize(state)
             .map_err(|_| "cannot resolve canonical state repository".to_owned());

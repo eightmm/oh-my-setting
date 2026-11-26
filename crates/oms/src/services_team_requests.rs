@@ -201,6 +201,7 @@ pub(super) struct Channel<'a, 's> {
     consumed: usize,
     actions: Vec<TeamRequestAction>,
     private: Option<PrivateBinding>,
+    spawned: bool,
     issuance_stage: IssuanceStage,
 }
 impl<'a, 's> Channel<'a, 's> {
@@ -210,6 +211,7 @@ impl<'a, 's> Channel<'a, 's> {
         stop: &'a AtomicBool,
         deadline: Instant,
     ) -> Result<Self> {
+        let controller = service.controller().map_err(err)?;
         launch.check(service, stop)?;
         let selected = launch.attempt();
         let team = selected
@@ -279,7 +281,11 @@ impl<'a, 's> Channel<'a, 's> {
             .and_then(|v| v.get("event_id").text())
             .ok_or_else(|| err("Team lead creation generation unavailable"))?
             .to_owned();
+        let binding_sha = json::hash(&binding).map_err(plan_error)?;
         drop(guard);
+        if Instant::now() >= deadline || now() >= expires_at {
+            return Err(Error::new(124, "Team request channel expired"));
+        }
         let participant = format!("team-{}", identity.call_id);
         let room = oms_command_room::Room::open(
             selected.state_root,
@@ -311,7 +317,6 @@ impl<'a, 's> Channel<'a, 's> {
             .find(|v| v.text("participant") == participant)
             .map(|p| p.number("seq") as i128)
             .ok_or_else(|| err("Team lead Room enrollment unavailable"))?;
-        let binding_sha = json::hash(&binding).map_err(plan_error)?;
         Ok(Self {
             service,
             context,
@@ -327,7 +332,7 @@ impl<'a, 's> Channel<'a, 's> {
             deadline,
             expires_at,
             stop,
-            controller: oms_reference::controller::Controller::capture_current().map_err(err)?,
+            controller,
             owner: None,
             session: String::new(),
             nonce: String::new(),
@@ -340,6 +345,7 @@ impl<'a, 's> Channel<'a, 's> {
             consumed: 0,
             actions: launch.actions().to_vec(),
             private: None,
+            spawned: false,
             issuance_stage: IssuanceStage::Unavailable,
         })
     }
@@ -458,10 +464,7 @@ impl<'a, 's> Channel<'a, 's> {
         let plan = Plan::open(self.context.clone(), &self.service.control, self.stop)
             .map_err(plan_error)?;
         let guard = plan
-            .team_admission_before(
-                self.admission.clone(),
-                self.deadline.min(Instant::now() + Duration::from_secs(1)),
-            )
+            .team_admission_before(self.admission.clone(), self.deadline)
             .map_err(plan_error)?;
         if json::hash(guard.binding()).map_err(plan_error)? != self.binding_sha {
             return Err(err("Team channel contract changed"));
@@ -615,9 +618,8 @@ impl<'a, 's> Channel<'a, 's> {
         if self.binding.text("root_owner") != self.context.panel_main_attempt {
             return Err(err("Team root controller changed"));
         }
-        let expiry = self.expiry()?;
-        if now() >= expiry {
-            return Err(err("Team channel expired"));
+        if Instant::now() >= self.deadline || now() >= self.expires_at {
+            return Err(Error::new(124, "Team channel expired"));
         }
         if value
             .get("body")
@@ -642,7 +644,7 @@ impl<'a, 's> Channel<'a, 's> {
                     room_sequence: self.enrollment,
                     private_binding_sha256: &sha(&private.raw),
                 },
-                self.deadline.min(Instant::now() + Duration::from_secs(1)),
+                self.deadline,
             )
             .map_err(plan_error)?;
         self.sequence += 1;
@@ -664,6 +666,63 @@ impl<'a, 's> Channel<'a, 's> {
                 ("receipt_challenge", string(&challenge)),
             ]),
         )
+    }
+    fn settle_room_leave(&self) -> std::result::Result<(), EnrollmentFailureStage> {
+        use EnrollmentFailureStage as Stage;
+        struct SettlementRoomServices<'a> {
+            control: oms_command_autonomy::LocalServices<'a>,
+            stop: &'a AtomicBool,
+        }
+        impl oms_command_room::Services for SettlementRoomServices<'_> {
+            fn state_repository(&self, repo: &Path) -> oms_command_room::Result<PathBuf> {
+                crate::services_control::state_repository_for(repo)
+                    .map_err(oms_command_room::Error::new)
+            }
+            fn canonical_provider(&self, provider: &str) -> oms_command_room::Result<String> {
+                oms_command_room::Services::canonical_provider(
+                    &oms_command_room::LocalServices,
+                    provider,
+                )
+            }
+            fn operations_before<'a>(
+                &'a self,
+                repo: &Path,
+                deadline: Instant,
+            ) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>>
+            {
+                super::room_operations_before(&self.control, repo, deadline, self.stop)
+            }
+        }
+        let settling = AtomicBool::new(false);
+        let cleanup = SettlementRoomServices {
+            control: oms_command_autonomy::LocalServices::new(&settling),
+            stop: &settling,
+        };
+        let room = oms_command_room::Room::open(
+            &self.context.state_repo,
+            oms_command_room::Session::from_env(),
+            &cleanup,
+            &settling,
+            false,
+            false,
+        )
+        .map_err(|_| Stage::RoomSetup)?
+        .with_deadline(Instant::now() + Duration::from_secs(5));
+        room.leave_if_enrolled(
+            self.binding.text("room_id"),
+            &self.participant,
+            self.enrollment
+                .try_into()
+                .map_err(|_| Stage::CheckedRoomLeave)?,
+            self.binding.text("root_owner"),
+        )
+        .map_err(|_| Stage::CheckedRoomLeave)?;
+        Ok(())
+    }
+    fn settle_unspawned_enrollment(&self) {
+        if !self.spawned && self.controller.check().is_ok() {
+            let _ = self.settle_room_leave();
+        }
     }
     fn settle_enrollment(
         &self,
@@ -693,29 +752,7 @@ impl<'a, 's> Channel<'a, 's> {
             .ok_or(Stage::PrivateBinding)?
             .check()
             .map_err(|_| Stage::PrivateBinding)?;
-        let settling = std::sync::Arc::new(AtomicBool::new(false));
-        let cleanup =
-            CollabServices::new(&settling, &self.service.source).map_err(|_| Stage::RoomSetup)?;
-        let room = oms_command_room::Room::open(
-            &self.context.state_repo,
-            oms_command_room::Session::from_env(),
-            &cleanup,
-            &settling,
-            false,
-            false,
-        )
-        .map_err(|_| Stage::RoomSetup)?
-        .with_deadline(Instant::now() + Duration::from_secs(5));
-        room.leave_if_enrolled(
-            self.binding.text("room_id"),
-            &self.participant,
-            self.enrollment
-                .try_into()
-                .map_err(|_| Stage::CheckedRoomLeave)?,
-            self.binding.text("root_owner"),
-        )
-        .map_err(|_| Stage::CheckedRoomLeave)?;
-        Ok(())
+        self.settle_room_leave()
     }
     pub(super) fn complete(&self) -> bool {
         self.hello
@@ -777,6 +814,10 @@ fn incomplete_cues(
     detail
 }
 impl super::OwnedDuplexConsumer for Channel<'_, '_> {
+    fn note_spawned(&mut self) {
+        self.spawned = true;
+    }
+
     fn issuance_stage(&self) -> IssuanceStage {
         self.issuance_stage
     }
@@ -811,21 +852,31 @@ impl CollabServices<'_> {
             return Err(err("Team invocation differs from its New launch binding"));
         }
         let deadline = Instant::now() + input.timeout;
-        let mut channel = Channel::prepare(self, &binding, stop, deadline)
-            .map_err(|e| prelaunch_error(e, stop, deadline, None))?;
-        let expires_at = channel.expires_at;
-        let classify = |e| prelaunch_error(e, stop, deadline, Some(expires_at));
-        binding.check(self, stop).map_err(classify)?;
         input.input = None;
         let argv = self
             .resolve_argv(input.argv)
             .map_err(err)
-            .map_err(classify)?;
+            .map_err(|e| prelaunch_error(e, stop, deadline, None))?;
         if let Some(fence) = &input.launch_fence {
-            fence.check(stop).map_err(classify)?;
+            fence
+                .check(stop)
+                .map_err(|e| prelaunch_error(e, stop, deadline, None))?;
         }
-        binding.check(self, stop).map_err(classify)?;
-        let (done, protocol_failed) = supervise(
+        let mut channel = Channel::prepare(self, &binding, stop, deadline)
+            .map_err(|e| prelaunch_error(e, stop, deadline, None))?;
+        let expires_at = channel.expires_at;
+        let classify = |e| prelaunch_error(e, stop, deadline, Some(expires_at));
+        if let Err(error) = binding.check_protocol() {
+            channel.settle_unspawned_enrollment();
+            return Err(classify(error));
+        }
+        if let Some(fence) = &input.launch_fence
+            && let Err(error) = fence.check(stop)
+        {
+            channel.settle_unspawned_enrollment();
+            return Err(classify(error));
+        }
+        let (done, protocol_failed) = match supervise(
             Job {
                 stdin: None,
                 environment: input.environment,
@@ -843,9 +894,13 @@ impl CollabServices<'_> {
                 )
             },
             stop,
-        )
-        .map_err(err)
-        .map_err(classify)?;
+        ) {
+            Ok(done) => done,
+            Err(message) => {
+                channel.settle_unspawned_enrollment();
+                return Err(classify(err(message)));
+            }
+        };
         let enrollment_failure = done
             .owned_cleanup()
             .ok_or(EnrollmentFailureStage::MissingCleanupProof)
