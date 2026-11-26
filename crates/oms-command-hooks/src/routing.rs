@@ -406,9 +406,13 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
 fn memory_review_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     let result = (|| -> Result<String, String> {
         let path = state_path(repo, v, ".memory-review");
-        let (pending, fresh) = update_memory_review_state(&path, &ctx.snapshot.now(), || {
-            oms_command_memory::pending_review(repo, ctx.interrupted)
-        })?;
+        let observe = || oms_command_memory::pending_review(repo, ctx.interrupted);
+        // An empty queue needs no new receipt. This read is advisory only:
+        // every receipt transition observes again while holding its lock.
+        if !path.exists() && observe()?.pending == 0 {
+            return Ok(String::new());
+        }
+        let (pending, fresh) = update_memory_review_state(&path, &ctx.snapshot.now(), observe)?;
         Ok(if fresh {
             format!(
                 "[oms] memory review: {pending} pending proposal(s); inspect `oms agent-memory review`. Acceptance is explicit and does not verify a claim."
@@ -1723,15 +1727,17 @@ mod tests {
             );
             assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
         };
+        let event = json!({"session_id":"memory-review-session"});
+        let receipt_path = state_path(&repo, &event, ".memory-review");
+        assert!(memory_review_hint(&event, &repo, &ctx).is_empty());
+        assert!(!receipt_path.exists(), "an empty queue needs no receipt");
+        assert!(!repo.join(".oms/hooks").exists());
         let first = proposal("First automatic proposal text stays private to review");
         let second = proposal("Second automatic proposal text stays private to review");
-        let event = json!({"session_id":"memory-review-session"});
-        assert!(!repo.join(".oms/hooks").exists());
         let hint = memory_review_hint(&event, &repo, &ctx);
         assert!(hint.contains("2 pending proposal(s)"), "{hint}");
         assert!(hint.contains("oms agent-memory review"), "{hint}");
         assert!(!hint.contains("--accept"), "{hint}");
-        let receipt_path = state_path(&repo, &event, ".memory-review");
         let observed = update_memory_review_state(&receipt_path, &snapshot.now(), || {
             assert!(
                 lock(&receipt_path, &repo).is_err(),
@@ -1764,6 +1770,15 @@ mod tests {
                 .pending,
             0
         );
+        let empty_receipt = fs::read(&receipt_path).unwrap();
+        assert!(
+            document(&empty_receipt).unwrap()["candidates"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(memory_review_hint(&event, &repo, &ctx).is_empty());
+        assert_eq!(fs::read(&receipt_path).unwrap(), empty_receipt);
     }
 
     #[test]
