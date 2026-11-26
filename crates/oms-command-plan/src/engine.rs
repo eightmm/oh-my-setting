@@ -2364,11 +2364,54 @@ impl<'a> Plan<'a> {
         )?;
         let reason = reason(req, "cancellation")?;
         let expected = req.value("expected-plan-sha256")?;
+        let batch = req.has("all-inactive");
+        if !batch {
+            let id = req.text("id")?;
+            if !id.is_empty()
+                && let Some(task) = s.plan.get("tasks").opt(id)
+                && task.text("state") == "cancelled"
+            {
+                let expected_task = req.value("expected-task-sha256")?;
+                let state = req.value("expected-state")?;
+                let expected_lease = req.value("expected-lease-id")?;
+                let lease = if expected_lease == "none" {
+                    ""
+                } else {
+                    expected_lease
+                };
+                let rel = req.value("decision-artifact")?;
+                let decision_sha = req.value("expected-decision-artifact-sha256")?;
+                let receipt = task.get("cancellation");
+                if receipt.get("schema").is_int(1)
+                    && receipt.text("kind") == "operator-cancellation"
+                    && receipt.text("operator_consent") == "cancel"
+                    && receipt.text("reason") == reason
+                    && json::hex(expected, 64)
+                    && receipt.text("plan_sha256") == expected
+                    && json::hex(expected_task, 64)
+                    && receipt.text("task_sha256") == expected_task
+                    && ["ready", "blocked"].contains(&state)
+                    && receipt.text("state") == state
+                    && (expected_lease == "none" || receipt_id(expected_lease, 200))
+                    && receipt.text("lease_id_sha256") == json::sha(lease)
+                    && crate::decision::relative(rel).is_ok()
+                    && receipt.text("decision_artifact") == rel
+                    && json::hex(decision_sha, 64)
+                    && receipt.text("decision_artifact_sha256") == decision_sha
+                {
+                    return Ok(Response::text(format!(
+                        "plan: {id} -> cancelled (replayed)"
+                    )));
+                }
+                return Err(error(format!(
+                    "task {id} was already cancelled by a different request"
+                )));
+            }
+        }
         require(
             json::hex(expected, 64) && s.raw.as_ref().is_some_and(|r| json::sha(r) == expected),
             "active plan changed after cancellation was reviewed",
         )?;
-        let batch = req.has("all-inactive");
         let mut selected = Vec::new();
         if batch {
             for (_, task) in s.tasks()? {
