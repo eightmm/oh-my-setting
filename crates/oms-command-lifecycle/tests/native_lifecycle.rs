@@ -2971,7 +2971,7 @@ fn doctor_integration_diagnostics(source: &Path, root: &Path, host: &NativeServi
         fs::write(
             &codex,
             format!(
-                "[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"{profile}\"\n",
+                "# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"{profile}\"\n",
                 json!(executable)
             ),
         )
@@ -4367,31 +4367,35 @@ esac
     assert!(!cleaned_toml.contains("mcp_servers"));
     assert!(cleaned_toml.contains(custom));
     for profile in ["core", "full"] {
-        write(
-            &claude_config,
-            &json!({"custom":true,"mcpServers":{"oh-my-setting":{
-                "type":"stdio","command":home.join(".local/bin/oms"),"args":["mcp-server"],
-                "env":{"OMS_MCP_TOOL_PROFILE":profile}
-            }}}),
-        );
-        fs::write(
-            &codex_config,
+        for split_codex in [
             format!(
                 "{custom}\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"{profile}\"\n",
                 json!(home.join(".local/bin/oms"))
             ),
-        )
-        .unwrap();
-        success(call("install-mcp", &["--remove"], &source, &host));
-        assert_eq!(read(&claude_config)["custom"], true);
-        assert!(
-            read(&claude_config)["mcpServers"]
-                .get("oh-my-setting")
-                .is_none()
-        );
-        let cleaned = fs::read_to_string(&codex_config).unwrap();
-        assert!(cleaned.contains(custom));
-        assert!(!cleaned.contains("mcp_servers"));
+            format!(
+                "{custom}\n# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"{profile}\"\n",
+                json!(home.join(".local/bin/oms"))
+            ),
+        ] {
+            write(
+                &claude_config,
+                &json!({"custom":true,"mcpServers":{"oh-my-setting":{
+                    "type":"stdio","command":home.join(".local/bin/oms"),"args":["mcp-server"],
+                    "env":{"OMS_MCP_TOOL_PROFILE":profile}
+                }}}),
+            );
+            fs::write(&codex_config, split_codex).unwrap();
+            success(call("install-mcp", &["--remove"], &source, &host));
+            assert_eq!(read(&claude_config)["custom"], true);
+            assert!(
+                read(&claude_config)["mcpServers"]
+                    .get("oh-my-setting")
+                    .is_none()
+            );
+            let cleaned = fs::read_to_string(&codex_config).unwrap();
+            assert!(cleaned.contains(custom));
+            assert!(!cleaned.contains("mcp_servers"));
+        }
     }
     fs::write(
         &codex_config,
