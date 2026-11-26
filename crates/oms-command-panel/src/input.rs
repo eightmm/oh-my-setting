@@ -260,7 +260,7 @@ impl TerminalInput {
         self.file.write_all(b"\x1b[?1002h").map_err(Error::new)
     }
     pub fn wait(&mut self, duration: Duration) -> Result<Vec<Key>> {
-        self.wait_woken(duration, None, [None; 2])
+        self.wait_woken(duration, None, [None; 3])
             .map(|(keys, _, _)| keys)
     }
     /// Like [`Self::wait`], also polling the wakeup socket; the flag is true
@@ -270,8 +270,8 @@ impl TerminalInput {
         &mut self,
         duration: Duration,
         wake: Option<&crate::wakeup::Wakeup>,
-        native: [Option<rustix::fd::BorrowedFd<'_>>; 2],
-    ) -> Result<(Vec<Key>, bool, [bool; 2])> {
+        native: [Option<rustix::fd::BorrowedFd<'_>>; 3],
+    ) -> Result<(Vec<Key>, bool, [bool; 3])> {
         use rustix::event::{PollFd, PollFlags, poll};
         require(
             rustix::termios::tcgetpgrp(&self.file).map_err(Error::new)?
@@ -294,7 +294,7 @@ impl TerminalInput {
         });
         match poll(&mut descriptors, Some(&timeout)) {
             Ok(_) => {}
-            Err(rustix::io::Errno::INTR) => return Ok((vec![], false, [false; 2])),
+            Err(rustix::io::Errno::INTR) => return Ok((vec![], false, [false; 3])),
             Err(e) => return Err(Error::new(e)),
         }
         let readable = descriptors[0].revents().contains(PollFlags::IN);
