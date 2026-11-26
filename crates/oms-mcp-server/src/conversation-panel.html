@@ -243,6 +243,18 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 #criteria-list small{display:block;margin-top:.2rem;white-space:pre-wrap}
 #followup-panel{margin-top:.7rem;padding:.7rem;background:var(--surface);border:1px solid var(--line);border-radius:.55rem}
 #followup-text{display:block;width:100%;margin-top:.35rem;min-height:6rem;resize:vertical;background:var(--bg);border:1px solid var(--line);border-radius:.4rem;padding:.5rem}
+#finding-preview{margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:var(--r-sm)}
+#finding-text{max-height:18rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:.84rem/1.5 var(--mono);margin:8px 0}
+#finding-scope,#finding-range{overflow-wrap:anywhere}
+#inspection{max-width:min(52rem,calc(100% - 1.5rem))}
+#inspect-content{display:grid;gap:12px;margin-top:12px}
+.inspect-card{padding:12px;border:1px solid var(--line);border-radius:var(--r-sm);min-width:0;overflow-wrap:anywhere}
+.inspect-card h3{font-size:.95rem;color:var(--ink)}
+.inspect-card dl{display:grid;grid-template-columns:minmax(7rem,1fr) minmax(0,2fr);gap:4px 12px;margin:8px 0 0}
+.inspect-card dt{color:var(--soft);font-size:.8rem}.inspect-card dd{margin:0;font-size:.85rem;white-space:pre-wrap}
+#inspect-query{flex:1;min-width:8rem;padding:6px 8px;background:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm)}
+#inspect-kind{max-width:100%}.inspect-nodes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+#inspect-graph-form{align-items:center}
 #lead-auto-label{display:flex;align-items:center;gap:.4rem;margin-top:.5rem;color:var(--soft)}
 .lead-turn{display:block;color:var(--soft);font-size:.78rem}
 #full-answer{margin-top:.7rem;padding-top:.6rem;border-top:1px solid var(--line)}
@@ -286,6 +298,7 @@ header{gap:8px;padding-bottom:8px}
 <body><main>
 <header><div class="scope"><h1>OMS</h1><strong id="project"></strong><label id="scope" hidden><span class="sr-only" data-i18n="project">프로젝트</span><select id="project-choice"></select></label></div><div class="tools">
 <select id="language-choice" aria-label="언어 / Language"><option value="ko">한국어</option><option value="en">English</option></select>
+<button id="inspect-open" type="button" aria-haspopup="dialog" data-i18n="inspect.open" disabled>더 살펴보기</button>
 <button id="auto-refresh" type="button" aria-pressed="false" data-i18n="auto">자동</button><button id="refresh" type="button" aria-keyshortcuts="Alt+R" aria-label="새로고침" disabled>↻</button><button id="display-mode" type="button" hidden></button></div></header>
 <p id="status" class="note" role="status"></p><p id="receipt" class="note" role="status"></p>
 <noscript><p lang="ko">대화에서 OMS에 프로젝트 상태를 물어보세요.</p><p lang="en">Ask OMS for project status in the conversation.</p></noscript>
@@ -294,7 +307,7 @@ header{gap:8px;padding-bottom:8px}
 <p id="goal" tabindex="-1" class="clamp"></p><button id="goal-expand" class="subtle" aria-controls="goal" aria-expanded="false" hidden></button><p id="progress" hidden></p><div id="progress-track" class="progress-track" aria-hidden="true" hidden><span id="progress-fill"></span></div>
 <div id="goal-journey"><p id="criteria-summary" hidden></p><p id="attention-summary" class="note"></p><p id="next-step" class="note"></p><div class="actions"><button id="evidence-toggle" type="button" aria-expanded="false" aria-controls="goal-evidence" data-i18n="evidence.open">결과 근거 보기</button><button id="followup-open" type="button" data-i18n="followup.prepare" hidden>현재 Main에 요청할 초안 준비</button></div>
 <section id="goal-evidence" hidden><h3 data-i18n="evidence.title">프로젝트 완료 기준과 근거</h3><ul id="criteria-list"></ul><p id="evidence-note" class="note"></p><ul id="readiness-list"></ul></section>
-<section id="followup-panel" hidden><label for="followup-text" data-i18n="followup.label">현재 대화에 추가할 요청 초안</label><textarea id="followup-text" rows="3" maxlength="4000"></textarea><p class="note" data-i18n="followup.note">초안 추가는 작업 배정이나 실행 시작이 아닙니다.</p><div class="actions"><button id="followup-add" type="button" data-i18n="followup.add">대화 문맥에 추가</button><button id="followup-copy" type="button" data-i18n="copy">복사</button><button id="followup-main" type="button" data-i18n="main.continue">Main 대화에서 이어가기</button><button id="followup-close" type="button" data-i18n="close">닫기</button></div><p id="followup-status" class="note" role="status"></p></section></div></section>
+<section id="followup-panel" hidden><label for="followup-text" data-i18n="followup.label">현재 대화에 추가할 요청 초안</label><textarea id="followup-text" rows="3" maxlength="4000"></textarea><p class="note" data-i18n="followup.note">초안 추가는 작업 배정이나 실행 시작이 아닙니다.</p><section id="finding-preview" hidden><h3 data-i18n="finding.title">공유할 선택 결과 미리보기</h3><p id="finding-scope" class="note"></p><p id="finding-range" class="note"></p><pre id="finding-text"></pre><p class="note" data-i18n="finding.note">아래 공유 버튼을 누를 때만 이 발췌문과 요청 초안을 현재 대화 문맥에 추가합니다. 전체 대화는 공유하지 않습니다.</p><button id="finding-share" type="button" data-i18n="finding.share">이 발췌문과 초안을 Main 문맥에 공유</button></section><div class="actions"><button id="followup-add" type="button" data-i18n="followup.add">대화 문맥에 추가</button><button id="followup-copy" type="button" data-i18n="copy">복사</button><button id="followup-main" type="button" data-i18n="main.continue">Main 대화에서 이어가기</button><button id="followup-close" type="button" data-i18n="close">닫기</button></div><p id="followup-status" class="note" role="status"></p></section></div></section>
 <div>
 <section id="main-card" aria-labelledby="main-name"><h2 id="main-scope" class="label"></h2><div class="identity"><span id="avatar" class="avatar" aria-hidden="true"></span><strong id="main-name" tabindex="-1"></strong></div><p id="main-status" class="note"></p><button id="header-main" type="button" data-i18n="main.continue" hidden>Main 대화에서 이어가기</button></section>
 <section id="approval-card" aria-labelledby="approvals-heading" hidden><h2 id="approvals-heading" tabindex="-1"></h2><div id="approvals"></div></section>
@@ -313,7 +326,7 @@ header{gap:8px;padding-bottom:8px}
 </div></dialog>
 <dialog id="worker-output" aria-labelledby="output-title"><div class="dialog-body"><div class="section-head"><h2 id="output-title" data-i18n="out.title">워커 출력</h2><button id="output-close" type="button" data-i18n="close">닫기</button></div>
 <p id="output-worker"></p><p id="output-status" class="note" role="status"></p><pre id="output-body" hidden></pre><p id="output-limited" class="note" data-i18n="out.limited" hidden>기록된 출력의 일부입니다.</p>
-<div class="actions"><button id="output-refresh" type="button" data-i18n="refresh">새로고침</button><button id="output-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="output-more" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button><button id="output-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="output-followup" type="button" data-i18n="followup.result" hidden>이 결과로 요청 초안 준비</button></div><p id="output-copy-status" class="note" role="status"></p></div></dialog>
+<div class="actions"><button id="output-refresh" type="button" data-i18n="refresh">새로고침</button><button id="output-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="output-more" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button><button id="output-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="output-preview" type="button" data-i18n="finding.preview" hidden>Main에 공유할 부분 미리보기</button><button id="output-followup" type="button" data-i18n="followup.result" hidden>이 결과로 요청 초안 준비</button></div><p id="output-copy-status" class="note" role="status"></p></div></dialog>
 <dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><div class="identity"><span id="chat-avatar" class="avatar" aria-hidden="true" hidden></span><h2 id="chat-title"></h2></div><span class="dialog-actions"><button id="settings-toggle" type="button" aria-controls="chat-settings" aria-expanded="false" data-i18n="prefs.title" hidden>대화 설정</button><button id="chat-refresh" type="button" aria-label="대화 새로고침">↻</button><button id="chat-back" type="button" data-i18n="close">닫기</button></span></div>
 <section id="chat-settings" tabindex="-1" aria-labelledby="settings-toggle" hidden>
 <p id="settings-scope" class="note"></p><p id="settings-saved"></p><p id="settings-actual" class="note" hidden></p><p id="settings-catalog" class="note"></p>
@@ -322,9 +335,10 @@ header{gap:8px;padding-bottom:8px}
 <label><span data-i18n="prefs.effort">추론 강도</span><select id="settings-effort"></select></label></fieldset>
 <p id="settings-hint" class="note"></p><div id="settings-controls"><p id="settings-status" class="note" role="status"></p><button id="settings-read" type="button" data-i18n="refresh" hidden>새로고침</button><button id="settings-save" type="button" data-i18n="prefs.save" hidden>저장</button></div></section>
 <p id="chat-status" class="note" role="status"></p><button id="chat-new" type="button" class="subtle" data-i18n="chat.new" hidden>새 메시지 보기</button><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-result"></p><p id="chat-result-limited" class="note" data-i18n="turn.partial" hidden>부분 답변</p><button id="chat-result-full" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button>
-<section id="full-answer" hidden><div class="section-head"><h3 data-i18n="answer.title">기록된 출력</h3><button id="answer-close" type="button" data-i18n="close">닫기</button></div><pre id="full-answer-body"></pre><p id="answer-status" class="note" role="status"></p><div class="actions"><button id="answer-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="answer-more" type="button" data-i18n="answer.more" hidden>다음 부분 읽기</button><button id="answer-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="answer-followup" type="button" data-i18n="followup.result" hidden>이 결과로 요청 초안 준비</button></div></section></div>
+<section id="full-answer" hidden><div class="section-head"><h3 data-i18n="answer.title">기록된 출력</h3><button id="answer-close" type="button" data-i18n="close">닫기</button></div><pre id="full-answer-body"></pre><p id="answer-status" class="note" role="status"></p><div class="actions"><button id="answer-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="answer-more" type="button" data-i18n="answer.more" hidden>다음 부분 읽기</button><button id="answer-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="answer-preview" type="button" data-i18n="finding.preview" hidden>Main에 공유할 부분 미리보기</button><button id="answer-followup" type="button" data-i18n="followup.result" hidden>이 결과로 요청 초안 준비</button></div></section></div>
 <form id="chat-compose" hidden><label for="chat-text" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000" aria-describedby="chat-count chat-delivery"></textarea><span id="chat-count" class="count"></span>
 <div class="actions"><span id="chat-delivery" role="status"></span><button id="chat-check" type="button" hidden></button><button id="chat-send" type="submit" data-i18n="chatSend">보내기</button></div></form></dialog>
+<dialog id="inspection" aria-labelledby="inspect-title"><div class="dialog-body"><div class="section-head"><h2 id="inspect-title" data-i18n="inspect.title">프로젝트 더 살펴보기</h2><button id="inspect-close" type="button" data-i18n="close">닫기</button></div><div class="actions"><label for="inspect-kind" class="sr-only" data-i18n="inspect.choose">살펴볼 항목</label><select id="inspect-kind"><option value="usage" data-i18n="inspect.usage">사용량과 쿼터</option><option value="graph" data-i18n="inspect.graph">프로젝트 관계</option><option value="routes" data-i18n="inspect.routes">예상 라우팅</option><option value="modelcatalog" data-i18n="inspect.modelcatalog">모델 카탈로그</option></select><button id="inspect-refresh" type="button" data-i18n="refresh">새로고침</button></div><form id="inspect-graph-form" class="actions" hidden><label for="inspect-query" class="sr-only" data-i18n="inspect.searchLabel">이름 또는 경로</label><input id="inspect-query" maxlength="256" placeholder="이름 또는 경로"><button type="submit" data-i18n="inspect.search">찾기</button><button id="inspect-root" type="button" data-i18n="inspect.root">전체 범위</button></form><p id="inspect-note" class="note"></p><p id="inspect-status" class="note" role="status"></p><div id="inspect-content"></div><div class="actions"><button id="inspect-prev" type="button" data-i18n="inspect.prev" hidden>이전 페이지</button><button id="inspect-next" type="button" data-i18n="inspect.next" hidden>다음 페이지</button></div></div></dialog>
 </main><script>
 'use strict';
 const el=id=>document.getElementById(id);
@@ -555,9 +569,41 @@ const messages = {
   "followup.label": ["현재 대화에 추가할 요청 초안", "Request draft for the current conversation"],
   "followup.note": ["초안 추가는 작업 배정이나 실행 시작이 아닙니다.", "Adding a draft does not assign a task or start execution."],
   "followup.add": ["대화 문맥에 추가", "Add to conversation context"],
+  "followup.referencesOnly": ["참조와 초안만 추가", "Add draft and references only"],
   "followup.done": ["현재 대화의 문맥에 요청 초안을 추가했습니다. Main 수신이나 실행은 확인되지 않았습니다.", "Added the request draft to this conversation's context. Main receipt and execution are unconfirmed."],
   "followup.failed": ["대화 문맥 추가를 확인하지 못했습니다. 초안을 복사해 현재 Main 대화에서 이어가세요.", "Context update is unconfirmed. Copy the draft and continue in Main's conversation."],
   "followup.text": ["프로젝트 목표: {goal}\n확인할 항목: {item}\n현재 범위에서 근거와 미완료 기준을 확인하고 다음 조치를 제안해 주세요.", "Project goal: {goal}\nItem to check: {item}\nCheck the evidence and unmet criteria within the current scope, then propose the next action."],
+  "finding.preview": ["Main에 공유할 부분 미리보기", "Preview excerpt for Main"],
+  "finding.title": ["공유할 선택 결과 미리보기", "Selected finding to share"],
+  "finding.note": ["공유 버튼을 누를 때만 이 발췌문과 요청 초안을 현재 대화 문맥에 추가합니다. 전체 대화는 공유하지 않습니다.", "Only Share adds this excerpt and your draft to the current conversation context. The rest of the private conversation stays private."],
+  "finding.share": ["이 발췌문과 초안을 Main 문맥에 공유", "Share this excerpt and draft with Main context"],
+  "finding.range": ["공유 범위 {start}–{end} / {total}바이트 · {extent}", "Sharing bytes {start}–{end} of {total} · {extent}"],
+  "finding.partial": ["결과의 일부", "partial result"],
+  "finding.complete": ["기록된 결과 전체", "complete recorded result"],
+  "finding.limit": ["표시된 부분의 앞 {n}바이트까지 공유합니다.", "Shares the first {n} bytes of the displayed part."],
+  "finding.checking": ["공유 전 현재 범위와 원문을 다시 확인하는 중…", "Rechecking the current scope and source before sharing…"],
+  "finding.changed": ["범위나 원문을 다시 확인할 수 없어 공유하지 않았습니다. 결과를 다시 열어 선택하세요.", "Scope or source could not be reverified. Nothing was shared. Reopen the result to select it again."],
+  "finding.done": ["선택한 발췌문과 초안을 현재 대화 문맥에 추가했습니다. 실행 권한이나 Main 수신 확인은 아닙니다.", "Added the selected excerpt and draft to this conversation's context. This grants no execution authority and does not confirm Main receipt."],
+  "inspect.open": ["더 살펴보기", "Inspect"],
+  "inspect.title": ["프로젝트 더 살펴보기", "Inspect project"],
+  "inspect.choose": ["살펴볼 항목", "What to inspect"],
+  "inspect.usage": ["사용량과 쿼터", "Usage and quota"],
+  "inspect.graph": ["프로젝트 관계", "Project relationships"],
+  "inspect.routes": ["예상 라우팅", "Proposed routes"],
+  "inspect.modelcatalog": ["모델 카탈로그", "Model catalog"],
+  "inspect.searchLabel": ["이름 또는 경로", "Name or path"],
+  "inspect.search": ["찾기", "Search"],
+  "inspect.root": ["전체 범위", "Overview"],
+  "inspect.prev": ["이전 페이지", "Previous page"],
+  "inspect.next": ["다음 페이지", "Next page"],
+  "inspect.page": ["{page}페이지 · {n}개 표시", "Page {page} · {n} shown"],
+  "inspect.partial": ["일부 기록만 표시합니다. 생략된 값은 미확인입니다.", "Only part of the records is shown. Omitted values are unconfirmed."],
+  "inspect.empty": ["표시할 기록이 없습니다.", "No records to display."],
+  "inspect.failed": ["현재 프로젝트의 읽기 결과를 확인하지 못했습니다. 새로고침해 주세요.", "Could not verify this read for the current project. Refresh to try again."],
+  "inspect.usageNote": ["저장소의 최근 시도와 공급자 쿼터를 표시합니다. 현재 Room이나 이 답변만의 사용량이 아닙니다. 미보고 값은 0으로 계산하지 않습니다.", "Recent repository attempts and provider quota windows. These are not totals for this Room or this reply. Unreported values are not counted as zero."],
+  "inspect.graphNote": ["추출된 관계, 추정 관계, 모호한 관계와 파일 구조를 구분합니다. 노드를 선택하면 그 주변만 읽습니다.", "Extracted, inferred, ambiguous and structural relationships are distinguished. Select a node to read its neighborhood."],
+  "inspect.routesNote": ["현재 근거로 예상한 선택입니다. 실제 실행 기록이나 실행 권한이 아닙니다.", "Expected choices from current evidence. These are proposals, not records of execution or permission to run."],
+  "inspect.modelcatalogNote": ["캐시된 모델·추론 강도 근거입니다. 목록에 있다는 이유로 현재 계정의 접근이나 실제 응답 모델을 보장하지 않습니다.", "Cached model and effort evidence. A catalog entry does not confirm current account access or the model that served a reply."],
   "prefs.scope": ["이 Lead의 읽기 전용 상담 · 다음 메시지부터 적용 · 워커에 상속되지 않음", "This Lead's read-only consultation · applies to the next message · not inherited by workers"],
   "prefs.continuity": ["OMS 대화 기록을 이어갑니다. 공급자의 native 세션 재개 여부는 별도입니다.", "Continues the OMS thread. Native provider session resumption is separate."],
   "prefs.catalogAge": ["모델 목록 확인 후 {n}초 경과", "Model catalog observed {n} seconds ago"],
@@ -624,6 +670,8 @@ function localize() {
   el('auto-refresh').setAttribute('aria-label',t('autoLabel'));
   el('chat-refresh').setAttribute('aria-label',t('refreshChat'));
   el('brief').setAttribute('placeholder',t('briefPlaceholder'));
+  el('inspect-query').setAttribute('placeholder',t('inspect.searchLabel'));
+  if(followupDraft)paintFollowup();
   paintObserved();syncBriefCount();
   if(managedChat)paintComposer(managedChat);
   el('language-choice').value=lang;
@@ -642,6 +690,7 @@ function setLanguage(next,explicit) {
 const stateLabel=state=>messages['state.'+state]?t('state.'+state):state||t('statusUnknown');
 let dashboardData, members=[], rows=[], selectedChat, chatOrigin, chatCursor, chatPage=0;
 let selectedOutput;
+let inspection;
 let staleView=false,bindingKey=null,lastGoodBinding=null,lastGoodGeneration=-1,followupDraft=null,fullAnswer=null,roomResult=null,roomPageSeen=false;
 const roomMessageKeys=new Map();
 let approvedScope=0, issueTicket=0, reviewedIssue;
@@ -672,17 +721,19 @@ const pendingOpens = [];
 const pendingErrors = [];
 let retryStart;
 let contextTypes;
+const hasContext=()=>Boolean(contextTypes?.text || contextTypes?.structuredContent);
 
 let canOpenLinks=false, readOnly=false, contextKey, contextQueue=Promise.resolve();
 const MODES=['inline','fullscreen','pip'];
 let hostModes=[],displayMode='',autoExpanded=false,modeBusy=false;
-function updateContext(data, textOnly = false) {
-  if (!contextTypes || (textOnly && !contextTypes.text)) return Promise.resolve(false);
+function updateContext(data, textOnly = false, current = ()=>true) {
+  if (!hasContext() || (textOnly && !contextTypes.text)) return Promise.resolve(false);
   const key = JSON.stringify(data);
   if (key === contextKey) return contextQueue;
   contextKey = key;
   contextQueue = contextQueue.then(async () => {
     if (key !== contextKey) return false;
+    if (!current() || !hasContext() || (textOnly && !contextTypes.text)) { contextKey=undefined; return false; }
     const params = !data ? {content:[]} : !textOnly && contextTypes.structuredContent ? {structuredContent:data}
       : {content:[{type:'text', text:key}]};
     try {
@@ -737,7 +788,7 @@ window.addEventListener('message', event => {
     if (msg.method === 'ui/resource-teardown' && !disposed) {
       disposed = true;
       generation++;resetLeadControl();
-      closeDialogs(); resetIssue();
+      closeDialogs(); resetIssue(); clearFollowup();
       setBusy(true, true);
       syncDisplayMode();
       el('view').hidden = true;
@@ -1022,6 +1073,7 @@ function clearChat() {
   el('chat-result-limited').hidden=el('chat-result-full').hidden=true;clearFullAnswer();
 }
 function closeDialogs() {
+  if(el('inspection').open)el('inspection').close();
   closeWorkerOutput();
   for(const id of ['conversation','launcher']) if(el(id).open) el(id).close();
   clearChat();
@@ -1169,39 +1221,44 @@ function clearWorkerOutput(){
   selectedOutput=undefined;
   for(const id of ['output-worker','output-status','output-body']){const e=el(id);bindings.delete(e);e.textContent='';}
   el('output-body').hidden=true;el('output-limited').hidden=true;
-  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=true;put('output-copy-status',()=>'');
+  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=el('output-preview').hidden=true;put('output-copy-status',()=>'');
 }
 function closeWorkerOutput(){
   if(el('worker-output').open)el('worker-output').close();
   clearWorkerOutput();
 }
+function checkedWorkerOutput(result,args,paged){
+  const data=result.structuredContent, out=result._meta?.workerOutput;
+  if(!data || !out || ['projectKey','room','leadAttempt','workerAttempt'].some(k=>data[k]!==args[k] || out[k]!==args[k]) ||
+    !['running','complete','not_recorded','unavailable'].includes(data.status) || out.status!==data.status ||
+    typeof out.truncated!=='boolean' || (data.status==='complete'
+      ? !['native-report','indexed-answer'].includes(out.source) || typeof out.text!=='string' || !(paged?out.text:out.text.trim()) ||
+        out.text.length>16384 || new TextEncoder().encode(out.text).length>16384
+      : out.text!==null || out.source!==null || out.truncated))throw uiError('out.unavailable');
+  return out;
+}
 async function readWorkerOutput(s,paged=false){
   if(!s || s!==selectedOutput || s.loading)return;
-  const args={projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt};
-  if(paged)args.answerPage=s.cursor||'';else{s.cursor=null;s.digest=null;s.end=0;}
+  const args={projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt},cursor=paged?s.cursor||'':null;
+  if(paged)args.answerPage=cursor;else{s.cursor=null;s.digest=null;s.end=0;s.pageCursor=null;}
   el('output-body').hidden=true;el('output-body').textContent='';el('output-limited').hidden=true;
   if(!currentWorkerOutput(s)){put('output-status','out.unavailable');return;}
   s.loading=true;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=true;put('output-status','out.loading');
-  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=true;put('output-copy-status',()=>'');
+  el('output-first').hidden=el('output-more').hidden=el('output-copy').hidden=el('output-followup').hidden=el('output-preview').hidden=true;put('output-copy-status',()=>'');
   try{
     const result=await tool('oms_worker_output',args,s.ctl.generation);
     if(!currentWorkerOutput(s))return;
-    const data=result.structuredContent, out=result._meta?.workerOutput;
-    if(!data || !out || ['projectKey','room','leadAttempt','workerAttempt'].some(k=>data[k]!==args[k] || out[k]!==args[k]) ||
-      !['running','complete','not_recorded','unavailable'].includes(data.status) || out.status!==data.status ||
-      typeof out.truncated!=='boolean' || (data.status==='complete'
-        ? !['native-report','indexed-answer'].includes(out.source) || typeof out.text!=='string' || !(paged?out.text:out.text.trim()) ||
-          out.text.length>16384 || new TextEncoder().encode(out.text).length>16384
-        : out.text!==null || out.source!==null || out.truncated))throw uiError('out.unavailable');
+    const out=checkedWorkerOutput(result,args,paged);
     if(paged){
       if(out.status!=='complete')throw uiError('answer.changed');
-      acceptChunk(s,{...out.page,text:out.text});
+      acceptChunk(s,{...out.page,text:out.text});s.pageCursor=cursor;
       put('output-status',()=>t('answer.loaded',{start:s.start+1,n:s.end,total:s.total}));
     }else put('output-status','out.'+out.status);
-    s.text=out.text||'';
+    s.text=out.text||'';s.format=out.source;
     el('output-body').textContent=out.text||'';el('output-body').hidden=!out.text;
     el('output-limited').hidden=!(out.text && out.truncated);
     el('output-copy').hidden=el('output-followup').hidden=!out.text;
+    el('output-preview').hidden=!out.text?.trim() || !findingScope();
     el('output-more').hidden=!out.text || (paged?!s.cursor:!out.truncated);
     el('output-first').hidden=!paged || !s.start;
     put('output-more',paged?'answer.more':'answer.full');
@@ -1242,45 +1299,56 @@ function acceptChunk(reader,page){
 }
 function clearFullAnswer(){
   fullAnswer=null;el('full-answer').hidden=true;el('full-answer-body').textContent='';
-  el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=true;put('answer-status',()=>'');
+  el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=el('answer-preview').hidden=true;put('answer-status',()=>'');
 }
 function currentFullAnswer(s){
   return s && s===fullAnswer && s.generation===generation && !el('full-answer').hidden && (s.kind==='lead'?currentManaged(s.c):
     s.projectKey===bindingKey && s.member===selectedChat && canChat(s.member) && el('conversation').open);
 }
+async function loadResultPage(ref,cursor,expected){
+  const scope={projectKey:ref.projectKey,room:ref.room};
+  if(ref.kind==='worker-output'){
+    const args={...scope,leadAttempt:ref.leadAttempt,workerAttempt:ref.workerAttempt,answerPage:cursor};
+    const out=checkedWorkerOutput(await tool('oms_worker_output',args,expected),args,true);
+    if(out.status!=='complete')throw uiError('answer.changed');
+    return {page:{...out.page,text:out.text},source:{kind:ref.kind,...scope,leadAttempt:ref.leadAttempt,workerAttempt:ref.workerAttempt,format:out.source}};
+  }
+  if(ref.kind==='lead-answer'){
+    const args={...scope,provider:ref.provider,leadRequestId:ref.leadRequestId,turnId:ref.turnId,answerPage:cursor};
+    const result=await tool('oms_lead_conversation_status',args,expected);
+    const item=validatedTeam(result,scope,ref.provider).items.get(ref.provider),data=result._meta?.leadConversation;
+    if(item.status!=='ready' || item.requestId!==ref.leadRequestId || data?.room!==ref.room ||
+      data.provider!==ref.provider || data.requestId!==ref.leadRequestId || data.answer?.turnId!==ref.turnId ||
+      data.answer.source!=='recorded-answer')throw uiError('answer.changed');
+    const handoff=data.answer.handoff;
+    const valid=handoff && handoff.room===ref.room && handoff.provider===ref.provider && handoff.leadRequestId===ref.leadRequestId &&
+      handoff.turnId===ref.turnId && typeof handoff.participant==='string' && typeof handoff.operation==='string' &&
+      /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.participant) && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.operation);
+    return {page:data.answer,source:valid?{kind:ref.kind,...scope,provider:ref.provider,leadRequestId:ref.leadRequestId,
+      turnId:ref.turnId,participant:handoff.participant,operation:handoff.operation,pageCursor:cursor}:null};
+  }
+  if(ref.kind!=='room-result')throw uiError('answer.changed');
+  const args={...scope,participant:ref.participant,section:'transcript',attempt:ref.attempt,evidenceCursor:cursor};
+  const result=await tool('oms_panel_chat',args,expected),data=result._meta?.chat;
+  if(data?.source!=='room' || data.room!==ref.room || data.participant!==ref.participant ||
+    data.projectKey!==ref.projectKey || result.structuredContent?.projectKey!==ref.projectKey ||
+    data.evidence?.attempt!==ref.attempt || data.evidence.section!=='transcript')throw uiError('answer.changed');
+  return {page:data.evidence,source:{kind:ref.kind,...scope,participant:ref.participant,attempt:ref.attempt}};
+}
 async function readFullAnswer(s){
   if(!currentFullAnswer(s) || s.loading)return;
   s.loading=true;el('answer-more').disabled=el('answer-first').disabled=true;put('answer-status','chatLoading');
   try{
-    let page,source;
-    if(s.kind==='lead'){
-      const c=s.c,args={...settingsScope(c),turnId:s.turnId,answerPage:s.cursor||''};
-      const result=await tool('oms_lead_conversation_status',args,c.ctl.generation);
-      if(!currentFullAnswer(s))return;
-      const item=validatedTeam(result,c.ctl,c.provider).items.get(c.provider),privateData=result._meta?.leadConversation;
-      if(item.status!=='ready' || item.requestId!==c.requestId || privateData?.room!==c.ctl.room ||
-        privateData.provider!==c.provider || privateData.requestId!==c.requestId || privateData.answer?.turnId!==s.turnId ||
-        privateData.answer.source!=='recorded-answer')throw uiError('answer.changed');
-      page=privateData.answer;
-      const handoff=page.handoff;
-      if(handoff && handoff.room===c.ctl.room && handoff.provider===c.provider && handoff.leadRequestId===c.requestId &&
-        handoff.turnId===s.turnId && typeof handoff.participant==='string' && typeof handoff.operation==='string' &&
-        /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.participant) && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.operation))
-        source={kind:'lead-answer',projectKey:c.ctl.projectKey,...handoff};
-    }else{
-      const m=s.member,result=await tool('oms_panel_chat',{projectKey:s.projectKey,room:m.room,participant:m.participant,section:'transcript',attempt:s.attempt,evidenceCursor:s.cursor||''},s.generation);
-      if(!currentFullAnswer(s))return;
-      const data=result._meta?.chat;
-      if(data?.source!=='room' || data.room!==m.room || data.participant!==m.participant ||
-        data.projectKey!==s.projectKey || result.structuredContent?.projectKey!==s.projectKey ||
-        data.evidence?.attempt!==s.attempt || data.evidence.section!=='transcript')throw uiError('answer.changed');
-      page=data.evidence;source={kind:'room-result',projectKey:s.projectKey,room:m.room,participant:m.participant,attempt:s.attempt};
-    }
-    acceptChunk(s,page);s.source=source;el('full-answer-body').textContent=s.text;
+    const ref=s.kind==='lead'?{kind:'lead-answer',projectKey:s.projectKey,room:s.c.ctl.room,provider:s.c.provider,leadRequestId:s.c.requestId,turnId:s.turnId}:
+      {kind:'room-result',projectKey:s.projectKey,room:s.member.room,participant:s.member.participant,attempt:s.attempt};
+    const cursor=s.cursor||'',{page,source}=await loadResultPage(ref,cursor,s.generation);
+    if(!currentFullAnswer(s))return;
+    acceptChunk(s,page);s.pageCursor=cursor;s.source=source;el('full-answer-body').textContent=s.text;
     put('answer-status',()=>t('answer.loaded',{start:s.text?s.start+1:0,n:s.end,total:s.total}));
     el('answer-first').hidden=!s.start;el('answer-more').hidden=!s.cursor;el('answer-copy').hidden=!s.text;el('answer-followup').hidden=!source || !joinedMain();
+    el('answer-preview').hidden=!source || !s.text.trim() || !findingScope();
   }catch{
-    if(currentFullAnswer(s)){s.text='';s.cursor=null;s.source=null;el('full-answer-body').textContent='';el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=true;put('answer-status','answer.changed');}
+    if(currentFullAnswer(s)){s.text='';s.cursor=null;s.source=null;el('full-answer-body').textContent='';el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=el('answer-preview').hidden=true;put('answer-status','answer.changed');}
   }finally{if(currentFullAnswer(s)){s.loading=false;el('answer-more').disabled=el('answer-first').disabled=false;}}
 }
 function openFullAnswer(selection){
@@ -1839,6 +1907,7 @@ function paintJourney(d){
 }
 function clearFollowup(){
   followupDraft=null;el('followup-panel').hidden=true;el('followup-text').value='';put('followup-status',()=>'');
+  clearFinding();
 }
 function currentFollowup(d){
   const main=joinedMain();
@@ -1847,7 +1916,9 @@ function currentFollowup(d){
 }
 function paintFollowup(){
   const current=currentFollowup(followupDraft),valid=validText(el('followup-text').value);
-  el('followup-add').hidden=!contextTypes;el('followup-add').disabled=!current || !valid || followupDraft?.pending;
+  el('followup-add').hidden=!hasContext();el('followup-add').disabled=!current || !valid || followupDraft?.pending;
+  put('followup-add',followupDraft?.finding?'followup.referencesOnly':'followup.add');
+  el('finding-share').hidden=!hasContext();el('finding-share').disabled=!current || !valid || !findingScope() || !followupDraft?.finding || followupDraft.pending;
   el('followup-copy').disabled=!current || !valid;el('followup-main').disabled=!current;
   if(current && !valid)put('followup-status','turn.limit');
   else if(current && el('followup-status').textContent===t('turn.limit'))put('followup-status',()=>'');
@@ -1865,25 +1936,21 @@ onClick('evidence-toggle',()=>{
   el('evidence-toggle').setAttribute('aria-expanded',String(show));put('evidence-toggle',show?'evidence.close':'evidence.open');
   if(show)paintEvidence();
 });
-function resultTask(source){
+function resultTask(source,d=dashboardData){
   if(source.projectKey!==bindingKey || source.room!==joinedMain()?.room)return null;
-  let attempt;
-  if(source.kind==='worker-output'){
-    const lead=rows.find(r=>r.attempt.id===source.leadAttempt);
-    attempt=lead?.workers.find(r=>r.attempt.id===source.workerAttempt)?.attempt;
-  }else{
-    const id=source.kind==='room-result'?source.attempt:source.kind==='lead-answer'?source.operation:null;
-    const records=Array.isArray(dashboardData?.conversationAttempts)?dashboardData.conversationAttempts:[];
-    const matches=records.filter(r=>id && r?.id===id && r.room===source.room &&
-      (r.participant||r.id)===source.participant && (!source.provider || providerName(r.provider)===providerName(source.provider)));
-    if(matches.length===1)attempt=matches[0];
-  }
+  const records=Array.isArray(d?.conversationAttempts)?d.conversationAttempts:[];
+  const id=source.kind==='worker-output'?source.workerAttempt:source.kind==='room-result'?source.attempt:source.kind==='lead-answer'?source.operation:null;
+  const matches=records.filter(r=>id && r?.id===id && (source.kind==='worker-output'
+    ? (r.room==null || r.room===source.room) && r.parentAttempt===source.leadAttempt
+    : r.room===source.room && (r.participant||r.id)===source.participant && (!source.provider || providerName(r.provider)===providerName(source.provider))));
+  const attempt=matches.length===1?matches[0]:null;
   return typeof attempt?.task==='string' && /^[A-Za-z0-9._-]{1,160}$/.test(attempt.task)?attempt.task:null;
 }
-function prepareFollowup(source=null){
+function prepareFollowup(source=null,finding=null){
   const main=joinedMain();if(!main || staleView || busy)return;
+  clearFinding();
   const focus=source?null:journeyFocus(dashboardData),task=source?resultTask(source):focus.task?.id||null;
-  followupDraft={project,projectKey:bindingKey,generation,room:main.room,owner:main.participant,task,source};
+  followupDraft={project,projectKey:bindingKey,generation,room:main.room,owner:main.participant,mainProvider:main.provider,task,source,finding};
   const excerpt=(value,max)=>Array.from(value).length>max?Array.from(value).slice(0,max).join('')+'…':value;
   const reference=source && [['Kind',source.kind],['Provider',source.provider],['Participant',source.participant],
     ['Lead request',source.leadRequestId],['Turn',source.turnId],['Operation',source.operation],['Lead attempt',source.leadAttempt],
@@ -1893,8 +1960,87 @@ function prepareFollowup(source=null){
     bindingKey&&'Project key: '+bindingKey,reference&&t('followup.reference',{v:reference}),task&&'Task: '+task,
     t('followup.text',{goal:excerpt(displayText(dashboardData.goal,2000)||t('goalUnknown'),400),
       item:excerpt(source?t('answer.title'):focus.summary||t('evidence.title'),200)})].filter(Boolean).join('\n');
+  if(finding){
+    const selected=finding.selection;
+    el('finding-preview').hidden=false;el('finding-text').textContent=selected.text;
+    put('finding-scope',()=>t('followup.scope',{project:project||displayText(dashboardData.project,255)||'OMS',room:main.room})+' · '+reference);
+    put('finding-range',()=>t('finding.range',{start:selected.offset+1,end:selected.offset+selected.bytes,total:selected.totalBytes,
+      extent:t(selected.truncated?'finding.partial':'finding.complete')})+(selected.bytes<selected.displayedBytes?' · '+t('finding.limit',{n:selected.bytes}):''));
+  }
   el('followup-panel').hidden=false;put('followup-status',()=>'');paintFollowup();el('followup-text').focus();
 }
+const FINDING_BYTES=4000;
+function findingScope(){return !disposed && !busy && !readOnly && !staleView && !!joinedMain() && /^[a-f0-9]{64}$/.test(bindingKey);}
+function utf8Prefix(text,limit){
+  let result='',bytes=0;
+  for(const char of text){const n=new TextEncoder().encode(char).length;if(bytes+n>limit)break;result+=char;bytes+=n;}
+  return result;
+}
+function clearFinding(){
+  el('finding-preview').hidden=true;el('finding-text').textContent='';
+  put('finding-scope',()=>'');put('finding-range',()=>'');el('finding-share').disabled=true;
+}
+function selectedFinding(reader,displayed=reader.text){
+  const text=utf8Prefix(displayed,FINDING_BYTES),bytes=new TextEncoder().encode(text).length,displayedBytes=new TextEncoder().encode(displayed).length;
+  if(!text.trim() || !/^[a-f0-9]{64}$/.test(reader.digest) || !Number.isSafeInteger(reader.start) || reader.start<0 ||
+    !Number.isSafeInteger(reader.total) || reader.start+displayedBytes>reader.total)throw uiError('answer.changed');
+  return {cursor:reader.pageCursor||'',selection:{text,offset:reader.start,bytes,totalBytes:reader.total,digest:reader.digest,
+    truncated:reader.start>0 || reader.start+bytes<reader.total,displayedBytes}};
+}
+onClick('output-preview',async()=>{
+  const s=selectedOutput;if(!currentWorkerOutput(s) || s.loading || !s.text?.trim() || !findingScope())return;
+  const displayed=s.text,ref={kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,format:s.format};
+  s.loading=true;el('output-preview').disabled=true;
+  try{
+    let reader=s,source=ref;
+    if(!s.digest){
+      const result=await loadResultPage(ref,'',s.ctl.generation);
+      if(!currentWorkerOutput(s))return;
+      if(result.source.format!==s.format || !result.page.text.startsWith(utf8Prefix(displayed,FINDING_BYTES)))throw uiError('answer.changed');
+      reader={end:0,pageCursor:''};acceptChunk(reader,result.page);source=result.source;
+    }
+    if(!currentWorkerOutput(s) || !findingScope())return;
+    const finding=selectedFinding(reader,displayed);source={...source,digest:reader.digest};
+    closeWorkerOutput();prepareFollowup(source,finding);
+  }catch{if(currentWorkerOutput(s)){s.text='';s.digest=null;el('output-body').textContent='';
+    el('output-preview').hidden=el('output-copy').hidden=el('output-followup').hidden=true;put('output-status','answer.changed');}}
+  finally{s.loading=false;el('output-preview').disabled=false;}
+});
+onClick('answer-preview',()=>{
+  const s=fullAnswer;if(!currentFullAnswer(s) || s.loading || !s.source || !s.text?.trim() || !findingScope())return;
+  const finding=selectedFinding(s),source={...s.source,digest:s.digest};
+  el('conversation').close();clearChat();prepareFollowup(source,finding);
+});
+const resultSourceFields=['kind','projectKey','room','provider','participant','leadRequestId','turnId','operation','leadAttempt','workerAttempt','attempt','format','digest','pageCursor'];
+async function verifiedFindingScope(draft){
+  if(!currentFollowup(draft) || !findingScope())throw uiError('finding.changed');
+  const registry=(await tool('oms_list_projects',{},draft.generation)).structuredContent;
+  const key=draft.project?registry?.projectKeys?.[draft.project]:registry?.projectKey;
+  if(registry?.readOnly===true || key!==draft.projectKey || !currentFollowup(draft) || !findingScope())throw uiError('finding.changed');
+  const response=await tool('oms_panel_snapshot',{},draft.generation),d=response.structuredContent?.dashboard||response._meta?.dashboard,m=d?.conversationMain;
+  if(d?.conversationBinding!=='matched' || m?.source!=='room-session' || m.state!=='joined' || m.room!==draft.room ||
+    m.participant!==draft.owner || m.provider!==draft.mainProvider || resultTask(draft.source,d)!==draft.task || !currentFollowup(draft))throw uiError('finding.changed');
+}
+onClick('finding-share',async()=>{
+  const draft=followupDraft,text=el('followup-text').value,finding=draft?.finding;
+  if(!currentFollowup(draft) || !finding || draft.pending || !findingScope() || !hasContext() || !validText(text))return;
+  draft.pending=true;paintFollowup();put('followup-status','finding.checking');
+  try{
+    await verifiedFindingScope(draft);
+    const {page,source}=await loadResultPage(draft.source,finding.cursor,draft.generation),selected=finding.selection;
+    const check={end:selected.offset,digest:selected.digest,total:selected.totalBytes};acceptChunk(check,page);
+    await verifiedFindingScope(draft);
+    if(!source || resultSourceFields.some(k=>({...source,digest:check.digest})[k]!==draft.source[k]) || !page.text.startsWith(selected.text) ||
+      !currentFollowup(draft) || !findingScope() || !hasContext() || el('followup-text').value!==text)throw uiError('finding.changed');
+    const excerptSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(selected.text))),
+      byte=>byte.toString(16).padStart(2,'0')).join('');
+    const delivered=await updateContext({kind:'oms-selected-finding',authority:'context-only',project:draft.project||null,projectKey:draft.projectKey,
+      room:draft.room,owner:draft.owner,...(draft.task?{task:draft.task}:{}),source:draft.source,selection:{...selected,excerptSha256},text},false,
+      ()=>currentFollowup(draft) && findingScope() && hasContext() && el('followup-text').value===text && draft.finding===finding);
+    if(currentFollowup(draft))put('followup-status',delivered?'finding.done':'followup.failed');
+  }catch{if(currentFollowup(draft)){draft.finding=null;clearFinding();put('followup-status','finding.changed');}}
+  finally{if(currentFollowup(draft)){draft.pending=false;paintFollowup();}}
+});
 onClick('followup-open',()=>prepareFollowup());
 on('followup-text','input',paintFollowup);
 onClick('followup-close',()=>{clearFollowup();el('followup-open').focus();});
@@ -1902,11 +2048,158 @@ onClick('followup-copy',()=>{const draft=followupDraft;copyDisplayed(el('followu
 onClick('followup-main',()=>{const m=joinedMain();if(currentFollowup(followupDraft))openConversation(m,()=>conversationMainName(m),el('followup-main'));});
 onClick('followup-add',async()=>{
   const draft=followupDraft,text=el('followup-text').value;
-  if(!currentFollowup(draft) || draft.pending || !validText(text) || !contextTypes)return;
+  if(!currentFollowup(draft) || draft.pending || !validText(text) || !hasContext())return;
   draft.pending=true;paintFollowup();
   const delivered=await updateContext({project:project||null,projectKey:draft.projectKey,room:draft.room,owner:draft.owner,kind:'oms-followup-draft',...(draft.task?{task:draft.task}:{}),source:draft.source,text});
   if(currentFollowup(draft)){draft.pending=false;put('followup-status',delivered?'followup.done':'followup.failed');paintFollowup();}
 });
+const inspectionKinds=['usage','graph','routes','modelcatalog'];
+function canInspect(){return !disposed && !busy && !staleView && dashboardData && !el('view').hidden && /^[a-f0-9]{64}$/.test(bindingKey);}
+function inspectionRoom(){const m=dashboardData?.conversationMain;return [m?.room||null,m?.participant||null].join(':');}
+function currentInspection(s,ticket=s?.ticket){
+  return s && s===inspection && !disposed && !staleView && s.generation===generation && s.project===project &&
+    s.projectKey===bindingKey && s.room===inspectionRoom() && s.ticket===ticket && el('inspection').open;
+}
+const inspectedNumber=v=>typeof v==='number' && Number.isFinite(v) && v>=0?v.toLocaleString(lang==='ko'?'ko-KR':'en-US'):t('statusUnknown');
+const inspectedValue=v=>typeof v==='boolean'?choice(v?'예':'아니요',v?'Yes':'No'):typeof v==='number'?inspectedNumber(v):displayText(v,1024)||t('statusUnknown');
+const inspectedPercent=v=>typeof v==='number' && Number.isFinite(v) && v>=0 && v<=100?inspectedNumber(v)+'%':t('statusUnknown');
+function inspectedDate(v){
+  try{const d=new Date(typeof v==='number'?v*1000:typeof v==='string'?v:NaN);return Number.isFinite(d.getTime())?d.toLocaleString(lang==='ko'?'ko-KR':'en-US'):t('statusUnknown');}
+  catch{return t('statusUnknown');}
+}
+const inspectLabels={
+  provider:['공급자','Provider'],model:['예상 모델','Expected model'],effort:['예상 추론 강도','Expected effort'],access:['접근 모드','Access'],
+  status:['상태','Status'],requestedModel:['요청 모델','Requested model'],requestedEffort:['요청 추론 강도','Requested effort'],
+  inFlight:['실행 중','In flight'],recentAttempts:['최근 시도','Recent attempts'],probeAge:['근거 경과(초)','Evidence age (seconds)'],issue:['확인할 항목','Issue'],
+  efforts:['모델별 추론 강도','Model-specific efforts'],providerEfforts:['공급자 단위 강도','Provider-wide efforts'],routable:['라우팅 후보','Routing candidate'],
+  source:['출처','Source'],probe:['캐시 상태','Cache status'],age:['캐시 경과(초)','Cache age (seconds)'],
+  contextUsed:['관측된 문맥 사용률','Observed context used'],cacheReadShare:['캐시 읽기 비율','Cache read share'],calls:['보고된 호출 수','Reported calls'],
+  tokens:['보고된 토큰','Reported tokens'],cost:['보고된 비용(USD)','Reported cost (USD)'],used:['사용률','Used'],stale:['오래된 관측','Stale observation'],
+  resets:['초기화 시각','Resets at'],input:['입력 토큰','Input tokens'],output:['출력 토큰','Output tokens'],cacheRead:['캐시 읽기 토큰','Cache read tokens']
+};
+function inspectCard(title,fields){
+  const card=node('section','','inspect-card'),list=node('dl','');card.append(node('h3',title));
+  for(const [key,value] of fields){
+    list.append(node('dt',()=>choice(...inspectLabels[key])),node('dd',typeof value==='function'?value:()=>inspectedValue(value)));
+  }
+  card.append(list);return card;
+}
+function inspectUsage(data){
+  if(data?.scope!=='repository-recent-attempts' || !Array.isArray(data.providers) || data.providers.length>4 ||
+    !Array.isArray(data.attempts) || data.attempts.length>16)throw uiError('inspect.failed');
+  const content=el('inspect-content');let partial=Number(data.attemptsOmitted)>0 || Number(data.providerTotalsOmitted)>0;
+  for(const p of data.providers){
+    if(!p || !displayText(p.provider,64) || !Array.isArray(p.windows) || p.windows.length>8)throw uiError('inspect.failed');
+    const fields=[['contextUsed',()=>inspectedPercent(p.contextUsed)],['cacheReadShare',()=>inspectedPercent(p.cacheReadShare)]];
+    content.append(inspectCard(()=>providerName(p.provider)+' · '+choice('공급자 관측','provider observation'),fields));
+    if(p.recent7d)content.append(inspectCard(()=>providerName(p.provider)+' · '+choice('최근 7일 토큰','tokens in the last 7 days'),
+      [['calls',p.recent7d.calls],['input',p.recent7d.input],['output',p.recent7d.output],['cacheRead',p.recent7d.cacheRead]]));
+    for(const w of p.windows){
+      if(!w || !displayText(w.name,160))throw uiError('inspect.failed');
+      content.append(inspectCard(()=>providerName(p.provider)+' · '+w.name,[['used',()=>inspectedPercent(w.used)],['stale',w.stale],
+        ['source',w.source],['age',w.age_seconds],['resets',()=>inspectedDate(w.resets_at)]]));
+    }
+    partial ||= Number(p.windowsOmitted)>0;
+  }
+  for(const a of data.attempts){
+    if(!a || !displayText(a.id,160))throw uiError('inspect.failed');
+    content.append(inspectCard(()=>providerName(a.provider)+' · '+a.id,[['tokens',a.tokens],['source',()=>a.source==='receipt'?choice('사용량 receipt','Usage receipt'):a.source==='events'?choice('기록된 event','Recorded event'):t('statusUnknown')],
+      ['calls',a.reportedCalls],['cost',()=>typeof a.costMicrousd==='number' && Number.isFinite(a.costMicrousd) && a.costMicrousd>=0?(a.costMicrousd/1000000).toLocaleString(lang==='ko'?'ko-KR':'en-US',{maximumFractionDigits:6}):t('statusUnknown')]]));
+  }
+  return {count:data.providers.length+data.attempts.length,partial};
+}
+function inspectTable(data,kind,page){
+  if(data?.view!==kind || data.page!==page || !['ready','unavailable'].includes(data.status) || !Array.isArray(data.rows) ||
+    data.rows.length>20 || !Array.isArray(data.columns) || data.nextPage!=null && (!Number.isSafeInteger(data.nextPage) || data.nextPage!==page+1 || data.nextPage>1000))throw uiError('inspect.failed');
+  if(data.status==='unavailable')return {count:0,unavailable:true,partial:true};
+  for(const row of data.rows){
+    if(!row || typeof row!=='object' || Array.isArray(row))throw uiError('inspect.failed');
+    const keys=kind==='routes'?['provider','model','effort','access','status','requestedModel','requestedEffort','inFlight','recentAttempts','probeAge','issue']:
+      ['efforts','providerEfforts','routable','source','probe','age'];
+    const title=kind==='routes'?()=>displayText(row.role,96)||t('statusUnknown'):
+      ()=>providerName(row.provider)+' · '+(displayText(row.model,160)||t('statusUnknown'));
+    el('inspect-content').append(inspectCard(title,keys.filter(k=>k!=='issue' || row.issue!=null).map(k=>[k,row[k]])));
+  }
+  return {count:data.rows.length,next:data.nextPage,partial:data.incomplete===true};
+}
+const graphConfidence={EXTRACTED:['추출됨','Extracted'],INFERRED:['추정됨','Inferred'],AMBIGUOUS:['모호함','Ambiguous'],STRUCTURAL:['파일 구조','Structural']};
+function inspectGraph(data,args,s,ticket){
+  if(data?.schema!==1 || data.kind!=='oms-panel-project-graph' || !['ready','partial','empty','not_found','unknown'].includes(data.status) ||
+    data.provenance?.readOnly!==true || data.provenance.wroteIndex!==false || !Array.isArray(data.nodes) || data.nodes.length>60 ||
+    !Array.isArray(data.edges) || data.edges.length>180 || (data.scope?.focusNode||null)!==(args.node||null) ||
+    (data.scope?.query||null)!==(args.query||null))throw uiError('inspect.failed');
+  const content=el('inspect-content'),card=node('section','','inspect-card'),nodes=node('div','','inspect-nodes'),labels=new Map();
+  card.append(node('h3',()=>data.provenance.mode==='fallback'?choice('기록된 파일 구조','Recorded file structure'):choice('캐시된 프로젝트 관계','Cached project relationships')),
+    node('p',()=>choice('노드 ','Nodes ')+inspectedNumber(data.counts?.shown_nodes)+' / '+inspectedNumber(data.counts?.total_nodes)+' · '+
+      choice('관계 ','Relationships ')+inspectedNumber(data.counts?.shown_edges)+' / '+inspectedNumber(data.counts?.total_edges),'note'));
+  for(const n of data.nodes){
+    if(!n || !displayText(n.id,512))throw uiError('inspect.failed');
+    const label=displayText(n.label,512)||displayText(n.path,512)||n.id;labels.set(n.id,label);
+    const button=node('button',label);button.type='button';
+    button.addEventListener('click',()=>{if(currentInspection(s,ticket))readInspection(s,{node:n.id});});nodes.append(button);
+  }
+  card.append(nodes);content.append(card);
+  if(data.edges.length){
+    const relationships=node('section','','inspect-card'),list=node('ul','');relationships.append(node('h3',message('inspect.graph')));
+    for(const e of data.edges.slice(0,40)){
+      if(!e || !labels.has(e.source) || !labels.has(e.target) || !displayText(e.relation,96) || !graphConfidence[e.confidence])throw uiError('inspect.failed');
+      list.append(node('li',()=>labels.get(e.source)+' → '+labels.get(e.target)+' · '+e.relation+' · '+choice(...graphConfidence[e.confidence])));
+    }
+    relationships.append(list);content.append(relationships);
+  }
+  return {count:data.nodes.length,partial:data.completeness!=='complete' || data.limits?.truncated===true || data.edges.length>40,
+    unavailable:data.status==='unknown' || data.status==='not_found'};
+}
+async function verifyInspectionBinding(s,ticket){
+  if(!currentInspection(s,ticket))throw uiError('inspect.failed');
+  const data=(await tool('oms_list_projects',{},s.generation)).structuredContent;
+  if(!currentInspection(s,ticket) || (s.project?data?.projectKeys?.[s.project]:data?.projectKey)!==s.projectKey)throw uiError('inspect.failed');
+}
+async function readInspection(s,graph=s.graph||{}){
+  if(!currentInspection(s) || !inspectionKinds.includes(s.kind))return;
+  const ticket=++s.ticket,kind=s.kind,page=s.page;s.graph=kind==='graph'?graph:{};s.loading=true;s.next=null;
+  el('inspect-content').replaceChildren();el('inspect-prev').hidden=el('inspect-next').hidden=true;
+  el('inspect-refresh').disabled=true;el('inspect-graph-form').hidden=kind!=='graph';
+  put('inspect-note','inspect.'+kind+'Note');put('inspect-status','chatLoading');
+  try{
+    await verifyInspectionBinding(s,ticket);
+    const args=kind==='graph'?{...graph,limit:20,depth:2}:kind==='usage'?{}:{view:kind,page};
+    const result=await tool(kind==='graph'?'oms_panel_project_graph':kind==='usage'?'oms_panel_usage':'oms_panel_tui_view',args,s.generation);
+    await verifyInspectionBinding(s,ticket);
+    const data=result.structuredContent;
+    const summary=kind==='graph'?inspectGraph(data,args,s,ticket):kind==='usage'?inspectUsage(data):inspectTable(data,kind,page);
+    if(!summary.count && !summary.unavailable)el('inspect-content').append(node('p',message('inspect.empty'),'note'));
+    put('inspect-status',()=>summary.unavailable?t('statusUnknown'):
+      [(['routes','modelcatalog'].includes(kind)?t('inspect.page',{page,n:summary.count}):''),summary.partial?t('inspect.partial'):''].filter(Boolean).join(' · '));
+    s.next=summary.next||null;el('inspect-next').hidden=!s.next;el('inspect-prev').hidden=!['routes','modelcatalog'].includes(kind) || page<=1;
+  }catch{if(currentInspection(s,ticket)){el('inspect-content').replaceChildren();put('inspect-status','inspect.failed');}}
+  finally{if(currentInspection(s,ticket)){s.loading=false;el('inspect-refresh').disabled=false;}}
+}
+onClick('inspect-open',()=>{
+  if(!canInspect())return;
+  const kind=inspectionKinds.includes(el('inspect-kind').value)?el('inspect-kind').value:'usage';el('inspect-kind').value=kind;
+  inspection={project,projectKey:bindingKey,generation,room:inspectionRoom(),kind,page:1,ticket:0};
+  el('inspection').showModal();el('inspect-close').focus();armAuto();readInspection(inspection);
+});
+onClick('inspect-close',()=>el('inspection').close());
+on('inspection','close',()=>{
+  if(el('inspection').open)return;
+  inspection=null;el('inspect-content').replaceChildren();el('inspect-query').value='';put('inspect-status',()=>'');put('inspect-note',()=>'');
+  el('inspect-prev').hidden=el('inspect-next').hidden=true;armAuto();if(!disposed)el('inspect-open').focus();
+});
+on('inspect-kind','change',()=>{
+  const s=inspection;if(!currentInspection(s) || !inspectionKinds.includes(el('inspect-kind').value))return;
+  s.kind=el('inspect-kind').value;s.page=1;el('inspect-query').value='';readInspection(s,{});
+});
+onClick('inspect-refresh',()=>{if(currentInspection(inspection) && !inspection.loading)readInspection(inspection);});
+onClick('inspect-next',()=>{const s=inspection;if(currentInspection(s) && !s.loading && s.next){s.page=s.next;readInspection(s);}});
+onClick('inspect-prev',()=>{const s=inspection;if(currentInspection(s) && !s.loading && s.page>1){s.page--;readInspection(s);}});
+on('inspect-graph-form','submit',event=>{
+  event.preventDefault();const s=inspection,query=el('inspect-query').value.trim();
+  if(currentInspection(s) && s.kind==='graph' && (!query || displayText(query,256)))readInspection(s,query?{query}:{});
+});
+onClick('inspect-root',()=>{const s=inspection;if(currentInspection(s) && s.kind==='graph'){el('inspect-query').value='';readInspection(s,{});}});
+
 function render(d) {
   for(const element of bindings.keys())if(element.isConnected===false)bindings.delete(element);
   const prior=joinedMain();dashboardData=d;const main=joinedMain();
@@ -2119,12 +2412,14 @@ function setBusy(value,writing=false) {
   el('controls').disabled=value || staleView;el('view').ariaBusy=String(value);
   el('new-goal').disabled=value || staleView;el('header-main').disabled=staleView;
   el('followup-open').disabled=value || staleView;
+  el('inspect-open').disabled=!canInspect();
+  if(followupDraft)paintFollowup();
   for(const b of el('approvals').querySelectorAll('button'))b.disabled=value || staleView;
   el('refresh').setAttribute('aria-busy',String(value && !disposed));
   armAuto();
 }
 function panelIdle() {
-  return Boolean(!disposed && !el('conversation').open && !el('launcher').open && !el('worker-output').open &&
+  return Boolean(!disposed && !el('conversation').open && !el('launcher').open && !el('worker-output').open && !el('inspection').open &&
     (transientError?autoRetryCount<AUTO_RETRY_LIMIT:dashboardData && !el('view').hidden));
 }
 function resetAutoRetry(){transientError=false;autoRetryCount=0;}
@@ -2369,7 +2664,7 @@ window.addEventListener('keydown',event=>{
   // WCAG 2.1.4: never a bare character key. The physical code covers layouts where Alt composes another character.
   if(!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat || event.isComposing || event.defaultPrevented ||
      !(event.code==='KeyR' || event.key==='r' || event.key==='R'))return;
-  if(busy || disposed || el('conversation').open || el('launcher').open || el('worker-output').open || isTyping(event.target) || isTyping(document.activeElement))return;
+  if(busy || disposed || el('conversation').open || el('launcher').open || el('worker-output').open || el('inspection').open || isTyping(event.target) || isTyping(document.activeElement))return;
   event.preventDefault();manualRefresh();
 });
 on('language-choice','change', () => { const value = el('language-choice').value; if (LANGS.includes(value)) setLanguage(value, true); });
