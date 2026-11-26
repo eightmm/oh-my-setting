@@ -30,9 +30,11 @@ OMS의 제품 중심은 승인된 작업을 실행하고, 변경·검증·수용
 공개 [#431](https://github.com/eightmm/oh-my-setting/issues/431)과
 [#437](https://github.com/eightmm/oh-my-setting/issues/437)은 2026-11-26 확인 시 열려 있다.
 [#446](https://github.com/eightmm/oh-my-setting/pull/446)의 기존 UI/MCP 연결은 병합되었지만,
-[#600](https://github.com/eightmm/oh-my-setting/pull/600)과
-[#607](https://github.com/eightmm/oh-my-setting/pull/607)은 이 확인 시점에 열린 미병합 PR이다.
-그 제안의 Goal UI나 handoff 보강을 기준 revision에 이미 있는 기능으로 전제하지 않는다.
+[#600](https://github.com/eightmm/oh-my-setting/pull/600)은 확인 시점에 열린 미병합 PR이다.
+[#607](https://github.com/eightmm/oh-my-setting/pull/607)은 이 문서 게시 중 병합되었으나,
+분석 기준 revision `7d0e40c48886bc009eee50091c7a12d132cc37e8`에는 포함되지 않는다.
+Goal UI나 이후 병합된 handoff 보강을 기준 revision의 기능으로 전제하거나,
+이 문서에서 해당 후속 동작을 검토·검증했다고 주장하지 않는다.
 
 ## 2. 현재 owner와 Core의 의미
 
