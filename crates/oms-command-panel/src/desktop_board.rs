@@ -1909,18 +1909,22 @@ pub(crate) fn work_items(
         let task_hash = task["task_sha256"]
             .as_str()
             .filter(|s| oms_command_plan::json::hex(s, 64));
+        let recorded = raw_plan.as_ref().filter(|plan| {
+            plan_id.is_some()
+                && plan["plan_id"] == report["plan_id"]
+                && plan["tasks"][id]["id"] == id
+        });
+        let same_task = recorded.zip(task_hash).is_some_and(|(plan, hash)| {
+            serde_json::to_vec(&plan["tasks"][id])
+                .ok()
+                .is_some_and(|raw| {
+                    oms_command_plan::stored_task_revision(&raw).is_ok_and(|value| value == hash)
+                })
+        });
         let mut result = Value::Null;
         if let Some(row) = latest.get(id) {
-            let recorded = raw_plan.as_ref().filter(|plan| {
-                plan_id.is_some()
-                    && plan["plan_id"] == report["plan_id"]
-                    && plan["tasks"][id]["id"] == id
-            });
-            if let (Some(store), Some(plan), Some(hash)) = (&store, recorded, task_hash)
-                && oms_command_plan::stored_task_revision(
-                    &serde_json::to_vec(&plan["tasks"][id]).map_err(Error::new)?,
-                )
-                .is_ok_and(|v| v == hash)
+            if let (Some(store), Some(plan)) = (&store, recorded)
+                && same_task
             {
                 match results::verified_bound_result(store, plan, row) {
                     Ok(Some(v)) => result = v,
@@ -1954,6 +1958,14 @@ pub(crate) fn work_items(
         partial |= revision.is_none();
         let mut item = json!({"id":id,"title":title,"owner":owner,"state":state,"depends":depends,"issue":issue,
             "result":result["outcome"],"verification":verification,"revision":revision});
+        // A read reference for an explicit selection, never scheduling or
+        // approval authority. The preparation owner re-reads the full task.
+        if state == Some("ready") && same_task {
+            let provider = task["assignment"]["provider"]
+                .as_str()
+                .filter(|p| valid_work_item_id(p));
+            item["planSelection"] = json!({"source":"canonical-plan","readOnly":true,"planId":plan_id,"taskId":id,"taskSha256":task_hash,"provider":provider});
+        }
         if let Some(expired) = task["claim_expired"].as_bool() {
             item["claimExpired"] = json!(expired);
         }
@@ -2600,6 +2612,35 @@ mod tests {
         assert!(oms_command_plan::json::hex(current.as_str().unwrap(), 64));
         assert!(unbound["items"][0]["result"].is_null());
         assert!(!unbound.to_string().contains("private verifier"));
+        assert!(unbound["items"][0].get("planSelection").is_none());
+        let mut ready = source.clone();
+        ready["state"] = json!("ready");
+        ready["assignment"] = json!({"provider":"claude","model":"private-model"});
+        let ready_plan = json!({"plan_id":plan["plan_id"],"tasks":{"task-a":ready}});
+        std::fs::write(repo.join(".oms/plan/tasks.json"), ready_plan.to_string()).unwrap();
+        let ready_row = report_row(&ready);
+        let observed = read(&ready_plan, vec![ready_row.clone()]);
+        assert_eq!(
+            observed["items"][0]["planSelection"],
+            json!({"source":"canonical-plan","readOnly":true,"planId":plan["plan_id"],"taskId":"task-a","taskSha256":ready_row["task_sha256"],"provider":"claude"})
+        );
+        assert!(!observed.to_string().contains("private-model"));
+        let mut stale_row = ready_row.clone();
+        stale_row["task_sha256"] = json!("f".repeat(64));
+        assert!(
+            read(&ready_plan, vec![stale_row])["items"][0]
+                .get("planSelection")
+                .is_none()
+        );
+        let mut absent = ready_row.clone();
+        absent.as_object_mut().unwrap().remove("task_sha256");
+        assert!(
+            read(&ready_plan, vec![absent])["items"][0]
+                .get("planSelection")
+                .is_none(),
+            "a display revision cannot substitute for a canonical task digest"
+        );
+        std::fs::write(repo.join(".oms/plan/tasks.json"), plan.to_string()).unwrap();
         let raw = oms_json::parse_strict(&serde_json::to_vec(&source).unwrap()).unwrap();
         let binding = json!({"plan_id":plan["plan_id"],"task_sha256":oms_json::projection_cache_digest(&raw).unwrap()});
         let mut result = json!({"kind":"oms-panel-result","schema":1,"task_id":"task-a","outcome":"completed",

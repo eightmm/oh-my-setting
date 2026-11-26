@@ -61,8 +61,9 @@ fn inspect(value: &V, expression: &regex::Regex) -> Result<()> {
 pub(crate) struct Pack {
     pub orientation: String,
     pub targets: Vec<std::ffi::OsString>,
+    pub reviewed: Option<oms_command_plan::reviewed_context::LeadExcerpt>,
 }
-pub(crate) fn orientation(location: &Path) -> Result<Pack> {
+pub(crate) fn orientation(location: &Path, expected_sha256: Option<&str>) -> Result<Pack> {
     let parent = location
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -85,6 +86,16 @@ pub(crate) fn orientation(location: &Path) -> Result<Pack> {
             )
         })?;
     safety::outbound(&raw)?;
+    if let Some(expected) = expected_sha256
+        && (!oms_command_plan::json::hex(expected, 64) || storage::hash(&raw) != expected)
+    {
+        return fail("context pack bytes changed before provider dispatch");
+    }
+    let reviewed = oms_command_plan::reviewed_context::from_pack(&raw)
+        .map_err(|e| Error::new(e.code, e.message))?;
+    if reviewed.is_some() && expected_sha256.is_none() {
+        return fail("reviewed Lead context requires --expected-context-pack-sha256");
+    }
     let parsed = oms_command_plan::json::parse(&raw)
         .map_err(|_| Error::new(2, "context pack must contain strict UTF-8 JSON"))?;
     let pack = V::parse(
@@ -170,6 +181,9 @@ pub(crate) fn orientation(location: &Path) -> Result<Pack> {
             ));
         }
     }
+    if let Some(excerpt) = &reviewed {
+        output.push_str(&excerpt.orientation());
+    }
     safety::outbound(output.as_bytes())?;
     Ok(Pack {
         orientation: output,
@@ -177,5 +191,6 @@ pub(crate) fn orientation(location: &Path) -> Result<Pack> {
             .iter()
             .map(|value| path(value).map(std::ffi::OsString::from))
             .collect::<Result<_>>()?,
+        reviewed,
     })
 }

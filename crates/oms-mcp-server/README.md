@@ -35,6 +35,64 @@ canonical capture reader, with no command execution or arbitrary path input.
 Unqualified reference line numbers and retired Python/Bash paths below describe
 frozen migration evidence. The Rust files above own current production behavior.
 
+## Reviewed Lead findings for a Plan task
+
+The desktop `chatgpt-panel` profile exposes `oms_prepare_lead_plan_context`
+only to the panel app (`_meta.ui.visibility: ["app"]`), never in the
+model-visible tool list. The generic project-read `mcp-app` profile and
+delegated callers cannot use it. This preparation action runs through the
+bounded runtime queue. It performs owned reads and publishes one bounded
+context-pack snapshot in the existing Lead operation directory; it never
+claims a task, starts a provider, changes Lead settings, accepts evidence, or
+lands a patch.
+
+The explicit workflow is: review a displayed Lead answer, select the finding in
+the panel, select a ready canonical Plan task, prepare its context in the panel
+UI, then inspect and run the returned managed execution command. Preparation
+requires the selected text itself, not just metadata. The existing
+`Conversation::answer_page` reader must return exactly those bytes at the
+selected UTF-8 range, with the observed whole-answer digest and page cursor.
+Every wrong guess, wrong range (including mid-UTF-8-character ranges) or wrong
+hash returns the same fixed error without actual source text. The maximum excerpt
+is 4096 bytes; empty, whitespace-only, partial-character, oversized, changed or
+out-of-page selections are refused.
+
+For an `oms-selected-finding` host export whose source is `lead-answer`, map the
+fields to the preparation tool as follows:
+
+| Tool argument | Explicitly shared finding |
+|---|---|
+| `projectKey`, `room`, `provider`, `leadRequestId`, `turnId` | Same fields under `source` |
+| `answerPage`, `answerSha256` | `source.pageCursor`, `source.digest` |
+| `excerpt`, `excerptSha256`, `offset`, `bytes` | `selection.text`, `selection.excerptSha256`, `selection.offset`, `selection.bytes` |
+| `taskId`, `taskSha256` | Selected ready-state item’s checked `planSelection` from `oms_panel_work_items`; an independently reviewed `oms agent-plan evidence-snapshot --id TASK` is also supported |
+| `executionProvider` | `claude` or `antigravity`, matching a frozen assignment when present |
+| `project` | Host-configured project alias, when required by the connection |
+
+`planSelection` is a bounded read reference from the matching canonical Plan
+snapshot. Its digest is neither approval nor proof of scheduling eligibility;
+preparation re-reads the task and execution retains canonical scheduling checks.
+
+The response includes only the supplied and verified excerpt, its provenance,
+the exact task/provider, and `contextPack.path` plus `contextPack.sha256`.
+`previewCommand` includes `--dry-run --json`; both commands carry the concrete
+selected project as `cwd` and `--repo`. Paths that cannot be represented exactly
+as bounded command text are refused. `runCommand` uses the existing
+Main-owned `panel --repo REPO --room ROOM --orchestrator PROVIDER --task-id TASK` route with
+`--context-pack FILE --expected-context-pack-sha256 SHA`. Run these from the
+selected project under its current Main. The path is a bounded snapshot, not a
+new transcript store. Identical preparation reuses the same bytes and path, and
+each Lead answer operation is bounded to at most 16 prepared context packs.
+
+Panel and PlanRun recheck the pack, ready task and recorded Lead answer digest
+against the state repository before claim; peer dispatch rechecks the exact pack
+bytes, recorded Lead answer digest and frozen task fields against the
+independently verified issued lease. The physical state repository and original
+Room must still match. Execution is a managed Plan worker (`native_lead_input: false`) with
+the original model, scope, verifier and review gates. The excerpt is quoted
+reference data and does not establish native Lead execution parity. Plain
+managed calls and graph-only context packs continue to work.
+
 ## Consumer ABI
 
 ```rust,ignore
@@ -94,7 +152,7 @@ or cancellation grants. No latency, physical-disk or HPC performance claim is ma
 | `resources/list`, `resources/read` | Exact versioned graph template, MIME and CSP metadata; lines 2046–2063 and 914–941 |
 | `tasks/get` | Opt-in modern capability check, live/terminal snapshot and embedded final result; lines 2064–2111 and 1786–1826 |
 | `tasks/update` | Canonical refusal: no outstanding input requests; same handle branch |
-| `tasks/cancel` | Capability, task ancestry, terminal/legacy checks, durable receipt; same handle branch and 1829–1854 |
+| `tasks/cancel` | Capability, task ancestry, terminal/legacy checks, idempotent durable receipt; same handle branch and 1829–1854 |
 
 `tasks/result` and `resources/templates/list` return method-not-found: neither
 exists in the reference handler. Task results are in `tasks/get.result`.
@@ -208,10 +266,22 @@ against another process with the same filesystem rights.
 | `prompt.txt`, `meta.json`, private `launch.json` | Each uses exclusive mode-0600 temporary creation, full write, file sync, rename and directory sync. No child starts before all three are published. A kill can leave `.part` files or a partially prepared run. No automatic relaunch. |
 | `owner.lock` | No-follow, single-link, owned mode-0600 file with nonblocking exclusive `flock`. A second owner refuses; process death releases the lock. The inert file can remain. |
 | `pid`, `status` | Synced atomic publication. An owner death after pid publication without status reads stalled on positive evidence of death. Missing/malformed pid remains unknown/running; malformed status is a failed completion. |
-| `cancel-request.json` | Concurrent cancels atomically replace one valid receipt; last publication supplies the timestamp. A kill leaves the prior complete receipt or no published receipt, plus a possible `.part`. Receiving no RPC response does not prove no receipt was recorded. |
+| `cancel-request.lock` | No-follow, single-link, owned mode-0600 file with blocking exclusive `flock` serializing `cancel-request.json` validation and publication across both fast-path creation and invalid-receipt replacement. Process death releases the lock; the inert per-operation file can remain. |
+| `cancel-request.json` | Idempotent first-wins publication under `cancel-request.lock`: uses `RENAME_NOREPLACE` where supported and falls back to `link` + `unlink` on filesystems that reject rename flags, so the first valid receipt for the task wins and retries preserve its exact bytes. Legacy receipts without `requested_at` remain valid (`requested_at` is `null`); malformed `requested_at`, invalid or foreign files are replaced on cancel and ignored on read. A kill before publication leaves no receipt plus a possible `.part`. Receiving no RPC response does not prove no receipt was recorded. |
 | `cancel-observed.json` | Native owner writes it only for cancellation before launch. Once the CLI starts, its existing supervisor owns observation. A requested receipt alone never proves provider termination. |
 | `run.log` | Separate exclusive log per operation, streamed by the owner/verb. Kill can leave partial logs; logs are not completion receipts and are not claimed durable. |
 | `answers/*`, thread/room records, downstream caches/locks | Fixed OMS verbs own these writes and their existing safety protocols. A second call has their documented effects; this crate neither coalesces writes nor bypasses their locks. |
+
+Task snapshots (`tasks/get`) and peer status/result payloads (`oms_peer_operations`,
+`oms_peer_result`) report a `cancellation` object with `requested_at` (from the
+first valid `cancel-request.json`, or `null` when absent or omitted by a legacy
+receipt) and `state`: `none` (no valid request), `requested` (request recorded
+while running, or in the metadata-only `oms_peer_operations` listing for a
+completed run without observation), `confirmed` (`cancel-observed.json` present),
+`completed_first` (single-task read only: request recorded, and the operation
+finished its own work without observation) or `unknown` (request recorded, and
+the operation stalled or ended without a durable own exit or observation).
+Existing status and compatibility fields remain unchanged.
 
 Mutation opens require owned, real ancestry. Existing directory modes are
 preserved; newly created directories use 0700. Receipt files cannot follow links.

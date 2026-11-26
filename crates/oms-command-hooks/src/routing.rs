@@ -403,19 +403,79 @@ pub fn run(raw: &[u8], ctx: &Context<'_>) -> Output {
     injection(ctx, &repo, &v, "prompt", output.as_bytes());
     out(output)
 }
+fn memory_review_source_identity(repo: &Path) -> Option<(Value, bool)> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = repo.join(".oms/memory");
+    let mut entries = serde_json::Map::new();
+    let mut any_present = false;
+    for name in ["shared.md", "pins.md", "reviews.jsonl", "pending.jsonl"] {
+        match std::fs::symlink_metadata(dir.join(name)) {
+            Ok(meta) => {
+                if !meta.file_type().is_file() {
+                    return None;
+                }
+                any_present = true;
+                entries.insert(
+                    name.into(),
+                    json!([
+                        meta.dev(),
+                        meta.ino(),
+                        meta.len(),
+                        meta.mtime(),
+                        meta.mtime_nsec(),
+                        meta.ctime(),
+                        meta.ctime_nsec(),
+                    ]),
+                );
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                entries.insert(name.into(), Value::Null);
+            }
+            Err(_) => return None,
+        }
+    }
+    Some((Value::Object(entries), any_present))
+}
 fn memory_review_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
+    memory_review_hint_with(v, repo, ctx, || {
+        oms_command_memory::pending_review(repo, ctx.interrupted)
+    })
+}
+fn memory_review_hint_with(
+    v: &Value,
+    repo: &Path,
+    ctx: &Context<'_>,
+    observe: impl FnOnce() -> Result<oms_command_memory::PendingReviewSummary, String>,
+) -> String {
     let result = (|| -> Result<String, String> {
         let path = state_path(repo, v, ".memory-review");
-        let observe = || oms_command_memory::pending_review(repo, ctx.interrupted);
-        // An empty queue needs no new receipt. This read is advisory only:
-        // every receipt transition observes again while holding its lock.
-        if !path.exists() && observe()?.pending == 0 {
+        let identity = memory_review_source_identity(repo);
+        if let Some((_, false)) = &identity
+            && !path.exists()
+        {
             return Ok(String::new());
         }
-        let (pending, fresh) = update_memory_review_state(&path, &ctx.snapshot.now(), observe)?;
+        if let Some((sources, _)) = &identity {
+            let previous = load(&path);
+            if previous["schema"] == 1
+                && &previous["sources"] == sources
+                && previous["pending"].is_u64()
+                && previous["skipped"].is_u64()
+                && previous["candidates"].is_array()
+            {
+                return Ok(String::new());
+            }
+        }
+        let (pending, skipped, fresh) =
+            observe_memory_review_state(&path, Some(repo), &ctx.snapshot.now(), observe)?;
         Ok(if fresh {
+            let skipped_note = if skipped > 0 {
+                format!(" ({skipped} invalid row(s) skipped)")
+            } else {
+                String::new()
+            };
             format!(
-                "[oms] memory review: {pending} pending proposal(s); inspect `oms agent-memory review`. Acceptance is explicit and does not verify a claim."
+                "[oms] memory review: {pending} pending proposal(s){skipped_note}; inspect `oms agent-memory review`. Acceptance is explicit and does not verify a claim."
             )
         } else {
             String::new()
@@ -423,16 +483,42 @@ fn memory_review_hint(v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
     })();
     result.unwrap_or_default()
 }
+#[cfg(test)]
 fn update_memory_review_state(
     path: &Path,
     now: &str,
     observe: impl FnOnce() -> Result<oms_command_memory::PendingReviewSummary, String>,
 ) -> Result<(usize, bool), String> {
+    let (pending, _, fresh) = observe_memory_review_state(path, None, now, observe)?;
+    Ok((pending, fresh))
+}
+fn observe_memory_review_state(
+    path: &Path,
+    repo: Option<&Path>,
+    now: &str,
+    observe: impl FnOnce() -> Result<oms_command_memory::PendingReviewSummary, String>,
+) -> Result<(usize, usize, bool), String> {
     // Observe candidates under the same lock as the receipt update. Otherwise
     // an older caller can overwrite a newer seen set and repeat its hint.
     mutate(path, STATE_MAX, false, |raw| {
-        let summary = observe()?;
         let previous = document(raw).unwrap_or_else(|| json!({}));
+        let before = repo.and_then(memory_review_source_identity).map(|(s, _)| s);
+        if let Some(sources) = &before
+            && previous["schema"] == 1
+            && &previous["sources"] == sources
+            && let (Some(pending), Some(skipped)) =
+                (previous["pending"].as_u64(), previous["skipped"].as_u64())
+            && previous["candidates"].is_array()
+        {
+            return Ok((raw.to_vec(), (pending as usize, skipped as usize, false)));
+        }
+        let summary = observe()?;
+        let after = repo.and_then(memory_review_source_identity).map(|(s, _)| s);
+        let sources = match (&before, &after) {
+            (Some(a), Some(b)) if a == b => a.clone(),
+            (None, _) => previous.get("sources").cloned().unwrap_or(Value::Null),
+            _ => Value::Null,
+        };
         let seen: BTreeSet<_> = previous["candidates"]
             .as_array()
             .into_iter()
@@ -444,12 +530,24 @@ fn update_memory_review_state(
             .iter()
             .any(|id| !seen.contains(id.as_str()));
         let candidates = json!(summary.candidate_fingerprints);
-        let next = if previous["candidates"] == candidates {
+        let next = if previous["schema"] == 1
+            && previous["candidates"] == candidates
+            && previous["pending"] == json!(summary.pending)
+            && previous["skipped"] == json!(summary.skipped)
+            && previous["sources"] == sources
+        {
             raw.to_vec()
         } else {
-            json_line(&json!({"schema":1,"updated_at":now,"candidates":candidates}))
+            json_line(&json!({
+                "schema": 1,
+                "updated_at": now,
+                "pending": summary.pending,
+                "skipped": summary.skipped,
+                "sources": sources,
+                "candidates": candidates,
+            }))
         };
-        Ok((next, (summary.pending, fresh)))
+        Ok((next, (summary.pending, summary.skipped, fresh)))
     })
 }
 fn state_hint(_v: &Value, repo: &Path, ctx: &Context<'_>) -> String {
@@ -1757,12 +1855,98 @@ mod tests {
         assert!(memory_review_hint(&event, &repo, &ctx).contains("2 pending proposal(s)"));
         assert!(memory_review_hint(&event, &repo, &ctx).is_empty());
         let other = json!({"session_id":"another-memory-review-session"});
-        assert!(memory_review_hint(&other, &repo, &ctx).contains("2 pending proposal(s)"));
+        let reads = AtomicUsize::new(0);
+        let hint_counted = |ev: &Value| {
+            memory_review_hint_with(ev, &repo, &ctx, || {
+                reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                oms_command_memory::pending_review(&repo, &cancel)
+            })
+        };
+        assert!(hint_counted(&other).contains("2 pending proposal(s)"));
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(hint_counted(&other).is_empty());
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "unchanged sources must skip re-reading memory logs"
+        );
         let receipt = fs::read_to_string(state_path(&repo, &event, ".memory-review")).unwrap();
         assert!(!receipt.contains("proposal"));
         assert!(!receipt.contains(&third));
+        let other_receipt: Value = serde_json::from_str(
+            &fs::read_to_string(state_path(&repo, &other, ".memory-review")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(other_receipt["pending"], 2);
+        assert_eq!(other_receipt["skipped"], 0);
+        assert!(!other_receipt.to_string().contains("proposal"));
         accept(&second);
+        assert!(hint_counted(&other).is_empty());
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "changed review receipt must re-read sources once"
+        );
+        assert!(hint_counted(&other).is_empty());
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
         accept(&third);
+        assert!(hint_counted(&other).is_empty());
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert!(hint_counted(&other).is_empty());
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "unchanged empty queue with existing sources must also skip re-reading"
+        );
+        {
+            use std::io::Write;
+            use std::os::unix::fs::MetadataExt;
+            let reviews_path = repo.join(".oms/memory/reviews.jsonl");
+            let reviews_raw = fs::read_to_string(&reviews_path).unwrap();
+            let before_meta = fs::symlink_metadata(&reviews_path).unwrap();
+            let replacement_id = {
+                let mut chars: Vec<char> = third.chars().collect();
+                let last = chars.last_mut().unwrap();
+                *last = if *last == '0' { '1' } else { '0' };
+                chars.into_iter().collect::<String>()
+            };
+            assert_eq!(replacement_id.len(), third.len());
+            let rewritten = reviews_raw.replacen(&third, &replacement_id, 1);
+            assert_eq!(rewritten.len(), reviews_raw.len());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let old_mtime = std::time::UNIX_EPOCH
+                + std::time::Duration::new(
+                    u64::try_from(before_meta.mtime()).unwrap(),
+                    u32::try_from(before_meta.mtime_nsec()).unwrap(),
+                );
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&reviews_path)
+                .unwrap();
+            file.write_all(rewritten.as_bytes()).unwrap();
+            file.flush().unwrap();
+            file.set_modified(old_mtime).unwrap();
+            drop(file);
+            let after_meta = fs::symlink_metadata(&reviews_path).unwrap();
+            assert_eq!(after_meta.dev(), before_meta.dev());
+            assert_eq!(after_meta.ino(), before_meta.ino());
+            assert_eq!(after_meta.len(), before_meta.len());
+            assert_eq!(after_meta.mtime(), before_meta.mtime());
+            assert_eq!(after_meta.mtime_nsec(), before_meta.mtime_nsec());
+            assert_ne!(
+                (after_meta.ctime(), after_meta.ctime_nsec()),
+                (before_meta.ctime(), before_meta.ctime_nsec()),
+            );
+            assert!(
+                hint_counted(&other).contains("1 pending proposal(s)"),
+                "same-inode, same-size rewrite with restored mtime must invalidate cache via ctime"
+            );
+            assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 4);
+            assert!(hint_counted(&other).is_empty());
+            assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 4);
+            fs::write(&reviews_path, reviews_raw).unwrap();
+        }
         assert!(memory_review_hint(&event, &repo, &ctx).is_empty());
         assert_eq!(
             oms_command_memory::pending_review(&repo, &cancel)

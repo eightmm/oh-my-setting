@@ -10,6 +10,7 @@ const FLAGS: &[&str] = &[
     "desktop-usage",
     "desktop-chat",
     "desktop-worker-output",
+    "evidence-full",
     "desktop-work-items",
     "sessions",
     "next-attention",
@@ -44,6 +45,8 @@ const FLAGS: &[&str] = &[
     "unbound",
 ];
 const VALUES: &[&str] = &[
+    "context-pack",
+    "expected-context-pack-sha256",
     "desktop-view",
     "repo",
     "layout",
@@ -436,11 +439,13 @@ impl Options {
                                 | "lead-attempt"
                                 | "worker-attempt"
                                 | "conversation-digest"
+                                | "page"
                         )
                     })
                     && self.has("repo"),
                 "invalid worker output selectors",
             )?;
+            self.integer("page", 1, 1, 10000)?;
             for field in ["room", "lead-attempt", "worker-attempt"] {
                 oms_command_room::identifier(&self.required(field)?, field).map_err(Error::new)?;
             }
@@ -712,11 +717,22 @@ impl Options {
             &["accept"],
         )?;
         self.needs(&["export"], &["results"])?;
-        self.needs(&["page"], &["results", "desktop-view", "desktop-chat"])?;
+        self.needs(
+            &["page"],
+            &[
+                "results",
+                "desktop-view",
+                "desktop-chat",
+                "desktop-worker-output",
+            ],
+        )?;
+        self.needs(&["evidence-full"], &["desktop-chat"])?;
         self.needs(&["evidence-section", "evidence-attempt"], &["desktop-chat"])?;
         if self.has("desktop-chat") {
             require(
                 self.has("evidence-section") == self.has("evidence-attempt")
+                    && (!self.has("evidence-full")
+                        || matches!(self.get("evidence-section"), Some("transcript" | "diff")))
                     && (!self.has("page") || self.has("evidence-section"))
                     && !(self.has("before") && self.has("evidence-section")),
                 "select an exact evidence attempt and section or a Room message page",
@@ -778,6 +794,22 @@ impl Options {
                 "--native-result requires --orchestrator codex and --task-id",
             )?;
         }
+        if self.has("context-pack") || self.has("expected-context-pack-sha256") {
+            require(
+                self.managed_plan_task()
+                    && self.has("context-pack")
+                    && self.has("expected-context-pack-sha256"),
+                "reviewed context requires managed --task-id, --context-pack and --expected-context-pack-sha256",
+            )?;
+            require(
+                self.get("expected-context-pack-sha256").is_some_and(|s| {
+                    s.len() == 64
+                        && s.bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                }),
+                "--expected-context-pack-sha256 must be lowercase SHA-256",
+            )?;
+        }
         if self.has("task-id") && self.has("orchestrator") {
             if self.managed_plan_task() {
                 require(
@@ -805,10 +837,16 @@ impl Options {
                         && self.values.keys().all(|key| {
                             matches!(
                                 key.as_str(),
-                                "repo" | "orchestrator" | "task-id" | "owner" | "room"
+                                "repo"
+                                    | "orchestrator"
+                                    | "task-id"
+                                    | "owner"
+                                    | "room"
+                                    | "context-pack"
+                                    | "expected-context-pack-sha256"
                             )
                         }),
-                    "managed --task-id accepts only --repo, --room, --owner, --json and --dry-run alongside --orchestrator and --task-id",
+                    "managed --task-id accepts --repo, --room, --owner, --json, --dry-run and an explicitly pinned --context-pack alongside --orchestrator and --task-id",
                 )?;
             } else {
                 require(
@@ -896,7 +934,7 @@ impl Options {
                 "page",
                 1,
                 1,
-                if self.has("desktop-chat") {
+                if self.has("desktop-chat") || self.has("desktop-worker-output") {
                     10000
                 } else {
                     1000
@@ -1072,7 +1110,7 @@ pub fn usage() -> String {
     text.push_str("Codex alternate: --orchestrator codex --lead alternate --account ID [--task TEXT] | --focus-orchestrator codex --lead alternate\n\n");
     text.push_str("Bind a canonical task: --orchestrator codex --task-id ID --task TEXT\nReuses the exact claim and durable intent; an unknown send is never resent automatically.\n\n");
     text.push_str("Retain a native report: --orchestrator codex --task-id ID --native-result FILE\nImports digest-bound findings or candidate evidence; does not confirm consumption, completion or acceptance.\n\n");
-    text.push_str("Typed return paths/templates and next actions: --results [--task-id ID] --json\nA changed typed report requires --expected-previous-result-sha256 SHA; first capture and identical replay do not.\nReconcile an exact retained result: --native-reconcile ATTEMPT --result-sha256 SHA --decision request-revision|blocked|reviewed\nRetire a verified-unsent first intent: --native-reconcile ATTEMPT --intent-sha256 SHA --decision retire-unsent\nNative next round: --orchestrator codex --task-id ID --task TEXT --after-native-result SHA\nReviewed candidates use existing Plan review, patch-admit and patch-land; reports do not accept or finish tasks.\nClaude/AGY canonical task: --orchestrator claude|antigravity --task-id ID [--dry-run] [--json].\nUses managed plan-run from the current Main with a pinned ready task and frozen assignment/scope/verifier; no native Lead input, automatic landing or publication.\nRejects --task, account, model, effort and native-result overrides; reconcile existing claims separately.\nDo not pre-claim; this route claims the ready task itself. Inspect retained Plan evidence and checked Plan recovery after an unknown return; panel --continue is for role-dispatch workers.\nIncomplete runner output/cleanup stays unknown (exit 75 if producer exit was zero). --dispatch --task-id only labels work.\n\n");
+    text.push_str("Typed return paths/templates and next actions: --results [--task-id ID] --json\nA changed typed report requires --expected-previous-result-sha256 SHA; first capture and identical replay do not.\nReconcile an exact retained result: --native-reconcile ATTEMPT --result-sha256 SHA --decision request-revision|blocked|reviewed\nRetire a verified-unsent first intent: --native-reconcile ATTEMPT --intent-sha256 SHA --decision retire-unsent\nNative next round: --orchestrator codex --task-id ID --task TEXT --after-native-result SHA\nReviewed candidates use existing Plan review, patch-admit and patch-land; reports do not accept or finish tasks.\nClaude/AGY canonical task: --orchestrator claude|antigravity --task-id ID [--dry-run] [--json].\nUses managed plan-run from the current Main with a pinned ready task and frozen assignment/scope/verifier; no native Lead input, automatic landing or publication.\nRejects --task, account, model, effort and native-result overrides; reconcile existing claims separately.\nOptional reviewed context: --context-pack FILE --expected-context-pack-sha256 SHA. Prepare an explicitly selected Lead excerpt with oms_prepare_lead_plan_context; the pack pins exact ready task/provider and is reference data only.\nDo not pre-claim; this route claims the ready task itself. Inspect retained Plan evidence and checked Plan recovery after an unknown return; panel --continue is for role-dispatch workers.\nIncomplete runner output/cleanup stays unknown (exit 75 if producer exit was zero). --dispatch --task-id only labels work.\n\n");
     text.push_str("Fresh Claude account spread: --orchestrator claude --spread-accounts\n\n");
     text.push_str("After a canonical Main swap: --native-adopt ATTEMPT --assignment-sha256 SHA [--result-sha256 SHA]\nResults supplies the exact adoption command. Omit result SHA only when no current result exists.\nAdoption preserves the frozen claim, attempt, account and round; it never resends input or grants acceptance.\nSettled tasks permit retirement-only adoption even after the checkout advances.\n\n");
     text.push_str("Managed native Main: --launch codex|claude [--account ID] [--task TEXT]\n\n");
@@ -1112,6 +1150,59 @@ mod tests {
             .is_ok()
         );
         assert!(Options::parse(&args(&["--repo", ".", "--desktop-usage", "--json"])).is_ok());
+        let worker = [
+            "--repo",
+            ".",
+            "--desktop-worker-output",
+            "--json",
+            "--room",
+            "room-a",
+            "--lead-attempt",
+            "lead-a",
+            "--worker-attempt",
+            "worker-a",
+            "--conversation-digest",
+            "00000000000000000000000000000000",
+        ];
+        for page in ["1", "2", "10000"] {
+            assert!(
+                Options::parse(&args(&[worker.as_slice(), &["--page", page]].concat())).is_ok()
+            );
+        }
+        for page in ["0", "10001", "../answer"] {
+            assert!(
+                Options::parse(&args(&[worker.as_slice(), &["--page", page]].concat())).is_err()
+            );
+        }
+        let evidence = [
+            "--repo",
+            ".",
+            "--desktop-chat",
+            "--json",
+            "--room",
+            "room-a",
+            "--participant",
+            "main",
+            "--conversation-digest",
+            "00000000000000000000000000000000",
+            "--evidence-full",
+            "--evidence-attempt",
+            "attempt-a",
+        ];
+        for section in ["transcript", "diff"] {
+            assert!(
+                Options::parse(&args(
+                    &[evidence.as_slice(), &["--evidence-section", section]].concat()
+                ))
+                .is_ok()
+            );
+        }
+        assert!(
+            Options::parse(&args(
+                &[evidence.as_slice(), &["--evidence-section", "events"]].concat()
+            ))
+            .is_err()
+        );
         assert!(
             Options::parse(&args(&[
                 "--repo",
