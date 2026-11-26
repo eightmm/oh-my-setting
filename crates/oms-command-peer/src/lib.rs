@@ -18,6 +18,7 @@ mod delegate;
 pub use delegate::buffer_interactive_stdout;
 mod digest;
 pub mod dispatch_context;
+mod lead_observation;
 mod manifest;
 mod ml_context;
 mod native;

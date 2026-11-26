@@ -8,6 +8,9 @@ use crate::{RUN_ROOT, Server};
 use rustix::fs::{self, AtFlags, FileType};
 use std::path::Path;
 
+#[path = "lead_observation.rs"]
+mod observation;
+
 #[path = "lead_settings.rs"]
 mod settings;
 
