@@ -452,8 +452,7 @@ pub(crate) fn claude_in(home: &Path, pid: u32, repo: &Path) -> Option<Vec<Value>
             let id = text(result, "agentId");
             if block["type"] != "tool_result"
                 || !tools.contains(text(block, "tool_use_id"))
-                || !(8..=40).contains(&id.len())
-                || !id.bytes().all(|b| b.is_ascii_hexdigit())
+                || !crate::claude_child_chat::agent_id(id)
             {
                 continue;
             }
@@ -4474,12 +4473,17 @@ mod tests {
                 .count()
         };
 
-        // Missing session directory itself falls back silently.
-        assert!(ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).is_none());
+        // Missing session directory itself arms a bounded lazy watch (count == 1)
+        // on projects/<key>/ and transitions cleanly once <session>/ appears.
+        let missing_session =
+            ClaudeSubagentsWatch::prepare(&config, PID, BIRTH, &repo, None).unwrap();
+        assert_eq!(watch_count(&missing_session), 1);
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&session_dir)
             .unwrap();
+        assert_eq!(missing_session.changed(), Some(false));
+        assert_eq!(watch_count(&missing_session), 1);
 
         // Symlinked subagents directory falls back silently and never wakes.
         symlink(&elsewhere, &subagents).unwrap();
