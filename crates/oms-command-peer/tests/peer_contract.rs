@@ -227,6 +227,7 @@ struct ProviderProbe {
     calls: Mutex<Vec<ObservedProvider>>,
     outcome: i32,
     mutate: bool,
+    answer: Option<Vec<u8>>,
 }
 fn option_value<'a>(argv: &'a [OsString], name: &str) -> Option<&'a OsString> {
     argv.windows(2)
@@ -313,7 +314,10 @@ impl Executor for ProviderProbe {
         }
         Ok(Completed {
             code: self.outcome,
-            stdout: b"fixture answer\n".to_vec(),
+            stdout: self
+                .answer
+                .clone()
+                .unwrap_or_else(|| b"fixture answer\n".to_vec()),
             stderr: Vec::new(),
             complete: true,
             cleanup_complete: Some(true),
@@ -2968,6 +2972,107 @@ fn provider_private_prompt_cleanup_and_read_boundaries() {
                     assert_ne!(output.0, 0);
                     assert!(probe.calls.lock().unwrap().is_empty());
                 }
+            }
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            let home_first = ["file://", "/ho", "me/person/checkout/src/lib.rs#L10"].concat();
+            let home_second = ["file://", "/ho", "me/person/checkout/src/main.rs#L20"].concat();
+            let consult_repo = provider_repo();
+            let answer_probe = ProviderProbe {
+                answer: Some(
+                    format!(
+                        "Summary of findings.\nSee {home_first}\nAlso check {home_second}\nConclusion: safe to proceed.\n"
+                    )
+                    .into_bytes(),
+                ),
+                ..Default::default()
+            };
+            let consult_out = oms_command_peer::run_with_executor(
+                "consult",
+                &args(&[
+                    "--to",
+                    "claude",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "inspect clean question",
+                ]),
+                &consult_repo.0,
+                source,
+                &STOP,
+                &answer_probe,
+            );
+            assert_eq!(consult_out.0, 0, "{}", message(&consult_out));
+            assert!(
+                !String::from_utf8_lossy(&consult_out.2).contains("rephrase"),
+                "{}",
+                String::from_utf8_lossy(&consult_out.2)
+            );
+            let printed = std::str::from_utf8(&consult_out.1).unwrap();
+            assert!(
+                !printed.contains(&home_first) && !printed.contains(&home_second),
+                "{printed}"
+            );
+            assert!(!printed.contains("rephrase"), "{printed}");
+            let consult_artifacts = oms_command_peer::storage::names(
+                &consult_repo.0,
+                Path::new(".oms/artifacts/consult"),
+                ".md",
+            )
+            .unwrap();
+            assert_eq!(consult_artifacts.len(), 1);
+            let recorded_artifact = consult_repo
+                .0
+                .join(".oms/artifacts/consult")
+                .join(&consult_artifacts[0]);
+            assert!(recorded_artifact.is_file());
+            let expected_block = format!(
+                "\nclaude:\nSummary of findings.\n[oms-redacted:home-path]\n[oms-redacted:home-path]\nConclusion: safe to proceed.\nnote: 2 line(s) redacted by the shared content scan; recorded artifact: {}\n",
+                recorded_artifact.display()
+            );
+            assert!(printed.contains(&expected_block), "{printed}");
+            let follow_up = oms_command_peer::run_with_executor(
+                "consult",
+                &args(&[
+                    "--to",
+                    "claude",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "follow-up clean question",
+                ]),
+                &consult_repo.0,
+                source,
+                &STOP,
+                &ProviderProbe::default(),
+            );
+            assert_eq!(follow_up.0, 0, "{}", message(&follow_up));
+            for extra in [&[][..], &["--dry-run"][..]] {
+                let blocked_probe = ProviderProbe::default();
+                let mut blocked_args = vec![
+                    "--to",
+                    "claude",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                ];
+                blocked_args.extend_from_slice(extra);
+                let blocked_prompt = format!("inspect {home_first}");
+                blocked_args.push(&blocked_prompt);
+                let blocked = oms_command_peer::run_with_executor(
+                    "consult",
+                    &args(&blocked_args),
+                    &consult_repo.0,
+                    source,
+                    &STOP,
+                    &blocked_probe,
+                );
+                assert_eq!(blocked.0, 3, "{extra:?}: {}", message(&blocked));
+                assert!(blocked.1.is_empty());
+                assert!(blocked_probe.calls.lock().unwrap().is_empty());
+                assert_eq!(
+                    std::str::from_utf8(&blocked.2).unwrap(),
+                    "error: outbound prompt blocked by the shared content scan; rephrase private content\n"
+                );
             }
             assert!(fs::read_dir(std::env::temp_dir()).unwrap().all(|entry| {
                 let name = entry.unwrap().file_name();

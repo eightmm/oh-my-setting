@@ -15,22 +15,30 @@ fn environment() -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
     }
     Ok(pairs)
 }
-pub fn outbound(bytes: &[u8]) -> Result<()> {
+fn scan_outbound(bytes: &[u8], subject: &str) -> Result<()> {
     let pairs = environment()?;
     let refs: Vec<_> = pairs
         .iter()
         .map(|(k, v)| (k.as_slice(), v.as_slice()))
         .collect();
     let hits = oms_scrub::scan(bytes, &refs)
-        .map_err(|_| Error::new(3, "outbound text could not be scanned"))?;
+        .map_err(|_| Error::new(3, format!("outbound {subject} could not be scanned")))?;
     if hits.is_empty() {
         Ok(())
     } else {
         Err(Error::new(
             3,
-            "outbound text blocked by the shared content scan; rephrase private content",
+            format!(
+                "outbound {subject} blocked by the shared content scan; rephrase private content"
+            ),
         ))
     }
+}
+pub fn outbound(bytes: &[u8]) -> Result<()> {
+    scan_outbound(bytes, "text")
+}
+pub fn outbound_prompt(bytes: &[u8]) -> Result<()> {
+    scan_outbound(bytes, "prompt")
 }
 pub fn redact(bytes: &[u8]) -> Result<Vec<u8>> {
     let pairs = environment()?;
@@ -41,6 +49,53 @@ pub fn redact(bytes: &[u8]) -> Result<Vec<u8>> {
     oms_scrub::redact(bytes, &refs)
         .map(|r| r.bytes)
         .map_err(|_| Error::new(2, "output could not be scanned"))
+}
+pub(crate) fn redact_outbound(bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
+    let pairs = environment()?;
+    let refs: Vec<_> = pairs
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.as_slice()))
+        .collect();
+    let redacted = oms_scrub::redact(bytes, &refs)
+        .map_err(|_| Error::new(2, "output could not be scanned"))?;
+    let hits = oms_scrub::scan(&redacted.bytes, &refs)
+        .map_err(|_| Error::new(2, "output could not be scanned"))?;
+    if hits.is_empty() {
+        return Ok((redacted.bytes, redacted.count));
+    }
+    let mut flagged = std::collections::BTreeMap::new();
+    for hit in hits {
+        flagged.entry(hit.line).or_insert(hit.class);
+    }
+    let mut out = Vec::with_capacity(redacted.bytes.len());
+    let mut extra = 0usize;
+    for (i, part) in redacted.bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        if let Some(class) = flagged.get(&(i + 1)) {
+            out.extend_from_slice(format!("[oms-redacted:{class}]\n").as_bytes());
+            extra += 1;
+        } else {
+            out.extend_from_slice(part);
+            if !part.ends_with(b"\n") {
+                out.push(b'\n');
+            }
+        }
+    }
+    let residual =
+        oms_scrub::scan(&out, &refs).map_err(|_| Error::new(2, "output could not be scanned"))?;
+    if !residual.is_empty() {
+        let lines: std::collections::BTreeSet<usize> =
+            residual.into_iter().map(|hit| hit.line).collect();
+        let mut scrubbed = Vec::with_capacity(out.len());
+        for (i, part) in out.split_inclusive(|b| *b == b'\n').enumerate() {
+            if lines.contains(&(i + 1)) {
+                scrubbed.extend_from_slice(b"[scrub]\n");
+            } else {
+                scrubbed.extend_from_slice(part);
+            }
+        }
+        out = scrubbed;
+    }
+    Ok((out, redacted.count + extra))
 }
 pub fn child() -> bool {
     std::env::var_os("OMS_HARNESS_CHILD").is_some_and(|s| s == "1")

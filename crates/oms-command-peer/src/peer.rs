@@ -548,7 +548,7 @@ pub(crate) fn prompt(
                 args.has("allow-sensitive"),
                 context,
             )?;
-            safety::outbound(digest.as_bytes())?;
+            safety::outbound_prompt(digest.as_bytes())?;
             body.push_str("## Caller session history\n\n");
             body.untrusted(
                 "history",
@@ -621,7 +621,7 @@ pub(crate) fn prompt(
     } else {
         body.push_str("\nAnswer:\nTradeoffs:\nEvidence:\nRisks:\nRecommendation:\nVerification:\n");
     }
-    safety::outbound(body.as_bytes())?;
+    safety::outbound_prompt(body.as_bytes())?;
     Ok(body)
 }
 fn validate_council_round(seats: &[Seat]) -> Result<()> {
@@ -755,6 +755,8 @@ pub(crate) struct Seat {
     pub requested_model: String,
     pub artifact: PathBuf,
     pub answer: String,
+    pub shown_answer: String,
+    pub redacted_lines: usize,
     pub findings: Option<crate::review::ParsedFindings>,
     pub code: i32,
     pub complete: bool,
@@ -988,6 +990,8 @@ fn call_routed(
             route,
             artifact,
             answer: String::new(),
+            shown_answer: String::new(),
+            redacted_lines: 0,
             findings: None,
             code: 0,
             complete: false,
@@ -1233,6 +1237,12 @@ fn call_routed(
         }
     }
     let answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
+    let (shown_answer, redacted_lines) = if tool == "peer-review" {
+        (answer.clone(), 0)
+    } else {
+        let (redacted, count) = safety::redact_outbound(&result.stdout)?;
+        (String::from_utf8_lossy(&redacted).into_owned(), count)
+    };
     let findings = if tool == "peer-review" {
         Some(crate::review::seat_findings(&String::from_utf8_lossy(
             &result.stdout,
@@ -1335,7 +1345,7 @@ fn call_routed(
     if args.has("thread") {
         let role = if quality == "ok" { "answer" } else { "note" };
         let quoted = if quality == "ok" {
-            answer.clone()
+            shown_answer.clone()
         } else {
             format!(
                 "{} returned {quality}; see {}",
@@ -1370,6 +1380,8 @@ fn call_routed(
         route,
         artifact,
         answer,
+        shown_answer,
+        redacted_lines,
         findings,
         code: result.code,
         complete: result.complete,
@@ -1612,6 +1624,8 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             .collect::<Result<Vec<_>>>()?;
     }
     if args.has("thread") && !dry(args, tool) && !args.has("export-only") {
+        safety::outbound_prompt(args.get("topic").as_bytes())?;
+        safety::outbound_prompt(question.as_bytes())?;
         // Background callers already seeded their own explicit live thread.
         // append requires that exact log to exist and checks closure under its lock.
         if !args.has("no-current") && thread::current(&repo).as_deref() != Some(args.get("thread"))
@@ -1732,13 +1746,13 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
                     debate.push_str(&safety::untrusted(
                         &seat.target.provider,
                         "peer answer",
-                        safety::truncate(&seat.answer, budget).as_bytes(),
+                        safety::truncate(&seat.shown_answer, budget).as_bytes(),
                     )?);
                 }
             }
             if synthesis_json {
                 debate.push_str(discussion::COUNCIL_REBUTTAL_SECTIONS);
-                safety::outbound(debate.as_bytes())?;
+                safety::outbound_prompt(debate.as_bytes())?;
             } else {
                 debate.push_str("\nAnswer:\nEvidence:\nRisks:\nRecommendation:\nVerification:\nChanged from previous round:\nRemaining disagreements:\n");
             }
@@ -1785,9 +1799,23 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         return Ok((0, output.into_bytes(), warnings));
     }
     for seat in &seats {
-        output.push_str(&format!("{}\n", repo.join(&seat.artifact).display()));
-        if !args.has("quiet") && !seat.answer.is_empty() {
-            output.push_str(&format!("\n{}:\n{}\n", seat.target.provider, seat.answer));
+        let artifact_path = repo.join(&seat.artifact);
+        output.push_str(&format!("{}\n", artifact_path.display()));
+        if !args.has("quiet") && !seat.shown_answer.is_empty() {
+            if seat.redacted_lines > 0 {
+                output.push_str(&format!(
+                    "\n{}:\n{}\nnote: {} line(s) redacted by the shared content scan; recorded artifact: {}\n",
+                    seat.target.provider,
+                    seat.shown_answer.trim_end_matches('\n'),
+                    seat.redacted_lines,
+                    artifact_path.display()
+                ));
+            } else {
+                output.push_str(&format!(
+                    "\n{}:\n{}\n",
+                    seat.target.provider, seat.shown_answer
+                ));
+            }
         }
     }
     if args.has("synthesize") {
@@ -1807,13 +1835,13 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
                 synthesis.push_str(&safety::untrusted(
                     &seat.target.provider,
                     "peer answer",
-                    safety::truncate(&seat.answer, 16384).as_bytes(),
+                    safety::truncate(&seat.shown_answer, 16384).as_bytes(),
                 )?);
             }
         }
         if synthesis_json {
             synthesis.push_str(discussion::COUNCIL_SYNTHESIS_SECTIONS);
-            safety::outbound(synthesis.as_bytes())?;
+            safety::outbound_prompt(synthesis.as_bytes())?;
         }
         let synthesis = crate::request_context::Prompt::unknown(synthesis);
         let result = if let Some((target, route)) = synthesis_route {
@@ -1868,11 +1896,21 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             .map_err(|e| Error::new(e.code, e.message))?;
             return Ok((0, raw, warnings));
         }
-        output.push_str(&format!(
-            "synthesis: {}\n{}\n",
-            result.artifact.display(),
-            result.answer
-        ));
+        if result.redacted_lines > 0 {
+            output.push_str(&format!(
+                "synthesis: {}\n{}\nnote: {} line(s) redacted by the shared content scan; recorded artifact: {}\n",
+                result.artifact.display(),
+                result.shown_answer.trim_end_matches('\n'),
+                result.redacted_lines,
+                repo.join(&result.artifact).display()
+            ));
+        } else {
+            output.push_str(&format!(
+                "synthesis: {}\n{}\n",
+                result.artifact.display(),
+                result.shown_answer
+            ));
+        }
     }
     if tool == "peer-review" {
         let mut result = crate::review::finish(args, &repo, &dir, &run, &seats, output, context)?;
