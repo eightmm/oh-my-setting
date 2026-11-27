@@ -855,7 +855,32 @@ fn home_panel_opener() {
             ])
         );
 
+        let opener_tool = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "oms_open_panel")
+            .unwrap();
+        assert_eq!(
+            opener_tool["_meta"]["com.google.antigravity/ui"]["entrypoints"],
+            json!([
+                {"type":"aux_pane","title":"OMS"},
+                {"type":"global","title":"OMS"}
+            ]),
+            "{profile}"
+        );
+
         let resources = c.call("resources/list", json!({}))["result"]["resources"].clone();
+        assert_eq!(
+            resources
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["name"] == "oms-conversation-panel")
+                .unwrap()["title"],
+            "OMS",
+            "{profile}: {resources}"
+        );
         assert!(
             resources
                 .as_array()
@@ -914,6 +939,32 @@ fn home_panel_opener() {
 
     for profile in ["mcp-app", "chatgpt-panel"] {
         let mut c = Client::with_depth(&source, &repo, profile, false, false, "0".as_ref());
+        let catalog_tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
+        let catalog_opener = catalog_tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "oms_open_panel")
+            .unwrap();
+        assert_eq!(
+            catalog_opener["_meta"]["com.google.antigravity/ui"]["entrypoints"],
+            json!([
+                {"type":"aux_pane","title":"OMS"},
+                {"type":"global","title":"OMS"}
+            ]),
+            "{profile}"
+        );
+        let catalog_resources = c.call("resources/list", json!({}))["result"]["resources"].clone();
+        assert_eq!(
+            catalog_resources
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["name"] == "oms-conversation-panel")
+                .unwrap()["title"],
+            "OMS",
+            "{profile}: {catalog_resources}"
+        );
         let opened = c.tool("oms_open_home", json!({}));
         good(&opened);
         let expected = json!({"panel": "OMS home", "readOnly": true});
@@ -937,48 +988,97 @@ fn home_panel_opener() {
     }
 
     // Under OMS_PANEL_REPO (pinned binding, even with desktop-projects.json absent or present on disk):
-    // returns an error and no page. Note: setting both OMS_PANEL_REPO and explicit map is invalid map,
-    // whereas OMS_PANEL_REPO with XDG_CONFIG_HOME desktop-projects.json pins the connection.
-    for profile in ["mcp-app", "chatgpt-panel"] {
-        let child = Command::new(std::env::current_exe().unwrap())
-            .env_remove("PYTHONUTF8")
-            .env_remove("PYTHONIOENCODING")
-            .arg("--stdio")
-            .arg(&source)
-            .arg(&repo)
-            .arg(profile)
-            .arg("0")
-            .env("OMS_PANEL_REPO", &repo)
-            .env_remove("OMS_PANEL_PROJECTS")
-            .env_remove("OMS_PANEL_PROJECTS_FILE")
-            .env_remove("OMS_ROOM_PARTICIPANT")
-            .env("XDG_CONFIG_HOME", source.join("test-config"))
-            .env("XDG_CACHE_HOME", source.join("test-cache"))
-            .env("OMS_HARNESS_CHILD", "0")
-            .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        let mut pinned_client = Client::from_child(child);
-        assert_eq!(
-            registry_summary(&pinned_client.tool("oms_list_projects", json!({})))["binding"],
-            "pinned",
-            "{profile}"
-        );
-        let pinned_home = pinned_client.tool("oms_open_home", json!({}));
-        bad(&pinned_home, "bound to one project");
-        bad(&pinned_home, "not available");
-        assert!(
-            !pinned_home["result"]["content"][0]["text"]
-                .as_str()
+    // returns an error and no page, and reports `OMS · <dir>` for Antigravity entrypoints and the
+    // conversation-panel resource title so multiple pinned panels are distinguishable.
+    let second_pin = tmp.0.join("beta-checkout");
+    std::fs::create_dir_all(second_pin.join(".oms")).unwrap();
+    let second_pin = second_pin.canonicalize().unwrap();
+    for (pinned_repo, expected_title) in [
+        (
+            repo.clone(),
+            format!("OMS · {}", repo.file_name().unwrap().to_str().unwrap()),
+        ),
+        (second_pin, "OMS · beta-checkout".to_owned()),
+    ] {
+        for profile in ["mcp-app", "chatgpt-panel"] {
+            let child = Command::new(std::env::current_exe().unwrap())
+                .env_remove("PYTHONUTF8")
+                .env_remove("PYTHONIOENCODING")
+                .arg("--stdio")
+                .arg(&source)
+                .arg(&repo)
+                .arg(profile)
+                .arg("0")
+                .env("OMS_PANEL_REPO", &pinned_repo)
+                .env_remove("OMS_PANEL_PROJECTS")
+                .env_remove("OMS_PANEL_PROJECTS_FILE")
+                .env_remove("OMS_ROOM_PARTICIPANT")
+                .env("XDG_CONFIG_HOME", source.join("test-config"))
+                .env("XDG_CACHE_HOME", source.join("test-cache"))
+                .env("OMS_HARNESS_CHILD", "0")
+                .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            let mut pinned_client = Client::from_child(child);
+            assert_eq!(
+                registry_summary(&pinned_client.tool("oms_list_projects", json!({})))["binding"],
+                "pinned",
+                "{profile}"
+            );
+            let pinned_tools =
+                pinned_client.call("tools/list", json!({}))["result"]["tools"].clone();
+            let pinned_opener = pinned_tools
+                .as_array()
                 .unwrap()
-                .contains("no host project map is configured"),
-            "{profile}: {pinned_home}"
-        );
-        assert!(pinned_home["result"].get("structuredContent").is_none());
-        assert!(pinned_home["result"].get("_meta").is_none());
+                .iter()
+                .find(|t| t["name"] == "oms_open_panel")
+                .unwrap();
+            assert_eq!(
+                pinned_opener["_meta"]["com.google.antigravity/ui"]["entrypoints"],
+                json!([
+                    {"type":"aux_pane","title":&expected_title},
+                    {"type":"global","title":&expected_title}
+                ]),
+                "{profile}"
+            );
+            let pinned_resources =
+                pinned_client.call("resources/list", json!({}))["result"]["resources"].clone();
+            assert_eq!(
+                pinned_resources
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["name"] == "oms-conversation-panel")
+                    .unwrap()["title"],
+                expected_title,
+                "{profile}: {pinned_resources}"
+            );
+            assert_eq!(
+                pinned_resources
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|r| r["name"] == "oms-home-panel")
+                    .unwrap()["title"],
+                "OMS Home",
+                "{profile}: {pinned_resources}"
+            );
+            let pinned_home = pinned_client.tool("oms_open_home", json!({}));
+            bad(&pinned_home, "bound to one project");
+            bad(&pinned_home, "not available");
+            assert!(
+                !pinned_home["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no host project map is configured"),
+                "{profile}: {pinned_home}"
+            );
+            assert!(pinned_home["result"].get("structuredContent").is_none());
+            assert!(pinned_home["result"].get("_meta").is_none());
+        }
     }
 
     // Missing explicit OMS_PANEL_PROJECTS_FILE fails with the invalid map error.
