@@ -3092,7 +3092,7 @@ fn login_tmux_session(
     caller_pane: Option<&str>,
     services: &dyn Services,
     interrupted: &AtomicBool,
-) -> Option<String> {
+) -> Option<(String, bool)> {
     // The panel's own session first: the Main may run detached where the user cannot see a new window.
     let own = caller_pane
         .filter(|id| commands::valid_target(id, '%'))
@@ -3106,10 +3106,10 @@ fn login_tmux_session(
             .ok()
         })
         .filter(|session| commands::valid_target(session, '$'));
-    own.or_else(|| {
+    own.map(|session| (session, false)).or_else(|| {
         session_hint
             .filter(|id| commands::valid_target(id, '$'))
-            .map(str::to_owned)
+            .map(|session| (session.to_owned(), true))
     })
 }
 
@@ -3147,12 +3147,16 @@ fn open_login_window_with_entry(
     let Some(login_argv) = login_command_argv_for(source, entry) else {
         return format!("Run: {LOGIN_FALLBACK_COMMAND} (oms unavailable)");
     };
-    let Some(session) = login_tmux_session(repo, session_hint, caller_pane, services, interrupted)
+    let Some((session, used_hint_fallback)) =
+        login_tmux_session(repo, session_hint, caller_pane, services, interrupted)
     else {
         return format!("Run: {LOGIN_FALLBACK_COMMAND} (no tmux session)");
     };
     let mut argv = commands::strings(&[
         "new-window",
+        "-P",
+        "-F",
+        "#{pane_id}",
         "-t",
         &format!("{session}:"),
         "-n",
@@ -3162,7 +3166,29 @@ fn open_login_window_with_entry(
     argv.push(repo.as_os_str().into());
     argv.extend(login_argv);
     match oms_panel_core::terminals::tmux(services, repo, &argv, interrupted) {
-        Ok(_) => "Sign-in window opened".into(),
+        Ok(pane_out) => {
+            let pane_id = pane_out.trim();
+            if commands::valid_target(pane_id, '%') {
+                let _ = oms_panel_core::terminals::tmux(
+                    services,
+                    repo,
+                    &commands::strings(&[
+                        "set-option",
+                        "-p",
+                        "-t",
+                        pane_id,
+                        "remain-on-exit",
+                        "failed",
+                    ]),
+                    interrupted,
+                );
+            }
+            if used_hint_fallback {
+                format!("Sign-in window opened in session {session}")
+            } else {
+                "Sign-in window opened".into()
+            }
+        }
         Err(err) => format!("Run: {LOGIN_FALLBACK_COMMAND} (tmux: {})", err.message),
     }
 }
@@ -13136,6 +13162,7 @@ fi
         struct LoginTmux {
             calls: std::sync::Mutex<Vec<Vec<std::ffi::OsString>>>,
             session_reply: Option<&'static str>,
+            pane_reply: Option<&'static str>,
             fail_new_window: bool,
         }
         impl PeerExecutor for LoginTmux {
@@ -13152,8 +13179,19 @@ fi
                         None => Err(Error::new("no tmux client")),
                     };
                 }
-                if self.fail_new_window {
-                    return Err(Error::new("tmux failed"));
+                if request.argv.get(1).and_then(|v| v.to_str()) == Some("new-window") {
+                    if self.fail_new_window {
+                        return Err(Error::new("tmux failed"));
+                    }
+                    return Ok(CommandOutput {
+                        stdout: self
+                            .pane_reply
+                            .map(|id| format!("{id}\n").into_bytes())
+                            .unwrap_or_default(),
+                        cleanup_complete: true,
+                        output_complete: true,
+                        ..Default::default()
+                    });
                 }
                 Ok(CommandOutput {
                     cleanup_complete: true,
@@ -13182,6 +13220,7 @@ fi
             let tmux = LoginTmux {
                 calls: std::sync::Mutex::new(Vec::new()),
                 session_reply: Some("$7"),
+                pane_reply: Some("%9"),
                 fail_new_window: false,
             };
             let notice =
@@ -13202,10 +13241,12 @@ fi
             script: true,
         };
 
-        // Direct session hint spawns `tmux new-window -t $3: -n login -c <repo> <oms...> connect-services --login-menu`.
+        // Direct session hint spawns `tmux new-window -P -F #{pane_id} -t $3: -n login -c <repo> <oms...> connect-services --login-menu`,
+        // sets remain-on-exit=failed when tmux returns a pane id, and names the fallback session.
         let tmux = LoginTmux {
             calls: std::sync::Mutex::new(Vec::new()),
             session_reply: None,
+            pane_reply: Some("%9"),
             fail_new_window: false,
         };
         let notice = super::open_login_window_with_entry(
@@ -13217,9 +13258,9 @@ fi
             &tmux,
             &stop,
         );
-        assert_eq!(notice, "Sign-in window opened");
+        assert_eq!(notice, "Sign-in window opened in session $3");
         let calls = tmux.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2);
         let argv: Vec<String> = calls[0]
             .iter()
             .map(|v| v.to_string_lossy().into_owned())
@@ -13229,6 +13270,9 @@ fi
             [
                 "tmux",
                 "new-window",
+                "-P",
+                "-F",
+                "#{pane_id}",
                 "-t",
                 "$3:",
                 "-n",
@@ -13240,11 +13284,25 @@ fi
                 "--login-menu"
             ]
         );
+        assert_eq!(
+            calls[1],
+            commands::strings(&[
+                "tmux",
+                "set-option",
+                "-p",
+                "-t",
+                "%9",
+                "remain-on-exit",
+                "failed"
+            ])
+        );
+        drop(calls);
 
         // Script entry reuses native_panel::entry_prefix_for (prepends `bash`).
         let tmux = LoginTmux {
             calls: std::sync::Mutex::new(Vec::new()),
             session_reply: None,
+            pane_reply: None,
             fail_new_window: false,
         };
         let notice = super::open_login_window_with_entry(
@@ -13256,13 +13314,16 @@ fi
             &tmux,
             &stop,
         );
-        assert_eq!(notice, "Sign-in window opened");
+        assert_eq!(notice, "Sign-in window opened in session $3");
         let calls = tmux.calls.lock().unwrap();
         assert_eq!(
             calls[0],
             commands::strings(&[
                 "tmux",
                 "new-window",
+                "-P",
+                "-F",
+                "#{pane_id}",
                 "-t",
                 "$3:",
                 "-n",
@@ -13275,11 +13336,13 @@ fi
                 "--login-menu",
             ])
         );
+        drop(calls);
 
         // Falls back to querying session from TMUX_PANE when no session hint is given.
         let tmux = LoginTmux {
             calls: std::sync::Mutex::new(Vec::new()),
             session_reply: Some("$7"),
+            pane_reply: None,
             fail_new_window: false,
         };
         let notice = super::open_login_window_with_entry(
@@ -13298,13 +13361,14 @@ fi
             calls[0],
             commands::strings(&["tmux", "display-message", "-p", "-t", "%5", "#{session_id}"])
         );
-        assert_eq!(calls[1][3], "$7:");
+        assert_eq!(calls[1][6], "$7:");
         drop(calls);
 
         // The panel's own session wins over the Board Main's session, which may be detached.
         let tmux = LoginTmux {
             calls: std::sync::Mutex::new(Vec::new()),
             session_reply: Some("$7"),
+            pane_reply: None,
             fail_new_window: false,
         };
         let notice = super::open_login_window_with_entry(
@@ -13317,12 +13381,13 @@ fi
             &stop,
         );
         assert_eq!(notice, "Sign-in window opened");
-        assert_eq!(tmux.calls.lock().unwrap()[1][3], "$7:");
+        assert_eq!(tmux.calls.lock().unwrap()[1][6], "$7:");
 
         // Unavailable executable does not open a window and reports the fallback command first.
         let tmux = LoginTmux {
             calls: std::sync::Mutex::new(Vec::new()),
             session_reply: Some("$7"),
+            pane_reply: None,
             fail_new_window: false,
         };
         let notice =
@@ -13337,6 +13402,7 @@ fi
         let tmux = LoginTmux {
             calls: std::sync::Mutex::new(Vec::new()),
             session_reply: None,
+            pane_reply: None,
             fail_new_window: false,
         };
         let notice = super::open_login_window_with_entry(
@@ -13358,6 +13424,7 @@ fi
         let tmux = LoginTmux {
             calls: std::sync::Mutex::new(Vec::new()),
             session_reply: None,
+            pane_reply: None,
             fail_new_window: true,
         };
         let notice = super::open_login_window_with_entry(

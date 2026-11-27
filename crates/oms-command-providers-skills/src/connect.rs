@@ -441,87 +441,79 @@ fn account_config_dir() -> Result<PathBuf> {
     };
     physical(&base.join("oh-my-setting"))
 }
-fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
-    let (provider, id) = args
-        .required("--account")?
-        .split_once(':')
-        .ok_or_else(|| error("--account requires PROVIDER:ID"))?;
-    let (label, env, default, names, receipt_name): (&str, &str, &str, &[&str], &str) =
-        match provider {
-            "codex" => (
-                "Codex",
-                "CODEX_HOME",
-                ".codex",
-                SHARED,
-                "codex-account-links.json",
-            ),
-            "claude" => (
-                "Claude",
-                "CLAUDE_CONFIG_DIR",
-                ".claude",
-                CLAUDE_SHARED,
-                "provider-account-effects.json",
-            ),
-            "pi" => (
-                "Pi",
-                "PI_CODING_AGENT_DIR",
-                ".pi/agent",
-                PI_SHARED,
-                "pi-account-links.json",
-            ),
-            "antigravity" => return antigravity(args, id),
-            _ => {
-                return Err(error(
-                    "provider account isolation is unproved and unavailable",
-                ));
-            }
-        };
-    let claude = provider == "claude";
-    account_flags(args, id)?;
+struct ProviderAccountSpec {
+    provider: &'static str,
+    label: &'static str,
+    env: &'static str,
+    default_dir: &'static str,
+    link_names: &'static [&'static str],
+    receipt_name: &'static str,
+    claude: bool,
+}
+
+fn provider_account_spec(provider: &str) -> Result<ProviderAccountSpec> {
+    match provider {
+        "codex" => Ok(ProviderAccountSpec {
+            provider: "codex",
+            label: "Codex",
+            env: "CODEX_HOME",
+            default_dir: ".codex",
+            link_names: SHARED,
+            receipt_name: "codex-account-links.json",
+            claude: false,
+        }),
+        "claude" => Ok(ProviderAccountSpec {
+            provider: "claude",
+            label: "Claude",
+            env: "CLAUDE_CONFIG_DIR",
+            default_dir: ".claude",
+            link_names: CLAUDE_SHARED,
+            receipt_name: "provider-account-effects.json",
+            claude: true,
+        }),
+        "pi" => Ok(ProviderAccountSpec {
+            provider: "pi",
+            label: "Pi",
+            env: "PI_CODING_AGENT_DIR",
+            default_dir: ".pi/agent",
+            link_names: PI_SHARED,
+            receipt_name: "pi-account-links.json",
+            claude: false,
+        }),
+        _ => Err(error(
+            "provider account isolation is unproved and unavailable",
+        )),
+    }
+}
+
+struct ValidatedRegistries {
+    _guard: oms_lock::Guard,
+    config: PathBuf,
+    registry: PathBuf,
+    old: Vec<u8>,
+    value: Value,
+    claude_registry: PathBuf,
+    claude_raw: Vec<u8>,
+    claude_doc: Value,
+    default_claude: PathBuf,
+    agy_homes: std::collections::BTreeSet<PathBuf>,
+}
+
+fn load_validated_registries(load_claude: bool, load_agy: bool) -> Result<ValidatedRegistries> {
     let config = account_config_dir()?;
     let registry = config.join("provider-accounts.json");
     let claude_registry = config.join("provider-accounts.claude.json");
-    let receipt = config.join(receipt_name);
     let _guard = lock(&registry)?;
     let old = optional(&registry)?;
-    let mut value = if old.is_empty() {
+    let value = if old.is_empty() {
         json!({"schema":1,"providers":{}})
     } else {
         json(&old)?
     };
     let shared_homes = validate_shared_registry(&value)?;
-    let rows_raw = optional(&receipt)?;
-    let mut receipt_doc = if rows_raw.is_empty() {
-        if claude {
-            json!({"schema":1,"accounts":[]})
-        } else {
-            json!([])
-        }
-    } else {
-        json(&rows_raw)?
-    };
-    if claude && receipt_doc["schema"] != 1 {
-        return Err(error("invalid Claude account effects"));
-    }
-    let mut rows = if claude {
-        receipt_doc["accounts"].take()
-    } else {
-        receipt_doc.take()
-    };
-    let rows = rows
-        .as_array_mut()
-        .ok_or_else(|| error(format!("invalid {label} link ownership receipt")))?;
-    let save = |rows: &Vec<Value>| -> Result<()> {
-        let doc = if claude {
-            json!({"schema":1,"accounts":rows})
-        } else {
-            json!(rows)
-        };
-        write_locked(&receipt, &json_bytes(&doc)?, false, None)
-    };
     let default_claude = physical(&home()?.join(".claude"))?;
     let claude_raw = optional(&claude_registry)?;
-    let mut claude_doc = if claude || (!args.has("--verify") && !args.has("--remove")) {
+    let claude_doc = if load_claude {
         if claude_raw.is_empty() {
             json!({"schema":1,"provider":"claude","accounts":[]})
         } else {
@@ -532,27 +524,285 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
     } else {
         json!({"schema":1,"provider":"claude","accounts":[]})
     };
-    let main = physical(&env_path(env, home()?.join(default)))?;
-    let existing = value["providers"][provider]["accounts"]
+    let agy_homes = if load_agy {
+        agy_homes(&config)?.into_iter().collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    Ok(ValidatedRegistries {
+        _guard,
+        config,
+        registry,
+        old,
+        value,
+        claude_registry,
+        claude_raw,
+        claude_doc,
+        default_claude,
+        agy_homes,
+    })
+}
+
+fn load_receipt_rows(config: &Path, spec: &ProviderAccountSpec) -> Result<Vec<Value>> {
+    let receipt = config.join(spec.receipt_name);
+    let rows_raw = optional(&receipt)?;
+    let mut receipt_doc = if rows_raw.is_empty() {
+        if spec.claude {
+            json!({"schema":1,"accounts":[]})
+        } else {
+            json!([])
+        }
+    } else {
+        json(&rows_raw)?
+    };
+    if spec.claude && receipt_doc["schema"] != 1 {
+        return Err(error("invalid Claude account effects"));
+    }
+    let mut rows = if spec.claude {
+        receipt_doc["accounts"].take()
+    } else {
+        receipt_doc.take()
+    };
+    rows.as_array_mut()
+        .map(std::mem::take)
+        .ok_or_else(|| error(format!("invalid {} link ownership receipt", spec.label)))
+}
+
+fn find_registered_account(
+    registries: &ValidatedRegistries,
+    provider: &str,
+    id: &str,
+) -> Option<Value> {
+    registries.value["providers"][provider]["accounts"]
         .as_array()
         .and_then(|v| v.iter().find(|v| v["id"] == id))
         .cloned()
         .or_else(|| {
-            claude
+            (provider == "claude")
                 .then(|| {
-                    claude_doc["accounts"]
+                    registries.claude_doc["accounts"]
                         .as_array()
                         .and_then(|v| v.iter().find(|v| v["id"] == id))
                         .cloned()
                 })
                 .flatten()
-        });
+        })
+}
+
+fn validate_account_placement_and_uniqueness(
+    registries: &ValidatedRegistries,
+    spec: &ProviderAccountSpec,
+    id: &str,
+    raw_path: &Path,
+    main: &Path,
+    check_existing_private: bool,
+    seed_main_check: bool,
+) -> Result<PathBuf> {
+    if check_existing_private {
+        private_home(raw_path)?;
+    }
+    let path = physical(raw_path)?;
+    home_placement(&path, Some(main))?;
+    for (owner, settings) in registries.value["providers"]
+        .as_object()
+        .ok_or_else(|| error("invalid providers"))?
+    {
+        for row in settings["accounts"]
+            .as_array()
+            .ok_or_else(|| error("invalid provider accounts"))?
+        {
+            if !(owner == spec.provider && row["id"] == id)
+                && row["home"]
+                    .as_str()
+                    .is_some_and(|s| physical(Path::new(s)).is_ok_and(|p| p == path))
+            {
+                return Err(error("duplicate provider account id or canonical home"));
+            }
+        }
+    }
+    let claude_accounts = registries.claude_doc["accounts"]
+        .as_array()
+        .ok_or_else(|| error("invalid Claude registry"))?;
+    for row in claude_accounts {
+        if !(spec.claude && row["id"] == id)
+            && row["home"]
+                .as_str()
+                .is_some_and(|s| physical(Path::new(s)).is_ok_and(|p| p == path))
+        {
+            return Err(error(
+                "canonical home is already registered by another provider",
+            ));
+        }
+    }
+    for (owner_prov, file, nested) in [
+        ("codex", "codex-account-links.json", false),
+        ("pi", "pi-account-links.json", false),
+        ("claude", "provider-account-effects.json", true),
+    ] {
+        let raw_receipt = optional(&registries.config.join(file))?;
+        if raw_receipt.is_empty() {
+            continue;
+        }
+        let parsed = json(&raw_receipt)?;
+        let list = if nested {
+            parsed["accounts"].as_array()
+        } else {
+            parsed.as_array()
+        }
+        .ok_or_else(|| error("invalid provider account receipt"))?;
+        for row in list {
+            if !(owner_prov == spec.provider && row["id"] == id)
+                && let Some(canon) = row["home"]
+                    .as_str()
+                    .and_then(|s| physical(Path::new(s)).ok())
+            {
+                if seed_main_check && owner_prov == spec.provider && canon == *main {
+                    return Err(error("duplicate provider account id or canonical home"));
+                }
+                if canon == path || (seed_main_check && canon == *main) {
+                    return Err(error(
+                        "canonical home is already registered by another provider",
+                    ));
+                }
+            }
+        }
+    }
+    for canon in &registries.agy_homes {
+        if *canon == path || (seed_main_check && *canon == *main) {
+            return Err(error(
+                "canonical home is already registered by another provider",
+            ));
+        }
+    }
+    Ok(path)
+}
+
+fn validate_and_open_account_home(
+    spec: &ProviderAccountSpec,
+    id: &str,
+    raw_path: &Path,
+    canon: &Path,
+    rows: &[Value],
+    create_if_missing: bool,
+) -> Result<(std::os::fd::OwnedFd, Option<Value>)> {
+    for row in rows {
+        if row["id"] == id
+            || row["home"]
+                .as_str()
+                .and_then(|s| physical(Path::new(s)).ok())
+                .as_deref()
+                == Some(canon)
+        {
+            validate_receipt_links(row, spec.link_names, spec.claude)?;
+        }
+    }
+    let owner = rows
+        .iter()
+        .find(|r| {
+            r["id"] == id
+                && (r["home"] == canon.to_string_lossy().as_ref()
+                    || r["home"]
+                        .as_str()
+                        .and_then(|s| physical(Path::new(s)).ok())
+                        .as_deref()
+                        == Some(canon))
+        })
+        .cloned();
+    if create_if_missing {
+        let parent = canon
+            .parent()
+            .ok_or_else(|| error("invalid account parent"))?;
+        private_parents(parent)?;
+        if !canon.exists() {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(canon)?;
+        }
+        private_home(canon)?;
+        let directory = open_home(
+            canon,
+            owner
+                .as_ref()
+                .map(|r| if spec.claude { &r["identity"] } else { r }),
+        )?;
+        Ok((directory, owner))
+    } else {
+        private_home(canon)?;
+        let directory = open_home(
+            raw_path,
+            owner
+                .as_ref()
+                .map(|r| if spec.claude { &r["identity"] } else { r }),
+        )?;
+        Ok((directory, owner))
+    }
+}
+
+fn validate_registered_account_home(
+    registries: &ValidatedRegistries,
+    spec: &ProviderAccountSpec,
+    id: &str,
+    rows: &[Value],
+) -> Result<PathBuf> {
+    let existing = find_registered_account(registries, spec.provider, id)
+        .ok_or_else(|| error(format!("{} account is not registered: {id}", spec.label)))?;
+    let raw_home = existing["home"]
+        .as_str()
+        .ok_or_else(|| error("invalid account home"))?;
+    let raw_path = Path::new(raw_home);
+    let main_home = physical(&env_path(spec.env, home()?.join(spec.default_dir)))?;
+    let canon = validate_account_placement_and_uniqueness(
+        registries, spec, id, raw_path, &main_home, true, false,
+    )?;
+    let _ = validate_and_open_account_home(spec, id, raw_path, &canon, rows, false)?;
+    Ok(canon)
+}
+
+fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
+    let (provider, id) = args
+        .required("--account")?
+        .split_once(':')
+        .ok_or_else(|| error("--account requires PROVIDER:ID"))?;
+    if provider == "antigravity" {
+        return antigravity(args, id);
+    }
+    let spec = provider_account_spec(provider)?;
+    let label = spec.label;
+    let env = spec.env;
+    let default = spec.default_dir;
+    let names = spec.link_names;
+    let receipt_name = spec.receipt_name;
+    let claude = spec.claude;
+    account_flags(args, id)?;
+    let mut loaded = load_validated_registries(
+        claude || (!args.has("--verify") && !args.has("--remove")),
+        !args.has("--verify") && !args.has("--remove"),
+    )?;
+    let receipt = loaded.config.join(receipt_name);
+    let mut rows = load_receipt_rows(&loaded.config, &spec)?;
+    let rows = &mut rows;
+    let save = |rows: &Vec<Value>| -> Result<()> {
+        let doc = if claude {
+            json!({"schema":1,"accounts":rows})
+        } else {
+            json!(rows)
+        };
+        write_locked(&receipt, &json_bytes(&doc)?, false, None)
+    };
+    let main = physical(&env_path(env, home()?.join(default)))?;
+    let existing = find_registered_account(&loaded, provider, id);
     if args.has("--verify") {
-        let all = value["providers"][provider]["accounts"]
+        let all = loaded.value["providers"][provider]["accounts"]
             .as_array()
             .or_else(|| {
                 claude
-                    .then(|| claude_doc["accounts"].as_array().filter(|v| !v.is_empty()))
+                    .then(|| {
+                        loaded.claude_doc["accounts"]
+                            .as_array()
+                            .filter(|v| !v.is_empty())
+                    })
                     .flatten()
             })
             .ok_or_else(|| error(format!("{label} account is not registered")))?;
@@ -750,38 +1000,43 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
                 save(rows)?;
             }
         }
-        if let Some(entries) = value["providers"]
+        if let Some(entries) = loaded.value["providers"]
             .get_mut(provider)
             .and_then(|section| section["accounts"].as_array_mut())
         {
             entries.retain(|r| r["id"] != id);
             if entries.is_empty() {
-                value["providers"]
+                loaded.value["providers"]
                     .as_object_mut()
                     .ok_or_else(|| error("invalid providers"))?
                     .remove(provider);
             }
         }
-        if claude && !claude_raw.is_empty() {
-            claude_doc["accounts"]
+        if claude && !loaded.claude_raw.is_empty() {
+            loaded.claude_doc["accounts"]
                 .as_array_mut()
                 .ok_or_else(|| error("invalid Claude registry"))?
                 .retain(|r| r["id"] != id);
             write_locked(
-                &claude_registry,
-                &json_bytes(&claude_doc)?,
+                &loaded.claude_registry,
+                &json_bytes(&loaded.claude_doc)?,
                 false,
-                Some(&claude_raw),
+                Some(&loaded.claude_raw),
             )?;
         }
-        write_locked(&registry, &json_bytes(&value)?, false, Some(&old))?;
+        write_locked(
+            &loaded.registry,
+            &json_bytes(&loaded.value)?,
+            false,
+            Some(&loaded.old),
+        )?;
         rows.retain(|r| r["id"] != id);
         save(rows)?;
         return Ok(Output::text(format!(
             "{label} account removed: {id}; home, login and sessions kept\n"
         )));
     }
-    let path = args
+    let raw_path = args
         .get("--home")
         .map(|s| ctx.path(s))
         .or_else(|| {
@@ -791,84 +1046,17 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
                 .map(PathBuf::from)
         })
         .unwrap_or_else(|| main.join("accounts").join(id));
-    let path = physical(&path)?;
-    home_placement(&path, Some(&main))?;
-    for (owner, settings) in value["providers"]
-        .as_object()
-        .ok_or_else(|| error("invalid providers"))?
-    {
-        for row in settings["accounts"]
-            .as_array()
-            .ok_or_else(|| error("invalid provider accounts"))?
-        {
-            if !(owner == provider && row["id"] == id)
-                && row["home"]
-                    .as_str()
-                    .is_some_and(|s| physical(Path::new(s)).is_ok_and(|p| p == path))
-            {
-                return Err(error("duplicate provider account id or canonical home"));
-            }
-        }
-    }
-    let claude_accounts = claude_doc["accounts"]
-        .as_array()
-        .ok_or_else(|| error("invalid Claude registry"))?;
-    for row in claude_accounts {
-        if !(claude && row["id"] == id)
-            && row["home"]
-                .as_str()
-                .is_some_and(|s| physical(Path::new(s)).is_ok_and(|p| p == path))
-        {
-            return Err(error(
-                "canonical home is already registered by another provider",
-            ));
-        }
-    }
-    for (owner_prov, file, nested) in [
-        ("codex", "codex-account-links.json", false),
-        ("pi", "pi-account-links.json", false),
-        ("claude", "provider-account-effects.json", true),
-    ] {
-        let raw_receipt = optional(&config.join(file))?;
-        if raw_receipt.is_empty() {
-            continue;
-        }
-        let parsed = json(&raw_receipt)?;
-        let list = if nested {
-            parsed["accounts"].as_array()
-        } else {
-            parsed.as_array()
-        }
-        .ok_or_else(|| error("invalid provider account receipt"))?;
-        for row in list {
-            if !(owner_prov == provider && row["id"] == id)
-                && let Some(canon) = row["home"]
-                    .as_str()
-                    .and_then(|s| physical(Path::new(s)).ok())
-            {
-                if value["providers"].get(provider).is_none()
-                    && owner_prov == provider
-                    && canon == main
-                {
-                    return Err(error("duplicate provider account id or canonical home"));
-                }
-                if canon == path || (value["providers"].get(provider).is_none() && canon == main) {
-                    return Err(error(
-                        "canonical home is already registered by another provider",
-                    ));
-                }
-            }
-        }
-    }
-    for canon in agy_homes(&config)? {
-        if canon == path || (value["providers"].get(provider).is_none() && canon == main) {
-            return Err(error(
-                "canonical home is already registered by another provider",
-            ));
-        }
-    }
-    let mut next_value = value.clone();
-    let mut next_claude_doc = claude_doc.clone();
+    let path = validate_account_placement_and_uniqueness(
+        &loaded,
+        &spec,
+        id,
+        &raw_path,
+        &main,
+        false,
+        loaded.value["providers"].get(provider).is_none(),
+    )?;
+    let mut next_value = loaded.value.clone();
+    let mut next_claude_doc = loaded.claude_doc.clone();
     if next_value["providers"].get(provider).is_none() {
         let mut seeded = vec![json!({"id":"default","home":main})];
         if claude && let Some(prior) = next_claude_doc["accounts"].as_array() {
@@ -906,46 +1094,17 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
     if claude {
         validate_claude_registry(
             &next_claude_doc,
-            &default_claude,
+            &loaded.default_claude,
             &next_value,
             &next_shared_homes,
         )?;
     }
-    for row in rows.iter() {
-        if row["id"] == id
-            || row["home"]
-                .as_str()
-                .and_then(|s| physical(Path::new(s)).ok())
-                .as_ref()
-                == Some(&path)
-        {
-            validate_receipt_links(row, names, claude)?;
-        }
-    }
-    let owner = rows
-        .iter()
-        .find(|r| r["id"] == id && r["home"] == path.to_string_lossy().as_ref())
-        .cloned();
+    let (directory, owner) = validate_and_open_account_home(&spec, id, &path, &path, rows, true)?;
+    let info =
+        rustix::fs::fstat(&directory).map_err(|_| error("cannot inspect account directory"))?;
     let parent = path
         .parent()
         .ok_or_else(|| error("invalid account parent"))?;
-    private_parents(parent)?;
-    if !path.exists() {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&path)?;
-    }
-    private_home(&path)?;
-    let directory = open_home(
-        &path,
-        owner
-            .as_ref()
-            .map(|r| if claude { &r["identity"] } else { r }),
-    )?;
-    let info =
-        rustix::fs::fstat(&directory).map_err(|_| error("cannot inspect account directory"))?;
     // Preflight every subdirectory and (--repair) symlink before mutating receipts or links.
     for name in names {
         let target = main.join(name);
@@ -1078,13 +1237,18 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
     }
     if claude {
         write_locked(
-            &claude_registry,
+            &loaded.claude_registry,
             &json_bytes(&next_claude_doc)?,
             false,
-            Some(&claude_raw),
+            Some(&loaded.claude_raw),
         )?;
     }
-    write_locked(&registry, &json_bytes(&next_value)?, false, Some(&old))?;
+    write_locked(
+        &loaded.registry,
+        &json_bytes(&next_value)?,
+        false,
+        Some(&loaded.old),
+    )?;
     Ok(Output::text(format!(
         "{label} account {id}: registered, login pending\n"
     )))
@@ -1944,7 +2108,22 @@ fn login_overrides(provider: &str) -> &'static [&'static str] {
         _ => &[],
     }
 }
-fn parse_login_spec(raw: &str) -> Result<&'static str> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LoginTarget {
+    provider: &'static str,
+    account_id: Option<String>,
+}
+
+impl LoginTarget {
+    fn display(&self) -> String {
+        match &self.account_id {
+            Some(id) => format!("{}:{id}", self.provider),
+            None => self.provider.to_owned(),
+        }
+    }
+}
+
+fn parse_login_spec(raw: &str) -> Result<LoginTarget> {
     let (provider, account_id) = match raw.split_once(':') {
         Some((p, id)) => (p, Some(id)),
         None => (raw, None),
@@ -1959,13 +2138,29 @@ fn parse_login_spec(raw: &str) -> Result<&'static str> {
             ));
         }
     };
-    if account_id.is_some() {
-        return Err(error(
-            "per-account sign-in is not available yet; run the provider's sign-in with that account's home",
-        ));
+    if let Some(id) = account_id {
+        if canonical == "antigravity" {
+            return Err(error(
+                "per-account sign-in is only supported for codex and claude",
+            ));
+        }
+        if !valid_account_id(id) || id == "default" {
+            return Err(error("invalid provider account id; default is reserved"));
+        }
     }
-    Ok(canonical)
+    Ok(LoginTarget {
+        provider: canonical,
+        account_id: account_id.map(str::to_owned),
+    })
 }
+
+fn resolve_login_account_home(provider: &str, id: &str) -> Result<PathBuf> {
+    let spec = provider_account_spec(provider)?;
+    let loaded = load_validated_registries(true, true)?;
+    let rows = load_receipt_rows(&loaded.config, &spec)?;
+    validate_registered_account_home(&loaded, &spec, id, &rows)
+}
+
 const LOGIN_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const LOGIN_UNKNOWN_CODE: i32 = 3;
 
@@ -2002,10 +2197,40 @@ fn provider_login_spec(provider: &str) -> Result<(&'static str, &'static [&'stat
         )),
     }
 }
-fn run_login(provider: &str, ctx: &Context<'_>) -> Result<(i32, String)> {
+fn run_login(target: &LoginTarget, ctx: &Context<'_>) -> Result<(i32, String)> {
+    run_login_with(
+        target,
+        ctx,
+        installed,
+        resolve_login_account_home,
+        |mut command, binary| match command.status() {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(error(format!("{binary} is not installed or not on PATH")))
+            }
+            Err(_) => Err(error(format!("failed to run {binary}"))),
+        },
+        login_status,
+    )
+}
+fn run_login_with(
+    target: &LoginTarget,
+    ctx: &Context<'_>,
+    has_binary: impl Fn(&str) -> bool,
+    resolve_home: impl Fn(&str, &str) -> Result<PathBuf>,
+    run_command: impl FnOnce(Command, &str) -> Result<()>,
+    probe_status: impl Fn(&str, Option<&Path>, &Context<'_>) -> Result<LoginStatus>,
+) -> Result<(i32, String)> {
     use std::io::Write;
+    let provider = target.provider;
+    let display = target.display();
+    let validated_home = target
+        .account_id
+        .as_deref()
+        .map(|id| resolve_home(provider, id))
+        .transpose()?;
     let (binary, subargs) = provider_login_spec(provider)?;
-    if !installed(binary) {
+    if !has_binary(binary) {
         return Err(error(format!("{binary} is not installed or not on PATH")));
     }
     if provider == "antigravity" {
@@ -2023,30 +2248,31 @@ fn run_login(provider: &str, ctx: &Context<'_>) -> Result<(i32, String)> {
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    if let Some(home_dir) = validated_home.as_deref() {
+        let spec = provider_account_spec(provider)?;
+        command.env(spec.env, home_dir);
+    }
     for var in login_overrides(provider) {
         command.env_remove(var);
     }
     // The child's own exit code is not evidence of sign-in; only the status check below is.
-    match command.status() {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(error(format!("{binary} is not installed or not on PATH")));
-        }
-        Err(_) => return Err(error(format!("failed to run {binary}"))),
-    }
+    run_command(command, binary)?;
     if provider == "antigravity" {
         return Ok((
             LOGIN_UNKNOWN_CODE,
-            format!("{provider}: sign-in not verifiable\n"),
+            format!("{display}: sign-in not verifiable\n"),
         ));
     }
-    let verified = login_status(provider, None, ctx)?;
-    let report = format!("{provider}: {}\n", verified.label());
+    let verified = match probe_status(provider, validated_home.as_deref(), ctx) {
+        Ok(status) => status,
+        Err(err) => LoginStatus::Unknown(err.message),
+    };
+    let report = format!("{display}: {}\n", verified.label());
     Ok((verified.exit_code(), report))
 }
 fn login_direct(raw: &str, ctx: &Context<'_>) -> Result<Output> {
-    let provider = parse_login_spec(raw)?;
-    let (code, report) = run_login(provider, ctx)?;
+    let target = parse_login_spec(raw)?;
+    let (code, report) = run_login(&target, ctx)?;
     Ok(Output {
         code,
         out: report.into_bytes(),
@@ -2055,27 +2281,96 @@ fn login_direct(raw: &str, ctx: &Context<'_>) -> Result<Output> {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MenuItem {
-    provider: &'static str,
+    target: Option<String>,
+    label: String,
     status: String,
 }
-fn build_login_menu(ctx: &Context<'_>) -> Vec<MenuItem> {
-    build_login_menu_with(installed, |provider| login_status(provider, None, ctx))
+struct RegisteredLoginAccount {
+    spec: String,
+    provider: &'static str,
+    home: Result<PathBuf>,
 }
+fn load_login_accounts() -> Result<Vec<RegisteredLoginAccount>> {
+    let loaded = load_validated_registries(true, true)?;
+    let codex_spec = provider_account_spec("codex")?;
+    let claude_spec = provider_account_spec("claude")?;
+    let codex_rows = load_receipt_rows(&loaded.config, &codex_spec)?;
+    let claude_rows = load_receipt_rows(&loaded.config, &claude_spec)?;
+    let mut accounts = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (spec, rows) in [(&codex_spec, &codex_rows), (&claude_spec, &claude_rows)] {
+        if let Some(entries) = loaded.value["providers"][spec.provider]["accounts"].as_array() {
+            for row in entries {
+                if let Some(id) = row["id"].as_str().filter(|id| *id != "default")
+                    && seen.insert((spec.provider, id.to_owned()))
+                {
+                    accounts.push(RegisteredLoginAccount {
+                        spec: format!("{}:{id}", spec.provider),
+                        provider: spec.provider,
+                        home: validate_registered_account_home(&loaded, spec, id, rows),
+                    });
+                }
+            }
+        }
+        if spec.claude
+            && let Some(entries) = loaded.claude_doc["accounts"].as_array()
+        {
+            for row in entries {
+                if let Some(id) = row["id"].as_str().filter(|id| *id != "default")
+                    && seen.insert((spec.provider, id.to_owned()))
+                {
+                    accounts.push(RegisteredLoginAccount {
+                        spec: format!("{}:{id}", spec.provider),
+                        provider: spec.provider,
+                        home: validate_registered_account_home(&loaded, spec, id, rows),
+                    });
+                }
+            }
+        }
+    }
+    Ok(accounts)
+}
+fn build_login_menu(ctx: &Context<'_>) -> Vec<MenuItem> {
+    build_login_menu_with_accounts(
+        installed,
+        |provider, home| login_status(provider, home, ctx),
+        load_login_accounts(),
+    )
+}
+#[cfg(test)]
 fn build_login_menu_with(
-    mut has_binary: impl FnMut(&str) -> bool,
+    has_binary: impl FnMut(&str) -> bool,
     mut status_for: impl FnMut(&str) -> Result<LoginStatus>,
+) -> Vec<MenuItem> {
+    build_login_menu_with_accounts(
+        has_binary,
+        |provider, home| {
+            debug_assert!(home.is_none());
+            status_for(provider)
+        },
+        Ok(Vec::new()),
+    )
+}
+fn build_login_menu_with_accounts(
+    mut has_binary: impl FnMut(&str) -> bool,
+    mut status_for: impl FnMut(&str, Option<&Path>) -> Result<LoginStatus>,
+    registered: Result<Vec<RegisteredLoginAccount>>,
 ) -> Vec<MenuItem> {
     let mut items = Vec::with_capacity(3);
     for (provider, binary) in [("codex", "codex"), ("claude", "claude")] {
         let status = if !has_binary(binary) {
             format!("{binary} not installed")
         } else {
-            match status_for(provider) {
+            match status_for(provider, None) {
                 Ok(status) => status.label(),
                 Err(err) => LoginStatus::Unknown(err.message).label(),
             }
         };
-        items.push(MenuItem { provider, status });
+        items.push(MenuItem {
+            target: Some(provider.to_owned()),
+            label: provider.to_owned(),
+            status,
+        });
     }
     let agy_status = if has_binary("agy") {
         "sign-in not verifiable".to_owned()
@@ -2083,9 +2378,37 @@ fn build_login_menu_with(
         "agy not installed".to_owned()
     };
     items.push(MenuItem {
-        provider: "antigravity",
+        target: Some("antigravity".to_owned()),
+        label: "antigravity".to_owned(),
         status: agy_status,
     });
+    match registered {
+        Ok(accounts) => {
+            for entry in accounts {
+                let binary = entry.provider;
+                let status = match entry.home {
+                    Err(err) => LoginStatus::Unknown(err.message).label(),
+                    Ok(_) if !has_binary(binary) => format!("{binary} not installed"),
+                    Ok(path) => match status_for(entry.provider, Some(&path)) {
+                        Ok(status) => status.label(),
+                        Err(err) => LoginStatus::Unknown(err.message).label(),
+                    },
+                };
+                items.push(MenuItem {
+                    target: Some(entry.spec.clone()),
+                    label: entry.spec,
+                    status,
+                });
+            }
+        }
+        Err(err) => {
+            items.push(MenuItem {
+                target: None,
+                label: "registered accounts".to_owned(),
+                status: LoginStatus::Unknown(err.message).label(),
+            });
+        }
+    }
     items
 }
 fn format_login_menu(items: &[MenuItem]) -> String {
@@ -2094,7 +2417,7 @@ fn format_login_menu(items: &[MenuItem]) -> String {
         out.push_str(&format!(
             "  {}. {:<16} [{}]\n",
             idx + 1,
-            item.provider,
+            item.label,
             item.status
         ));
     }
@@ -2138,6 +2461,11 @@ fn login_menu_with_terminals(
     if !stdin_is_tty || !stdout_is_tty {
         return Err(error("--login-menu requires an interactive terminal"));
     }
+    {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "Checking sign-in status...");
+        let _ = stdout.flush();
+    }
     let items = build_login_menu(ctx);
     {
         let mut stdout = std::io::stdout().lock();
@@ -2159,7 +2487,7 @@ fn login_menu_with_terminals(
         });
     }
     let selected = match parse_menu_choice(&line, items.len()) {
-        Ok(Some(idx)) => items[idx].provider,
+        Ok(Some(idx)) => &items[idx],
         Ok(None) => {
             return Ok(Output {
                 code: 0,
@@ -2177,7 +2505,11 @@ fn login_menu_with_terminals(
             });
         }
     };
-    match run_login(selected, ctx) {
+    let result = match &selected.target {
+        Some(spec) => parse_login_spec(spec).and_then(|target| run_login(&target, ctx)),
+        None => Err(error(selected.status.clone())),
+    };
+    match result {
         Ok((code, report)) => {
             let mut stdout = std::io::stdout().lock();
             let _ = write!(stdout, "{report}");
@@ -3274,23 +3606,58 @@ mod tests {
 
     #[test]
     fn login_spec_and_menu_parsing() {
-        assert_eq!(parse_login_spec("codex").unwrap(), "codex");
-        assert_eq!(parse_login_spec("claude").unwrap(), "claude");
-        assert_eq!(parse_login_spec("antigravity").unwrap(), "antigravity");
+        assert_eq!(
+            parse_login_spec("codex").unwrap(),
+            LoginTarget {
+                provider: "codex",
+                account_id: None
+            }
+        );
+        assert_eq!(
+            parse_login_spec("claude").unwrap(),
+            LoginTarget {
+                provider: "claude",
+                account_id: None
+            }
+        );
+        assert_eq!(
+            parse_login_spec("antigravity").unwrap(),
+            LoginTarget {
+                provider: "antigravity",
+                account_id: None
+            }
+        );
+        assert_eq!(
+            parse_login_spec("codex:work").unwrap(),
+            LoginTarget {
+                provider: "codex",
+                account_id: Some("work".to_owned())
+            }
+        );
+        assert_eq!(
+            parse_login_spec("claude:team-1").unwrap(),
+            LoginTarget {
+                provider: "claude",
+                account_id: Some("team-1".to_owned())
+            }
+        );
+        for bad in ["antigravity:work", "antigravity:default", "antigravity:"] {
+            refused(
+                parse_login_spec(bad),
+                "per-account sign-in is only supported for codex and claude",
+            );
+        }
         for bad in [
-            "codex:work",
             "codex:default",
+            "claude:default",
             "codex:Bad",
             "codex:",
-            "claude:work",
             "claude:UPPER",
-            "antigravity:work",
-            "antigravity:default",
-            "antigravity:",
+            "claude:",
         ] {
             refused(
                 parse_login_spec(bad),
-                "per-account sign-in is not available",
+                "invalid provider account id; default is reserved",
             );
         }
         for bad in ["", "agy", "pi", "gemini:work", ":work"] {
@@ -3308,16 +3675,24 @@ mod tests {
 
         let menu = format_login_menu(&[
             MenuItem {
-                provider: "codex",
+                target: Some("codex".into()),
+                label: "codex".into(),
                 status: LoginStatus::SignedIn.label(),
             },
             MenuItem {
-                provider: "claude",
+                target: Some("claude".into()),
+                label: "claude".into(),
                 status: LoginStatus::NotSignedIn.label(),
             },
             MenuItem {
-                provider: "antigravity",
+                target: Some("antigravity".into()),
+                label: "antigravity".into(),
                 status: "sign-in not verifiable".into(),
+            },
+            MenuItem {
+                target: Some("codex:work".into()),
+                label: "codex:work".into(),
+                status: LoginStatus::NotSignedIn.label(),
             },
         ]);
         assert!(menu.contains("1. codex"), "{menu}");
@@ -3326,6 +3701,7 @@ mod tests {
         assert!(menu.contains("[not signed in]"), "{menu}");
         assert!(menu.contains("3. antigravity"), "{menu}");
         assert!(menu.contains("[sign-in not verifiable]"), "{menu}");
+        assert!(menu.contains("4. codex:work"), "{menu}");
     }
 
     #[test]
@@ -3420,17 +3796,65 @@ mod tests {
             },
         );
         assert_eq!(items.len(), 3);
-        assert_eq!(items[0].provider, "codex");
+        assert_eq!(items[0].label, "codex");
         assert_eq!(items[0].status, "signed in");
-        assert_eq!(items[1].provider, "claude");
+        assert_eq!(items[1].label, "claude");
         assert_eq!(items[1].status, "not signed in");
-        assert_eq!(items[2].provider, "antigravity");
+        assert_eq!(items[2].label, "antigravity");
         assert_eq!(items[2].status, "sign-in not verifiable");
         assert_eq!(probed, vec!["codex", "claude"]);
 
+        // Registered accounts reuse home validation in the menu: valid accounts probe with
+        // their validated home, refused homes render as `unknown: <reason>`.
+        let fx = Fixture::new("login-menu");
+        let work_home = fx.home("work", true);
+        let with_accounts = build_login_menu_with_accounts(
+            |_| true,
+            |provider, home| match (provider, home) {
+                ("codex", None) => Ok(LoginStatus::SignedIn),
+                ("claude", None) => Ok(LoginStatus::NotSignedIn),
+                ("codex", Some(path)) if path == work_home => Ok(LoginStatus::NotSignedIn),
+                _ => panic!("unexpected status probe for {provider} ({home:?})"),
+            },
+            Ok(vec![
+                RegisteredLoginAccount {
+                    spec: "codex:work".into(),
+                    provider: "codex",
+                    home: Ok(work_home.clone()),
+                },
+                RegisteredLoginAccount {
+                    spec: "claude:bad".into(),
+                    provider: "claude",
+                    home: Err(error(
+                        "account home must be user-owned and not group/other-writable",
+                    )),
+                },
+            ]),
+        );
+        assert_eq!(with_accounts.len(), 5);
+        assert_eq!(with_accounts[3].label, "codex:work");
+        assert_eq!(with_accounts[3].status, "not signed in");
+        assert_eq!(with_accounts[4].label, "claude:bad");
+        assert_eq!(
+            with_accounts[4].status,
+            "unknown: account home must be user-owned and not group/other-writable"
+        );
+
+        let corrupt_registry = build_login_menu_with_accounts(
+            |_| false,
+            |_, _| panic!("must not probe missing binary"),
+            Err(error("unsupported provider accounts schema")),
+        );
+        assert_eq!(corrupt_registry.len(), 4);
+        assert_eq!(corrupt_registry[3].target, None);
+        assert_eq!(corrupt_registry[3].label, "registered accounts");
+        assert_eq!(
+            corrupt_registry[3].status,
+            "unknown: unsupported provider accounts schema"
+        );
+
         // A probe error on one row (e.g. spawn failure or output budget) marks that row unknown
         // without aborting the menu, and the remaining rows still render.
-        let fx = Fixture::new("login-menu");
         let items = build_login_menu_with(
             |_| true,
             |provider| match provider {
@@ -3474,5 +3898,31 @@ mod tests {
                 "interactive terminal",
             );
         }
+
+        // Direct sign-in converts post-sign-in status probe errors to unknown (exit 3), matching the menu.
+        let target = parse_login_spec("codex:work").unwrap();
+        let (code, report) = run_login_with(
+            &target,
+            &ctx,
+            |_| true,
+            |_, _| Ok(fx.0.clone()),
+            |command, _| {
+                assert_eq!(
+                    command
+                        .get_envs()
+                        .find(|(k, _)| *k == "CODEX_HOME")
+                        .and_then(|(_, v)| v),
+                    Some(fx.0.as_os_str())
+                );
+                Ok(())
+            },
+            |_, _, _| Err(error("child output exceeded its byte budget")),
+        )
+        .unwrap();
+        assert_eq!(code, LOGIN_UNKNOWN_CODE);
+        assert_eq!(
+            report,
+            "codex:work: unknown: child output exceeded its byte budget\n"
+        );
     }
 }
