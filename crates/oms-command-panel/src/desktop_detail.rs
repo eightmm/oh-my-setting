@@ -1,10 +1,17 @@
 //! On-demand projections for the desktop reader, outside the compact dashboard.
 use crate::{Error, Result, Services, cli::Options, commands::query, parent_only, rows};
 use oms_panel_core::{
-    NativeCommand, Store, Value, metrics::desktop_receipts, native::room, results,
+    NativeCommand, Store, Value,
+    metrics::{self, desktop_receipts},
+    native::room,
+    results,
 };
 use serde_json::json;
-use std::{collections::BTreeSet, path::Path, sync::atomic::AtomicBool};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
+};
 
 pub(super) fn usage(repo: &Path, report: &Value, now: f64, stop: &AtomicBool) -> Value {
     let snapshot = crate::usage::snapshot(report, now);
@@ -28,7 +35,134 @@ pub(super) fn usage(repo: &Path, report: &Value, now: f64, stop: &AtomicBool) ->
         groups.truncate(32);
     }
     value["providerTotals"] = lifetime;
+    let hud = std::env::var_os("OMS_HUD_CACHE_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("oh-my-setting-hud"));
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .or_else(|| std::env::var_os("HOME"))
+        .filter(|v| !v.is_empty())
+        .map(|dir| PathBuf::from(dir).join(".claude.json"));
+    let uid = rustix::process::getuid().as_raw();
+    fill_claude_local(&mut value, &hud, config.as_deref(), uid, now);
     value
+}
+
+/// Display-only fallback for the desktop usage strip: when no proved Claude
+/// reading exists, show the newest still-open window that Claude Code itself
+/// recorded on this host (its statusline HUD cache or its `/usage` cache).
+/// It never reaches `provider_status`, so routing and account ranking ignore it.
+/// The host-wide reading names no account.
+fn fill_claude_local(value: &mut Value, hud: &Path, config: Option<&Path>, uid: u32, now: f64) {
+    let Some(providers) = value["providers"].as_array_mut() else {
+        return;
+    };
+    if providers
+        .iter()
+        .any(|p| p["provider"] == "claude" && !rows(&p["windows"]).is_empty())
+    {
+        return;
+    }
+    let windows = claude_local_windows(hud, config, uid, now);
+    if windows.is_empty() {
+        return;
+    }
+    match providers.iter_mut().find(|p| p["provider"] == "claude") {
+        Some(row) => row["windows"] = windows.into(),
+        None => providers.push(
+            json!({"provider":"claude","windows":windows,"windowsOmitted":0,
+            "contextUsed":null,"cacheReadShare":null,"recent7d":null}),
+        ),
+    }
+}
+
+fn claude_local_windows(hud: &Path, config: Option<&Path>, uid: u32, now: f64) -> Vec<Value> {
+    let mut readings: Vec<(f64, &str, Value, &str)> = hud_rows(hud, uid)
+        .into_iter()
+        .map(|(at, row)| (at, "Claude Code statusline", row, "used_percentage"))
+        .collect();
+    readings.extend(
+        config
+            .and_then(|path| usage_cache(path, uid))
+            .map(|(at, row)| (at, "Claude Code usage cache", row, "utilization")),
+    );
+    let open = |row: &Value, used: &str| {
+        [("5h", "five_hour"), ("weekly", "seven_day")]
+            .into_iter()
+            .filter_map(|(name, key)| {
+                let used = metrics::percent(&row[key][used])?;
+                let reset = metrics::stamp(&row[key]["resets_at"]).filter(|r| *r > now)?;
+                Some((name, used, reset))
+            })
+            .collect::<Vec<_>>()
+    };
+    readings
+        .iter()
+        .filter(|(at, ..)| at.is_finite() && *at <= now + 60.0)
+        .map(|(at, source, row, used)| (*at, *source, open(row, used)))
+        .filter(|(.., windows)| !windows.is_empty())
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(at, source, windows)| {
+            let age = (now - at).max(0.0);
+            windows
+                .into_iter()
+                .map(|(name, used, reset)| {
+                    json!({"name":name,"used":used,"source":source,"resets_at":reset,
+                        "stale":age > metrics::READING_FRESH_SECONDS,"age_seconds":age})
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn hud_rows(dir: &Path, uid: u32) -> Vec<(f64, Value)> {
+    use std::os::unix::fs::MetadataExt;
+    let owned = std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == uid);
+    let Some(entries) = owned.then(|| std::fs::read_dir(dir).ok()).flatten() else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .take(512)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("ctx-") && n.ends_with(".json"))
+        })
+        .filter_map(|e| {
+            let row = oms_panel_core::decode(&private_file(&e.path(), uid, 8192)?, 8192).ok()?;
+            Some((metrics::number(&row["ts"])?, row))
+        })
+        .collect()
+}
+
+fn usage_cache(path: &Path, uid: u32) -> Option<(f64, Value)> {
+    let mut doc: Value = serde_json::from_slice(&private_file(path, uid, 8 << 20)?).ok()?;
+    let mut cache = doc.get_mut("cachedUsageUtilization")?.take();
+    Some((
+        metrics::number(&cache["fetchedAtMs"])? / 1000.0,
+        cache.get_mut("utilization")?.take(),
+    ))
+}
+
+/// A regular, single-link file this user owns and no one else can write.
+fn private_file(path: &Path, uid: u32, limit: u64) -> Option<Vec<u8>> {
+    use rustix::fs::{Mode, OFlags};
+    use std::{io::Read, os::unix::fs::MetadataExt};
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let file = std::fs::File::from(rustix::fs::open(path, flags, Mode::empty()).ok()?);
+    let meta = file.metadata().ok()?;
+    if !meta.is_file()
+        || meta.nlink() != 1
+        || meta.uid() != uid
+        || meta.mode() & 0o022 != 0
+        || meta.len() > limit
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= limit).then_some(bytes)
 }
 
 fn usage_projection(
@@ -620,6 +754,112 @@ mod tests {
         assert!(v["attempts"][1]["costMicrousd"].is_null());
         assert!(v["attempts"][2]["tokens"].is_null());
         assert_eq!(v["providers"][0]["contextUsed"], 0);
+    }
+
+    #[test]
+    fn claude_local_usage_fills_only_an_empty_row_from_the_newest_open_private_record() {
+        use std::os::unix::fs::PermissionsExt;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("oms-claude-local-{}-{nonce}", std::process::id()));
+        struct Guard(std::path::PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Guard(root.clone());
+        let hud = root.join("hud");
+        std::fs::create_dir_all(&hud).unwrap();
+        let write = |path: &std::path::Path, body: &Value, mode: u32| {
+            std::fs::write(path, body.to_string()).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let now = 1_000_000.0;
+        let uid = rustix::process::getuid().as_raw();
+        let config = root.join(".claude.json");
+        let run = |value: &mut Value| fill_claude_local(value, &hud, Some(&config), uid, now);
+        let empty = || json!({"providers":[{"provider":"codex","windows":[]},{"provider":"claude","windows":[]}]});
+        let week = |used: u8, reset: f64| json!({"used_percentage":used,"resets_at":reset});
+        // An old open statusline window, a newer one whose window already reset, and a
+        // newest one another user could have written: only the old open one is shown.
+        write(
+            &hud.join("ctx-a.json"),
+            &json!({"ts":now - 7200.0,"seven_day":week(34, now + 3600.0)}),
+            0o600,
+        );
+        write(
+            &hud.join("ctx-b.json"),
+            &json!({"ts":now - 60.0,"seven_day":week(90, now - 1.0)}),
+            0o600,
+        );
+        write(
+            &hud.join("ctx-c.json"),
+            &json!({"ts":now - 1.0,"seven_day":week(5, now + 3600.0)}),
+            0o622,
+        );
+        let mut value = empty();
+        run(&mut value);
+        let shown = &value["providers"][1]["windows"];
+        assert_eq!(shown.as_array().unwrap().len(), 1, "{value}");
+        assert_eq!(shown[0]["name"], "weekly");
+        assert_eq!(shown[0]["used"], 34);
+        assert_eq!(shown[0]["source"], "Claude Code statusline");
+        assert_eq!(shown[0]["stale"], true);
+        assert_eq!(shown[0]["age_seconds"], 7200.0);
+        assert!(
+            value["providers"][0]["windows"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        // Claude Code's own /usage cache wins when newer; its account id never leaves.
+        write(
+            &config,
+            &json!({"oauthAccount":{"emailAddress":"private-account"},"cachedUsageUtilization":{
+            "accountUuid":"private-account","fetchedAtMs":(now - 30.0) * 1000.0,
+            "utilization":{"five_hour":{"utilization":12,"resets_at":"1970-01-12T14:46:40Z"},
+                "seven_day":{"utilization":81,"resets_at":now + 600.0}}}}),
+            0o600,
+        );
+        let mut value = empty();
+        run(&mut value);
+        let shown = &value["providers"][1]["windows"];
+        assert_eq!(shown[0]["name"], "5h");
+        assert_eq!(shown[0]["used"], 12);
+        assert_eq!(shown[1]["used"], 81);
+        assert_eq!(shown[1]["source"], "Claude Code usage cache");
+        assert_eq!(shown[1]["stale"], false);
+        assert!(!value.to_string().contains("private-account"));
+        // A proved reading is never replaced, and a missing Claude row is added.
+        let mut proved =
+            json!({"providers":[{"provider":"claude","windows":[{"name":"weekly","used":3}]}]});
+        run(&mut proved);
+        assert_eq!(proved["providers"][0]["windows"][0]["used"], 3);
+        let mut missing = json!({"providers":[]});
+        run(&mut missing);
+        assert_eq!(missing["providers"][0]["provider"], "claude");
+        // A link or a directory owned by someone else is not read.
+        std::fs::remove_file(&config).unwrap();
+        std::os::unix::fs::symlink(hud.join("ctx-a.json"), &config).unwrap();
+        let mut value = empty();
+        run(&mut value);
+        assert_eq!(
+            value["providers"][1]["windows"][0]["source"],
+            "Claude Code statusline"
+        );
+        let mut value = empty();
+        fill_claude_local(&mut value, &hud, Some(&config), uid + 1, now);
+        assert!(
+            value["providers"][1]["windows"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(claude_local_windows(&root.join("absent"), Some(&config), uid, now).is_empty());
     }
 
     #[test]
