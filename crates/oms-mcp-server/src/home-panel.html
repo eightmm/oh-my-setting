@@ -57,13 +57,13 @@ button:disabled{opacity:.55;cursor:default}
 .mapwrap{position:relative;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;background:var(--sea);height:clamp(380px,72vh,920px);touch-action:none;user-select:none;-webkit-user-select:none}
 #map{width:100%;height:100%;display:block;cursor:grab}
 #map.drag{cursor:grabbing}
-.find{position:absolute;left:10px;top:10px;display:flex;gap:6px}
+.find{position:absolute;z-index:1;left:10px;top:10px;display:flex;gap:6px}
 .find input{font:inherit;color:inherit;width:min(220px,46vw);min-height:32px;padding:4px 10px;border:1px solid var(--line);border-radius:var(--r-sm);background:color-mix(in srgb,var(--bg) 92%,transparent)}
-.ctl{position:absolute;right:10px;top:10px;display:flex;flex-direction:column;gap:6px}
+.ctl{position:absolute;z-index:1;right:10px;top:10px;display:flex;flex-direction:column;gap:6px}
 .ctl button{width:34px;height:34px;padding:0;font-size:17px;line-height:1;background:color-mix(in srgb,var(--bg) 90%,transparent)}
 .ctl button.wide{width:auto;padding:0 10px;font-size:12.5px}
-#mini{position:absolute;left:10px;bottom:10px;width:140px;height:90px;background:color-mix(in srgb,var(--bg) 82%,transparent);border:1px solid var(--line);border-radius:8px;cursor:pointer}
-.hint{position:absolute;right:10px;bottom:10px;font-size:11.5px;color:var(--soft);background:color-mix(in srgb,var(--bg) 85%,transparent);padding:2px 8px;border-radius:6px}
+#mini{position:absolute;z-index:1;left:10px;bottom:10px;width:140px;height:90px;background:color-mix(in srgb,var(--bg) 82%,transparent);border:1px solid var(--line);border-radius:8px;cursor:pointer}
+.hint{position:absolute;z-index:1;right:10px;bottom:10px;font-size:11.5px;color:var(--soft);background:color-mix(in srgb,var(--bg) 85%,transparent);padding:2px 8px;border-radius:6px}
 .status{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;color:var(--soft);pointer-events:none}
 .status[hidden]{display:none}
 aside{border:1px solid var(--line);border-radius:var(--r);background:var(--surface);padding:14px;overflow:auto;max-height:clamp(380px,72vh,920px)}
@@ -289,48 +289,61 @@ const MASCOT={
   claude:{hair:'#a4502a',hi:'#d27a4c',tip:'#c96a3c',skin:'#ffe5d2',iris:'#8a3a1b',iris2:'#eb9a62',top:'#f4e4cc',top2:'#e3cba8',trim:'#d9773f',low:'#d9773f',shoe:'#7a4630',line:'#5e2c15'},
   antigravity:{hair:'#b9a5ff',hi:'#e2d9ff',tip:'#8f78f0',skin:'#ffe7da',iris:'#5236cf',iris2:'#b3a0ff',top:'#fbfaff',top2:'#e4ddfb',trim:'#7d5ff0',low:'#6a4fe0',shoe:'#fbfaff',line:'#46329f'},
   none:{hair:'#6b4226',hi:'#9a6a46',tip:'#8a5a3b',skin:'#f6d0ae',iris:'#4a4a58',iris2:'#9a9aac',top:'#8d95a3',top2:'#a8afbb',trim:'#646c79',low:'#3a3f4b',shoe:'#646c79',line:'#3a3f4b'}};
-const SKL='#d9a184',SKS='#f2c3a8',INK='#2b2530';
+const SKL='#e3a88c',SKS='#f7cdb5',INK='#2b2530';
 // Main mood follows the project's state, so a glance at the face says how the project is doing.
 function mood(c){return c.state==='stale'?'sleep':c.state==='missing'||c.state==='unavailable'?'lost':c.attention>0?'worry':c.active?'busy':'happy'}
 const ln=k=>` stroke="${k.line}" stroke-width=".35" stroke-linejoin="round"`;
+// Face: round cheeks narrowing to a soft chin; eyes sit low and large, the usual chibi proportion.
+const FACE='M-6.7 -19.6 C-6.8 -15.2 -3.9 -11.5 0 -11.4 C3.9 -11.5 6.8 -15.2 6.7 -19.6 C6.6 -23.8 3.6 -26 0 -26 C-3.6 -26 -6.6 -23.8 -6.7 -19.6Z';
 function eyes(m,k){
-  const one=(x,d)=>{
-    if(m==='sleep')return`<path d="M${x-1.5} -17.2 Q${x} -15.9 ${x+1.5} -17.2" stroke="${INK}" stroke-width=".6" fill="none" stroke-linecap="round"/><path d="M${x+1.5*d} -17.2 l${.5*d} .3" stroke="${INK}" stroke-width=".45" stroke-linecap="round"/>`;
-    if(m==='lost')return`<circle cx="${x}" cy="-17.3" r="1.5" fill="#fff" stroke="${INK}" stroke-width=".45"/><circle cx="${x}" cy="-17.3" r=".45" fill="${INK}"/>`;
-    const ry=m==='busy'?1.5:2,cy=-17.1;
-    // Iris with a darker crown, lower glow and two highlights; the lash traces the eye's top edge with an outer flick.
-    return`<ellipse cx="${x}" cy="${cy}" rx="1.45" ry="${ry}" fill="${k.iris}"/><path d="M${x-1.45} ${cy} A1.45 ${ry} 0 0 1 ${x+1.45} ${cy} Q${x} ${cy+.5} ${x-1.45} ${cy}Z" fill="${INK}" opacity=".55"/><ellipse cx="${x}" cy="${cy+ry*.55}" rx=".95" ry="${ry*.32}" fill="${k.iris2}"/><ellipse cx="${x}" cy="${cy-ry*.05}" rx=".55" ry="${ry*.4}" fill="${INK}" opacity=".7"/><circle cx="${x+.5*d}" cy="${cy-ry*.45}" r=".6" fill="#fff"/><circle cx="${x-.55*d}" cy="${cy+ry*.45}" r=".25" fill="#fff"/>`
-      +`<path d="M${x-1.6} ${cy+.1} A1.6 ${ry+.15} 0 0 1 ${x+1.6} ${cy+.1}" stroke="${INK}" stroke-width=".62" fill="none" stroke-linecap="round"/><path d="M${x+1.55*d} ${cy-.2} l${.55*d} -.45" stroke="${INK}" stroke-width=".5" stroke-linecap="round"/>`;
+  const cy=-16.6,one=(x,d)=>{
+    if(m==='sleep')return`<path d="M${x-1.6} ${cy} Q${x} ${cy+1.3} ${x+1.6} ${cy}" stroke="${INK}" stroke-width=".62" fill="none" stroke-linecap="round"/><path d="M${x+1.55*d} ${cy} l${.5*d} -.35" stroke="${INK}" stroke-width=".5" stroke-linecap="round"/>`;
+    if(m==='lost')return`<ellipse cx="${x}" cy="${cy}" rx="1.35" ry="1.65" fill="#fff" stroke="${INK}" stroke-width=".45"/><circle cx="${x}" cy="${cy+.2}" r=".5" fill="${INK}"/>`;
+    const ry=m==='busy'?1.7:2.2;
+    // Iris: dark crown, light lower glow, pupil, two highlights lit from the upper left; a tapered upper lash with an outer flick.
+    return`<ellipse cx="${x}" cy="${cy}" rx="1.6" ry="${ry}" fill="${k.iris}"/><ellipse cx="${x}" cy="${cy+ry*.45}" rx="1.15" ry="${ry*.45}" fill="${k.iris2}" opacity=".9"/><ellipse cx="${x}" cy="${cy-ry*.4}" rx="1.45" ry="${ry*.55}" fill="${INK}" opacity=".32"/><ellipse cx="${x}" cy="${cy-ry*.05}" rx=".7" ry="${ry*.5}" fill="${INK}" opacity=".75"/><ellipse cx="${x-.55}" cy="${cy-ry*.42}" rx=".62" ry=".72" fill="#fff"/><circle cx="${x+.62}" cy="${cy+ry*.5}" r=".3" fill="#fff"/>`
+      +`<path d="M${x-1.75} ${cy-.3} A1.75 ${ry+.22} 0 0 1 ${x+1.75} ${cy-.3}" stroke="${INK}" stroke-width=".5" fill="none" stroke-linecap="round"/><path d="M${x+.2*d} ${cy-ry-.2} A1.75 ${ry+.22} 0 0 ${d>0?1:0} ${x+1.75*d} ${cy-.3} l${.5*d} -.25" stroke="${INK}" stroke-width=".8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`;
   };
-  let o=one(-2.7,-1)+one(2.7,1);
-  o+=`<ellipse cx="-4.7" cy="-15.2" rx="1.25" ry=".55" fill="#ff8fa3" opacity=".55"/><ellipse cx="4.7" cy="-15.2" rx="1.25" ry=".55" fill="#ff8fa3" opacity=".55"/>`;
-  o+=m==='happy'?`<path d="M-.95 -14.6 Q0 -13.6 .95 -14.6" stroke="#7a3b3b" stroke-width=".5" fill="${'#e8747c'}" stroke-linecap="round"/>`
-    :m==='worry'?'<path d="M-1 -14.3 q.5 -.5 1 0 q.5 .5 1 0" stroke="#7a3b3b" stroke-width=".45" fill="none" stroke-linecap="round"/>'
-    :m==='busy'?'<path d="M-.7 -14.4 h1.4" stroke="#7a3b3b" stroke-width=".5" stroke-linecap="round"/>':'<ellipse cx="0" cy="-14.3" rx=".5" ry=".42" fill="#7a3b3b"/>';
+  let o=one(-2.9,-1)+one(2.9,1);
+  o+=`<ellipse cx="-4.7" cy="-13.9" rx="1.35" ry=".68" fill="#ff8fa3" opacity=".5"/><ellipse cx="4.7" cy="-13.9" rx="1.35" ry=".68" fill="#ff8fa3" opacity=".5"/>`;
+  o+=m==='happy'?'<path d="M-.85 -13.3 Q0 -12.1 .85 -13.3Z" fill="#d9606c" stroke="#7a3b3b" stroke-width=".3" stroke-linejoin="round"/>'
+    :m==='worry'?'<path d="M-.9 -12.8 q.45 -.45 .9 0 q.45 .45 .9 0" stroke="#7a3b3b" stroke-width=".4" fill="none" stroke-linecap="round"/>'
+    :m==='busy'?'<path d="M-.6 -12.9 Q0 -12.6 .6 -12.9" stroke="#7a3b3b" stroke-width=".45" fill="none" stroke-linecap="round"/>':'<ellipse cx="0" cy="-12.9" rx=".42" ry=".38" fill="#7a3b3b"/>';
   return o;
 }
-function brows(m){
-  return m==='worry'?`<path d="M-4 -20.9 Q-2.8 -20.8 -1.7 -20.2 M4 -20.9 Q2.8 -20.8 1.7 -20.2" stroke="#5a3b30" stroke-width=".42" fill="none" stroke-linecap="round"/><path d="M6.4 -20.8 q1 1.7 0 2.3 q-1 -.6 0 -2.3z" fill="#8fd3ff" stroke="#5aa9d6" stroke-width=".2"/>`
-    :m==='busy'?`<path d="M-4 -20.3 L-1.6 -20.8 M4 -20.3 L1.6 -20.8" stroke="#5a3b30" stroke-width=".45" stroke-linecap="round"/>`:'';
+// Brows show through the fringe only when the mood needs them.
+function brows(m,k){
+  return m==='worry'?`<path d="M-4.2 -20.4 Q-3 -20.5 -1.8 -19.7 M4.2 -20.4 Q3 -20.5 1.8 -19.7" stroke="${k.line}" stroke-width=".42" fill="none" stroke-linecap="round" opacity=".85"/><path d="M6.6 -20.6 q1 1.7 0 2.3 q-1 -.6 0 -2.3z" fill="#8fd3ff" stroke="#5aa9d6" stroke-width=".2"/>`
+    :m==='busy'?`<path d="M-4.2 -19.7 L-1.8 -20.3 M4.2 -19.7 L1.8 -20.3" stroke="${k.line}" stroke-width=".45" stroke-linecap="round" opacity=".85"/>`:'';
 }
-// Bangs: a rounded cap whose lower edge breaks into soft pointed strands; a skin shadow sits under them.
-const BANGS='C6.8 -19.8 5.8 -21 4.7 -21.5 Q4.5 -20.2 3.9 -19.3 Q3.5 -21.1 2.1 -21.8 Q1.7 -20.6 .9 -19.7 Q.5 -21.4 -1 -21.8 Q-1.4 -20.4 -2.1 -19.5 Q-2.6 -21.1 -4.2 -21.6 Q-5.4 -20.8 -6.2 -19.2 Q-6.8 -18.4 -7.3 -17.6Z';
-function bangs(k){
-  const cap=`M-7.3 -17.6 C-7.8 -24.6 -3.6 -26.6 0 -26.4 C3.6 -26.6 7.8 -24.6 7.3 -17.6 `;
-  return`<path d="${cap}${BANGS}" fill="${SKS}" opacity=".7" transform="translate(0 .7)"/><path d="${cap}${BANGS}" fill="${k.hair}"${ln(k)}/><path d="M-4.4 -24.4 Q-2 -25.5 .4 -25.3 M1.8 -25.2 Q3.4 -25 4.6 -24.3" stroke="${k.hi}" stroke-width=".7" fill="none" stroke-linecap="round" opacity=".8"/>`;
+// Hair per mascot: back mass behind the face and a side lock (mirrored); the fringe is shared.
+const HAIR={
+  codex:{back:'M-8 -19.2 C-8.7 -25.6 -4.8 -28.2 0 -28 C4.8 -28.2 8.7 -25.6 8 -19.2 C8.3 -15.6 7.9 -13.2 6.2 -12.2 L-6.2 -12.2 C-7.9 -13.2 -8.3 -15.6 -8 -19.2Z',side:'M-7.9 -17.8 C-8.5 -15 -8 -13.1 -6.5 -11.8 Q-6.7 -14 -5.6 -16.6Z'},
+  claude:{back:'M-8 -19.4 C-8.8 -25.8 -4.7 -28.3 0 -28.1 C4.7 -28.3 8.8 -25.8 8 -19.4 C9.5 -14.6 9.8 -10.2 8.7 -7 Q9.6 -5.4 8.1 -4.6 Q6.9 -5.2 6.6 -6 L-6.6 -6 Q-6.9 -5.2 -8.1 -4.6 Q-9.6 -5.4 -8.7 -7 C-9.8 -10.2 -9.5 -14.6 -8 -19.4Z',side:'M-7.9 -17.8 C-9 -14.4 -8.8 -11.4 -7.1 -9.6 Q-7.8 -10.8 -6.9 -11.4 Q-6.3 -13.8 -5.6 -16.6Z'},
+  antigravity:{back:'M-8 -19.2 C-8.7 -25.6 -4.8 -28.2 0 -28 C4.8 -28.2 8.7 -25.6 8 -19.2 C8.2 -16.4 7.6 -14.4 6.3 -13.6 L-6.3 -13.6 C-7.6 -14.4 -8.2 -16.4 -8 -19.2Z',side:'M-7.9 -17.8 C-8.4 -15.6 -7.9 -14 -6.6 -12.9 Q-6.6 -14.7 -5.6 -16.6Z'}};
+HAIR.none=HAIR.codex;
+// Fringe: a crown cap whose lower edge breaks into leaf-shaped strands ending just above the eyes.
+const FRINGE=(()=>{const e=[[-7.9,-16.9],[-5.5,-20.3],[-4.1,-18.4],[-2.9,-21.1],[-1.4,-18.8],[-.1,-21.5],[1.4,-18.9],[2.7,-21.2],[4.1,-18.5],[5.4,-20.4],[7.9,-16.9]];
+  let d='M7.9 -16.9 C8.7 -24.4 4.7 -28.2 0 -28.2 C-4.7 -28.2 -8.7 -24.4 -7.9 -16.9';
+  for(let n=1;n<e.length;n++){const[a,b]=[e[n-1],e[n]],tip=n%2===0;
+    const cx=tip?a[0]+(b[0]-a[0])*.2:a[0]+(b[0]-a[0])*.75,cy=tip?b[1]-.5:a[1]-.6;d+=` Q${f(cx)} ${f(cy)} ${b[0]} ${b[1]}`}
+  return d+'Z'})();
+function fringe(k){
+  return`<path d="${FRINGE}" fill="${SKS}" opacity=".65" transform="translate(0 .6)"/><path d="${FRINGE}" fill="${k.hair}"${ln(k)}/><path d="M-5.8 -23.4 Q-4.4 -25.2 -2.2 -25.7 M-.6 -25.9 Q1.6 -26.1 3.3 -25.4 M4.5 -24.8 Q5.5 -24.2 6 -23.2" stroke="${k.hi}" stroke-width=".75" fill="none" stroke-linecap="round" opacity=".9"/>`;
 }
 function arm(x,y,a,len,k,hand=true){
   return`<g transform="translate(${x} ${y}) rotate(${a})"><rect x="-1.2" y="-.5" width="2.4" height="${len}" rx="1.2" fill="${k.top}"${ln(k)}/><rect x="-1.25" y="${len-1.9}" width="2.5" height=".9" rx=".4" fill="${k.trim}"/>${hand?`<circle cx="0" cy="${len+.2}" r="1.25" fill="${k.skin}" stroke="${SKL}" stroke-width=".3"/>`:''}</g>`;
 }
 function chibi(c){
-  const p=MASCOT[c.main]?c.main:'none',k=MASCOT[p],m=mood(c),hy=-18.8,fly=p==='antigravity';
+  const p=MASCOT[c.main]?c.main:'none',k=MASCOT[p],m=mood(c),fly=p==='antigravity';
   let o=fly?`<ellipse cx="0" cy="0" rx="4" ry="1" fill="#000" opacity=".1"/><ellipse cx="0" cy="-1.5" rx="5.6" ry="1.5" fill="none" stroke="${k.tip}" stroke-width=".5" opacity=".7" stroke-dasharray="2 1"/>`
     :'<ellipse cx="0" cy="0" rx="5.8" ry="1.6" fill="#000" opacity=".15"/>';
   o+=fly?'<g transform="translate(0 -2.6)">':'<g>';
   // back hair
-  if(p==='claude')o+=`<path d="M-7.4 ${hy} C-9.6 -14 -8.2 -11 -8.8 -8.6 Q-8 -6.4 -6.2 -7.2 Q-5.6 -6 -4.2 -7 L4.2 -7 Q5.6 -6 6.2 -7.2 Q8 -6.4 8.8 -8.6 C8.2 -11 9.6 -14 7.4 ${hy}Z" fill="${k.hair}"${ln(k)}/>`;
-  if(p==='codex')o+=`<path d="M-7.3 ${hy} Q-8 -12.6 -5.6 -12.2 L5.6 -12.2 Q8 -12.6 7.3 ${hy}Z" fill="${k.hair}"${ln(k)}/><path d="M-7.5 -14.8 Q-7.6 -12.4 -5.6 -12.2 L-5.8 -14.6Z M7.5 -14.8 Q7.6 -12.4 5.6 -12.2 L5.8 -14.6Z" fill="${k.tip}"/>`;
-  if(fly)o+=`<path d="M-6 -22.4 C-12.6 -19.4 -11.6 -12 -10.6 -8.4 Q-10 -6 -8 -5.4 Q-9.2 -9 -8.6 -12.4 Q-8 -16.4 -6.6 -17.4Z" fill="${k.hair}"${ln(k)}/><path d="M6 -22.4 C12.6 -19.4 11.6 -12 10.6 -8.4 Q10 -6 8 -5.4 Q9.2 -9 8.6 -12.4 Q8 -16.4 6.6 -17.4Z" fill="${k.hair}"${ln(k)}/><path d="M-10.5 -8.8 Q-10 -6 -8 -5.4 Q-9.1 -7.2 -9.2 -9.6Z M10.5 -8.8 Q10 -6 8 -5.4 Q9.1 -7.2 9.2 -9.6Z" fill="${k.tip}"/><path d="M-10 -16 Q-10.8 -12 -9.8 -9.6 M10 -16 Q10.8 -12 9.8 -9.6" stroke="${k.hi}" stroke-width=".6" fill="none" stroke-linecap="round"/>`;
+  const H=HAIR[p];
+  if(fly)o+=`<g fill="${k.hair}"${ln(k)}><path d="M-6.4 -24.4 C-11.8 -24.8 -12.6 -18 -11.7 -13 C-11.1 -9.6 -11.7 -7.2 -10.1 -5.2 Q-9.8 -6.9 -9.5 -8.4 Q-8.8 -7.2 -8.1 -6.2 C-8.8 -9.6 -9.4 -14 -8.6 -18.4 C-8.2 -20.6 -7.3 -21.9 -6 -22.4Z"/><path d="M6.4 -24.4 C11.8 -24.8 12.6 -18 11.7 -13 C11.1 -9.6 11.7 -7.2 10.1 -5.2 Q9.8 -6.9 9.5 -8.4 Q8.8 -7.2 8.1 -6.2 C8.8 -9.6 9.4 -14 8.6 -18.4 C8.2 -20.6 7.3 -21.9 6 -22.4Z"/></g><path d="M-10.4 -19.6 Q-11.2 -15 -10.4 -11.6 M10.4 -19.6 Q11.2 -15 10.4 -11.6" stroke="${k.hi}" stroke-width=".65" fill="none" stroke-linecap="round"/>`;
+  o+=`<path d="${H.back}" fill="${k.hair}"${ln(k)}/>`;
+  if(p==='claude')o+=`<path d="M-8.4 -12 Q-8.9 -9 -8 -7.4 M8.4 -12 Q8.9 -9 8 -7.4" stroke="${k.hi}" stroke-width=".55" fill="none" stroke-linecap="round" opacity=".8"/>`;
   // legs and shoes
   const leg=p==='claude'||fly?k.skin:k.low,lgS=leg===k.skin?` stroke="${SKL}" stroke-width=".3"`:ln(k);
   o+=`<rect x="-2.9" y="-5.6" width="2.2" height="5" rx=".9" fill="${leg}"${lgS}/><rect x=".7" y="-5.6" width="2.2" height="5" rx=".9" fill="${leg}"${lgS}/>`;
@@ -344,7 +357,7 @@ function chibi(c){
   // arms (pose per mascot)
   o+=arm(-4.6,-12.4,18,5.8,k);
   if(p==='claude')o+=arm(4.6,-12.4,-14,5.6,k,false)+`<g transform="rotate(-10 7 -7.4)"><rect x="5.4" y="-9.2" width="3.4" height="4" rx=".35" fill="#7a4630"${ln(k)}/><rect x="5.8" y="-8.9" width="2.6" height="3.4" fill="#fff6e8"/><path d="M6.3 -8 h1.6 M6.3 -7.2 h1.6 M6.3 -6.4 h1.1" stroke="#c9a27a" stroke-width=".25"/></g><circle cx="6.1" cy="-6.8" r="1.2" fill="${k.skin}" stroke="${SKL}" stroke-width=".3"/>`;
-  else if(fly)o+=arm(4.6,-12.4,-135,5.2,k);
+  else if(fly)o+=arm(4.6,-12.4,-28,5.4,k)+`<circle cx="8.4" cy="-10.6" r="2" fill="${k.hi}" opacity=".55"/><path d="M8.4 -12.2 l.45 1 1.1 .12 -.82 .75 .24 1.08 -.97 -.55 -.97 .55 .24 -1.08 -.82 -.75 1.1 -.12z" fill="#ffcf3f" stroke="#c99a1a" stroke-width=".22"/>`;
   else o+=arm(4.6,-12.4,-18,5.8,k);
   // upper garment
   o+=`<path d="M-4.5 -13 Q0 -14.3 4.5 -13 L5 -${p==='codex'?6.4:8.2} Q0 -${p==='codex'?5.4:7.2} -5 -${p==='codex'?6.4:8.2}Z" fill="${k.top}"${ln(k)}/>`;
@@ -354,13 +367,15 @@ function chibi(c){
   if(fly)o+=`<path d="M-3.6 -13.4 Q0 -11.6 3.6 -13.4 L3.3 -11.9 Q0 -10.5 -3.3 -11.9Z" fill="${k.trim}"${ln(k)}/><path d="M0 -11 V-8.4" stroke="${k.trim}" stroke-width=".45"/><path d="M-2.8 -10.6 l.4 .9 .9 .1 -.7 .6 .2 .9 -.8 -.5 -.8 .5 .2 -.9 -.7 -.6 .9 -.1z" fill="#ffcf3f"/>`;
   if(p==='codex')o+=`<path d="M-4.7 -13.6 Q0 -11 4.7 -13.6" stroke="${k.trim}" stroke-width=".85" fill="none"/><rect x="-5.8" y="-14.6" width="1.7" height="2.5" rx=".7" fill="${k.trim}"${ln(k)}/><rect x="4.1" y="-14.6" width="1.7" height="2.5" rx=".7" fill="${k.trim}"${ln(k)}/>`;
   // neck, head, face
-  o+=`<rect x="-1.1" y="-13.8" width="2.2" height="2" fill="${SKS}"/><circle cx="0" cy="${hy}" r="7" fill="${k.skin}" stroke="${SKL}" stroke-width=".35"/>`+eyes(m,k);
-  // front hair
-  o+=bangs(k);
-  if(p==='codex')o+=`<path d="M.4 -26.2 Q1.4 -29.6 3.8 -28.8 Q1.9 -28.4 1.5 -26.1Z" fill="${k.hair}"${ln(k)}/><path d="M6.9 -18.6 Q6.6 -20.4 5.4 -21.2 Q5.6 -19.6 6.2 -18.2Z" fill="${k.tip}"/>`;
-  if(p==='claude')o+=`<path d="M-7.3 -18 C-8.6 -14.6 -7.8 -12.2 -6.8 -11 Q-6.4 -13.6 -6.2 -17Z M7.3 -18 C8.6 -14.6 7.8 -12.2 6.8 -11 Q6.4 -13.6 6.2 -17Z" fill="${k.hair}"${ln(k)}/><g transform="translate(-4.8 -23.6)"><circle cx="0" cy="-1.3" r="1.05" fill="#fff6e8" stroke="${k.trim}" stroke-width=".25"/><circle cx="1.25" cy="-.4" r="1.05" fill="#fff6e8" stroke="${k.trim}" stroke-width=".25"/><circle cx=".8" cy="1" r="1.05" fill="#fff6e8" stroke="${k.trim}" stroke-width=".25"/><circle cx="-.8" cy="1" r="1.05" fill="#fff6e8" stroke="${k.trim}" stroke-width=".25"/><circle cx="-1.25" cy="-.4" r="1.05" fill="#fff6e8" stroke="${k.trim}" stroke-width=".25"/><circle r=".75" fill="${k.trim}"/></g>`;
-  if(fly)o+=`<g fill="#ffcf3f" stroke="#c99a1a" stroke-width=".25"><path d="M-6.9 -24.6 l.55 1.2 1.3 .15 -1 .9 .3 1.3 -1.15 -.65 -1.15 .65 .3 -1.3 -1 -.9 1.3 -.15z"/><path d="M6.9 -24.6 l.55 1.2 1.3 .15 -1 .9 .3 1.3 -1.15 -.65 -1.15 .65 .3 -1.3 -1 -.9 1.3 -.15z"/></g>`;
-  o+=brows(m);
+  o+=`<rect x="-1.1" y="-12.8" width="2.2" height="1.8" fill="${SKS}"/><path d="${FACE}" fill="${k.skin}" stroke="${SKL}" stroke-width=".35"/>`+eyes(m,k);
+  // side locks, fringe and accessories
+  o+=`<path d="${H.side}" fill="${k.hair}"${ln(k)}/><path d="${H.side}" transform="scale(-1 1)" fill="${k.hair}"${ln(k)}/>`;
+  if(p==='codex')o+=`<path d="M-7.6 -14.2 Q-7.7 -12.7 -6.5 -11.8 Q-6.7 -13 -6.4 -14Z M7.6 -14.2 Q7.7 -12.7 6.5 -11.8 Q6.7 -13 6.4 -14Z" fill="${k.tip}"/>`;
+  o+=fringe(k);
+  if(p==='codex')o+=`<path d="M.2 -27.9 Q.5 -31.2 3.5 -30.8 Q1.7 -30.1 1.3 -27.8Z" fill="${k.hair}"${ln(k)}/><path d="M4.1 -18.5 Q4.6 -19.8 5.4 -20.4 Q5.6 -19.2 4.1 -18.5Z" fill="${k.tip}"/>`;
+  if(p==='claude')o+=`<g transform="translate(-5.3 -24.4)"><circle cx="0" cy="-1.3" r="1.05" fill="#fff6e8" stroke="${k.trim}" stroke-width=".25"/><circle cx="1.25" cy="-.4" r="1.05" fill="#fff6e8" stroke="${k.trim}" stroke-width=".25"/><circle cx=".8" cy="1" r="1.05" fill="#fff6e8" stroke="${k.trim}" stroke-width=".25"/><circle cx="-.8" cy="1" r="1.05" fill="#fff6e8" stroke="${k.trim}" stroke-width=".25"/><circle cx="-1.25" cy="-.4" r="1.05" fill="#fff6e8" stroke="${k.trim}" stroke-width=".25"/><circle r=".75" fill="${k.trim}"/></g>`;
+  if(fly)o+=`<g fill="#ffcf3f" stroke="#c99a1a" stroke-width=".25"><path d="M-6.9 -25.6 l.55 1.2 1.3 .15 -1 .9 .3 1.3 -1.15 -.65 -1.15 .65 .3 -1.3 -1 -.9 1.3 -.15z"/><path d="M6.9 -25.6 l.55 1.2 1.3 .15 -1 .9 .3 1.3 -1.15 -.65 -1.15 .65 .3 -1.3 -1 -.9 1.3 -.15z"/></g>`;
+  o+=brows(m,k);
   return o+'</g>';
 }
 // Helper: a pocket-size version of its provider's mascot holding a sign with the provider mark; the hat says the role.
@@ -371,7 +386,7 @@ function helper(w){
   if(p==='claude')o+=`<path d="M-4.4 -6.4 Q-5.2 -2.6 -3.4 -2.4 L3.4 -2.4 Q5.2 -2.6 4.4 -6.4Z" fill="${k.hair}"${L}/>`;
   o+=`<rect x="-2.6" y="-3.5" width="5.2" height="3.1" rx="1.2" fill="${p==='claude'?k.low:k.top}"${L}/><ellipse cx="-1.3" cy="-.4" rx="1.05" ry=".55" fill="${k.shoe}"${L}/><ellipse cx="1.3" cy="-.4" rx="1.05" ry=".55" fill="${k.shoe}"${L}/>`;
   o+=`<circle cx="0" cy="-6.6" r="4.2" fill="${k.skin}" stroke="${SKL}" stroke-width=".3"/>`;
-  for(const x of[-1.6,1.6])o+=`<ellipse cx="${x}" cy="-5.8" rx=".9" ry="1.15" fill="${INK}"/><ellipse cx="${x}" cy="-5.45" rx=".65" ry=".72" fill="${k.iris}"/><circle cx="${x+.3}" cy="-6.25" r=".33" fill="#fff"/>`;
+  for(const x of[-1.6,1.6])o+=`<ellipse cx="${x}" cy="-5.6" rx=".95" ry="1.25" fill="${k.iris}"/><ellipse cx="${x}" cy="-5.05" rx=".7" ry=".55" fill="${k.iris2}"/><ellipse cx="${x}" cy="-5.9" rx=".5" ry=".7" fill="${INK}" opacity=".8"/><circle cx="${x-.32}" cy="-6.15" r=".36" fill="#fff"/><path d="M${x-1.05} -5.75 A1.05 1.4 0 0 1 ${x+1.05} -5.75" stroke="${INK}" stroke-width=".42" fill="none" stroke-linecap="round"/>`;
   o+='<ellipse cx="-2.9" cy="-4.5" rx=".7" ry=".38" fill="#ff8fa3" opacity=".7"/><ellipse cx="2.9" cy="-4.5" rx=".7" ry=".38" fill="#ff8fa3" opacity=".7"/>';
   o+=`<path d="M-4.3 -6.2 C-4.7 -9.8 -2.2 -11 0 -10.9 C2.2 -11 4.7 -9.8 4.3 -6.2 Q3.8 -7.8 2.6 -8.4 L2 -7.3 Q1.6 -8.4 .6 -8.7 L0 -7.5 Q-.4 -8.6 -1.4 -8.7 Q-1.6 -7.8 -2 -7.4 Q-2.6 -8.4 -3.2 -8.2 Q-3.9 -7.4 -4.3 -6.2Z" fill="${k.hair}"${L}/>`;
   if(p==='codex')o+=`<path d="M3.6 -7.4 Q4.4 -6.6 4.4 -5.6 Q3.8 -6.4 3.2 -6.8Z" fill="${k.tip}"/>`;
@@ -403,7 +418,8 @@ function lot(home,picked){
   else if(c.state==='unavailable')o+=poly([P(i+.4,j+.4),P(i+2.4,j+.4),P(i+2.4,j+2.4),P(i+.4,j+2.4)],'var(--dirt)')+sign(i+1.5,j+1.7,L.st.unavailable);
   else{
     o+=`<g${dim?' class="dim"':''}>${house(c,i,j)}`;
-    for(const[n,w]of crewOf(c).entries())o+=`<g class="walker" data-i="${i}" data-j="${j}" data-k="${n}" transform="${at(i+2.2+n*.22,j+.6+n*.7)}"><g class="bob" style="animation-delay:${-n*.5}s">${helper(w)}</g><g class="ctag"><rect x="${-w.name.length*3-3}" y="-27" width="${w.name.length*6+6}" height="10" rx="3" fill="${PROV[w.provider||'none'][1]}"/><text x="0" y="-19.5" text-anchor="middle" font-size="7.5" font-weight="700" fill="#fff" font-family="var(--mono)">${w.name}</text></g></g>`;
+    for(const[n,w]of crewOf(c).entries()){const[a,b]=PARK(n),tw=w.name.length*5+8,fill=PROV[w.provider||'none'][1];
+      o+=`<g class="walker" data-i="${i}" data-j="${j}" data-k="${n}" transform="${at(i+a,j+b)}"><g class="bob" style="animation-delay:${-n*.5}s">${helper(w)}</g><g class="ctag"><path d="M6 -10 l4 -3 v6z" fill="${fill}"/><rect x="9" y="-15" width="${tw}" height="10" rx="3" fill="${fill}"/><text x="${9+tw/2}" y="-7.5" text-anchor="middle" font-size="7.5" font-weight="700" fill="#fff" font-family="var(--mono)">${w.name}</text></g></g>`}
     if(c.total>c.crew.length)o+=`<text class="more" transform="${at(i+2.6+c.crew.length*.22,j+.6+c.crew.length*.7)}" y="-3" text-anchor="middle">+${c.total-c.crew.length}</text>`;
     o+=garden(c,i,j);
     o+=`<g transform="${at(i+1.2,j+1.88)} scale(1.3)"><g class="bob">${chibi(c)}</g></g>`;
@@ -526,7 +542,7 @@ function syncTags(){for(const t of document.querySelectorAll('.tag'))t.classList
 function select(alias,fly){
   picked=alias;
   for(const g of document.querySelectorAll('.house')){const on=g.dataset.alias===alias;g.setAttribute('aria-pressed',String(on));g.classList.toggle('picked',on)}
-  syncTags();
+  syncTags();walk(performance.now());
   inspect();
   const h=alias&&world.homes.get(alias);if(fly&&h)flyTo(h.i+1.2,h.j+1.2,Math.max(view.s,1.6));
 }
@@ -560,10 +576,12 @@ function mini(onlyViewport){
   r.setAttribute('x',f((-view.x/view.s)*k+ox));r.setAttribute('y',f((-view.y/view.s)*k+oy));r.setAttribute('width',f(w/view.s*k));r.setAttribute('height',f(h/view.s*k));
   el('mini').onclick=e=>{const q=el('mini').getBoundingClientRect(),wx=(e.clientX-q.left-ox)/k,wy=(e.clientY-q.top-oy)/k,{w,h}=size();move({s:view.s,x:w/2-wx*view.s,y:h/2-wy*view.s},true)};
 }
-/* helpers walk a loop in the yard; motion stops under reduced motion or while hidden */
+/* helpers walk a loop in the yard; they line up along its edge, name tags beside them, when their house is picked or motion is reduced */
+const PARK=k=>[2.62,.62+k*.9];
 function walk(t){
   const ws=document.querySelectorAll('.walker');
-  for(const g of ws){const i=+g.dataset.i,j=+g.dataset.j,k=+g.dataset.k,u=reduce.matches?k/3:((t/16000)+k/3)%1;
+  for(const g of ws){const i=+g.dataset.i,j=+g.dataset.j,k=+g.dataset.k,u=((t/16000)+k/3)%1;
+    if(reduce.matches||g.closest('.house')?.classList.contains('picked')){const[a,b]=PARK(k);g.setAttribute('transform',at(i+a,j+b));continue}
     const c=[[2.2,.55],[2.75,.55],[2.75,2.6],[2.2,2.6]],seg=u*4,n=Math.floor(seg)%4,e=seg-Math.floor(seg),a=c[n],b=c[(n+1)%4];
     g.setAttribute('transform',at(i+a[0]+(b[0]-a[0])*e,j+a[1]+(b[1]-a[1])*e))}
 }
