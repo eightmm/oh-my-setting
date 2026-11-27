@@ -405,13 +405,12 @@ impl Tail {
                             self.pending.push_str(&text);
                         }
                     }
-                    Some("content_block_stop") => {
+                    Some("content_block_stop")
                         if index(event).is_some_and(|i| self.blocks.remove(&i))
                             && !self.pending.is_empty()
-                            && !self.pending.ends_with('\n')
-                        {
-                            self.pending.push('\n');
-                        }
+                            && !self.pending.ends_with('\n') =>
+                    {
+                        self.pending.push('\n');
                     }
                     _ => {}
                 }

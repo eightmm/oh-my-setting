@@ -17,7 +17,8 @@ pub struct AttemptHeartbeat {
 /// Display-only view of a running provider's growing stdout prefix. It never
 /// changes the completed result or its proof.
 #[derive(Clone)]
-pub struct StreamTap(pub std::sync::Arc<dyn Fn(&[u8]) + Send + Sync>);
+pub struct StreamTap(pub std::sync::Arc<StreamFn>);
+pub type StreamFn = dyn Fn(&[u8]) + Send + Sync;
 impl std::fmt::Debug for StreamTap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("StreamTap")
