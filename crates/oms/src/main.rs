@@ -1272,23 +1272,11 @@ fn frontdoor_error(err: oms_bootstrap::Error) -> ! {
     std::process::exit(err.status);
 }
 
-fn unowned_dispatch_message(argv: &[OsString]) -> Vec<u8> {
-    let Some(first) = argv.first().map(OsString::as_os_str) else {
-        return b"runtime-core: invalid private dispatch invocation\n".to_vec();
-    };
-    let mut err = if let Some(tool) = first.to_str().filter(|_| registry::is_public(first)) {
-        format!("error: {tool} invocation is not native-owned (run: oms {tool} --help)")
-            .into_bytes()
-    } else {
-        oms_bootstrap::unknown_tool(first).diagnostic().to_vec()
-    };
-    err.push(b'\n');
-    err
-}
-
 fn unowned_dispatch_exit(argv: &[OsString]) -> ! {
     use std::io::Write;
-    let msg = unowned_dispatch_message(argv);
+    let tool = argv.first().map_or(OsStr::new(""), OsString::as_os_str);
+    let mut msg = oms_bootstrap::unknown_tool(tool).diagnostic().to_vec();
+    msg.push(b'\n');
     let mut stderr = std::io::stderr().lock();
     let _ = stderr.write_all(&msg);
     let _ = stderr.flush();
@@ -2148,13 +2136,6 @@ mod tests {
         assert_eq!(
             expand_session(OsStr::new(""), None, |_| None, || None),
             PathBuf::new()
-        );
-    }
-    #[test]
-    fn unowned_dispatch_message_names_a_public_tool_invocation() {
-        assert_eq!(
-            unowned_dispatch_message(&[OsString::from("agent-plan"), OsString::from("legacy")]),
-            b"error: agent-plan invocation is not native-owned (run: oms agent-plan --help)\n"
         );
     }
 }
