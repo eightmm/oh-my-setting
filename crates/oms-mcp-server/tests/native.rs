@@ -766,27 +766,45 @@ fn home_panel_opener() {
     let repo = tmp.repo();
     std::fs::create_dir(repo.join(".oms")).unwrap();
 
-    // Derive all non-read-only tool names from definitions() across panel and full profiles.
+    // Derive all tool names across mcp-app, chatgpt-panel and full profiles and assert the home
+    // page calls oms_list_projects and no other tool.
+    let mut app_client = Client::with_depth(&source, &repo, "mcp-app", false, false, "0".as_ref());
     let mut panel_client =
         Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
     let mut full_client = Client::new(&source, &repo, true, false, false);
-    let mut write_tools = std::collections::BTreeSet::new();
+    let mut all_tools = std::collections::BTreeSet::new();
     for listed in [
+        app_client.call("tools/list", json!({})),
         panel_client.call("tools/list", json!({})),
         full_client.call("tools/list", json!({})),
     ] {
         for tool in listed["result"]["tools"].as_array().unwrap() {
-            if tool["annotations"]["readOnlyHint"] == false {
-                write_tools.insert(tool["name"].as_str().unwrap().to_owned());
-            }
+            all_tools.insert(tool["name"].as_str().unwrap().to_owned());
         }
     }
-    assert!(!write_tools.is_empty());
-    for tool_name in &write_tools {
-        assert!(
-            !home_html.contains(tool_name.as_str()),
-            "home-panel.html must not contain non-readOnly tool {tool_name}"
+    assert!(all_tools.contains("oms_list_projects"));
+    assert!(home_html.contains("oms_list_projects"));
+    for tool_name in &all_tools {
+        if tool_name != "oms_list_projects" {
+            assert!(
+                !home_html.contains(tool_name.as_str()),
+                "home-panel.html must not call or reference tool {tool_name}"
+            );
+        }
+    }
+    let mut scan_rest = home_html;
+    while let Some(pos) = scan_rest.find("oms_") {
+        let after = &scan_rest[pos..];
+        let ident_len = after
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            .count();
+        let ident = &after[..ident_len];
+        assert_eq!(
+            ident, "oms_list_projects",
+            "unexpected OMS tool identifier in home-panel.html: {ident}"
         );
+        scan_rest = &after[ident_len..];
     }
 
     // Core and Full profiles do not list or serve oms_open_home.
@@ -862,10 +880,21 @@ fn home_panel_opener() {
             })
         );
 
-        // No project map (unbound in mcp-app, cwd in chatgpt-panel): refused with no page.
+        // No project map and no OMS_PANEL_REPO pin (unbound in mcp-app, cwd in chatgpt-panel):
+        // refused with the unconfigured-map message, never the "bound to one project" text.
         let non_catalog = c.tool("oms_open_home", json!({}));
-        bad(&non_catalog, "bound to one project");
+        bad(
+            &non_catalog,
+            "no host project map is configured for this connection",
+        );
         bad(&non_catalog, "not available");
+        assert!(
+            !non_catalog["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("bound to one project"),
+            "{profile}: {non_catalog}"
+        );
         assert!(non_catalog["result"].get("structuredContent").is_none());
         assert!(non_catalog["result"].get("_meta").is_none());
 
@@ -941,9 +970,50 @@ fn home_panel_opener() {
         let pinned_home = pinned_client.tool("oms_open_home", json!({}));
         bad(&pinned_home, "bound to one project");
         bad(&pinned_home, "not available");
+        assert!(
+            !pinned_home["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("no host project map is configured"),
+            "{profile}: {pinned_home}"
+        );
         assert!(pinned_home["result"].get("structuredContent").is_none());
         assert!(pinned_home["result"].get("_meta").is_none());
     }
+
+    // Missing explicit OMS_PANEL_PROJECTS_FILE fails with the invalid map error.
+    let missing_file = source.join("missing-explicit-projects.json");
+    let mut missing_explicit_client = Client::from_child(
+        Command::new(std::env::current_exe().unwrap())
+            .env_remove("PYTHONUTF8")
+            .env_remove("PYTHONIOENCODING")
+            .arg("--stdio")
+            .arg(&source)
+            .arg(&repo)
+            .arg("mcp-app")
+            .arg("0")
+            .env_remove("OMS_PANEL_REPO")
+            .env_remove("OMS_PANEL_PROJECTS")
+            .env("OMS_PANEL_PROJECTS_FILE", &missing_file)
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .env("XDG_CACHE_HOME", source.join("test-cache"))
+            .env("OMS_HARNESS_CHILD", "0")
+            .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    bad(
+        &missing_explicit_client.tool("oms_open_home", json!({})),
+        "Invalid OMS project map",
+    );
+    bad(
+        &missing_explicit_client.tool("oms_list_projects", json!({"cards": true})),
+        "Invalid OMS project map",
+    );
 }
 
 fn project_cards_catalog() {
@@ -1235,6 +1305,25 @@ fn project_cards_catalog() {
     assert_eq!(tree_entries(&alpha), alpha_before);
     assert_eq!(tree_entries(&beta), beta_before);
 
+    // Immediately after a successful refresh, future/rewritten marker mtimes do not re-trigger a
+    // refresh within the 60 s success interval on the same server process.
+    let cooldown_now = std::time::SystemTime::now();
+    set_mtime(
+        &alpha.join(".git/index"),
+        cooldown_now + Duration::from_secs(3600),
+    );
+    let cooldown_check = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+    assert_eq!(cooldown_check["cards"][0]["state"], "stale");
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(!source.join("last-call.json").exists());
+    assert!(!source.join("snapshot-ready").exists());
+    assert!(!trap_marker.exists());
+    set_mtime(
+        &alpha.join(".git/index"),
+        cooldown_now - Duration::from_secs(60),
+    );
+    drop(trapped);
+
     // Fallback to ~/.cache/oh-my-setting/project-cards when XDG_CACHE_HOME is unset.
     let fake_home = tmp.0.join("fallback-home");
     std::fs::create_dir_all(&fake_home).unwrap();
@@ -1264,6 +1353,7 @@ fn project_cards_catalog() {
             .unwrap(),
     );
     good(&home_fallback.tool("oms_panel_snapshot", json!({"project": "alpha"})));
+    good(&home_fallback.tool("oms_panel_snapshot", json!({"project": "beta"})));
     let fallback_cache = fake_home.join(".cache/oh-my-setting/project-cards");
     assert_eq!(
         std::fs::symlink_metadata(&fallback_cache)
@@ -1286,6 +1376,7 @@ fn project_cards_catalog() {
 
     // Stat-only stale states from age (>10m), .git/HEAD, .git/index, and .oms/plan, with gated refresh.
     let now = std::time::SystemTime::now();
+    let mut trapped = spawn_trapped("mcp-app", false);
     for file in &cached_files {
         set_mtime(file, now - Duration::from_secs(605));
     }
@@ -1300,13 +1391,16 @@ fn project_cards_catalog() {
     });
     let _ = std::fs::remove_file(source.join("snapshot-release"));
     let _ = std::fs::remove_file(source.join("snapshot-ready"));
+    drop(trapped);
 
+    let mut trapped = spawn_trapped("mcp-app", false);
+    let marker_base = std::time::SystemTime::now();
+    for file in &cached_files {
+        set_mtime(file, marker_base - Duration::from_secs(30));
+    }
     for (idx, marker) in [(0usize, ".git/HEAD"), (1, ".git/index")] {
         let target = if idx == 0 { &alpha } else { &beta };
-        set_mtime(
-            &target.join(marker),
-            std::time::SystemTime::now() + Duration::from_secs(5),
-        );
+        set_mtime(&target.join(marker), marker_base - Duration::from_secs(10));
         let check = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
         assert_eq!(check["cards"][idx]["state"], "stale", "{marker}");
         assert!(!trap_marker.exists());
@@ -1317,9 +1411,25 @@ fn project_cards_catalog() {
         cur["cards"][0]["state"] == "fresh" && cur["cards"][1]["state"] == "fresh"
     });
     let _ = std::fs::remove_file(source.join("snapshot-release"));
+    drop(trapped);
+
+    let mut trapped = spawn_trapped("mcp-app", false);
+    let plan_base = std::time::SystemTime::now();
+    set_mtime(&cached_files[0], plan_base - Duration::from_secs(30));
+    set_mtime(&cached_files[1], plan_base - Duration::from_secs(30));
+    for p in [
+        alpha.join(".git/HEAD"),
+        alpha.join(".git/index"),
+        beta.join(".git/HEAD"),
+        beta.join(".git/index"),
+        beta.join(".oms/plan"),
+        beta.join(".oms/plan/tasks.json"),
+    ] {
+        set_mtime(&p, plan_base - Duration::from_secs(40));
+    }
     set_mtime(
         &alpha.join(".oms/plan"),
-        std::time::SystemTime::now() + Duration::from_secs(10),
+        plan_base - Duration::from_secs(10),
     );
     let plan_stale = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
     assert_eq!(plan_stale["cards"][0]["state"], "stale");
@@ -1330,6 +1440,8 @@ fn project_cards_catalog() {
         payload(&trapped.tool("oms_list_projects", json!({"cards": true})))["cards"][0]["state"]
             == "fresh"
     });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    let _ = std::fs::remove_file(source.join("snapshot-ready"));
 
     // Old cache record without main, crew, or crewTotal still loads cleanly.
     let legacy_cache = json!({
@@ -1417,6 +1529,8 @@ fn project_cards_catalog() {
     );
 
     // Restore bg_snap into beta via aged refresh before testing withheld cards.
+    drop(trapped);
+    let mut trapped = spawn_trapped("mcp-app", false);
     for file in &cached_files {
         set_mtime(
             file,
@@ -1473,7 +1587,169 @@ fn project_cards_catalog() {
     assert_eq!(mixed_cards[1]["main"], "antigravity");
     assert_eq!(mixed_cards[2]["state"], "unavailable");
 
-    // 128-alias map fixture with 3 crew per card stays strictly below OUTPUT_LIMIT and per_card_cap.
+    // Card areas: explicit sidecar wins over origin & marker; origin owner (https, host:owner,
+    // linked worktree); marker fallback; null otherwise; symlinked .git/config outside checkout
+    // is not read; sidecar private & strict parse; inline OMS_PANEL_PROJECTS ignores sidecar.
+    let area_root = tmp.0.join("area-cases");
+    let explicit_repo = make_checkout("area-cases/explicit");
+    std::fs::write(
+        explicit_repo.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://github.com/ignored-owner/repo.git\n",
+    )
+    .unwrap();
+    std::fs::write(explicit_repo.join("Cargo.toml"), "[package]\n").unwrap();
+
+    let origin_https = make_checkout("area-cases/origin-https");
+    std::fs::write(
+        origin_https.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://github.com/octo-team/svc.git\n",
+    )
+    .unwrap();
+    std::fs::write(origin_https.join("package.json"), "{}\n").unwrap();
+
+    let origin_scp = make_checkout("area-cases/origin-scp");
+    std::fs::write(
+        origin_scp.join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@git.example.test:scp-owner/svc.git\n",
+    )
+    .unwrap();
+
+    let wt_parent = make_checkout("area-cases/wt-parent");
+    std::fs::write(
+        wt_parent.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://github.com/wt-org/svc.git\n",
+    )
+    .unwrap();
+    let wt_gitdir = wt_parent.join(".git/worktrees/linked");
+    std::fs::create_dir_all(&wt_gitdir).unwrap();
+    std::fs::write(wt_gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(wt_gitdir.join("commondir"), "../..\n").unwrap();
+    let linked_repo = area_root.join("linked");
+    std::fs::create_dir_all(linked_repo.join(".oms")).unwrap();
+    std::fs::write(
+        linked_repo.join(".git"),
+        format!("gitdir: {}\n", wt_gitdir.display()),
+    )
+    .unwrap();
+
+    let rust_repo = make_checkout("area-cases/rust-marker");
+    std::fs::write(rust_repo.join("Cargo.toml"), "[package]\n").unwrap();
+    let py_repo = make_checkout("area-cases/py-marker");
+    std::fs::write(py_repo.join("pyproject.toml"), "[project]\n").unwrap();
+    let none_repo = make_checkout("area-cases/none-marker");
+
+    let outside_cfg = tmp.0.join("outside-gitconfig");
+    std::fs::write(
+        &outside_cfg,
+        "[remote \"origin\"]\n\turl = https://github.com/forbidden-outside/repo.git\n",
+    )
+    .unwrap();
+    let sym_repo = make_checkout("area-cases/sym-outside");
+    std::os::unix::fs::symlink(&outside_cfg, sym_repo.join(".git/config")).unwrap();
+
+    let areas_path = cfg_dir.join("desktop-project-areas.json");
+    let write_areas = |raw: &str, mode: u32| {
+        std::fs::write(&areas_path, raw).unwrap();
+        std::fs::set_permissions(&areas_path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    write_map(json!({
+        "a-explicit": explicit_repo,
+        "b-https": origin_https,
+        "c-scp": origin_scp,
+        "d-worktree": linked_repo,
+        "e-rust": rust_repo,
+        "f-python": py_repo,
+        "g-none": none_repo,
+        "h-symlink": sym_repo,
+    }));
+    write_areas(&json!({"a-explicit": "한글 코어"}).to_string(), 0o600);
+
+    let area_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {"scope": "repository", "updated": "2026-11-27T06:12:00Z", "goal": "Area check", "degraded": false}
+    });
+    fixture_settings(&source, json!({"stdout": area_snap.to_string()}));
+    for alias_name in [
+        "a-explicit",
+        "b-https",
+        "c-scp",
+        "d-worktree",
+        "e-rust",
+        "f-python",
+        "g-none",
+        "h-symlink",
+    ] {
+        good(&c.tool("oms_panel_snapshot", json!({"project": alias_name})));
+    }
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+    let area_reply = trapped.tool("oms_list_projects", json!({"cards": true}));
+    good(&area_reply);
+    assert!(!source.join("last-call.json").exists());
+    assert!(!trap_marker.exists());
+    let area_cards = payload(&area_reply)["cards"].as_array().unwrap().clone();
+    let by_alias: std::collections::BTreeMap<_, _> = area_cards
+        .iter()
+        .map(|card| (card["alias"].as_str().unwrap(), card["area"].clone()))
+        .collect();
+    assert_eq!(by_alias["a-explicit"], json!("한글 코어"));
+    assert_eq!(by_alias["b-https"], json!("octo-team"));
+    assert_eq!(by_alias["c-scp"], json!("scp-owner"));
+    assert_eq!(by_alias["d-worktree"], json!("wt-org"));
+    assert_eq!(by_alias["e-rust"], json!("rust"));
+    assert_eq!(by_alias["f-python"], json!("python"));
+    assert_eq!(by_alias["g-none"], Value::Null);
+    assert_eq!(by_alias["h-symlink"], Value::Null);
+
+    // Inline OMS_PANEL_PROJECTS ignores the sidecar file on disk and guesses areas instead.
+    let inline_map = json!({"a-explicit": explicit_repo}).to_string();
+    let mut inline_client = Client::from_child(
+        Command::new(std::env::current_exe().unwrap())
+            .env_remove("PYTHONUTF8")
+            .env_remove("PYTHONIOENCODING")
+            .arg("--stdio")
+            .arg(&source)
+            .arg(&repo)
+            .arg("mcp-app")
+            .arg("0")
+            .env_remove("OMS_PANEL_REPO")
+            .env("OMS_PANEL_PROJECTS", &inline_map)
+            .env_remove("OMS_PANEL_PROJECTS_FILE")
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env("PATH", &trapped_path)
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .env("XDG_CACHE_HOME", source.join("test-cache"))
+            .env("OMS_HARNESS_CHILD", "0")
+            .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let inline_cards = payload(&inline_client.tool("oms_list_projects", json!({"cards": true})));
+    assert_eq!(inline_cards["cards"][0]["area"], "ignored-owner");
+
+    // Non-private (0644) and malformed sidecars are refused on cards:true.
+    write_areas(r#"{"a-explicit":"rust"}"#, 0o644);
+    bad(
+        &trapped.tool("oms_list_projects", json!({"cards": true})),
+        "area map",
+    );
+    for malformed in [
+        r#"{"a-explicit":"one","a-explicit":"two"}"#,
+        r#"{"a-explicit":1}"#,
+        r#"{"a-explicit":"bad/slash"}"#,
+    ] {
+        write_areas(malformed, 0o600);
+        bad(
+            &trapped.tool("oms_list_projects", json!({"cards": true})),
+            "area map",
+        );
+    }
+    let _ = std::fs::remove_file(&areas_path);
+
+    // 128-alias map fixture with 24-byte areas and 3 crew per card stays strictly below OUTPUT_LIMIT and per_card_cap.
     let rich_snap = json!({
         "schema": 1,
         "kind": "oms-panel-snapshot",
@@ -1497,8 +1773,10 @@ fn project_cards_catalog() {
             "degraded": true
         }
     });
-    fixture_settings(&source, json!({"stdout": rich_snap.to_string()}));
     let mut map_128 = serde_json::Map::new();
+    let mut areas_128 = serde_json::Map::new();
+    let area_24 = "area-twenty-four-bytes01";
+    assert_eq!(area_24.len(), 24);
     let root_128 = tmp.0.join("c128");
     for i in 0..128 {
         let alias_name = format!("p{i:03}");
@@ -1506,9 +1784,27 @@ fn project_cards_catalog() {
         std::fs::create_dir_all(dir.join(".oms")).unwrap();
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-        map_128.insert(alias_name, json!(dir));
+        map_128.insert(alias_name.clone(), json!(dir));
+        areas_128.insert(alias_name, json!(area_24));
     }
     write_map(Value::Object(map_128));
+    write_areas(&Value::Object(areas_128).to_string(), 0o600);
+
+    // First check compact 128 cards where every card retains its 24-byte area within OUTPUT_LIMIT.
+    let compact_128_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:15:00Z",
+            "branch": "main",
+            "git": {"available": true, "branch": "main", "dirty": false},
+            "goal": "Short goal",
+            "conversationMain": {"provider": "codex"},
+            "degraded": false
+        }
+    });
+    fixture_settings(&source, json!({"stdout": compact_128_snap.to_string()}));
     for i in 0..128 {
         good(&c.tool("oms_panel_snapshot", json!({"project": format!("p{i:03}")})));
     }
@@ -1520,6 +1816,28 @@ fn project_cards_catalog() {
         "method": "tools/call",
         "params": {"name": "oms_list_projects", "arguments": {"cards": true}}
     });
+    trapped.raw(format!("{req_128}\n").as_bytes());
+    let compact_wire_128 = trapped.read_line();
+    assert!(
+        compact_wire_128.ends_with('\n') && compact_wire_128.len() < 60_000,
+        "compact 128-alias wire bytes {} exceeded OUTPUT_LIMIT",
+        compact_wire_128.len()
+    );
+    let compact_parsed_128: Value = serde_json::from_str(&compact_wire_128).unwrap();
+    good(&compact_parsed_128);
+    for card in compact_parsed_128["result"]["structuredContent"]["cards"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(card["area"], area_24);
+    }
+
+    // Then check maximal 128 cards (rich_snap) with 24-byte areas configured.
+    fixture_settings(&source, json!({"stdout": rich_snap.to_string()}));
+    for i in 0..128 {
+        good(&c.tool("oms_panel_snapshot", json!({"project": format!("p{i:03}")})));
+    }
+    let _ = std::fs::remove_file(source.join("last-call.json"));
     trapped.raw(format!("{req_128}\n").as_bytes());
     let wire_128 = trapped.read_line();
     assert!(
