@@ -18,8 +18,54 @@ const DEFAULT_COLLECT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_COLLECT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_LEDGER_OUTPUT: usize = 512 * 1024;
 const MAX_STDERR_BYTES: u64 = 64 * 1024;
+const MAX_PRIVATE_LOG_BYTES: usize = 64 * 1024;
 
-fn ssh_control_path(host: &str, port: Option<u16>) -> Result<String> {
+pub const INTERACTIVE_AUTH_UNSUPPORTED: &str =
+    "interactive authentication required; this target is not supported";
+pub const RECONNECT_STATE_FILE: &str = ".oms/runtime/ssh-connections.json";
+pub const PRIVATE_CONTROL_LOG_FILE: &str = ".oms/runtime/logs/ssh.log";
+pub const MAX_NEW_CONNECTIONS_PER_HOUR: usize = 12;
+pub const RECONNECT_WINDOW_MS: u64 = 3_600_000;
+pub const INITIAL_BACKOFF_MS: u64 = 5_000;
+pub const MAX_BACKOFF_MS: u64 = 600_000;
+
+pub trait SshClock: Send + Sync {
+    fn now_ms(&self) -> u64;
+    /// Jitter ratio in `0..=1000`.
+    fn jitter_permille(&self, consecutive_failures: u32) -> u64;
+}
+
+pub struct SystemSshClock;
+
+impl SshClock for SystemSshClock {
+    fn now_ms(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    }
+
+    fn jitter_permille(&self, consecutive_failures: u32) -> u64 {
+        let mut buf = [0u8; 8];
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom")
+            && f.read_exact(&mut buf).is_ok()
+        {
+            return u64::from_le_bytes(buf) % 1001;
+        }
+        let mut seed = Vec::with_capacity(24);
+        seed.extend_from_slice(&self.now_ms().to_le_bytes());
+        seed.extend_from_slice(&std::process::id().to_le_bytes());
+        seed.extend_from_slice(&consecutive_failures.to_le_bytes());
+        seed.extend_from_slice(
+            &FRAME_NONCE_COUNTER
+                .fetch_add(1, Ordering::Relaxed)
+                .to_le_bytes(),
+        );
+        let hex = sha256(&seed);
+        u64::from_str_radix(&hex[..8], 16).unwrap_or(500) % 1001
+    }
+}
+
+pub fn ssh_control_path(host: &str, port: Option<u16>) -> Result<String> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let uid = rustix::process::geteuid().as_raw();
     let suffix = format!(
@@ -62,9 +108,22 @@ fn ssh_control_path(host: &str, port: Option<u16>) -> Result<String> {
 }
 
 pub fn run(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Response {
-    execute(args, cwd, interrupted).unwrap_or_else(Response::failure)
+    run_with_clock(args, cwd, interrupted, &SystemSshClock)
 }
-fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Response> {
+pub fn run_with_clock(
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    clock: &dyn SshClock,
+) -> Response {
+    execute(args, cwd, interrupted, clock).unwrap_or_else(Response::failure)
+}
+fn execute(
+    args: &[OsString],
+    cwd: &Path,
+    interrupted: &AtomicBool,
+    clock: &dyn SshClock,
+) -> Result<Response> {
     let started = Instant::now();
     if args.is_empty()
         || args.iter().any(|a| a == "--help" || a == "-h") && !args.iter().any(|a| a == "--")
@@ -134,10 +193,10 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
         let slot = match flag {
             "--host" => &mut host,
             "--port" => &mut port,
-            "--repo" if action != "probe" => &mut repo,
+            "--repo" => &mut repo,
             "--remote-dir" if action != "probe" => &mut remote,
             "--base" if action == "sync-bundle" => &mut base,
-            "--target" if action != "probe" => &mut target,
+            "--target" => &mut target,
             "--snapshot" if action == "exec" => &mut snapshot,
             "--op-id" if ["exec", "reconcile", "cancel"].contains(&action) => &mut op_id,
             "--grace-seconds" if action == "cancel" => &mut grace_seconds,
@@ -268,17 +327,37 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
     } else {
         require(!interrupted.load(Ordering::Relaxed), "interrupted")?;
     }
-    let mut ssh = build_ssh(&host, port, &control);
+    let deadline = started + Duration::from_secs(timeout_seconds);
     let mut value = serde_json::json!({"schema":1,"action":action,"host":host});
     let code;
     if action == "probe" {
-        let out = stream::output(
-            ssh.arg("printf ok"),
-            started + Duration::from_secs(timeout_seconds),
-            interrupted,
+        let probe_root = repo
+            .as_deref()
+            .map_or_else(|| cwd.to_path_buf(), |r| cwd.join(r));
+        let (target_key, control_persist) =
+            resolve_probe_target(&probe_root, target.as_deref(), &host, port)?;
+        let permit = admit_ssh_connection(
+            &probe_root,
+            cwd,
+            &target_key,
+            &host,
+            "probe",
+            &control,
+            deadline,
+            clock,
         )?;
+        let mut ssh = build_ssh(&host, port, &control, control_persist)?;
+        let out = stream::output(ssh.arg("printf ok"), deadline, interrupted)?;
         code = exit_code(out.status);
-        value["control_path"] = control.into();
+        record_ssh_outcome(
+            &permit,
+            is_connect_failure(code, &out.stdout, &out.stderr),
+            deadline,
+            clock,
+        )?;
+        if is_interactive_auth_failure(code, &out.stdout, &out.stderr) {
+            return Err(error(INTERACTIVE_AUTH_UNSUPPORTED));
+        }
         value["exit_code"] = code.into();
         value["reachable"] = (code == 0).into();
         value["stdout"] = String::from_utf8_lossy(&out.stdout).into_owned().into();
@@ -307,8 +386,9 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
                 op_id,
                 control: &control,
                 pretty,
-                deadline: started + Duration::from_secs(timeout_seconds),
+                deadline,
                 interrupted,
+                clock,
             })
         } else {
             run_cancel(CancelRequest {
@@ -322,13 +402,15 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
                 grace_seconds,
                 control: &control,
                 pretty,
-                deadline: started + Duration::from_secs(timeout_seconds),
+                deadline,
                 interrupted,
+                clock,
             })
         };
     }
     let remote = remote.expect("non-reconcile/cancel requires --remote-dir");
-    enforce_target_policy(&repo, target.as_deref(), &host, &remote)?;
+    let (target_key, control_persist) =
+        enforce_target_policy(&repo, target.as_deref(), &host, port, &remote)?;
     let snapshot_pins = if let Some(digest) = snapshot.as_deref() {
         let snap = validate_snapshot(&repo, digest)?;
         Some(verify_snapshot_checkouts(&repo, &snap)?)
@@ -342,6 +424,9 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
         let dest_raw = dest.as_deref().ok_or_else(|| error("--dest required"))?;
         return run_collect(CollectRequest {
             cwd,
+            repo: &repo,
+            target_key: &target_key,
+            control_persist,
             host: &host,
             port,
             remote: &remote,
@@ -353,7 +438,8 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             control: &control,
             pretty,
             interrupted,
-            deadline: started + Duration::from_secs(timeout_seconds),
+            deadline,
+            clock,
         });
     }
     value["remote_dir"] = remote.clone().into();
@@ -415,12 +501,32 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             "mktemp .oms-bundle.XXXXXX",
             "mktemp \"${TMPDIR:-/tmp}/oms-bundle.XXXXXX\"",
         );
+        let permit = admit_ssh_connection(
+            &repo,
+            cwd,
+            &target_key,
+            &host,
+            "sync-bundle",
+            &control,
+            deadline,
+            clock,
+        )?;
+        let mut ssh = build_ssh(&host, port, &control, control_persist)?;
         let out = ssh
             .arg(format!("sh -lc {}", quote(&script)))
             .stdin(Stdio::from(file))
             .output()
             .map_err(error)?;
         code = exit_code(out.status);
+        record_ssh_outcome(
+            &permit,
+            is_connect_failure(code, &out.stdout, &out.stderr),
+            deadline,
+            clock,
+        )?;
+        if is_interactive_auth_failure(code, &out.stdout, &out.stderr) {
+            return Err(error(INTERACTIVE_AUTH_UNSUPPORTED));
+        }
         value["exit_code"] = code.into();
     } else if let Some(op_id) = op_id.as_deref() {
         require(!tail.is_empty(), "command required after --")?;
@@ -431,6 +537,8 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             port,
             remote: &remote,
             target: target.as_deref(),
+            target_key: &target_key,
+            control_persist,
             snapshot: snapshot.as_deref(),
             snapshot_pins,
             head_sha: &head,
@@ -438,8 +546,9 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
             tail: &tail,
             control: &control,
             pretty,
-            deadline: started + Duration::from_secs(timeout_seconds),
+            deadline,
             interrupted,
+            clock,
         });
     } else {
         require(!tail.is_empty(), "command required after --")?;
@@ -464,15 +573,30 @@ fn execute(args: &[OsString], cwd: &Path, interrupted: &AtomicBool) -> Result<Re
         };
         let remote_command = format!("sh -lc {}", quote(&script));
         value["command_sha256"] = sha256(remote_command.as_bytes()).into();
-        value["control_path"] = control.into();
-        value["started_at"] = now()?.into();
-        let out = stream::output(
-            ssh.arg(&remote_command),
-            started + Duration::from_secs(timeout_seconds),
-            interrupted,
+        let permit = admit_ssh_connection(
+            &repo,
+            cwd,
+            &target_key,
+            &host,
+            "exec",
+            &control,
+            deadline,
+            clock,
         )?;
+        let mut ssh = build_ssh(&host, port, &control, control_persist)?;
+        value["started_at"] = now()?.into();
+        let out = stream::output(ssh.arg(&remote_command), deadline, interrupted)?;
         value["completed_at"] = now()?.into();
         code = exit_code(out.status);
+        record_ssh_outcome(
+            &permit,
+            is_connect_failure(code, &out.stdout, &out.stderr),
+            deadline,
+            clock,
+        )?;
+        if is_interactive_auth_failure(code, &out.stdout, &out.stderr) {
+            return Err(error(INTERACTIVE_AUTH_UNSUPPORTED));
+        }
         value["exit_code"] = code.into();
         value["stdout"] = String::from_utf8_lossy(&out.stdout).into_owned().into();
         value["stderr"] = String::from_utf8_lossy(&out.stderr).into_owned().into();
@@ -504,7 +628,109 @@ fn read_runtime_file(repo: &Path, path: &Path) -> Result<Vec<u8>> {
     .map_err(|e| error(format!("runtime input: {e:?}")))
 }
 
-fn validate_target(repo: &Path, name: &str, host: &str, remote: &str) -> Result<()> {
+fn default_target_key(host: &str, port: Option<u16>) -> String {
+    match port {
+        Some(p) if p != 22 => format!("{host}:{p}"),
+        _ => host.to_owned(),
+    }
+}
+
+fn ssh_host_matches(registered: &str, supplied: &str) -> bool {
+    let r_host = registered.rsplit_once('@').map_or(registered, |(_, h)| h);
+    let s_host = supplied.rsplit_once('@').map_or(supplied, |(_, h)| h);
+    registered.eq_ignore_ascii_case(supplied) || r_host.eq_ignore_ascii_case(s_host)
+}
+
+pub fn resolve_registered_target_persist(state_root: &Path, target_name: &str) -> Result<u64> {
+    if !state_root.exists() {
+        return Ok(crate::targets::DEFAULT_CONTROL_PERSIST);
+    }
+    let raw = read_runtime_file_opt(state_root, Path::new(crate::targets::FILE))?;
+    if raw.is_empty() {
+        return Ok(crate::targets::DEFAULT_CONTROL_PERSIST);
+    }
+    let registry = crate::value::parse(&raw)?;
+    crate::value::keys(&registry, &["schema", "targets"], &[])?;
+    require(
+        registry.get("schema").is_int(1),
+        "invalid remote target registry",
+    )?;
+    for (_, row) in registry.get("targets").object()? {
+        crate::targets::record(row)?;
+    }
+    let Some(row) = registry.get("targets").opt(target_name) else {
+        return Ok(crate::targets::DEFAULT_CONTROL_PERSIST);
+    };
+    crate::targets::control_persist(row)
+}
+
+fn resolve_probe_target(
+    state_root: &Path,
+    target: Option<&str>,
+    host: &str,
+    port: Option<u16>,
+) -> Result<(String, u64)> {
+    if let Some(name) = target {
+        let registry = crate::value::parse(&read_runtime_file(
+            state_root,
+            Path::new(crate::targets::FILE),
+        )?)?;
+        crate::value::keys(&registry, &["schema", "targets"], &[])?;
+        require(
+            registry.get("schema").is_int(1),
+            "invalid remote target registry",
+        )?;
+        let row = registry
+            .get("targets")
+            .opt(name)
+            .ok_or_else(|| error("unknown remote target"))?;
+        crate::targets::record(row)?;
+        require(
+            row.text("ssh_alias") == host,
+            "target does not match SSH host",
+        )?;
+        return Ok((name.to_owned(), crate::targets::control_persist(row)?));
+    }
+    if !state_root.exists() {
+        return Ok((
+            default_target_key(host, port),
+            crate::targets::DEFAULT_CONTROL_PERSIST,
+        ));
+    }
+    let raw = read_runtime_file_opt(state_root, Path::new(crate::targets::FILE))?;
+    if raw.is_empty() {
+        return Ok((
+            default_target_key(host, port),
+            crate::targets::DEFAULT_CONTROL_PERSIST,
+        ));
+    }
+    let registry = crate::value::parse(&raw)?;
+    crate::value::keys(&registry, &["schema", "targets"], &[])?;
+    require(
+        registry.get("schema").is_int(1),
+        "invalid remote target registry",
+    )?;
+    let mut exact = None;
+    let mut alias_match = None;
+    for (k, row) in registry.get("targets").object()? {
+        let entry_name = std::str::from_utf8(k).map_err(error)?;
+        crate::targets::record(row)?;
+        let persist = crate::targets::control_persist(row)?;
+        if row.text("ssh_alias") == host {
+            exact = Some((entry_name.to_owned(), persist));
+        } else if alias_match.is_none() && ssh_host_matches(row.text("ssh_alias"), host) {
+            alias_match = Some((entry_name.to_owned(), persist));
+        }
+    }
+    Ok(exact.or(alias_match).unwrap_or_else(|| {
+        (
+            default_target_key(host, port),
+            crate::targets::DEFAULT_CONTROL_PERSIST,
+        )
+    }))
+}
+
+fn validate_target(repo: &Path, name: &str, host: &str, remote: &str) -> Result<u64> {
     let registry = crate::value::parse(&read_runtime_file(repo, Path::new(crate::targets::FILE))?)?;
     crate::value::keys(&registry, &["schema", "targets"], &[])?;
     require(
@@ -522,17 +748,20 @@ fn validate_target(repo: &Path, name: &str, host: &str, remote: &str) -> Result<
     require(
         row.text("ssh_alias") == host && row.text("workdir") == remote,
         "target does not match SSH host and remote directory",
-    )
+    )?;
+    crate::targets::control_persist(row)
 }
 
 fn enforce_target_policy(
     repo: &Path,
     target: Option<&str>,
     host: &str,
+    port: Option<u16>,
     remote: &str,
-) -> Result<()> {
+) -> Result<(String, u64)> {
     if let Some(name) = target {
-        return validate_target(repo, name, host, remote);
+        let persist = validate_target(repo, name, host, remote)?;
+        return Ok((name.to_owned(), persist));
     }
     require(
         std::env::var_os("OMS_SSH_REQUIRE_TARGET").as_deref() != Some(OsStr::new("1")),
@@ -540,7 +769,10 @@ fn enforce_target_policy(
     )?;
     let raw = read_runtime_file_opt(repo, Path::new(crate::targets::FILE))?;
     if raw.is_empty() {
-        return Ok(());
+        return Ok((
+            default_target_key(host, port),
+            crate::targets::DEFAULT_CONTROL_PERSIST,
+        ));
     }
     let registry = crate::value::parse(&raw)?;
     crate::value::keys(&registry, &["schema", "targets"], &[])?;
@@ -548,20 +780,15 @@ fn enforce_target_policy(
         registry.get("schema").is_int(1),
         "invalid remote target registry",
     )?;
-    let Ok(entries) = registry.get("targets").object() else {
-        return Ok(());
-    };
-    let mut matched_exact = false;
+    let entries = registry.get("targets").object()?;
+    let mut matched_exact = None;
     let mut exact_approved = false;
     let mut matched_host = false;
     let mut host_approved = false;
-    fn ssh_host_matches(registered: &str, supplied: &str) -> bool {
-        let r_host = registered.rsplit_once('@').map_or(registered, |(_, h)| h);
-        let s_host = supplied.rsplit_once('@').map_or(supplied, |(_, h)| h);
-        registered.eq_ignore_ascii_case(supplied) || r_host.eq_ignore_ascii_case(s_host)
-    }
 
-    for (_, row) in entries {
+    for (k, row) in entries {
+        let entry_name = std::str::from_utf8(k).map_err(error)?;
+        crate::targets::record(row)?;
         if ssh_host_matches(row.text("ssh_alias"), host) {
             matched_host = true;
             let is_ok = crate::targets::approved(row)?;
@@ -569,18 +796,20 @@ fn enforce_target_policy(
                 host_approved = true;
             }
             if row.text("workdir") == remote {
-                matched_exact = true;
+                matched_exact =
+                    Some((entry_name.to_owned(), crate::targets::control_persist(row)?));
                 if is_ok {
                     exact_approved = true;
                 }
             }
         }
     }
-    if matched_exact {
+    if let Some(found) = matched_exact {
         require(
             exact_approved,
             "registered remote target is not approved for execution",
         )?;
+        return Ok(found);
     } else if matched_host {
         if !host_approved {
             return Err(error("registered SSH host is not approved for execution"));
@@ -589,7 +818,10 @@ fn enforce_target_policy(
             "remote directory is not registered for this SSH host",
         ));
     }
-    Ok(())
+    Ok((
+        default_target_key(host, port),
+        crate::targets::DEFAULT_CONTROL_PERSIST,
+    ))
 }
 
 fn validate_sha256_hex(digest: &str, label: &str) -> Result<()> {
@@ -767,32 +999,548 @@ fn validate_remote_rel_path(path: &str) -> Result<()> {
     )
 }
 
-fn build_ssh(host: &str, port: Option<u16>, control: &str) -> Command {
-    let mut ssh = Command::new(std::env::var_os("OMS_SSH_BIN").unwrap_or_else(|| "ssh".into()));
-    ssh.args([
-        "-o",
-        "ControlMaster=auto",
-        "-o",
-        "ControlPersist=120",
-        "-o",
-        &format!("ControlPath={control}"),
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-    ]);
+pub fn ssh_argv(
+    program: &OsStr,
+    host: &str,
+    port: Option<u16>,
+    control: &str,
+    control_persist_secs: u64,
+) -> Result<Vec<OsString>> {
+    crate::targets::validate_control_persist(control_persist_secs)?;
+    let mut argv = Vec::with_capacity(24);
+    argv.push(program.to_os_string());
+    argv.extend(
+        [
+            "-a",
+            "-o",
+            "ClearAllForwardings=yes",
+            "-o",
+            "ForwardAgent=no",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            &format!("ControlPath={control}"),
+            "-o",
+            &format!("ControlPersist={control_persist_secs}"),
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
     if let Some(port) = port {
-        ssh.args(["-p", &port.to_string()]);
+        argv.push(OsString::from("-p"));
+        argv.push(OsString::from(port.to_string()));
     }
-    ssh.args(["--", host]);
-    ssh
+    argv.push(OsString::from("--"));
+    argv.push(OsString::from(host));
+    Ok(argv)
+}
+
+fn build_ssh(
+    host: &str,
+    port: Option<u16>,
+    control: &str,
+    control_persist_secs: u64,
+) -> Result<Command> {
+    let program = std::env::var_os("OMS_SSH_BIN")
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "ssh".into());
+    let argv = ssh_argv(&program, host, port, control, control_persist_secs)?;
+    let mut ssh = Command::new(&argv[0]);
+    ssh.args(&argv[1..]);
+    Ok(ssh)
+}
+
+pub fn control_connection_open(control_path: &str) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let path = Path::new(control_path);
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !meta.file_type().is_socket() || meta.uid() != rustix::process::geteuid().as_raw() {
+        return false;
+    }
+    std::os::unix::net::UnixStream::connect(path).is_ok()
+}
+
+fn has_ascii_word(haystack: &str, word: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let wlen = word.len();
+    for (idx, _) in haystack.match_indices(word) {
+        let prev_ok = idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric();
+        let end = idx + wlen;
+        let next_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if prev_ok && next_ok {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn is_interactive_auth_failure(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> bool {
+    if exit_code == 0 || stderr.is_empty() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    let pw = concat!("pass", "word");
+    let pp = concat!("pass", "phrase");
+    let pc = concat!("pass", "code");
+    let strong = text.contains("keyboard-interactive")
+        || text.contains("challenge-response")
+        || text.contains("authenticated with partial success")
+        || text.contains("verification code")
+        || text.contains("one-time")
+        || text.contains(pc)
+        || text.contains("two-factor")
+        || has_ascii_word(&text, "2fa")
+        || text.contains("multi-factor")
+        || has_ascii_word(&text, "mfa")
+        || has_ascii_word(&text, "totp")
+        || has_ascii_word(&text, "otp")
+        || text.contains("interactive authentication")
+        || text.contains("keyboard input")
+        || text.contains(&format!("enter {pw}"))
+        || text.contains(&format!("enter {pp}"))
+        || text.contains(&format!("read_{pp}"))
+        || text.contains(&format!("{pw}:"))
+        || text.contains(&format!("{pp}:"))
+        || (text.contains("permission denied")
+            && (text.contains(pw)
+                || text.contains("keyboard-interactive")
+                || has_ascii_word(&text, "otp")
+                || has_ascii_word(&text, "2fa")));
+    if stdout.is_empty() && strong {
+        return true;
+    }
+    exit_code == 255 && stdout.is_empty() && (strong || text.contains(pw) || text.contains(pp))
+}
+
+pub fn is_connect_failure(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> bool {
+    (exit_code == 255 && stdout.is_empty() && !stderr.trim_ascii().is_empty())
+        || is_interactive_auth_failure(exit_code, stdout, stderr)
+}
+
+pub fn compute_backoff_ms(consecutive_failures: u32, jitter_permille: u64) -> u64 {
+    let shift = consecutive_failures.saturating_sub(1).min(20);
+    let raw_base = INITIAL_BACKOFF_MS.saturating_mul(1u64 << shift);
+    let jp = jitter_permille.min(1000);
+    if raw_base < MAX_BACKOFF_MS {
+        let jitter = (raw_base / 5) * jp / 1000;
+        (raw_base + jitter).min(MAX_BACKOFF_MS)
+    } else {
+        let jitter = (MAX_BACKOFF_MS / 10) * jp / 1000;
+        MAX_BACKOFF_MS - jitter
+    }
+}
+
+fn format_rfc3339_ms(epoch_ms: u64) -> String {
+    let secs = i64::try_from(epoch_ms / 1000).unwrap_or(i64::MAX);
+    let nanos = ((epoch_ms % 1000) * 1_000_000) as u32;
+    chrono::DateTime::from_timestamp(secs, nanos)
+        .map_or_else(|| format!("{epoch_ms}ms"), |dt| dt.to_rfc3339())
+}
+
+fn ensure_private_runtime_subdir(state_root: &Path, sub: &[&str]) -> Result<PathBuf> {
+    let mut dir = state_root.to_path_buf();
+    for segment in sub {
+        dir.push(segment);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) => {
+                require(
+                    meta.is_dir() && !meta.file_type().is_symlink(),
+                    format!("unsafe non-directory state path: {}", dir.display()),
+                )?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&dir)
+                    .or_else(|e| {
+                        if e.kind() == std::io::ErrorKind::AlreadyExists {
+                            Ok(())
+                        } else {
+                            Err(e)
+                        }
+                    })
+                    .map_err(error)?;
+            }
+            Err(e) => return Err(error(e)),
+        }
+    }
+    Ok(dir)
+}
+
+fn record_private_control_log(
+    state_root: &Path,
+    action: &str,
+    target_key: &str,
+    host: &str,
+    control_path: &str,
+    reused: bool,
+    now_ms: u64,
+) {
+    let Ok(_) = ensure_private_runtime_subdir(state_root, &[".oms", "runtime", "logs"]) else {
+        return;
+    };
+    let Ok(root) = oms_safe_fs::Root::open(state_root) else {
+        return;
+    };
+    let line = serde_json::json!({
+        "ts": format_rfc3339_ms(now_ms),
+        "action": action,
+        "target": target_key,
+        "host": host,
+        "control_path": control_path,
+        "reused": reused,
+    });
+    let Ok(mut row) = serde_json::to_vec(&line) else {
+        return;
+    };
+    row.push(b'\n');
+    let rel = Path::new(PRIVATE_CONTROL_LOG_FILE);
+    let _ = root.atomic_mutate(
+        rel,
+        oms_safe_fs::MutationOptions {
+            read: oms_safe_fs::ByteReadOptions {
+                missing_ok: true,
+                max_bytes: MAX_PRIVATE_LOG_BYTES * 2,
+            },
+            create_parent: true,
+            max_output: MAX_PRIVATE_LOG_BYTES * 2,
+            preserve_existing: false,
+            expected_exists: None,
+        },
+        move |prev| {
+            let mut next = prev.to_vec();
+            next.extend_from_slice(&row);
+            if next.len() > MAX_PRIVATE_LOG_BYTES {
+                let drop_from = next.len() - MAX_PRIVATE_LOG_BYTES;
+                let cut = next[drop_from..]
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(drop_from, |p| drop_from + p + 1);
+                next.drain(..cut);
+            }
+            Ok::<_, String>(next)
+        },
+    );
+    let abs = state_root.join(rel);
+    if let Ok(meta) = std::fs::symlink_metadata(&abs)
+        && meta.is_file()
+        && !meta.file_type().is_symlink()
+        && meta.permissions().mode() & 0o077 != 0
+    {
+        let _ = std::fs::set_permissions(&abs, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+fn lock_ssh_connections(
+    state_root: &Path,
+    cwd: &Path,
+    deadline: Instant,
+    allow_grace: bool,
+) -> Result<oms_lock::Guard> {
+    let resolved = resolve_existing(&state_root.join(RECONNECT_STATE_FILE))?;
+    let abs_cwd = resolve_existing(cwd)?;
+    let mut settings = match oms_lock::Settings::from_env() {
+        Ok(s) => s,
+        Err(oms_lock::Error::InvalidSettings) => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| PathBuf::from("/tmp"));
+            oms_lock::Settings {
+                mode: oms_lock::Mode::Mkdir,
+                timeout: Duration::from_secs(15),
+                poll_max: Duration::from_secs(1),
+                lock_dir: std::env::var_os("OMS_LOCK_DIR").map(PathBuf::from),
+                home,
+                temp_dir: PathBuf::from("/tmp"),
+                cwd: abs_cwd.clone(),
+                search_path: std::env::var_os("PATH").unwrap_or_default(),
+                force_mkdir: true,
+            }
+        }
+        Err(e) => return Err(status(e.exit_code(), format!("ssh reconnect lock: {e}"))),
+    };
+    settings.mode = oms_lock::Mode::Mkdir;
+    let remaining = deadline.checked_duration_since(Instant::now());
+    settings.timeout = match remaining.filter(|d| !d.is_zero()) {
+        Some(rem) => rem.min(Duration::from_secs(15)),
+        None if allow_grace => Duration::from_secs(1),
+        None => {
+            return Err(status(
+                124,
+                "SSH operation deadline exceeded while acquiring reconnect state lock",
+            ));
+        }
+    };
+    settings.cwd = abs_cwd;
+    if settings.lock_dir.is_none()
+        && let Some(xdg) = std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty())
+        && !resolved.starts_with("/tmp")
+        && !resolved.starts_with(&settings.temp_dir)
+    {
+        let candidate = PathBuf::from(xdg).join("oh-my-setting/locks");
+        if std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&candidate)
+            .is_ok()
+        {
+            settings.lock_dir = Some(candidate);
+        }
+    }
+    oms_lock::Lock::for_file(&resolved, settings)
+        .map_err(|e| status(e.exit_code(), format!("ssh reconnect lock: {e}")))?
+        .acquire(None)
+        .map_err(|e| status(e.exit_code(), format!("ssh reconnect lock: {e}")))
+}
+
+fn read_ssh_connections(state_root: &Path) -> Result<serde_json::Value> {
+    ensure_private_runtime_subdir(state_root, &[".oms", "runtime"])?;
+    let root =
+        oms_safe_fs::Root::open(state_root).map_err(|e| error(format!("repository: {e:?}")))?;
+    let bytes = root
+        .read_no_follow(
+            Path::new(RECONNECT_STATE_FILE),
+            oms_safe_fs::ByteReadOptions {
+                missing_ok: true,
+                max_bytes: crate::storage::MAX_STATE,
+            },
+        )
+        .map_err(|e| error(format!("ssh reconnect state: {e:?}")))?;
+    if bytes.is_empty() {
+        return Ok(serde_json::json!({"schema": 1, "targets": {}}));
+    }
+    let val: serde_json::Value = serde_json::from_slice(&bytes).map_err(error)?;
+    require(
+        val.get("schema").and_then(|v| v.as_i64()) == Some(1)
+            && val.get("targets").is_some_and(serde_json::Value::is_object),
+        "corrupt SSH reconnect state record",
+    )?;
+    Ok(val)
+}
+
+fn write_ssh_connections(state_root: &Path, state: &serde_json::Value) -> Result<()> {
+    ensure_private_runtime_subdir(state_root, &[".oms", "runtime"])?;
+    let mut encoded = serde_json::to_vec(state).map_err(error)?;
+    encoded.push(b'\n');
+    let root =
+        oms_safe_fs::Root::open(state_root).map_err(|e| error(format!("repository: {e:?}")))?;
+    let rel = Path::new(RECONNECT_STATE_FILE);
+    root.atomic_mutate(
+        rel,
+        oms_safe_fs::MutationOptions {
+            read: oms_safe_fs::ByteReadOptions {
+                missing_ok: true,
+                max_bytes: crate::storage::MAX_STATE,
+            },
+            create_parent: true,
+            max_output: crate::storage::MAX_STATE,
+            preserve_existing: false,
+            expected_exists: None,
+        },
+        move |_| Ok::<_, String>(encoded),
+    )
+    .map_err(|e| error(format!("persist SSH reconnect state: {e:?}")))?;
+    let abs = state_root.join(rel);
+    let meta = std::fs::symlink_metadata(&abs).map_err(error)?;
+    require(
+        meta.is_file() && !meta.file_type().is_symlink(),
+        "unsafe SSH reconnect state file",
+    )?;
+    if meta.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(&abs, std::fs::Permissions::from_mode(0o600)).map_err(error)?;
+    }
+    Ok(())
+}
+
+pub struct SshConnectPermit {
+    pub reused_control: bool,
+    state_root: PathBuf,
+    cwd: PathBuf,
+    target_key: String,
+    had_prior_backoff: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn admit_ssh_connection(
+    state_root: &Path,
+    cwd: &Path,
+    target_key: &str,
+    host: &str,
+    action: &str,
+    control_path: &str,
+    deadline: Instant,
+    clock: &dyn SshClock,
+) -> Result<SshConnectPermit> {
+    let now_ms = clock.now_ms();
+    let reused = control_connection_open(control_path);
+    record_private_control_log(
+        state_root,
+        action,
+        target_key,
+        host,
+        control_path,
+        reused,
+        now_ms,
+    );
+    if reused {
+        return Ok(SshConnectPermit {
+            reused_control: true,
+            state_root: state_root.to_path_buf(),
+            cwd: cwd.to_path_buf(),
+            target_key: target_key.to_owned(),
+            had_prior_backoff: false,
+        });
+    }
+    let _guard = lock_ssh_connections(state_root, cwd, deadline, false)?;
+    let mut state = read_ssh_connections(state_root)?;
+    let now_ms = clock.now_ms();
+    let entry = state["targets"]
+        .as_object_mut()
+        .expect("validated targets object")
+        .entry(target_key.to_owned())
+        .or_insert_with(|| {
+            serde_json::json!({
+                "connect_timestamps_ms": [],
+                "consecutive_failures": 0,
+                "backoff_until_ms": 0,
+            })
+        });
+    let backoff_until_ms = entry
+        .get("backoff_until_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let consecutive_failures = entry
+        .get("consecutive_failures")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
+    let mut timestamps: Vec<u64> = entry
+        .get("connect_timestamps_ms")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_u64())
+                .filter(|&ts| ts.saturating_add(RECONNECT_WINDOW_MS) > now_ms)
+                .collect()
+        })
+        .unwrap_or_default();
+    timestamps.sort_unstable();
+
+    if backoff_until_ms > now_ms {
+        let retry_at = format_rfc3339_ms(backoff_until_ms);
+        let wait_secs = (backoff_until_ms - now_ms).div_ceil(1000);
+        return Err(status(
+            75,
+            format!(
+                "SSH reconnect backoff active for target {target_key}; retry at {retry_at} (in {wait_secs}s)"
+            ),
+        ));
+    }
+    if timestamps.len() >= MAX_NEW_CONNECTIONS_PER_HOUR {
+        let retry_ms = timestamps[0].saturating_add(RECONNECT_WINDOW_MS);
+        let retry_at = format_rfc3339_ms(retry_ms);
+        let wait_secs = retry_ms.saturating_sub(now_ms).div_ceil(1000);
+        return Err(status(
+            75,
+            format!(
+                "SSH connection rate limit (12/hour) exceeded for target {target_key}; retry at {retry_at} (in {wait_secs}s)"
+            ),
+        ));
+    }
+    timestamps.push(now_ms);
+    entry["connect_timestamps_ms"] = serde_json::json!(timestamps);
+    write_ssh_connections(state_root, &state)?;
+    Ok(SshConnectPermit {
+        reused_control: false,
+        state_root: state_root.to_path_buf(),
+        cwd: cwd.to_path_buf(),
+        target_key: target_key.to_owned(),
+        had_prior_backoff: consecutive_failures > 0 || backoff_until_ms > 0,
+    })
+}
+
+pub fn record_ssh_outcome(
+    permit: &SshConnectPermit,
+    connect_failed: bool,
+    deadline: Instant,
+    clock: &dyn SshClock,
+) -> Result<()> {
+    if !connect_failed && !permit.had_prior_backoff {
+        return Ok(());
+    }
+    let _guard = lock_ssh_connections(&permit.state_root, &permit.cwd, deadline, true)?;
+    let mut state = read_ssh_connections(&permit.state_root)?;
+    let now_ms = clock.now_ms();
+    let entry = state["targets"]
+        .as_object_mut()
+        .expect("validated targets object")
+        .entry(permit.target_key.clone())
+        .or_insert_with(|| {
+            serde_json::json!({
+                "connect_timestamps_ms": [],
+                "consecutive_failures": 0,
+                "backoff_until_ms": 0,
+            })
+        });
+    if connect_failed {
+        let prev = entry
+            .get("consecutive_failures")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0);
+        let next_failures = prev.saturating_add(1);
+        let delay_ms = compute_backoff_ms(next_failures, clock.jitter_permille(next_failures));
+        if permit.reused_control {
+            let mut timestamps: Vec<u64> = entry
+                .get("connect_timestamps_ms")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64())
+                        .filter(|&ts| ts.saturating_add(RECONNECT_WINDOW_MS) > now_ms)
+                        .collect()
+                })
+                .unwrap_or_default();
+            timestamps.push(now_ms);
+            timestamps.sort_unstable();
+            entry["connect_timestamps_ms"] = serde_json::json!(timestamps);
+        }
+        entry["consecutive_failures"] = next_failures.into();
+        entry["backoff_until_ms"] = now_ms.saturating_add(delay_ms).into();
+    } else {
+        entry["consecutive_failures"] = 0.into();
+        entry["backoff_until_ms"] = 0.into();
+    }
+    write_ssh_connections(&permit.state_root, &state)
 }
 
 fn json_response(code: i32, value: &serde_json::Value, pretty: bool) -> Result<Response> {
-    let mut stdout = if pretty {
-        serde_json::to_vec_pretty(value)
+    let redacted;
+    let out_val = if let Some(map) = value.as_object()
+        && map.contains_key("control_path")
+    {
+        let mut clean = map.clone();
+        clean.remove("control_path");
+        redacted = serde_json::Value::Object(clean);
+        &redacted
     } else {
-        serde_json::to_vec(value)
+        value
+    };
+    let mut stdout = if pretty {
+        serde_json::to_vec_pretty(out_val)
+    } else {
+        serde_json::to_vec(out_val)
     }
     .map_err(error)?;
     stdout.push(b'\n');
@@ -874,7 +1622,10 @@ fn lock_remote_op(
             cwd.join(expanded)
         }
     } else {
-        settings.home.join(".cache/oh-my-setting/locks")
+        std::env::var_os("XDG_CACHE_HOME")
+            .filter(|v| !v.is_empty())
+            .map_or_else(|| settings.home.join(".cache"), PathBuf::from)
+            .join("oh-my-setting/locks")
     };
     let stamp = sha256(
         resolved
@@ -1174,6 +1925,8 @@ struct DurableExecRequest<'a> {
     port: Option<u16>,
     remote: &'a str,
     target: Option<&'a str>,
+    target_key: &'a str,
+    control_persist: u64,
     snapshot: Option<&'a str>,
     snapshot_pins: Option<SnapshotPins>,
     head_sha: &'a str,
@@ -1183,6 +1936,7 @@ struct DurableExecRequest<'a> {
     pretty: bool,
     deadline: Instant,
     interrupted: &'a AtomicBool,
+    clock: &'a dyn SshClock,
 }
 
 fn request_matches(
@@ -1326,6 +2080,18 @@ fn run_durable_exec(req: DurableExecRequest<'_>) -> Result<Response> {
         };
     }
 
+    let permit = admit_ssh_connection(
+        req.repo,
+        req.cwd,
+        req.target_key,
+        req.host,
+        "exec",
+        req.control,
+        req.deadline,
+        req.clock,
+    )?;
+    let mut ssh = build_ssh(req.host, req.port, req.control, req.control_persist)?;
+
     let ts = now()?;
     let op_tag = new_frame_nonce();
     let mut record = serde_json::json!({
@@ -1341,7 +2107,6 @@ fn run_durable_exec(req: DurableExecRequest<'_>) -> Result<Response> {
         "target": req.target,
         "snapshot": req.snapshot,
         "command_sha256": command_sha256,
-        "control_path": req.control,
         "started_at": ts,
         "updated_at": ts,
         "completed_at": serde_json::Value::Null,
@@ -1476,13 +2241,31 @@ fi
         op_tag = quote(&op_tag),
     );
     let out = operation_output(
-        build_ssh(req.host, req.port, req.control).arg(format!("sh -lc {}", quote(&remote_script))),
+        ssh.arg(format!("sh -lc {}", quote(&remote_script))),
         req.repo,
         req.op_id,
         &mut record,
         req.deadline,
         req.interrupted,
     )?;
+    let out_code = exit_code(out.status);
+    record_ssh_outcome(
+        &permit,
+        is_connect_failure(out_code, &out.stdout, &out.stderr),
+        req.deadline,
+        req.clock,
+    )?;
+    if out.stdout.is_empty() && is_interactive_auth_failure(out_code, &out.stdout, &out.stderr) {
+        record["state"] = "failed".into();
+        record["failure_kind"] = "interactive_auth_unsupported".into();
+        record["exit_code"] = out_code.into();
+        record["stderr"] = INTERACTIVE_AUTH_UNSUPPORTED.into();
+        let ts = now()?;
+        record["updated_at"] = ts.clone().into();
+        record["completed_at"] = ts.into();
+        write_remote_op(req.repo, req.op_id, &record)?;
+        return Err(error(INTERACTIVE_AUTH_UNSUPPORTED));
+    }
 
     let ssh_uncertain = out.status.code().is_none() || out.status.code() == Some(255);
     if ssh_uncertain || !out.status.success() {
@@ -1639,6 +2422,7 @@ struct ReconcileRequest<'a> {
     pretty: bool,
     deadline: Instant,
     interrupted: &'a AtomicBool,
+    clock: &'a dyn SshClock,
 }
 
 fn validate_existing_scope(
@@ -1648,7 +2432,7 @@ fn validate_existing_scope(
     port: Option<u16>,
     remote: Option<&str>,
     target: Option<&str>,
-) -> Result<String> {
+) -> Result<(String, String, u64, Option<u16>)> {
     require(
         record.get("host").and_then(|v| v.as_str()) == Some(host),
         "operation belongs to a different SSH host",
@@ -1659,6 +2443,12 @@ fn validate_existing_scope(
             "operation belongs to a different SSH port",
         )?;
     }
+    let effective_port = port.or_else(|| {
+        record
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u16::try_from(n).ok())
+    });
     let stored_remote = record
         .get("remote_dir")
         .and_then(|v| v.as_str())
@@ -1670,20 +2460,21 @@ fn validate_existing_scope(
             "operation belongs to a different --remote-dir",
         )?;
     }
-    enforce_target_policy(
+    let (target_key, control_persist) = enforce_target_policy(
         repo,
         target.or_else(|| record.get("target").and_then(|v| v.as_str())),
         host,
+        effective_port,
         &stored_remote,
     )?;
-    Ok(stored_remote)
+    Ok((stored_remote, target_key, control_persist, effective_port))
 }
 
 fn run_reconcile(req: ReconcileRequest<'_>) -> Result<Response> {
     let _guard = lock_remote_op(req.repo, req.cwd, req.op_id, req.deadline)?;
     let mut record =
         read_remote_op(req.repo, req.op_id)?.ok_or_else(|| error("unknown --op-id"))?;
-    let remote_dir = validate_existing_scope(
+    let (remote_dir, target_key, control_persist, effective_port) = validate_existing_scope(
         &record, req.repo, req.host, req.port, req.remote, req.target,
     )?;
     record["action"] = "reconcile".into();
@@ -1761,20 +2552,35 @@ emit_part "$tok" meta "$op_dir/meta.json"
         tok = quote(&tok),
         helpers = REMOTE_SH_HELPERS,
     );
-    let effective_port = req.port.or_else(|| {
-        record
-            .get("port")
-            .and_then(|v| v.as_u64())
-            .and_then(|n| u16::try_from(n).ok())
-    });
+    let permit = admit_ssh_connection(
+        req.repo,
+        req.cwd,
+        &target_key,
+        req.host,
+        "reconcile",
+        req.control,
+        req.deadline,
+        req.clock,
+    )?;
+    let mut ssh = build_ssh(req.host, effective_port, req.control, control_persist)?;
     let out = operation_output(
-        build_ssh(req.host, effective_port, req.control).arg(format!("sh -lc {}", quote(&script))),
+        ssh.arg(format!("sh -lc {}", quote(&script))),
         req.repo,
         req.op_id,
         &mut record,
         req.deadline,
         req.interrupted,
     )?;
+    let out_code = exit_code(out.status);
+    record_ssh_outcome(
+        &permit,
+        is_connect_failure(out_code, &out.stdout, &out.stderr),
+        req.deadline,
+        req.clock,
+    )?;
+    if out.stdout.is_empty() && is_interactive_auth_failure(out_code, &out.stdout, &out.stderr) {
+        return Err(error(INTERACTIVE_AUTH_UNSUPPORTED));
+    }
     if !out.status.success() {
         record["state"] = "unknown".into();
         record["updated_at"] = now()?.into();
@@ -1924,13 +2730,14 @@ struct CancelRequest<'a> {
     pretty: bool,
     deadline: Instant,
     interrupted: &'a AtomicBool,
+    clock: &'a dyn SshClock,
 }
 
 fn run_cancel(req: CancelRequest<'_>) -> Result<Response> {
     let _guard = lock_remote_op(req.repo, req.cwd, req.op_id, req.deadline)?;
     let mut record =
         read_remote_op(req.repo, req.op_id)?.ok_or_else(|| error("unknown --op-id"))?;
-    let remote_dir = validate_existing_scope(
+    let (remote_dir, target_key, control_persist, effective_port) = validate_existing_scope(
         &record, req.repo, req.host, req.port, req.remote, req.target,
     )?;
     record["action"] = "cancel".into();
@@ -2176,20 +2983,35 @@ emit_part "$tok" stderr "$op_dir/stderr"
         tok = quote(&tok),
         helpers = REMOTE_SH_HELPERS,
     );
-    let effective_port = req.port.or_else(|| {
-        record
-            .get("port")
-            .and_then(|v| v.as_u64())
-            .and_then(|n| u16::try_from(n).ok())
-    });
+    let permit = admit_ssh_connection(
+        req.repo,
+        req.cwd,
+        &target_key,
+        req.host,
+        "cancel",
+        req.control,
+        req.deadline,
+        req.clock,
+    )?;
+    let mut ssh = build_ssh(req.host, effective_port, req.control, control_persist)?;
     let out = operation_output(
-        build_ssh(req.host, effective_port, req.control).arg(format!("sh -lc {}", quote(&script))),
+        ssh.arg(format!("sh -lc {}", quote(&script))),
         req.repo,
         req.op_id,
         &mut record,
         req.deadline,
         req.interrupted,
     )?;
+    let out_code = exit_code(out.status);
+    record_ssh_outcome(
+        &permit,
+        is_connect_failure(out_code, &out.stdout, &out.stderr),
+        req.deadline,
+        req.clock,
+    )?;
+    if out.stdout.is_empty() && is_interactive_auth_failure(out_code, &out.stdout, &out.stderr) {
+        return Err(error(INTERACTIVE_AUTH_UNSUPPORTED));
+    }
     if !out.status.success() {
         record["state"] = "unknown".into();
         record["updated_at"] = now()?.into();
@@ -2282,6 +3104,9 @@ emit_part "$tok" stderr "$op_dir/stderr"
 #[derive(Clone, Copy)]
 struct CollectRequest<'a> {
     cwd: &'a Path,
+    repo: &'a Path,
+    target_key: &'a str,
+    control_persist: u64,
     host: &'a str,
     port: Option<u16>,
     remote: &'a str,
@@ -2294,6 +3119,7 @@ struct CollectRequest<'a> {
     pretty: bool,
     interrupted: &'a AtomicBool,
     deadline: Instant,
+    clock: &'a dyn SshClock,
 }
 
 struct TempFileGuard {
@@ -2845,7 +3671,28 @@ mod tests {
         assert_eq!(response.code, 0);
         let v: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
         assert_eq!(v["stdout"], "ok");
-        let ctrl = v["control_path"].as_str().unwrap();
+        assert!(
+            v.get("control_path").is_none(),
+            "probe JSON must not expose control_path: {v}"
+        );
+        let private_log = root.join(PRIVATE_CONTROL_LOG_FILE);
+        assert_eq!(
+            std::fs::symlink_metadata(&private_log)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+        let log_row: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(&private_log)
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        let ctrl = log_row["control_path"].as_str().unwrap();
         assert!(ctrl.len() <= 80);
         let ctrl_dir = Path::new(ctrl).parent().unwrap();
         assert_eq!(
@@ -2857,14 +3704,20 @@ mod tests {
             0
         );
         let args = std::fs::read_to_string(root.join("args")).unwrap();
+        let arg_lines: Vec<&str> = args.lines().collect();
+        assert!(arg_lines.contains(&"-a"), "{args}");
         for option in [
-            "ControlMaster=auto",
-            "ControlPersist=120",
-            "ControlPath=",
+            "ClearAllForwardings=yes",
+            "ForwardAgent=no",
             "BatchMode=yes",
             "ConnectTimeout=10",
+            "ServerAliveInterval=30",
+            "ServerAliveCountMax=3",
+            "ControlMaster=auto",
+            "ControlPersist=1800",
+            "ControlPath=",
         ] {
-            assert!(args.contains(option));
+            assert!(args.contains(option), "missing {option} in {args}");
         }
         let repo = repo.to_str().unwrap();
         let remote_str = remote.to_str().unwrap();
@@ -2948,6 +3801,7 @@ mod tests {
         );
         assert_eq!(response.code, 7);
         let v: serde_json::Value = serde_json::from_slice(&response.stdout).unwrap();
+        assert!(v.get("control_path").is_none());
         assert_eq!(v["schema"], 1);
         assert_eq!(v["stdout"], "hello");
         assert_eq!(v["exit_code"], 7);
@@ -3694,6 +4548,7 @@ exec sh -c "$last"
 "#;
             std::fs::write(&fake, script).unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let rt_dir = short_runtime_dir("sc8");
             let status = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -3705,12 +4560,14 @@ exec sh -c "$last"
                 .env("OMS_TEST_DIR", &temp.0)
                 .env("OMS_LOCK_DIR", temp.0.join("locks"))
                 .env("OMS_TEST_FAIL_STREAM", temp.0.join("fail_stream"))
+                .env("XDG_RUNTIME_DIR", &rt_dir.0)
                 .env_remove("OMS_HARNESS_CHILD")
                 .status()
                 .unwrap();
             assert!(status.success());
             return;
         }
+        let _mux = bind_control_mux("example", None);
         let root = PathBuf::from(std::env::var_os("OMS_TEST_DIR").unwrap());
         let repo = root.join("repo");
         let remote = root.join("remote");
@@ -4497,6 +5354,7 @@ exec sh -c "$last"
 "#;
             std::fs::write(&fake, script).unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let rt_dir = short_runtime_dir("can");
             let status = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -4514,12 +5372,14 @@ exec sh -c "$last"
                 .env("OMS_TEST_DROP_ACTIVE", temp.0.join("drop_active"))
                 .env("OMS_REMOTE_STATE_DIR", &state_dir)
                 .env("OMS_LOCK_DIR", temp.0.join("locks"))
+                .env("XDG_RUNTIME_DIR", &rt_dir.0)
                 .env_remove("OMS_HARNESS_CHILD")
                 .status()
                 .unwrap();
             assert!(status.success());
             return;
         }
+        let _mux = bind_control_mux("example", None);
         let root = PathBuf::from(std::env::var_os("OMS_TEST_DIR").unwrap());
         let state_dir = PathBuf::from(std::env::var_os("OMS_REMOTE_STATE_DIR").unwrap());
         let repo = root.join("repo");
@@ -5440,6 +6300,653 @@ exec sh -c "$last"
                 .unwrap()
                 .filter_map(|e| e.ok())
                 .any(|e| e.file_name().to_string_lossy().starts_with(".oms-collect-"))
+        );
+    }
+
+    struct ShortRuntimeDir(PathBuf);
+    impl Drop for ShortRuntimeDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn short_runtime_dir(tag: &str) -> ShortRuntimeDir {
+        for n in 0..1000 {
+            let p = PathBuf::from(format!("/tmp/oms-rt-{tag}-{}-{n}", std::process::id()));
+            match std::fs::DirBuilder::new().mode(0o700).create(&p) {
+                Ok(()) => return ShortRuntimeDir(p),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("short runtime dir: {e}"),
+            }
+        }
+        panic!("cannot allocate short runtime dir");
+    }
+
+    struct MuxSocketGuard {
+        _listener: std::os::unix::net::UnixListener,
+        path: PathBuf,
+    }
+    impl Drop for MuxSocketGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn bind_control_mux(host: &str, port: Option<u16>) -> MuxSocketGuard {
+        let ctrl = PathBuf::from(ssh_control_path(host, port).unwrap());
+        let _ = std::fs::remove_file(&ctrl);
+        let listener = std::os::unix::net::UnixListener::bind(&ctrl).unwrap();
+        MuxSocketGuard {
+            _listener: listener,
+            path: ctrl,
+        }
+    }
+
+    struct TestClock {
+        now_ms: AtomicU64,
+        jitter_permille: AtomicU64,
+    }
+    impl TestClock {
+        fn new(initial_ms: u64, jitter_permille: u64) -> Self {
+            Self {
+                now_ms: AtomicU64::new(initial_ms),
+                jitter_permille: AtomicU64::new(jitter_permille),
+            }
+        }
+        fn advance_ms(&self, delta_ms: u64) {
+            self.now_ms.fetch_add(delta_ms, Ordering::SeqCst);
+        }
+        fn set_jitter_permille(&self, jp: u64) {
+            self.jitter_permille.store(jp, Ordering::SeqCst);
+        }
+    }
+    impl SshClock for TestClock {
+        fn now_ms(&self) -> u64 {
+            self.now_ms.load(Ordering::SeqCst)
+        }
+        fn jitter_permille(&self, _consecutive_failures: u32) -> u64 {
+            self.jitter_permille.load(Ordering::SeqCst)
+        }
+    }
+
+    fn invoke_clock(args: &[&str], cwd: &Path, clock: &dyn SshClock) -> Response {
+        run_with_clock(
+            &args.iter().map(OsString::from).collect::<Vec<_>>(),
+            cwd,
+            &AtomicBool::new(false),
+            clock,
+        )
+    }
+
+    #[test]
+    fn control_persist_backoff_hourly_cap_interactive_auth_and_legacy_approval() {
+        if std::env::var_os("OMS_TEST_SSH_SPEC3").is_none() {
+            let temp = TempDir::new().unwrap();
+            let rt_dir = short_runtime_dir("sp3");
+            let fake = temp.0.join("ssh");
+            let script = concat!(
+                "#!/bin/sh\n",
+                "printf '%s\\n' \"$@\" > \"$OMS_TEST_ARGS\"\n",
+                "printf '1\\n' >> \"$OMS_TEST_CALLS\"\n",
+                "mode=$(cat \"$OMS_TEST_MODE\" 2>/dev/null || printf 'ok')\n",
+                "case \"$mode\" in\n",
+                "  refused)\n",
+                "    printf 'ssh: connect to host cluster port 22: Connection refused\\n' >&2\n",
+                "    exit 255\n",
+                "    ;;\n",
+                "  otp)\n",
+                "    printf 'Authenticated with partial success.\\nVerification code: \\n' >&2\n",
+                "    exit 255\n",
+                "    ;;\n",
+                "  kbdint)\n",
+                "    printf 'Permission denied (publickey,keyboard-interactive).\\n' >&2\n",
+                "    exit 255\n",
+                "    ;;\n",
+                "  pw)\n",
+                "    printf 'Enter pass",
+                "word:\\n' >&2\n",
+                "    exit 255\n",
+                "    ;;\n",
+                "  pubkey)\n",
+                "    printf 'Permission denied (publickey).\\n' >&2\n",
+                "    exit 255\n",
+                "    ;;\n",
+                "esac\n",
+                "for last do :; done\n",
+                "exec sh -c \"$last\"\n",
+            );
+            std::fs::write(&fake, script).unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ssh_adapter::tests::control_persist_backoff_hourly_cap_interactive_auth_and_legacy_approval",
+                    "--nocapture",
+                ])
+                .env("OMS_TEST_SSH_SPEC3", "1")
+                .env("OMS_SSH_BIN", &fake)
+                .env("OMS_TEST_DIR", &temp.0)
+                .env("OMS_TEST_ARGS", temp.0.join("args"))
+                .env("OMS_TEST_CALLS", temp.0.join("calls"))
+                .env("OMS_TEST_MODE", temp.0.join("mode"))
+                .env("OMS_LOCK_DIR", temp.0.join("locks"))
+                .env("XDG_RUNTIME_DIR", &rt_dir.0)
+                .env_remove("OMS_HARNESS_CHILD")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        use crate::value::*;
+        let root = PathBuf::from(std::env::var_os("OMS_TEST_DIR").unwrap());
+        let args_file = PathBuf::from(std::env::var_os("OMS_TEST_ARGS").unwrap());
+        let calls_file = PathBuf::from(std::env::var_os("OMS_TEST_CALLS").unwrap());
+        let mode_file = PathBuf::from(std::env::var_os("OMS_TEST_MODE").unwrap());
+        let call_count = || -> usize {
+            std::fs::read_to_string(&calls_file)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+
+        let repo = root.join("repo");
+        let remote = root.join("remote");
+        init_temp_git_repo(&repo);
+        init_temp_git_repo(&remote);
+        std::fs::create_dir_all(repo.join(".oms/runtime")).unwrap();
+        let rs = repo.to_str().unwrap();
+        let rd = remote.to_str().unwrap();
+
+        // 1. Existing target file without `control_persist` loads, keeps its exact approval
+        //    fingerprint, and uses default ControlPersist=1800; adding `control_persist`
+        //    preserves the identical approval fingerprint.
+        let legacy_identity = object([
+            ("ssh_alias", string("legacy-host")),
+            ("workdir", string("~/project")),
+            ("scheduler", string("none")),
+            ("scratch_root", string("")),
+        ]);
+        let expected_fp = sha(canonical(&legacy_identity).unwrap());
+        let mut legacy_row = object([
+            ("ssh_alias", string("legacy-host")),
+            ("workdir", string(rd)),
+            ("scheduler", string("none")),
+            ("scratch_root", string("")),
+        ]);
+        let rd_fp = sha(canonical(&legacy_row).unwrap());
+        legacy_row.set("execution_approved", b(true)).unwrap();
+        legacy_row
+            .set("approved_fingerprint", string(&rd_fp))
+            .unwrap();
+        let mut home_row = legacy_identity;
+        home_row.set("execution_approved", b(true)).unwrap();
+        home_row
+            .set("approved_fingerprint", string(&expected_fp))
+            .unwrap();
+        assert!(crate::targets::approved(&home_row).unwrap());
+        assert_eq!(
+            crate::targets::control_persist(&home_row).unwrap(),
+            crate::targets::DEFAULT_CONTROL_PERSIST
+        );
+        home_row.set("control_persist", number(3600)).unwrap();
+        assert!(
+            crate::targets::approved(&home_row).unwrap(),
+            "adding control_persist must not invalidate existing approval fingerprint"
+        );
+        assert_eq!(crate::targets::control_persist(&home_row).unwrap(), 3600);
+
+        let write_targets = |row: Value| {
+            let reg = object([("schema", number(1)), ("targets", object([("gpu", row)]))]);
+            std::fs::write(
+                repo.join(".oms/runtime/targets.json"),
+                canonical(&reg).unwrap(),
+            )
+            .unwrap();
+        };
+        write_targets(legacy_row.clone());
+
+        let clock = TestClock::new(1_700_000_000_000, 500);
+        let ok_default = invoke_clock(
+            &[
+                "exec",
+                "--repo",
+                rs,
+                "--host",
+                "legacy-host",
+                "--remote-dir",
+                rd,
+                "--target",
+                "gpu",
+                "--",
+                "true",
+            ],
+            &root,
+            &clock,
+        );
+        assert_eq!(
+            ok_default.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&ok_default.stderr)
+        );
+        let captured = std::fs::read_to_string(&args_file).unwrap();
+        assert!(captured.contains("ControlPersist=1800"), "{captured}");
+
+        // 2. Custom `control_persist` (60, 7200, 14400) is honored; invalid values are refused.
+        for valid_secs in [60u64, 7200, 14400] {
+            let mut row = legacy_row.clone();
+            row.set("control_persist", number(valid_secs)).unwrap();
+            write_targets(row);
+            clock.advance_ms(60_000);
+            let res = invoke_clock(
+                &[
+                    "exec",
+                    "--repo",
+                    rs,
+                    "--host",
+                    "legacy-host",
+                    "--remote-dir",
+                    rd,
+                    "--target",
+                    "gpu",
+                    "--",
+                    "true",
+                ],
+                &root,
+                &clock,
+            );
+            assert_eq!(res.code, 0, "{}", String::from_utf8_lossy(&res.stderr));
+            let captured = std::fs::read_to_string(&args_file).unwrap();
+            assert!(
+                captured.contains(&format!("ControlPersist={valid_secs}")),
+                "{captured}"
+            );
+        }
+        let calls_before_invalid = call_count();
+        for bad_json in [
+            Value::Number("0".into()),
+            Value::Number("59".into()),
+            Value::Number("14401".into()),
+            Value::Number("-5".into()),
+            Value::Number("120.5".into()),
+            string("1800"),
+            b(true),
+            Value::Null,
+        ] {
+            let mut row = legacy_row.clone();
+            row.set("control_persist", bad_json.clone()).unwrap();
+            write_targets(row);
+            let bad_exec = invoke_clock(
+                &[
+                    "exec",
+                    "--repo",
+                    rs,
+                    "--host",
+                    "legacy-host",
+                    "--remote-dir",
+                    rd,
+                    "--target",
+                    "gpu",
+                    "--",
+                    "true",
+                ],
+                &root,
+                &clock,
+            );
+            assert_eq!(bad_exec.code, 2, "{bad_json:?}");
+            let bad_probe = invoke_clock(
+                &[
+                    "probe",
+                    "--repo",
+                    rs,
+                    "--host",
+                    "legacy-host",
+                    "--target",
+                    "gpu",
+                ],
+                &root,
+                &clock,
+            );
+            assert_eq!(bad_probe.code, 2, "{bad_json:?}");
+        }
+        assert_eq!(
+            call_count(),
+            calls_before_invalid,
+            "invalid control_persist must refuse before spawning ssh"
+        );
+
+        // 3. Interactive-auth stub failures produce the exact unsupported message, while
+        //    non-interactive publickey rejection stays an ordinary SSH exit without it.
+        let mut auth_row = object([
+            ("ssh_alias", string("otp-host")),
+            ("workdir", string(rd)),
+            ("scheduler", string("none")),
+            ("scratch_root", string("")),
+        ]);
+        let auth_fp = sha(canonical(&auth_row).unwrap());
+        auth_row.set("execution_approved", b(true)).unwrap();
+        auth_row
+            .set("approved_fingerprint", string(&auth_fp))
+            .unwrap();
+        let reg = object([
+            ("schema", number(1)),
+            ("targets", object([("otp-box", auth_row)])),
+        ]);
+        std::fs::write(
+            repo.join(".oms/runtime/targets.json"),
+            canonical(&reg).unwrap(),
+        )
+        .unwrap();
+
+        for mode in ["otp", "kbdint", "pw"] {
+            std::fs::write(&mode_file, mode).unwrap();
+            clock.advance_ms(RECONNECT_WINDOW_MS + 1_000);
+            let probe_fail = invoke_clock(
+                &[
+                    "probe", "--repo", rs, "--host", "otp-host", "--target", "otp-box",
+                ],
+                &root,
+                &clock,
+            );
+            assert_eq!(probe_fail.code, 2, "{mode}");
+            assert!(
+                String::from_utf8_lossy(&probe_fail.stderr).contains(INTERACTIVE_AUTH_UNSUPPORTED),
+                "{mode}: {}",
+                String::from_utf8_lossy(&probe_fail.stderr)
+            );
+
+            clock.advance_ms(RECONNECT_WINDOW_MS + 1_000);
+            let exec_fail = invoke_clock(
+                &[
+                    "exec",
+                    "--repo",
+                    rs,
+                    "--host",
+                    "otp-host",
+                    "--remote-dir",
+                    rd,
+                    "--target",
+                    "otp-box",
+                    "--op-id",
+                    &format!("op-auth-{mode}"),
+                    "--",
+                    "true",
+                ],
+                &root,
+                &clock,
+            );
+            assert_eq!(exec_fail.code, 2, "{mode}");
+            assert!(
+                String::from_utf8_lossy(&exec_fail.stderr).contains(INTERACTIVE_AUTH_UNSUPPORTED),
+                "{mode}: {}",
+                String::from_utf8_lossy(&exec_fail.stderr)
+            );
+        }
+        std::fs::write(&mode_file, "pubkey").unwrap();
+        clock.advance_ms(RECONNECT_WINDOW_MS + 1_000);
+        let pubkey_probe = invoke_clock(
+            &[
+                "probe", "--repo", rs, "--host", "otp-host", "--target", "otp-box",
+            ],
+            &root,
+            &clock,
+        );
+        assert_eq!(pubkey_probe.code, 255);
+        assert!(
+            !String::from_utf8_lossy(&pubkey_probe.stderr).contains(INTERACTIVE_AUTH_UNSUPPORTED)
+        );
+
+        // 4. Exponential backoff with jitter (start 5 s, cap 10 min) using injectable clock.
+        assert_eq!(compute_backoff_ms(1, 0), 5_000);
+        assert_eq!(compute_backoff_ms(1, 500), 5_500);
+        assert_eq!(compute_backoff_ms(2, 500), 11_000);
+        assert_eq!(compute_backoff_ms(3, 500), 22_000);
+        assert_eq!(compute_backoff_ms(10, 0), 600_000);
+        assert_eq!(compute_backoff_ms(10, 500), 570_000);
+        assert!(compute_backoff_ms(20, 1000) <= 600_000);
+
+        let mut backoff_row = object([
+            ("ssh_alias", string("backoff-host")),
+            ("workdir", string(rd)),
+            ("scheduler", string("none")),
+            ("scratch_root", string("")),
+        ]);
+        let bf_fp = sha(canonical(&backoff_row).unwrap());
+        backoff_row.set("execution_approved", b(true)).unwrap();
+        backoff_row
+            .set("approved_fingerprint", string(&bf_fp))
+            .unwrap();
+        let mut cap_row = object([
+            ("ssh_alias", string("cap-host")),
+            ("workdir", string(rd)),
+            ("scheduler", string("none")),
+            ("scratch_root", string("")),
+        ]);
+        let cap_fp = sha(canonical(&cap_row).unwrap());
+        cap_row.set("execution_approved", b(true)).unwrap();
+        cap_row
+            .set("approved_fingerprint", string(&cap_fp))
+            .unwrap();
+        let reg = object([
+            ("schema", number(1)),
+            (
+                "targets",
+                object([("backoff-target", backoff_row), ("cap-target", cap_row)]),
+            ),
+        ]);
+        std::fs::write(
+            repo.join(".oms/runtime/targets.json"),
+            canonical(&reg).unwrap(),
+        )
+        .unwrap();
+
+        std::fs::write(&mode_file, "refused").unwrap();
+        clock.set_jitter_permille(500); // failure 1 => 5_500 ms, failure 2 => 11_000 ms
+        let f1 = invoke_clock(
+            &[
+                "probe",
+                "--repo",
+                rs,
+                "--host",
+                "backoff-host",
+                "--target",
+                "backoff-target",
+            ],
+            &root,
+            &clock,
+        );
+        assert_eq!(f1.code, 255);
+        let after_f1_calls = call_count();
+
+        clock.advance_ms(5_499);
+        let blocked_1 = invoke_clock(
+            &[
+                "probe",
+                "--repo",
+                rs,
+                "--host",
+                "backoff-host",
+                "--target",
+                "backoff-target",
+            ],
+            &root,
+            &clock,
+        );
+        assert_eq!(blocked_1.code, 75);
+        let err_1 = String::from_utf8_lossy(&blocked_1.stderr);
+        assert!(
+            err_1.contains("backoff-target") && err_1.contains("retry at 20"),
+            "{err_1}"
+        );
+        assert_eq!(
+            call_count(),
+            after_f1_calls,
+            "backoff must block before ssh"
+        );
+
+        clock.advance_ms(1); // total +5_500 ms -> failure 2 allowed, sets 11_000 ms backoff
+        let f2 = invoke_clock(
+            &[
+                "probe",
+                "--repo",
+                rs,
+                "--host",
+                "backoff-host",
+                "--target",
+                "backoff-target",
+            ],
+            &root,
+            &clock,
+        );
+        assert_eq!(f2.code, 255);
+        assert_eq!(call_count(), after_f1_calls + 1);
+
+        clock.advance_ms(10_999);
+        assert_eq!(
+            invoke_clock(
+                &[
+                    "probe",
+                    "--repo",
+                    rs,
+                    "--host",
+                    "backoff-host",
+                    "--target",
+                    "backoff-target",
+                ],
+                &root,
+                &clock,
+            )
+            .code,
+            75
+        );
+        clock.advance_ms(1); // total +11_000 ms -> recovery succeeds and resets failure count
+        std::fs::write(&mode_file, "ok").unwrap();
+        let recovered = invoke_clock(
+            &[
+                "probe",
+                "--repo",
+                rs,
+                "--host",
+                "backoff-host",
+                "--target",
+                "backoff-target",
+            ],
+            &root,
+            &clock,
+        );
+        assert_eq!(recovered.code, 0);
+
+        // 5. Hourly cap (at most 12 new connections per target per hour); reusing an open
+        //    control connection does not count.
+        for i in 0..12 {
+            clock.advance_ms(10_000);
+            let res = invoke_clock(
+                &[
+                    "probe",
+                    "--repo",
+                    rs,
+                    "--host",
+                    "cap-host",
+                    "--target",
+                    "cap-target",
+                ],
+                &root,
+                &clock,
+            );
+            assert_eq!(
+                res.code,
+                0,
+                "connection {i}: {}",
+                String::from_utf8_lossy(&res.stderr)
+            );
+        }
+        let calls_at_cap = call_count();
+        clock.advance_ms(10_000);
+        let over_cap = invoke_clock(
+            &[
+                "probe",
+                "--repo",
+                rs,
+                "--host",
+                "cap-host",
+                "--target",
+                "cap-target",
+            ],
+            &root,
+            &clock,
+        );
+        assert_eq!(over_cap.code, 75);
+        let cap_msg = String::from_utf8_lossy(&over_cap.stderr);
+        assert!(
+            cap_msg.contains("cap-target") && cap_msg.contains("retry at 20"),
+            "{cap_msg}"
+        );
+        assert_eq!(call_count(), calls_at_cap, "capped call must not spawn ssh");
+
+        // Reusing an open control connection succeeds without counting against the cap.
+        let mux = bind_control_mux("cap-host", None);
+        for _ in 0..5 {
+            let reused = invoke_clock(
+                &[
+                    "probe",
+                    "--repo",
+                    rs,
+                    "--host",
+                    "cap-host",
+                    "--target",
+                    "cap-target",
+                ],
+                &root,
+                &clock,
+            );
+            assert_eq!(
+                reused.code,
+                0,
+                "{}",
+                String::from_utf8_lossy(&reused.stderr)
+            );
+        }
+        assert_eq!(call_count(), calls_at_cap + 5);
+        drop(mux);
+
+        // Once the control socket closes within the same hour, a 13th new connection is still refused.
+        assert_eq!(
+            invoke_clock(
+                &[
+                    "probe",
+                    "--repo",
+                    rs,
+                    "--host",
+                    "cap-host",
+                    "--target",
+                    "cap-target",
+                ],
+                &root,
+                &clock,
+            )
+            .code,
+            75
+        );
+
+        // Advancing past 1 hour from the earliest connection frees slots again.
+        clock.advance_ms(RECONNECT_WINDOW_MS);
+        let after_window = invoke_clock(
+            &[
+                "probe",
+                "--repo",
+                rs,
+                "--host",
+                "cap-host",
+                "--target",
+                "cap-target",
+            ],
+            &root,
+            &clock,
+        );
+        assert_eq!(
+            after_window.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&after_window.stderr)
         );
     }
 }

@@ -132,7 +132,17 @@ pub(super) fn collect(
     file: &mut impl Write,
 ) -> Result<(u64, String)> {
     resumable::check_request(req)?;
-    let mut command = build_ssh(req.host, req.port, req.control);
+    let permit = admit_ssh_connection(
+        req.repo,
+        req.cwd,
+        req.target_key,
+        req.host,
+        "collect",
+        req.control,
+        req.deadline,
+        req.clock,
+    )?;
+    let mut command = build_ssh(req.host, req.port, req.control, req.control_persist)?;
     command.arg(format!("sh -lc {}", quote(script)));
     let argv = std::iter::once(command.get_program())
         .chain(command.get_args())
@@ -239,11 +249,21 @@ pub(super) fn collect(
                 }
                 require(done.output_complete(), "collection output is incomplete")?;
                 let exit = done.exit.map_or(1, |exit| exit.shell_code());
+                let stderr = done
+                    .stderr
+                    .as_ref()
+                    .map_or(&[][..], |capture| capture.bytes.as_slice());
+                let empty_stdout: &[u8] = if total == 0 { &[] } else { b"x" };
+                record_ssh_outcome(
+                    &permit,
+                    is_connect_failure(exit, empty_stdout, stderr),
+                    req.deadline,
+                    req.clock,
+                )?;
                 if exit != 0 {
-                    let stderr = done
-                        .stderr
-                        .as_ref()
-                        .map_or(&[][..], |capture| capture.bytes.as_slice());
+                    if total == 0 && is_interactive_auth_failure(exit, b"", stderr) {
+                        return Err(error(INTERACTIVE_AUTH_UNSUPPORTED));
+                    }
                     return Err(status(
                         exit,
                         format!(

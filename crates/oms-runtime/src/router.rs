@@ -512,7 +512,23 @@ pub fn dispatch(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
                             !r.has("scratch-root") || !r.text("scratch-root", "")?.is_empty(),
                             "--scratch-root must be non-empty",
                         )?;
-                        crate::targets::update_with_options(
+                        let control_persist = if r.has("control-persist") {
+                            let raw = r.integer(
+                                "control-persist",
+                                crate::targets::DEFAULT_CONTROL_PERSIST as i128,
+                            )?;
+                            let secs = u64::try_from(raw).map_err(|_| {
+                                error(format!(
+                                    "control_persist must be between {} and {} seconds",
+                                    crate::targets::MIN_CONTROL_PERSIST,
+                                    crate::targets::MAX_CONTROL_PERSIST
+                                ))
+                            })?;
+                            Some(crate::targets::validate_control_persist(secs)?)
+                        } else {
+                            None
+                        };
+                        crate::targets::update_with_persist(
                             rt,
                             name,
                             Some(r.text("ssh-alias", "")?),
@@ -525,6 +541,7 @@ pub fn dispatch(rt: &Runtime<'_>, r: &Request) -> Result<Response> {
                             &strings(&r.all("capability"))?,
                             r.text("scheduler", "none")?,
                             r.text("scratch-root", "")?,
+                            control_persist,
                         )?
                     }
                     "remove" => crate::targets::update(rt, name, None, None)?,

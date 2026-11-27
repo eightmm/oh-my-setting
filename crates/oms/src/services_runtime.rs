@@ -1093,6 +1093,8 @@ pub(crate) struct RuntimeServices<'a> {
     apptainer: Option<PathBuf>,
     #[cfg(test)]
     lock_timeout: Option<Duration>,
+    #[cfg(test)]
+    ssh_clock: Option<Arc<dyn oms_runtime::ssh_adapter::SshClock>>,
 }
 
 impl<'a> RuntimeServices<'a> {
@@ -1126,7 +1128,16 @@ impl<'a> RuntimeServices<'a> {
             scope,
             #[cfg(test)]
             lock_timeout: None,
+            #[cfg(test)]
+            ssh_clock: None,
         })
+    }
+    fn ssh_clock(&self) -> &dyn oms_runtime::ssh_adapter::SshClock {
+        #[cfg(test)]
+        if let Some(clock) = &self.ssh_clock {
+            return clock.as_ref();
+        }
+        &oms_runtime::ssh_adapter::SystemSshClock
     }
     /// Test constructor: `ProcessGroup` scope so multi-threaded harnesses can
     /// run children, and an explicit launcher and helper.
@@ -2570,6 +2581,14 @@ impl RuntimeServices<'_> {
                 "target workdir must be a same-path relative path",
             ));
         }
+        let state_root = request.state_repo.as_deref().unwrap_or(repo);
+        let control_persist_secs = match request.control_persist {
+            Some(secs) => oms_runtime::targets::validate_control_persist(secs)?,
+            None => oms_runtime::ssh_adapter::resolve_registered_target_persist(
+                state_root,
+                &request.name,
+            )?,
+        };
         let mut result = rvalue::object([
             ("schema", rvalue::number(1)),
             ("target", rvalue::string(&request.name)),
@@ -2677,22 +2696,31 @@ impl RuntimeServices<'_> {
             &branch,
             &seconds.to_string(),
         ];
-        let mut argv: Vec<OsString> = vec![self.ssh.clone()];
-        argv.extend(
-            [
-                "-a",
-                "-o",
-                "ClearAllForwardings=yes",
-                "-o",
-                "BatchMode=yes",
-                "--",
-            ]
-            .iter()
-            .map(OsString::from),
-        );
-        argv.push(request.ssh_alias.clone().into());
+        let control = oms_runtime::ssh_adapter::ssh_control_path(&request.ssh_alias, None)?;
+        let mut argv = oms_runtime::ssh_adapter::ssh_argv(
+            &self.ssh,
+            &request.ssh_alias,
+            None,
+            &control,
+            control_persist_secs,
+        )?;
         argv.extend(["sh", "-s", "--"].iter().map(OsString::from));
         argv.extend(values.iter().map(|v| OsString::from(shell_quote(v))));
+        let deadline = Instant::now() + request.timeout;
+        let permit = oms_runtime::ssh_adapter::admit_ssh_connection(
+            state_root,
+            repo,
+            &request.name,
+            &request.ssh_alias,
+            if request.sync {
+                "target-sync"
+            } else {
+                "target-status"
+            },
+            &control,
+            deadline,
+            self.ssh_clock(),
+        )?;
         let mut spec = ChildSpec::new(argv, request.timeout, GIT_LIMIT);
         spec.stdin = REMOTE_SCRIPT.as_bytes().to_vec();
         let remote = match run_child(self.scope, spec, self.cancel()) {
@@ -2706,6 +2734,16 @@ impl RuntimeServices<'_> {
         if remote.timed_out {
             return timed_out(&mut result);
         }
+        oms_runtime::ssh_adapter::record_ssh_outcome(
+            &permit,
+            oms_runtime::ssh_adapter::is_connect_failure(
+                remote.code,
+                &remote.stdout,
+                &remote.stderr,
+            ),
+            deadline,
+            self.ssh_clock(),
+        )?;
         let text = String::from_utf8_lossy(&remote.stdout).into_owned();
         let Some(
             [
@@ -2723,6 +2761,15 @@ impl RuntimeServices<'_> {
             ],
         ) = parse_remote_reply(remote.code, &text)
         else {
+            if oms_runtime::ssh_adapter::is_interactive_auth_failure(
+                remote.code,
+                &remote.stdout,
+                &remote.stderr,
+            ) {
+                return Err(plan_error(
+                    oms_runtime::ssh_adapter::INTERACTIVE_AUTH_UNSUPPORTED,
+                ));
+            }
             result.set("reason", rvalue::string(network_reason(&remote.stderr)))?;
             return Ok(result);
         };
@@ -4999,6 +5046,8 @@ exit 92
             name: "box".into(),
             ssh_alias: "alias".into(),
             workdir: "work/tree".into(),
+            control_persist: None,
+            state_repo: None,
             sync,
             sha: sha.map(str::to_owned),
             timeout: Duration::from_secs(secs),
@@ -5031,6 +5080,25 @@ exit 92
         assert!(
             malformed.is_err(),
             "a short sha is refused before any fetch"
+        );
+        for bad_persist in [0u64, 59, 14401] {
+            let mut bad = request(false, None, 10);
+            bad.control_persist = Some(bad_persist);
+            assert!(
+                rt.target_transport(repo.path(), &bad).is_err(),
+                "invalid control_persist {bad_persist} must refuse before network"
+            );
+        }
+        std::fs::create_dir_all(repo.path().join(".oms/runtime")).unwrap();
+        std::fs::write(
+            repo.path().join(".oms/runtime/targets.json"),
+            br#"{"schema":1,"targets":{"box":{"ssh_alias":"alias","workdir":"~/work/tree","control_persist":30}}}"#,
+        )
+        .unwrap();
+        assert!(
+            rt.target_transport(repo.path(), &request(false, None, 10))
+                .is_err(),
+            "invalid persisted control_persist must refuse before network"
         );
     }
 
@@ -5509,13 +5577,15 @@ exit 92
         remote.git(&["init", "-q", "-b", "main"]);
         remote.git(&["commit", "-q", "--allow-empty", "-m", "init"]);
         remote.git(&["remote", "add", "origin", origin]);
-        // A fake ssh: drop the options and alias, then run the remote command
-        // locally with the fake remote HOME (stdin carries the script).
+        // A fake ssh: record argv, drop the options and alias, then run the remote
+        // command locally with the fake remote HOME (stdin carries the script).
+        let args_log = home.path().join("ssh-args");
         let fake = home.path().join("fake-ssh");
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nshift\nHOME='{}' exec \"$@\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nshift\nHOME='{}' exec \"$@\"\n",
+                args_log.display(),
                 home.path().display()
             ),
         )
@@ -5530,6 +5600,8 @@ exit 92
             name: "box".into(),
             ssh_alias: "alias".into(),
             workdir: workdir.into(),
+            control_persist: None,
+            state_repo: None,
             sync: false,
             sha: None,
             timeout: Duration::from_secs(30),
@@ -5539,6 +5611,26 @@ exit 92
             .target_transport(repo.path(), &request("work/tree"))
             .unwrap();
         assert!(ok.get("ok").truth(), "{ok:?}");
+        assert!(ok.opt("control_path").is_none(), "{ok:?}");
+        let recorded = std::fs::read_to_string(&args_log).unwrap();
+        let recorded_lines: Vec<&str> = recorded.lines().collect();
+        assert!(recorded_lines.contains(&"-a"), "{recorded}");
+        for expected_opt in [
+            "ClearAllForwardings=yes",
+            "ForwardAgent=no",
+            "BatchMode=yes",
+            "ConnectTimeout=10",
+            "ServerAliveInterval=30",
+            "ServerAliveCountMax=3",
+            "ControlMaster=auto",
+            "ControlPath=",
+            "ControlPersist=1800",
+        ] {
+            assert!(
+                recorded.contains(expected_opt),
+                "missing {expected_opt} in {recorded}"
+            );
+        }
         assert!(matches!(ok.get("reason"), Value::Null));
         assert_eq!(
             (ok.text("head"), ok.text("branch")),
@@ -5573,5 +5665,231 @@ exit 92
             (down.get("ok").truth(), down.text("reason")),
             (false, "no-network")
         );
+    }
+
+    #[test]
+    fn target_transport_enforces_persist_backoff_hourly_cap_and_interactive_auth() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::AtomicU64;
+
+        struct FakeSshClock {
+            now_ms: AtomicU64,
+            jitter: AtomicU64,
+        }
+        impl oms_runtime::ssh_adapter::SshClock for FakeSshClock {
+            fn now_ms(&self) -> u64 {
+                self.now_ms.load(Ordering::SeqCst)
+            }
+            fn jitter_permille(&self, _consecutive_failures: u32) -> u64 {
+                self.jitter.load(Ordering::SeqCst)
+            }
+        }
+
+        let (flag, repo) = (Arc::new(AtomicBool::new(false)), Dir::repo());
+        let hub = Dir::repo();
+        let home = Dir::new();
+        let origin = "https://example.invalid/owner/project.git";
+        repo.git(&["remote", "add", "origin", origin]);
+        let work = home.path().join("work/tree");
+        std::fs::create_dir_all(&work).unwrap();
+        let remote = Dir(work.clone());
+        remote.git(&["init", "-q", "-b", "main"]);
+        remote.git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        remote.git(&["remote", "add", "origin", origin]);
+
+        let args_log = home.path().join("ssh-args");
+        let mode_file = home.path().join("ssh-mode");
+        let calls_log = home.path().join("ssh-calls");
+        let fake = home.path().join("fake-ssh");
+        let script = format!(
+            concat!(
+                "#!/bin/sh\n",
+                "printf '%s\\n' \"$@\" > '{args}'\n",
+                "printf '1\\n' >> '{calls}'\n",
+                "mode=$(cat '{mode}' 2>/dev/null || printf 'ok')\n",
+                "case \"$mode\" in\n",
+                "  otp)\n",
+                "    printf 'Permission denied (publickey,keyboard-interactive).\\n' >&2\n",
+                "    exit 255\n",
+                "    ;;\n",
+                "  refused)\n",
+                "    printf 'ssh: connect to host target-svc-alias port 22: Connection refused\\n' >&2\n",
+                "    exit 255\n",
+                "    ;;\n",
+                "  pubkey)\n",
+                "    printf 'Permission denied (publickey).\\n' >&2\n",
+                "    exit 255\n",
+                "    ;;\n",
+                "esac\n",
+                "while [ \"$1\" != -- ]; do shift; done\n",
+                "shift\nshift\n",
+                "HOME='{home}' exec \"$@\"\n",
+            ),
+            args = args_log.display(),
+            calls = calls_log.display(),
+            mode = mode_file.display(),
+            home = home.path().display(),
+        );
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let clock = Arc::new(FakeSshClock {
+            now_ms: AtomicU64::new(1_750_000_000_000),
+            jitter: AtomicU64::new(500),
+        });
+        let mut rt = services(&flag, repo.path());
+        rt.ssh = fake.into_os_string();
+        rt.ssh_clock = Some(clock.clone());
+
+        // 1. Existing target record in hub runtime state without `control_persist` loads,
+        //    retains approval, and defaults to ControlPersist=1800; custom `control_persist`
+        //    updates ControlPersist without changing the approval fingerprint.
+        let alias = format!("svc-alias-{}", std::process::id());
+        let identity = rvalue::object([
+            ("ssh_alias", rvalue::string(&alias)),
+            ("workdir", rvalue::string("~/work/tree")),
+            ("scheduler", rvalue::string("none")),
+            ("scratch_root", rvalue::string("")),
+        ]);
+        let fp = oms_runtime::value::sha(oms_runtime::value::canonical(&identity).unwrap());
+        let mut target_row = identity;
+        target_row
+            .set("execution_approved", rvalue::b(true))
+            .unwrap();
+        target_row
+            .set("approved_fingerprint", rvalue::string(&fp))
+            .unwrap();
+        assert!(oms_runtime::targets::approved(&target_row).unwrap());
+
+        std::fs::create_dir_all(hub.path().join(".oms/runtime")).unwrap();
+        let write_hub_targets = |row: &Value| {
+            let reg = rvalue::object([
+                ("schema", rvalue::number(1)),
+                ("targets", rvalue::object([("cluster", row.clone())])),
+            ]);
+            std::fs::write(
+                hub.path().join(".oms/runtime/targets.json"),
+                oms_runtime::value::canonical(&reg).unwrap(),
+            )
+            .unwrap();
+        };
+        write_hub_targets(&target_row);
+
+        let req = TargetRequest {
+            name: "cluster".into(),
+            ssh_alias: alias.clone(),
+            workdir: "work/tree".into(),
+            control_persist: None,
+            state_repo: Some(hub.path().to_path_buf()),
+            sync: false,
+            sha: None,
+            timeout: Duration::from_secs(30),
+        };
+        let first_ok = rt.target_transport(repo.path(), &req).unwrap();
+        assert!(first_ok.get("ok").truth());
+        assert!(
+            std::fs::read_to_string(&args_log)
+                .unwrap()
+                .contains("ControlPersist=1800")
+        );
+        assert!(
+            hub.path()
+                .join(oms_runtime::ssh_adapter::RECONNECT_STATE_FILE)
+                .is_file(),
+            "reconnect limits must be stored in the hub's runtime state"
+        );
+
+        target_row
+            .set("control_persist", rvalue::number(3600))
+            .unwrap();
+        assert!(
+            oms_runtime::targets::approved(&target_row).unwrap(),
+            "approval fingerprint must not change when control_persist is set"
+        );
+        write_hub_targets(&target_row);
+        clock.now_ms.fetch_add(10_000, Ordering::SeqCst);
+        let second_ok = rt.target_transport(repo.path(), &req).unwrap();
+        assert!(second_ok.get("ok").truth());
+        assert!(
+            std::fs::read_to_string(&args_log)
+                .unwrap()
+                .contains("ControlPersist=3600")
+        );
+
+        // 2. Interactive-auth failure fails fast with the specific unsupported message,
+        //    whereas non-interactive publickey failure keeps reason="auth".
+        std::fs::write(&mode_file, "otp").unwrap();
+        clock.now_ms.fetch_add(10_000, Ordering::SeqCst);
+        let interactive_err = rt.target_transport(repo.path(), &req).unwrap_err();
+        assert_eq!(
+            interactive_err.message,
+            oms_runtime::ssh_adapter::INTERACTIVE_AUTH_UNSUPPORTED
+        );
+
+        // 3. Exponential backoff after failed connects (failure 1 => 5_500 ms, failure 2 => 11_000 ms
+        //    at jitter=500) and 12/hour new-connection cap in hub runtime state.
+        clock.now_ms.fetch_add(5_499, Ordering::SeqCst);
+        let in_backoff_1 = rt.target_transport(repo.path(), &req).unwrap_err();
+        assert_eq!(in_backoff_1.code, 75);
+        assert!(
+            in_backoff_1.message.contains("cluster")
+                && in_backoff_1.message.contains("retry at 20"),
+            "{}",
+            in_backoff_1.message
+        );
+        clock.now_ms.fetch_add(1, Ordering::SeqCst); // +5_500 ms -> failure 2 allowed
+        std::fs::write(&mode_file, "pubkey").unwrap();
+        let pubkey_res = rt.target_transport(repo.path(), &req).unwrap();
+        assert_eq!(pubkey_res.text("reason"), "auth");
+
+        clock.now_ms.fetch_add(10_999, Ordering::SeqCst);
+        let in_backoff_2 = rt.target_transport(repo.path(), &req).unwrap_err();
+        assert_eq!(in_backoff_2.code, 75);
+        assert!(
+            in_backoff_2.message.contains("cluster")
+                && in_backoff_2.message.contains("retry at 20"),
+            "{}",
+            in_backoff_2.message
+        );
+        clock.now_ms.fetch_add(1, Ordering::SeqCst); // +11_000 ms -> recovery resets failures
+        std::fs::write(&mode_file, "ok").unwrap();
+        assert!(
+            rt.target_transport(repo.path(), &req)
+                .unwrap()
+                .get("ok")
+                .truth()
+        );
+
+        // Reset window and open 12 new connections within one hour.
+        clock.now_ms.fetch_add(
+            oms_runtime::ssh_adapter::RECONNECT_WINDOW_MS + 1_000,
+            Ordering::SeqCst,
+        );
+        for _ in 0..12 {
+            clock.now_ms.fetch_add(1_000, Ordering::SeqCst);
+            assert!(
+                rt.target_transport(repo.path(), &req)
+                    .unwrap()
+                    .get("ok")
+                    .truth()
+            );
+        }
+        let capped = rt.target_transport(repo.path(), &req).unwrap_err();
+        assert_eq!(capped.code, 75);
+        assert!(
+            capped.message.contains("cluster") && capped.message.contains("retry at 20"),
+            "{}",
+            capped.message
+        );
+
+        // Reusing an open control connection does not count toward the hourly cap.
+        let ctrl_path =
+            PathBuf::from(oms_runtime::ssh_adapter::ssh_control_path(&alias, None).unwrap());
+        let _ = std::fs::remove_file(&ctrl_path);
+        let listener = std::os::unix::net::UnixListener::bind(&ctrl_path).unwrap();
+        let reused = rt.target_transport(repo.path(), &req);
+        drop(listener);
+        let _ = std::fs::remove_file(&ctrl_path);
+        assert!(reused.unwrap().get("ok").truth());
     }
 }
