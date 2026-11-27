@@ -123,7 +123,10 @@ pub(crate) fn claude_board_children(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{claude_board_children, claude_child_chat, claude_current_children};
+pub(crate) use linux::{
+    agent_id, claude_board_children, claude_child_chat, claude_current_children,
+    verified_session_record,
+};
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use linux::{
     handback_paths, handback_reads, lead_roster_opens, reset_test_counters, roster_reads,
@@ -643,8 +646,35 @@ mod linux {
             })
     }
 
-    fn agent_id(id: &str) -> bool {
+    pub(crate) fn agent_id(id: &str) -> bool {
         (8..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    /// Verify a Claude Code `sessions/<pid>.json` record against the process
+    /// identity (`pid`, `procStart`), canonical UUID `sessionId`, and repository
+    /// root, returning the proven `sessionId`.
+    pub(crate) fn verified_session_record(
+        record: &[u8],
+        pid: u32,
+        birth: &str,
+        repo: &Path,
+    ) -> Stage<String> {
+        let meta =
+            oms_panel_core::decode(record, RECORD_LIMIT as usize).map_err(|_| "session-record")?;
+        let session = text(&meta, "sessionId");
+        gate(
+            meta["pid"].as_u64() == Some(u64::from(pid))
+                && meta["procStart"]
+                    .as_str()
+                    .is_some_and(|start| Some(start) == start_time(birth))
+                && uuid(session),
+            "session-record",
+        )?;
+        gate(
+            Path::new(text(&meta, "cwd")).canonicalize().ok().as_deref() == Some(repo),
+            "session-cwd",
+        )?;
+        Ok(session.to_owned())
     }
 
     /// A row's `timestamp` when it parses as RFC 3339, kept as recorded.
@@ -709,21 +739,8 @@ mod linux {
         let sessions = config.dir("sessions", "sessions")?;
         let record_name = format!("{}.json", lead.pid);
         let record = sessions.read(&record_name, RECORD_LIMIT, "session-record")?;
-        let meta =
-            oms_panel_core::decode(&record, RECORD_LIMIT as usize).map_err(|_| "session-record")?;
-        let session = text(&meta, "sessionId");
-        gate(
-            meta["pid"].as_u64() == Some(u64::from(lead.pid))
-                && meta["procStart"]
-                    .as_str()
-                    .is_some_and(|start| Some(start) == start_time(lead.birth))
-                && uuid(session),
-            "session-record",
-        )?;
-        gate(
-            Path::new(text(&meta, "cwd")).canonicalize().ok().as_deref() == Some(repo),
-            "session-cwd",
-        )?;
+        let session = verified_session_record(&record, lead.pid, lead.birth, repo)?;
+        let session = session.as_str();
         let project = config
             .dir("projects", "projects")?
             .dir(&claude_project_key(repo).ok_or("project-key")?, "project")?;

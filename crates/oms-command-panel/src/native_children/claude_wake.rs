@@ -1,9 +1,7 @@
 //! Linux metadata hints for a managed Claude Lead's subagent transcript directory.
-use super::{claude_project_key, uuid};
-use crate::claude_lead_usage::linux::{
-    DIR, FILE, config_root, environ, open_dir, start_time, unchanged,
-};
-use crate::text;
+use super::claude_project_key;
+use crate::claude_child_chat::{agent_id, verified_session_record};
+use crate::claude_lead_usage::linux::{DIR, FILE, config_root, environ, open_dir, unchanged};
 use crate::wakeup::ChildWakeSource;
 use oms_panel_core::terminals;
 use rustix::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
@@ -43,12 +41,30 @@ pub(super) struct Request<'a> {
     pub(super) previous: Option<&'a Arc<SubagentsWatch>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TargetIdentity {
+    Project,
+    Session((fs::Dev, u64)),
+    Subagents {
+        session: (fs::Dev, u64),
+        subagents: (fs::Dev, u64),
+    },
+}
+
 enum Target {
+    Project {
+        watch: i32,
+    },
     Session {
         watch: i32,
+        dir: OwnedFd,
+        identity: (fs::Dev, u64),
+        retired_watch: Option<i32>,
     },
     Subagents {
         watch: i32,
+        session_dir: OwnedFd,
+        session_identity: (fs::Dev, u64),
         dir: OwnedFd,
         identity: (fs::Dev, u64),
         retired_watch: Option<i32>,
@@ -100,9 +116,10 @@ pub(crate) struct SubagentsWatch {
     root_identity: (fs::Dev, u64),
     record_name: String,
     record: Vec<u8>,
-    session_path: PathBuf,
-    session_dir: OwnedFd,
-    session_identity: (fs::Dev, u64),
+    project_path: PathBuf,
+    project_dir: OwnedFd,
+    project_identity: (fs::Dev, u64),
+    session_name: String,
     state: Mutex<WatchState>,
     lost: AtomicBool,
 }
@@ -158,16 +175,24 @@ impl SubagentsWatch {
         let root_identity = (root_stat.st_dev, root_stat.st_ino);
         let record_name = format!("{pid}.json");
         let record = read_session_record(&root, &record_name, uid)?;
-        let session = verified_session(&record, pid, birth, repo)?;
-        let session_path = Path::new("projects")
-            .join(claude_project_key(repo)?)
-            .join(session);
-        let (session_dir, session_stat) = claude_directory(&root, &session_path, uid)?;
-        let session_identity = (session_stat.st_dev, session_stat.st_ino);
-        let subagents = inspect_subagents(&session_dir, uid)?;
-        let subagents_identity = subagents
-            .as_ref()
-            .map(|(_, stat)| (stat.st_dev, stat.st_ino));
+        let session_name = verified_session_record(&record, pid, birth, repo).ok()?;
+        let project_path = Path::new("projects").join(claude_project_key(repo)?);
+        let (project_dir, project_stat) = claude_directory(&root, &project_path, uid)?;
+        let project_identity = (project_stat.st_dev, project_stat.st_ino);
+        let session_entry = inspect_child_dir(&project_dir, &session_name, uid)?;
+        let expected_target = match &session_entry {
+            None => TargetIdentity::Project,
+            Some((session_dir, session_stat)) => {
+                let session_id = (session_stat.st_dev, session_stat.st_ino);
+                match inspect_child_dir(session_dir, "subagents", uid)? {
+                    None => TargetIdentity::Session(session_id),
+                    Some((_, subagents_stat)) => TargetIdentity::Subagents {
+                        session: session_id,
+                        subagents: (subagents_stat.st_dev, subagents_stat.st_ino),
+                    },
+                }
+            }
+        };
         if let Some(previous) = request.previous.filter(|previous| {
             previous.active()
                 && previous.uid == uid
@@ -175,9 +200,10 @@ impl SubagentsWatch {
                 && previous.root_identity == root_identity
                 && previous.record_name == record_name
                 && previous.record == record
-                && previous.session_path == session_path
-                && previous.session_identity == session_identity
-                && previous.matches_target(subagents_identity)
+                && previous.project_path == project_path
+                && previous.project_identity == project_identity
+                && previous.session_name == session_name
+                && previous.matches_target(expected_target)
                 && previous.current()
         }) {
             return Some(Arc::clone(previous));
@@ -185,29 +211,35 @@ impl SubagentsWatch {
 
         let fd = init(CreateFlags::NONBLOCK | CreateFlags::CLOEXEC).ok()?;
         let mut proven = VecDeque::new();
-        let target = match subagents {
-            Some((dir, stat)) => {
-                let (target, existing) = arm_subagents(&fd, dir, stat, None)?;
+        let target = match session_entry {
+            Some((session_dir, session_stat)) => {
+                let (target, existing) =
+                    arm_session_or_subagents(&fd, session_dir, session_stat, uid, None)?;
                 for id in existing {
                     remember_in(&mut proven, &id);
                 }
                 target
             }
             None => {
-                let session_watch = add_watch(
+                let project_watch = add_watch(
                     &fd,
-                    format!("/proc/self/fd/{}", session_dir.as_raw_fd()),
+                    format!("/proc/self/fd/{}", project_dir.as_raw_fd()),
                     SESSION_WATCH_FLAGS,
                 )
                 .ok()?;
-                match inspect_subagents(&session_dir, uid)? {
-                    None => Target::Session {
-                        watch: session_watch,
+                match inspect_child_dir(&project_dir, &session_name, uid)? {
+                    None => Target::Project {
+                        watch: project_watch,
                     },
-                    Some((dir, stat)) => {
-                        let (target, existing) =
-                            arm_subagents(&fd, dir, stat, Some(session_watch))?;
-                        let _ = remove_watch(&fd, session_watch);
+                    Some((session_dir, session_stat)) => {
+                        let (target, existing) = arm_session_or_subagents(
+                            &fd,
+                            session_dir,
+                            session_stat,
+                            uid,
+                            Some(project_watch),
+                        )?;
+                        let _ = remove_watch(&fd, project_watch);
                         for id in existing {
                             remember_in(&mut proven, &id);
                         }
@@ -224,22 +256,33 @@ impl SubagentsWatch {
             root_identity,
             record_name,
             record,
-            session_path,
-            session_dir,
-            session_identity,
+            project_path,
+            project_dir,
+            project_identity,
+            session_name,
             state: Mutex::new(WatchState { target, proven }),
             lost: AtomicBool::new(false),
         });
         source.current().then_some(source)
     }
 
-    fn matches_target(&self, expected_subagents: Option<(fs::Dev, u64)>) -> bool {
+    fn matches_target(&self, expected: TargetIdentity) -> bool {
         let Ok(state) = self.state.lock() else {
             return false;
         };
-        match (&state.target, expected_subagents) {
-            (Target::Session { .. }, None) => true,
-            (Target::Subagents { identity, .. }, Some(expected)) => *identity == expected,
+        match (&state.target, expected) {
+            (Target::Project { .. }, TargetIdentity::Project) => true,
+            (Target::Session { identity, .. }, TargetIdentity::Session(expected)) => {
+                *identity == expected
+            }
+            (
+                Target::Subagents {
+                    session_identity,
+                    identity,
+                    ..
+                },
+                TargetIdentity::Subagents { session, subagents },
+            ) => *session_identity == session && *identity == subagents,
             _ => false,
         }
     }
@@ -264,25 +307,44 @@ impl SubagentsWatch {
         }
         if read_session_record(&self.root, &self.record_name, self.uid)
             .is_none_or(|record| record != self.record)
-            || private_dir_for(&self.session_dir, self.uid)
-                .is_none_or(|held| (held.st_dev, held.st_ino) != self.session_identity)
+            || private_dir_for(&self.project_dir, self.uid)
+                .is_none_or(|held| (held.st_dev, held.st_ino) != self.project_identity)
         {
             return false;
         }
-        let Some((named_session, named_session_stat)) =
-            claude_directory(&self.root, &self.session_path, self.uid)
+        let Some((named_project, named_project_stat)) =
+            claude_directory(&self.root, &self.project_path, self.uid)
         else {
             return false;
         };
-        if (named_session_stat.st_dev, named_session_stat.st_ino) != self.session_identity {
+        if (named_project_stat.st_dev, named_project_stat.st_ino) != self.project_identity {
             return false;
         }
         match target {
-            Target::Session { .. } => inspect_subagents(&named_session, self.uid).is_some(),
-            Target::Subagents { dir, identity, .. } => {
+            Target::Project { .. } => {
+                inspect_child_dir(&named_project, &self.session_name, self.uid).is_some()
+            }
+            Target::Session { dir, identity, .. } => {
                 private_dir_for(dir, self.uid)
                     .is_some_and(|held| (held.st_dev, held.st_ino) == *identity)
-                    && open_subagents(&named_session, self.uid)
+                    && open_child_dir(&named_project, &self.session_name, self.uid)
+                        .is_some_and(|(_, named)| (named.st_dev, named.st_ino) == *identity)
+                    && inspect_child_dir(dir, "subagents", self.uid).is_some()
+            }
+            Target::Subagents {
+                session_dir,
+                session_identity,
+                dir,
+                identity,
+                ..
+            } => {
+                private_dir_for(session_dir, self.uid)
+                    .is_some_and(|held| (held.st_dev, held.st_ino) == *session_identity)
+                    && open_child_dir(&named_project, &self.session_name, self.uid)
+                        .is_some_and(|(_, named)| (named.st_dev, named.st_ino) == *session_identity)
+                    && private_dir_for(dir, self.uid)
+                        .is_some_and(|held| (held.st_dev, held.st_ino) == *identity)
+                    && open_child_dir(session_dir, "subagents", self.uid)
                         .is_some_and(|(_, named)| (named.st_dev, named.st_ino) == *identity)
             }
         }
@@ -327,7 +389,63 @@ impl ChildWakeSource for SubagentsWatch {
                 return None;
             }
             match &mut state.target {
-                Target::Session { watch } => {
+                Target::Project { watch } => {
+                    let watch = *watch;
+                    if event.wd() != watch
+                        || flags.intersects(
+                            ReadFlags::IGNORED
+                                | ReadFlags::MOVE_SELF
+                                | ReadFlags::DELETE_SELF
+                                | ReadFlags::UNMOUNT,
+                        )
+                    {
+                        return None;
+                    }
+                    let Some(name) = event.file_name() else {
+                        if !self.current_target(&state.target) {
+                            return None;
+                        }
+                        continue;
+                    };
+                    if name.to_bytes() != self.session_name.as_bytes() {
+                        continue;
+                    }
+                    if !flags.contains(ReadFlags::ISDIR)
+                        || !flags.intersects(ReadFlags::CREATE | ReadFlags::MOVED_TO)
+                    {
+                        return None;
+                    }
+                    let (session_dir, session_stat) =
+                        open_child_dir(&self.project_dir, &self.session_name, self.uid)?;
+                    let (target, existing) = arm_session_or_subagents(
+                        &self.fd,
+                        session_dir,
+                        session_stat,
+                        self.uid,
+                        Some(watch),
+                    )?;
+                    let _ = remove_watch(&self.fd, watch);
+                    for id in existing {
+                        if state.remember_new(&id) {
+                            changed = true;
+                        }
+                    }
+                    state.target = target;
+                    if !self.current_target(&state.target) {
+                        return None;
+                    }
+                }
+                Target::Session {
+                    watch,
+                    retired_watch,
+                    ..
+                } => {
+                    if *retired_watch == Some(event.wd()) {
+                        if flags.contains(ReadFlags::IGNORED) {
+                            *retired_watch = None;
+                        }
+                        continue;
+                    }
                     let watch = *watch;
                     if event.wd() != watch
                         || flags.intersects(
@@ -353,8 +471,23 @@ impl ChildWakeSource for SubagentsWatch {
                     {
                         return None;
                     }
-                    let (dir, stat) = open_subagents(&self.session_dir, self.uid)?;
-                    let (target, existing) = arm_subagents(&self.fd, dir, stat, Some(watch))?;
+                    let Target::Session {
+                        dir: session_dir,
+                        identity: session_identity,
+                        ..
+                    } = std::mem::replace(&mut state.target, Target::Project { watch: -1 })
+                    else {
+                        unreachable!();
+                    };
+                    let (dir, stat) = open_child_dir(&session_dir, "subagents", self.uid)?;
+                    let (target, existing) = arm_subagents(
+                        &self.fd,
+                        session_dir,
+                        session_identity,
+                        dir,
+                        stat,
+                        Some(watch),
+                    )?;
                     let _ = remove_watch(&self.fd, watch);
                     for id in existing {
                         if state.remember_new(&id) {
@@ -423,11 +556,59 @@ fn claude_agent_filename_id(path: &Path) -> Option<&str> {
         .to_str()?
         .strip_prefix("agent-")?
         .strip_suffix(".jsonl")?;
-    ((8..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())).then_some(id)
+    agent_id(id).then_some(id)
+}
+
+fn arm_session_or_subagents(
+    fd: &OwnedFd,
+    session_dir: OwnedFd,
+    session_stat: Stat,
+    uid: u32,
+    retired_watch: Option<i32>,
+) -> Option<(Target, Vec<String>)> {
+    let session_identity = (session_stat.st_dev, session_stat.st_ino);
+    if let Some((dir, stat)) = inspect_child_dir(&session_dir, "subagents", uid)? {
+        return arm_subagents(fd, session_dir, session_identity, dir, stat, retired_watch);
+    }
+    let session_watch = add_watch(
+        fd,
+        format!("/proc/self/fd/{}", session_dir.as_raw_fd()),
+        SESSION_WATCH_FLAGS,
+    )
+    .ok()?;
+    match inspect_child_dir(&session_dir, "subagents", uid) {
+        Some(None) => Some((
+            Target::Session {
+                watch: session_watch,
+                dir: session_dir,
+                identity: session_identity,
+                retired_watch,
+            },
+            Vec::new(),
+        )),
+        Some(Some((dir, stat))) => {
+            let result = arm_subagents(
+                fd,
+                session_dir,
+                session_identity,
+                dir,
+                stat,
+                Some(session_watch),
+            );
+            let _ = remove_watch(fd, session_watch);
+            result
+        }
+        None => {
+            let _ = remove_watch(fd, session_watch);
+            None
+        }
+    }
 }
 
 fn arm_subagents(
     fd: &OwnedFd,
+    session_dir: OwnedFd,
+    session_identity: (fs::Dev, u64),
     dir: OwnedFd,
     stat: Stat,
     retired_watch: Option<i32>,
@@ -445,6 +626,8 @@ fn arm_subagents(
     Some((
         Target::Subagents {
             watch,
+            session_dir,
+            session_identity,
             dir,
             identity: (stat.st_dev, stat.st_ino),
             retired_watch,
@@ -461,17 +644,17 @@ fn private_dir_for(dir: &OwnedFd, uid: u32) -> Option<Stat> {
         .then_some(stat)
 }
 
-fn open_subagents(session_dir: &OwnedFd, uid: u32) -> Option<(OwnedFd, Stat)> {
-    let dir = fs::openat(session_dir, "subagents", DIR, Mode::empty()).ok()?;
+fn open_child_dir(parent: &OwnedFd, name: &str, uid: u32) -> Option<(OwnedFd, Stat)> {
+    let dir = fs::openat(parent, name, DIR, Mode::empty()).ok()?;
     let stat = private_dir_for(&dir, uid)?;
     Some((dir, stat))
 }
 
-fn inspect_subagents(session_dir: &OwnedFd, uid: u32) -> Option<Option<(OwnedFd, Stat)>> {
-    match fs::openat(session_dir, "subagents", DIR, Mode::empty()) {
+fn inspect_child_dir(parent: &OwnedFd, name: &str, uid: u32) -> Option<Option<(OwnedFd, Stat)>> {
+    match fs::openat(parent, name, DIR, Mode::empty()) {
         Ok(dir) => private_dir_for(&dir, uid).map(|stat| Some((dir, stat))),
         Err(rustix::io::Errno::NOENT) => matches!(
-            fs::statat(session_dir, "subagents", AtFlags::SYMLINK_NOFOLLOW),
+            fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW),
             Err(rustix::io::Errno::NOENT)
         )
         .then_some(None),
@@ -539,19 +722,4 @@ fn read_session_record(root: &OwnedFd, name: &str, uid: u32) -> Option<Vec<u8>> 
     (&file).take(size + 1).read_to_end(&mut body).ok()?;
     (body.len() == len && fs::fstat(&file).is_ok_and(|after| unchanged(&before, &after)))
         .then_some(body)
-}
-
-fn verified_session(record: &[u8], pid: u32, birth: &str, repo: &Path) -> Option<String> {
-    let meta = oms_panel_core::decode(record, RECORD_LIMIT as usize).ok()?;
-    let session = text(&meta, "sessionId");
-    if meta["pid"].as_u64() != Some(u64::from(pid))
-        || !meta["procStart"]
-            .as_str()
-            .is_some_and(|start| Some(start) == start_time(birth))
-        || !uuid(session)
-        || Path::new(text(&meta, "cwd")).canonicalize().ok().as_deref() != Some(repo)
-    {
-        return None;
-    }
-    Some(session.to_owned())
 }
