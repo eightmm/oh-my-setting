@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>OMS Home</title>
+<style>
+:root{
+  color-scheme:light dark;
+  font:14px/1.5 system-ui,sans-serif;
+  --bg:#fff;
+  --surface:#f6f6f6;
+  --ink:#1f1f1f;
+  --soft:#595959;
+  --line:#dadada;
+  --focus:#1467b4;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media(prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#1e1e1e;
+    --surface:#282828;
+    --ink:#f0f0f0;
+    --soft:#b5b5b5;
+    --line:#404040;
+    --focus:#96c7ff;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --bg:#1e1e1e;
+  --surface:#282828;
+  --ink:#f0f0f0;
+  --soft:#b5b5b5;
+  --line:#404040;
+  --focus:#96c7ff;
+}
+:root[data-theme="light"]{color-scheme:light}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink)}
+main{max-width:56rem;margin:0 auto;padding:1rem 1.25rem}
+header{display:flex;align-items:center;justify-content:space-between;gap:.75rem;padding-bottom:.75rem;border-bottom:1px solid var(--line)}
+h1{margin:0;font-size:1rem;font-weight:700}
+button{font:inherit;color:inherit;cursor:pointer;border:1px solid var(--line);border-radius:.45rem;background:var(--surface);padding:.35rem .8rem;min-height:2.25rem}
+button:disabled{opacity:.55;cursor:wait}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+#status{margin:.75rem 0 0;color:var(--soft);font-size:.85rem}
+#status:empty{display:none}
+#cards{list-style:none;margin:.75rem 0 0;padding:0;border:1px solid var(--line);border-radius:.5rem;background:var(--surface)}
+#cards:empty{display:none}
+#cards>li{padding:.55rem .8rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:.83rem}
+#cards>li+li{border-top:1px solid var(--line)}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>OMS Home</h1>
+    <button id="refresh" type="button">Refresh</button>
+  </header>
+  <p id="status" role="status" aria-live="polite"></p>
+  <ul id="cards"></ul>
+</main>
+<script>
+const pending = new Map();
+let sequence = 0;
+let hostOrigin = '*';
+let initializing;
+let busy = false;
+let disposed = false;
+
+const statusEl = document.getElementById('status');
+const cardsEl = document.getElementById('cards');
+const refreshBtn = document.getElementById('refresh');
+
+function applyTheme(theme) {
+  const root = document.documentElement;
+  if (theme === 'light' || theme === 'dark') root.setAttribute('data-theme', theme);
+  else root.removeAttribute('data-theme');
+}
+
+function send(message, origin = hostOrigin) {
+  window.parent.postMessage({jsonrpc: '2.0', ...message}, origin);
+}
+
+function request(method, params, timeout = 30000) {
+  if (disposed) return Promise.reject(new Error('Closed.'));
+  const id = ++sequence;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error('Request timed out.'));
+    }, timeout);
+    pending.set(id, {resolve, reject, timer});
+    send({id, method, params});
+  });
+}
+
+window.addEventListener('message', event => {
+  const msg = event.data;
+  if (event.source !== window.parent || (hostOrigin !== '*' && event.origin !== hostOrigin) ||
+      !msg || typeof msg !== 'object' || msg.jsonrpc !== '2.0') return;
+  if (typeof msg.method === 'string' && (typeof msg.id === 'string' || typeof msg.id === 'number')) {
+    const origin = event.origin && event.origin !== 'null' ? event.origin : '*';
+    if (msg.method === 'ui/resource-teardown' && !disposed) {
+      disposed = true;
+      refreshBtn.disabled = true;
+      statusEl.textContent = 'Closed.';
+      for (const call of pending.values()) {
+        clearTimeout(call.timer);
+        call.reject(new Error('Closed.'));
+      }
+      pending.clear();
+    }
+    const reply = msg.method === 'ping' || msg.method === 'ui/resource-teardown'
+      ? {result: {}} : {error: {code: -32601, message: 'Method not found'}};
+    send({id: msg.id, ...reply}, origin);
+    return;
+  }
+  if (disposed) return;
+  if (msg.method === 'ui/notifications/host-context-changed') {
+    if (msg.params && typeof msg.params === 'object' && 'theme' in msg.params) {
+      applyTheme(msg.params.theme);
+    }
+    return;
+  }
+  if ('method' in msg || ('result' in msg) === ('error' in msg) || !pending.has(msg.id)) return;
+  if (event.origin && event.origin !== 'null') hostOrigin = event.origin;
+  const call = pending.get(msg.id);
+  clearTimeout(call.timer);
+  pending.delete(msg.id);
+  if (msg.error) call.reject(new Error(msg.error.message || 'Host request failed.'));
+  else call.resolve(msg.result);
+});
+
+function initialize() {
+  if (!initializing) {
+    initializing = (async () => {
+      if (window.parent === window) throw new Error('Open OMS Home in an MCP App host.');
+      const info = await request('ui/initialize', {
+        appInfo: {name: 'oms-home', version: '0.1.0'},
+        appCapabilities: {availableDisplayModes: ['inline', 'fullscreen']},
+        protocolVersion: '2026-01-26'
+      });
+      applyTheme(info?.hostContext?.theme);
+      send({method: 'ui/notifications/initialized', params: {}});
+    })().catch(err => {
+      initializing = undefined;
+      throw err;
+    });
+  }
+  return initializing;
+}
+
+function renderCards(cards) {
+  cardsEl.replaceChildren();
+  if (!Array.isArray(cards)) {
+    statusEl.textContent = 'Project cards are unavailable on this connection.';
+    return;
+  }
+  if (cards.length === 0) {
+    statusEl.textContent = 'No projects configured.';
+    return;
+  }
+  statusEl.textContent = '';
+  for (const card of cards) {
+    const alias = typeof card?.alias === 'string' ? card.alias : '';
+    const state = typeof card?.state === 'string' ? card.state : 'unknown';
+    const main = typeof card?.main === 'string' && card.main ? card.main : 'none';
+    const crewTotal = typeof card?.crewTotal === 'number' ? String(card.crewTotal) : '0';
+    const li = document.createElement('li');
+    li.textContent = `${alias} \u00b7 state: ${state} \u00b7 main: ${main} \u00b7 crewTotal: ${crewTotal}`;
+    cardsEl.append(li);
+  }
+}
+
+async function refresh() {
+  if (busy || disposed) return;
+  busy = true;
+  refreshBtn.disabled = true;
+  statusEl.textContent = 'Loading projects\u2026';
+  try {
+    await initialize();
+    const result = await request('tools/call', {
+      name: 'oms_list_projects',
+      arguments: {cards: true}
+    });
+    if (!result || result.isError) {
+      throw new Error(result?.content?.[0]?.text || 'Unable to read project catalog.');
+    }
+    renderCards(result.structuredContent?.cards);
+  } catch (err) {
+    cardsEl.replaceChildren();
+    statusEl.textContent = err?.message || 'Unable to load projects.';
+  } finally {
+    busy = false;
+    refreshBtn.disabled = disposed;
+  }
+}
+
+refreshBtn.addEventListener('click', refresh);
+refresh();
+</script>
+</body>
+</html>

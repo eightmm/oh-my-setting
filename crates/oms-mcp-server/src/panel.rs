@@ -19,6 +19,7 @@ mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
 const URI: &str = "ui://oms/conversation-panel/v38.html";
+const HOME_URI: &str = "ui://oms/home/v1.html";
 const V37: &str = "ui://oms/conversation-panel/v37.html";
 const V33: &str = "ui://oms/conversation-panel/v33.html";
 const V34: &str = "ui://oms/conversation-panel/v34.html";
@@ -57,6 +58,7 @@ const V3: &str = "ui://oms/conversation-panel/v3.html";
 const V1: &str = "ui://oms/conversation-panel/v1.html";
 const V2: &str = "ui://oms/conversation-panel/v2.html";
 const OPEN: &str = "oms_open_panel";
+const OPEN_HOME: &str = "oms_open_home";
 const PROJECTS: &str = "oms_list_projects";
 const SNAPSHOT: &str = "oms_panel_snapshot";
 const WORK_ITEMS: &str = "oms_panel_work_items";
@@ -323,7 +325,7 @@ fn valid_call_id(request: &Value) -> bool {
 pub(super) fn open_request(request: &Value) -> bool {
     valid_call_id(request)
         && request["method"] == "tools/call"
-        && request["params"]["name"].as_str() == Some(OPEN)
+        && matches!(request["params"]["name"].as_str(), Some(OPEN | OPEN_HOME))
 }
 
 pub(super) fn runtime_request(request: &Value) -> bool {
@@ -364,7 +366,15 @@ pub(super) fn runtime_request(request: &Value) -> bool {
 fn project_read(name: &str) -> bool {
     matches!(
         name,
-        OPEN | PROJECTS | SNAPSHOT | WORK_ITEMS | USAGE | GIT | GRAPH | VIEW | CAPABILITIES
+        OPEN | OPEN_HOME
+            | PROJECTS
+            | SNAPSHOT
+            | WORK_ITEMS
+            | USAGE
+            | GIT
+            | GRAPH
+            | VIEW
+            | CAPABILITIES
     )
 }
 
@@ -386,6 +396,11 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         "Pass the exact alias from oms_list_projects when the host has a project map; the initial view is included only when project names an exact alias from oms_list_projects on hosts with a project map."
     );
     open_scope["leadConversations"] = json!({"type":"boolean","description":"Explicit intent to open provider Lead conversations. Opening the panel itself only displays it."});
+    let openai_ui = if profile == ToolProfile::McpApp {
+        json!({"entrypoints":[{"type":"global"}]})
+    } else {
+        json!({"entrypoints":[{"type":"thread"}]})
+    };
     let mut opener = make(
         OPEN,
         "Open the OMS panel (expands beside or over the conversation when the host allows it).",
@@ -397,11 +412,18 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     opener["_meta"]["com.google.antigravity/ui"] =
         json!({"entrypoints":[{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}]});
     opener["_meta"]["openai/outputTemplate"] = json!(URI);
-    opener["_meta"]["openai/ui"] = if profile == ToolProfile::McpApp {
-        json!({"entrypoints":[{"type":"global"}]})
-    } else {
-        json!({"entrypoints":[{"type":"thread"}]})
-    };
+    opener["_meta"]["openai/ui"] = openai_ui.clone();
+    let mut home_opener = make(
+        OPEN_HOME,
+        "Open the read-only OMS home page showing all host-configured projects.",
+        json!({}),
+        &[],
+        false,
+    );
+    home_opener["_meta"]["ui"]["resourceUri"] = json!(HOME_URI);
+    home_opener["_meta"]["com.google.antigravity/ui"] = json!({"entrypoints":[{"type":"aux_pane","title":"OMS Home"},{"type":"global","title":"OMS Home"}]});
+    home_opener["_meta"]["openai/outputTemplate"] = json!(HOME_URI);
+    home_opener["_meta"]["openai/ui"] = openai_ui;
     let ident = json!({"type":"string","pattern":"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$"});
     let mut chat = make(
         CHAT,
@@ -548,6 +570,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     prepare["_meta"]["ui"]["visibility"] = json!(["app"]);
     let all = json!([
         opener,
+        home_opener,
         chat,
         worker_output,
         record_issue,
@@ -1399,7 +1422,16 @@ impl Server<'_> {
         let result = match method {
             "resources/templates/list" => json!({"resourceTemplates":[]}),
             "resources/list" => {
-                json!({"resources":[{"uri":URI,"name":"oms-conversation-panel","title":"OMS","mimeType":MIME}]})
+                json!({"resources":[
+                    {"uri":URI,"name":"oms-conversation-panel","title":"OMS","mimeType":MIME},
+                    {"uri":HOME_URI,"name":"oms-home-panel","title":"OMS Home","mimeType":MIME}
+                ]})
+            }
+            "resources/read" if params["uri"].as_str() == Some(HOME_URI) => {
+                json!({"contents":[{
+                    "uri":HOME_URI,"mimeType":MIME,"text":include_str!("home-panel.html"),
+                    "_meta":{"ui":{"preferredDisplayMode":"fullscreen","csp":{"connectDomains":[],"resourceDomains":["https://fonts.googleapis.com","https://fonts.gstatic.com"]}}}
+                }]})
             }
             "resources/read"
                 if matches!(
@@ -1459,6 +1491,7 @@ impl Server<'_> {
                 let allowed: &[&str] = match name {
                     PROJECTS => &["cards"],
                     OPEN => &["project", "leadConversations"],
+                    OPEN_HOME => &[],
                     OPEN_LEADS => &["project", "room", "projectKey", "providers"],
                     PREPARE_LEAD_CONTEXT => &[
                         "project",
@@ -1683,7 +1716,7 @@ impl Server<'_> {
                         }
                         Err(e) => response(Err(e)),
                     }
-                } else if name == OPEN {
+                } else if matches!(name, OPEN | OPEN_HOME) {
                     match result {
                         Ok(mut data)
                             if crate::output::outbound(
@@ -1915,6 +1948,19 @@ impl Server<'_> {
                 "binding": binding,
                 "readOnly": self.config.profile == ToolProfile::McpApp,
             }));
+        }
+        if name == OPEN_HOME {
+            if crate::delegated() {
+                return Err("A delegated worker cannot enumerate desktop projects.".into());
+            }
+            let projects = self.configured_projects_for_cards()?;
+            if projects.is_empty() {
+                return Err(
+                    "This connection is bound to one project and the all-projects home is not available here."
+                        .into(),
+                );
+            }
+            return Ok(json!({"panel": "OMS home", "readOnly": true}));
         }
         if name == OPEN {
             let resolved = if args.get("project").is_some() {
