@@ -543,6 +543,149 @@ impl Services for FeedbackMock {
                         "fixture stops before provider execution",
                     ));
                 }
+                if self.mode.starts_with("base-drift-") {
+                    let id = arg("--plan-task");
+                    use oms_command_plan::{Action, Context, DelegateBinding, Plan, Request};
+                    let issued =
+                        DelegateBinding::parse(&serde_json::to_vec(&binding).unwrap()).unwrap();
+                    let stop = AtomicBool::new(false);
+                    let start = Request::new(Action::Start)
+                        .with("id", id.as_str())
+                        .with("lease-id", issued.lease_id());
+                    let context = Context::from_environment(&start, &call.cwd).unwrap();
+                    let plan = Plan::open(context, self, &stop).unwrap();
+                    let running = plan.execute_bound_task(&start, &issued, None).unwrap();
+                    let operation = call
+                        .environment
+                        .iter()
+                        .find(|(key, _)| key == "OMS_OPERATION_ID")
+                        .and_then(|(_, value)| value.to_str())
+                        .unwrap();
+                    write_private(
+                        &call.cwd.join(".oms/artifacts/drift-report.md"),
+                        b"verified worker report\n",
+                    );
+                    write_private(
+                        &call.cwd.join(".oms/artifacts/drift.patch"),
+                        b"diff --git a/src/lib.rs b/src/lib.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/lib.rs\n@@ -0,0 +1 @@\n+pub fn ok() {}\n",
+                    );
+                    let index = json!({
+                        "schema": 1, "kind": "delegate",
+                        "event_id": format!("evt_{}", self.sends.load(std::sync::atomic::Ordering::SeqCst)),
+                        "attempt_id": format!("att_{}", self.sends.load(std::sync::atomic::Ordering::SeqCst)),
+                        "operation_id": operation,
+                        "task_id": id, "provider": "codex", "base_sha": issued.base_sha(),
+                        "exit": 0, "verify_exit": 0, "verification": "passed", "state": "review",
+                        "no_change": false, "plan_binding": binding,
+                        "artifact": ".oms/artifacts/drift-report.md",
+                        "artifact_sha256": oms_command_plan::json::sha(b"verified worker report\n"),
+                        "patch": ".oms/artifacts/drift.patch",
+                        "patch_sha256": oms_command_plan::json::sha(b"diff --git a/src/lib.rs b/src/lib.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/lib.rs\n@@ -0,0 +1 @@\n+pub fn ok() {}\n"),
+                    });
+                    let mut index_raw = serde_json::to_vec(&index).unwrap();
+                    index_raw.push(b'\n');
+                    write_private(&call.cwd.join(".oms/artifacts/index.jsonl"), &index_raw);
+                    match self.mode {
+                        "base-drift-ff" | "base-drift-ff-land" => {
+                            let out = Command::new("git")
+                                .arg("-C")
+                                .arg(&call.cwd)
+                                .args([
+                                    "-c",
+                                    "commit.gpgsign=false",
+                                    "-c",
+                                    "user.name=t",
+                                    "-c",
+                                    "user.email=t@example.invalid",
+                                    "commit",
+                                    "--allow-empty",
+                                    "-qm",
+                                    "shared checkout fast-forwarded mid-run",
+                                ])
+                                .output()
+                                .unwrap();
+                            assert!(out.status.success());
+                        }
+                        "base-drift-rewrite"
+                            if self.sends.load(std::sync::atomic::Ordering::SeqCst) == 1 =>
+                        {
+                            let tree = String::from_utf8(
+                                Command::new("git")
+                                    .arg("-C")
+                                    .arg(&call.cwd)
+                                    .args(["rev-parse", "HEAD^{tree}"])
+                                    .output()
+                                    .unwrap()
+                                    .stdout,
+                            )
+                            .unwrap();
+                            let orphan = String::from_utf8(
+                                Command::new("git")
+                                    .arg("-C")
+                                    .arg(&call.cwd)
+                                    .args([
+                                        "-c",
+                                        "commit.gpgsign=false",
+                                        "-c",
+                                        "user.name=t",
+                                        "-c",
+                                        "user.email=t@example.invalid",
+                                        "commit-tree",
+                                        tree.trim(),
+                                        "-m",
+                                        "rewritten history",
+                                    ])
+                                    .output()
+                                    .unwrap()
+                                    .stdout,
+                            )
+                            .unwrap();
+                            assert!(
+                                Command::new("git")
+                                    .arg("-C")
+                                    .arg(&call.cwd)
+                                    .args(["reset", "--hard", "-q", orphan.trim()])
+                                    .status()
+                                    .unwrap()
+                                    .success()
+                            );
+                        }
+                        "base-drift-lease" => {
+                            self.plan(
+                                &call.cwd,
+                                &["release", "--id", &id, "--lease-id", running.lease_id()],
+                            );
+                            self.plan(&call.cwd, &["claim", "--id", &id, "--provider", "codex"]);
+                        }
+                        _ => {}
+                    }
+                    let review_req = Request::new(Action::Review)
+                        .with("id", id.as_str())
+                        .with("lease-id", running.lease_id())
+                        .with(
+                            "artifact",
+                            call.cwd.join(".oms/artifacts/drift-report.md").as_os_str(),
+                        )
+                        .with(
+                            "patch",
+                            call.cwd.join(".oms/artifacts/drift.patch").as_os_str(),
+                        );
+                    let review_context = Context::from_environment(&review_req, &call.cwd).unwrap();
+                    let review_plan = Plan::open(review_context, self, &stop).unwrap();
+                    let parsed = oms_command_plan::json::parse(&index_raw).unwrap();
+                    return match review_plan.execute_bound_task(
+                        &review_req,
+                        &running,
+                        Some(&parsed),
+                    ) {
+                        Ok(_) => Ok((0, vec![], vec![])),
+                        Err(e) => Ok((
+                            e.code,
+                            vec![],
+                            format!("error: {}\n", e.message).into_bytes(),
+                        )),
+                    };
+                }
                 if self.mode.starts_with("unknown-after-start") {
                     let issued = self.plan(
                         &call.cwd,
@@ -644,6 +787,90 @@ impl Services for FeedbackMock {
             }
             "patch-land" => {
                 self.lands.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if self.mode.starts_with("base-drift-ff") {
+                    let encoded = call
+                        .args
+                        .windows(2)
+                        .find(|args| args[0] == "--expected-plan-review")
+                        .unwrap()[1]
+                        .to_str()
+                        .unwrap()
+                        .to_owned();
+                    let proof = serde_json::from_str::<serde_json::Value>(&encoded).unwrap();
+                    let head = String::from_utf8(
+                        Command::new("git")
+                            .arg("-C")
+                            .arg(&call.cwd)
+                            .args(["rev-parse", "HEAD"])
+                            .output()
+                            .unwrap()
+                            .stdout,
+                    )
+                    .unwrap();
+                    assert_eq!(proof["binding"]["base_sha"], head.trim());
+                    use oms_command_plan::{Action, Context, Plan, Request, json as plan_json};
+                    let id = proof["binding"]["task_id"].as_str().unwrap();
+                    let lease = proof["binding"]["lease_id"].as_str().unwrap();
+                    let patch_sha = proof["patch_sha256"].as_str().unwrap();
+                    let stop = AtomicBool::new(false);
+                    let snap = self.plan(&call.cwd, &["evidence-snapshot", "--id", id]);
+                    let land_req = Request::new(Action::Land)
+                        .with("id", id)
+                        .with("lease-id", lease)
+                        .with("expected-review-lease-id", lease)
+                        .with("expected-review-patch", snap["patch"].as_str().unwrap())
+                        .with("expected-review-patch-sha256", patch_sha)
+                        .with("expected-review-verify", snap["verify"].as_str().unwrap())
+                        .with("expected-review-executor-id", "")
+                        .with("expected-review-executor-soul-sha256", "")
+                        .with("expected-review-binding", &encoded);
+                    let plan = Plan::open(
+                        Context::from_environment(&land_req, &call.cwd).unwrap(),
+                        self,
+                        &stop,
+                    )
+                    .unwrap();
+                    assert_eq!(plan.execute(&land_req).unwrap().code, 0);
+                    let landing_task = plan.load().unwrap().task(id).unwrap().clone();
+                    let frozen = call.cwd.join(".oms/landing-patches/land-ff.patch");
+                    write_private(&frozen, &fs::read(snap["patch"].as_str().unwrap()).unwrap());
+                    let mut done_task = landing_task.clone();
+                    done_task
+                        .set("patch", plan_json::string(frozen.to_str().unwrap()))
+                        .unwrap();
+                    let receipt_sha = plan_json::receipt_digest(&landing_task).unwrap();
+                    let done_sha = plan_json::receipt_digest(&done_task).unwrap();
+                    let finish_req = Request::new(Action::Finish)
+                        .with("id", id)
+                        .with("lease-id", lease)
+                        .with("patch", frozen.as_os_str())
+                        .with("expected-landing-receipt-sha256", &receipt_sha)
+                        .with("expected-review-binding", &encoded)
+                        .with("expected-landing-done-receipt-sha256", &done_sha);
+                    assert_eq!(plan.execute(&finish_req).unwrap().code, 0);
+                    let mut intent_row = json!({
+                        "schema": 1, "ts": "2026-11-27T04:00:00Z", "landing_id": "land-ff",
+                        "event": "intent", "patch": frozen.to_str().unwrap(),
+                        "patch_sha": patch_sha, "base_sha": head.trim(),
+                        "task": id, "lease": lease, "plan_id": snap["plan_id"],
+                        "plan_receipt_sha": receipt_sha, "plan_done_receipt_sha": done_sha,
+                        "approval": "", "approval_version": "", "receipt_sha": "",
+                        "worktree": call.cwd.to_str().unwrap(),
+                        "plan_review_binding": proof,
+                    });
+                    let row_digest = oms_command_plan::patch_landing_receipt_digest(
+                        &plan_json::parse(&serde_json::to_vec(&intent_row).unwrap()).unwrap(),
+                    )
+                    .unwrap();
+                    intent_row["receipt_sha"] = json!(row_digest);
+                    let mut complete_row = intent_row.clone();
+                    complete_row["event"] = json!("complete");
+                    write_private(
+                        &call.cwd.join(".oms/landings.jsonl"),
+                        format!("{intent_row}\n{complete_row}\n").as_bytes(),
+                    );
+                    return Ok((0, b"patch-land: applied\n".to_vec(), vec![]));
+                }
                 if self.mode == "review-replaced" {
                     let proof = call
                         .args
@@ -1076,6 +1303,176 @@ fn plan_run_does_not_refresh_its_frozen_base_after_preflight() {
         task["state"], "ready",
         "only the newly issued original lease is released"
     );
+
+    // A fast-forward between Start and Review admits the verified result to
+    // review (still bound to its original base_sha) and lands on current HEAD.
+    let mock = FeedbackMock::new("base-drift-ff");
+    let repo = mock.fixture();
+    let initial_head = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo.0)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    mock.plan(
+        &repo.0,
+        &[
+            "add",
+            "--id",
+            "fresh",
+            "--title",
+            "fast-forward review",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ],
+    );
+    let out = run_with_services(
+        "plan-run",
+        &["--to".into(), "codex".into(), "--id".into(), "fresh".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
+    assert!(!repo.0.join(".oms/plan/late-results.jsonl").exists());
+    let reviewed = mock.plan(&repo.0, &["show", "--id", "fresh"]);
+    assert_eq!(reviewed["state"], "review");
+    let retained_index: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            repo.0.join(
+                reviewed["delegate_result"]["index"]["path"]
+                    .as_str()
+                    .unwrap(),
+            ),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retained_index["base_sha"], initial_head.trim());
+    let landed = mock.run(&repo, "fresh", false);
+    assert_eq!(landed.0, 0, "{}", String::from_utf8_lossy(&landed.2));
+    assert_eq!(
+        mock.plan(&repo.0, &["show", "--id", "fresh"])["state"],
+        "done"
+    );
+
+    // Single-command `plan-run --land` also lands cleanly after a mid-run fast-forward.
+    let mock = FeedbackMock::new("base-drift-ff-land");
+    let repo = mock.fixture();
+    mock.plan(
+        &repo.0,
+        &[
+            "add",
+            "--id",
+            "fresh",
+            "--title",
+            "fast-forward single land",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ],
+    );
+    let landed = mock.run(&repo, "fresh", false);
+    assert_eq!(landed.0, 0, "{}", String::from_utf8_lossy(&landed.2));
+    assert_eq!(
+        mock.plan(&repo.0, &["show", "--id", "fresh"])["state"],
+        "done"
+    );
+
+    // Rewritten non-ancestor history surfaces the preserved late result,
+    // releases the lease back to ready, and needs no manual release to rerun.
+    let mock = FeedbackMock::new("base-drift-rewrite");
+    let repo = mock.fixture();
+    mock.plan(
+        &repo.0,
+        &[
+            "add",
+            "--id",
+            "fresh",
+            "--title",
+            "rewritten base refusal",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ],
+    );
+    let refused = run_with_services(
+        "plan-run",
+        &["--to".into(), "codex".into(), "--id".into(), "fresh".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_eq!(refused.0, 2);
+    let stderr = String::from_utf8_lossy(&refused.2);
+    assert!(
+        stderr.contains("stale delegate binding (base drift); late result preserved in .oms/plan/late-results.jsonl")
+            && stderr.contains("task=fresh")
+            && stderr.contains("artifact=.oms/artifacts/drift-report.md")
+            && stderr.contains("patch=.oms/artifacts/drift.patch")
+            && stderr.contains("state=ready"),
+        "{stderr}"
+    );
+    let released = mock.plan(&repo.0, &["show", "--id", "fresh"]);
+    assert_eq!(released["state"], "ready");
+    assert_eq!(released["lease_id"], "");
+    let rerun = run_with_services(
+        "plan-run",
+        &["--to".into(), "codex".into(), "--id".into(), "fresh".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_eq!(rerun.0, 0, "{}", String::from_utf8_lossy(&rerun.2));
+    assert_eq!(
+        mock.plan(&repo.0, &["show", "--id", "fresh"])["state"],
+        "review"
+    );
+
+    // When a replacement claimant already owns the task, plan-run surfaces the
+    // preserved late result without releasing the replacement lease.
+    let mock = FeedbackMock::new("base-drift-lease");
+    let repo = mock.fixture();
+    mock.plan(
+        &repo.0,
+        &[
+            "add",
+            "--id",
+            "fresh",
+            "--title",
+            "replaced lease refusal",
+            "--allowed",
+            "src",
+            "--verify",
+            "true",
+        ],
+    );
+    let refused = run_with_services(
+        "plan-run",
+        &["--to".into(), "codex".into(), "--id".into(), "fresh".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_eq!(refused.0, 2);
+    let stderr = String::from_utf8_lossy(&refused.2);
+    assert!(
+        stderr.contains(
+            "stale delegate binding (lease); late result preserved in .oms/plan/late-results.jsonl"
+        ) && stderr.contains("artifact=.oms/artifacts/drift-report.md"),
+        "{stderr}"
+    );
+    let replacement = mock.plan(&repo.0, &["show", "--id", "fresh"]);
+    assert_eq!(replacement["state"], "claimed");
+    assert!(!replacement["lease_id"].as_str().unwrap().is_empty());
 
     // A panel caller pins the canonical selection before entering plan-run.
     // Reject changed work and pre-existing leases before the legacy reclaim pass.
