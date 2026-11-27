@@ -18,7 +18,11 @@ mod lead_plan_context;
 mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
-const URI: &str = "ui://oms/conversation-panel/v30.html";
+const URI: &str = "ui://oms/conversation-panel/v34.html";
+const V33: &str = "ui://oms/conversation-panel/v33.html";
+const V32: &str = "ui://oms/conversation-panel/v32.html";
+const V31: &str = "ui://oms/conversation-panel/v31.html";
+const V30: &str = "ui://oms/conversation-panel/v30.html";
 const V29: &str = "ui://oms/conversation-panel/v29.html";
 const V28: &str = "ui://oms/conversation-panel/v28.html";
 const V27: &str = "ui://oms/conversation-panel/v27.html";
@@ -305,9 +309,19 @@ fn checked_peer_directory(
     Ok(Some(dir.path))
 }
 
-pub(super) fn runtime_request(request: &Value) -> bool {
+fn valid_call_id(request: &Value) -> bool {
     let id = &request["id"];
-    (matches!(id, Value::Number(_)) || id.as_str().is_some_and(|s| s.len() <= 1024))
+    matches!(id, Value::Number(_)) || id.as_str().is_some_and(|s| s.len() <= 1024)
+}
+
+pub(super) fn open_request(request: &Value) -> bool {
+    valid_call_id(request)
+        && request["method"] == "tools/call"
+        && request["params"]["name"].as_str() == Some(OPEN)
+}
+
+pub(super) fn runtime_request(request: &Value) -> bool {
+    valid_call_id(request)
         && request["method"] == "tools/call"
         && matches!(
             request["params"]["name"].as_str(),
@@ -360,6 +374,9 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     let project = json!({"type":"string","description":"Exact alias from oms_list_projects when the host has a project map."});
     let scope = json!({"project":project});
     let mut open_scope = scope.clone();
+    open_scope["project"]["description"] = json!(
+        "Pass the exact alias from oms_list_projects when the host has a project map; the initial view is included only when project names an exact alias from oms_list_projects on hosts with a project map."
+    );
     open_scope["leadConversations"] = json!({"type":"boolean","description":"Explicit intent to open provider Lead conversations. Opening the panel itself only displays it."});
     let mut opener = make(
         OPEN,
@@ -1373,6 +1390,10 @@ impl Server<'_> {
                             | V27
                             | V28
                             | V29
+                            | V30
+                            | V31
+                            | V32
+                            | V33
                     )
                 ) =>
             {
@@ -1592,6 +1613,31 @@ impl Server<'_> {
                             result["_meta"]["chat"] = data;
                             result
                         }
+                        Err(e) => response(Err(e)),
+                    }
+                } else if name == OPEN {
+                    match result {
+                        Ok(mut data)
+                            if crate::output::outbound(
+                                data.to_string().as_bytes(),
+                                &Value::Null,
+                            )
+                            .is_ok() =>
+                        {
+                            let dashboard =
+                                data.as_object_mut().and_then(|o| o.remove("dashboard"));
+                            if dashboard.is_some() {
+                                data["snapshot"] = json!("attached");
+                            }
+                            let mut result = response(Ok(data));
+                            if let Some(dashboard) = dashboard {
+                                result["_meta"]["dashboard"] = dashboard;
+                            }
+                            result
+                        }
+                        Ok(_) => response(Err(
+                            "OMS withheld this response during its outbound scan".into(),
+                        )),
                         Err(e) => response(Err(e)),
                     }
                 } else {
@@ -1869,9 +1915,11 @@ impl Server<'_> {
             }));
         }
         if name == OPEN {
-            if args.get("project").is_some() {
-                self.panel_repo(args)?;
-            }
+            let resolved = if args.get("project").is_some() {
+                Some(self.panel_repo(args)?)
+            } else {
+                None
+            };
             let mut result = json!({"panel":"OMS","project":args["project"]});
             if let Some(flag) = args.get("leadConversations") {
                 let requested = flag
@@ -1883,6 +1931,20 @@ impl Server<'_> {
             }
             if self.config.profile == ToolProfile::McpApp {
                 result["readOnly"] = json!(true);
+            }
+            if !self.open_snapshot {
+                result["snapshotOmitted"] = json!("busy");
+            } else if let Some(repo) = resolved.or_else(|| self.panel_repo(args).ok()) {
+                if let Ok(dashboard) = self.panel_snapshot_projection(&repo, meta) {
+                    let encoded = dashboard.to_string();
+                    if encoded.len() > crate::OUTPUT_LIMIT {
+                        result["snapshotOmitted"] = json!("size");
+                    } else if crate::output::outbound(encoded.as_bytes(), &Value::Null).is_ok() {
+                        result["dashboard"] = dashboard;
+                    }
+                }
+            } else {
+                result["snapshotOmitted"] = json!("project");
             }
             return Ok(result);
         }
@@ -2332,8 +2394,19 @@ impl Server<'_> {
                     let text = data["evidence"]["text"]
                         .as_str()
                         .ok_or("Full retained evidence is unavailable.")?;
-                    oms_scrub::check_outbound(text.as_bytes())
-                        .map_err(|_| "OMS withheld this evidence during its outbound scan.")?;
+                    oms_scrub::outbound_page(
+                        text,
+                        oms_scrub::OUTBOUND_PAGE_BYTES,
+                        oms_scrub::PageSelector::Offset(0),
+                    )
+                    .map_err(|e| match e {
+                        oms_scrub::PageError::OutboundWithheld => {
+                            "OMS withheld this evidence during its outbound scan."
+                        }
+                        oms_scrub::PageError::InvalidRange => {
+                            "The recorded output page could not be verified."
+                        }
+                    })?;
                     let page = output_page(&data["evidence"], text, cursor, position, &scope)?;
                     for field in [
                         "offset",
@@ -2680,8 +2753,19 @@ impl Server<'_> {
                                 .any(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'))
                     })
                     .ok_or(err)?;
-                oms_scrub::check_outbound(text.as_bytes())
-                    .map_err(|_| "OMS withheld this worker output during its outbound scan.")?;
+                let bound = if page.is_some() {
+                    oms_scrub::OUTBOUND_PAGE_BYTES
+                } else {
+                    crate::PAGE_BYTES
+                };
+                oms_scrub::outbound_page(text, bound, oms_scrub::PageSelector::Offset(0)).map_err(
+                    |e| match e {
+                        oms_scrub::PageError::OutboundWithheld => {
+                            "OMS withheld this worker output during its outbound scan."
+                        }
+                        oms_scrub::PageError::InvalidRange => err,
+                    },
+                )?;
             }
             Some("running" | "not_recorded" | "unavailable")
                 if data.get("text").is_some_and(Value::is_null)
@@ -3495,6 +3579,14 @@ impl Server<'_> {
     }
 
     pub(super) fn panel_snapshot(&self, repo: &Path, meta: &Value) -> PanelResult<Value> {
+        let dashboard = self.panel_snapshot_projection(repo, meta)?;
+        if dashboard.to_string().len() > crate::OUTPUT_LIMIT {
+            return Err("OMS panel snapshot exceeds its output limit.".into());
+        }
+        Ok(dashboard)
+    }
+
+    fn panel_snapshot_projection(&self, repo: &Path, meta: &Value) -> PanelResult<Value> {
         let mut argv = vec![
             "dashboard".into(),
             "--repo".into(),
@@ -3553,9 +3645,6 @@ impl Server<'_> {
                 }
                 dashboard["observation"]["revision"] = Value::Null;
             }
-        }
-        if dashboard.to_string().len() > crate::OUTPUT_LIMIT {
-            return Err("OMS panel snapshot exceeds its output limit.".into());
         }
         Ok(dashboard)
     }

@@ -1,6 +1,6 @@
 // Run with node --test crates/oms-mcp-server/tests/conversation-panel.test.mjs.
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { setImmediate } from 'node:timers/promises';
 import test from 'node:test';
@@ -53,7 +53,7 @@ async function panel(projects, dashboard = {}, options = {}) {
   const window = new EventTarget();
   window.scrollTo = (_x,y) => { window.scrollY = y; };
   const calls = [];
-  const host = {modes:[],contexts:[],status:null, failStart:true, replies:[], links:[], messages:[], notices:[], tools:options.tools};
+  const host = {modes:[],contexts:[],status:null, failStart:true, replies:[], links:[], messages:[], notices:[], tools:options.tools, toolError:options.toolError};
   function notify(payload) {
     window.dispatchEvent(Object.assign(new Event('message'), {
       source:window.parent, origin:'https://oms.example', data:{jsonrpc:'2.0', ...payload}
@@ -84,7 +84,13 @@ async function panel(projects, dashboard = {}, options = {}) {
   window.parent = {postMessage(message) {
     const {id, method, params} = message;
     if (!method) { host.replies.push(JSON.parse(JSON.stringify(message))); return; }
-    if (id == null) { host.notices.push(method); return; }
+    if (id == null) {
+      host.notices.push(method);
+      if (method === 'ui/notifications/initialized' && options.initialOpen) {
+        for (const [kind, openParams] of options.initialOpen) queueMicrotask(() => notify({method:'ui/notifications/tool-' + kind, params:openParams}));
+      }
+      return;
+    }
     let result = {};
     if (method === 'ui/initialize') {
       host.initialize = params;
@@ -105,6 +111,8 @@ async function panel(projects, dashboard = {}, options = {}) {
       result = {isError:host.rejectMessage === true};
     }
     if (method === 'tools/call') {
+      const rpcError = typeof host.toolError === 'function' ? host.toolError(params) : host.toolError;
+      if (rpcError) { queueMicrotask(() => notify({id, error:rpcError})); return; }
       try {
         const value = tool(params.name, params.arguments);
         if(['oms_worker_output','oms_lead_settings','oms_update_lead_settings'].includes(params.name))result=value;
@@ -145,7 +153,8 @@ async function panel(projects, dashboard = {}, options = {}) {
   const cssSupports=(k,v)=>typeof v==='string' && (k==='color'?/^#[0-9a-f]{6}$/i.test(v):
     k==='border-radius'?v.trim().split(/\s+/).every((p,i)=>i<4 && /^(?:0|(?:\d+|\d*\.\d+)(?:px|r?em|%))$/i.test(p)):
     k==='font-family' && v.split(',').every(f=>/^(?:"[^"]+"|'[^']+'|[a-z_-][a-z0-9_-]*(?:\s+[a-z_-][a-z0-9_-]*)*)$/i.test(f.trim())));
-  const context = createContext({window, document, Option, TextEncoder, CSS:{supports:cssSupports}, setTimeout, clearTimeout, crypto:{randomUUID},
+  const context = createContext({window, document, Option, TextEncoder, CSS:{supports:cssSupports}, setTimeout, clearTimeout,
+    crypto:{randomUUID,subtle:{async digest(algorithm,bytes){assert.equal(algorithm,'SHA-256');return createHash('sha256').update(bytes).digest();}}},
     ...options.timers, ...(options.navigator && {navigator:options.navigator}), ...(options.storage && {localStorage:options.storage})});
   runInContext(script, context);
   await setImmediate();
@@ -542,7 +551,7 @@ test('the first screen shows proven participants and only requests registry, sna
   await choose(p,'ko');assert.match(cards[1].textContent,/차단됨.*배정 기록 보기/);assert.match(cards[2].textContent,/배정 대기/);
   assert.ok(!html.includes('role="tablist"'));
   for(const tool of ['oms_panel_project_graph','oms_panel_work_items','oms_panel_usage','oms_panel_capabilities','oms_panel_tui_view'])
-    assert.ok(!script.includes(tool),tool);
+    assert.ok(!p.calls.some(call=>call.name===tool),tool);
   const generic=await panel([],dashboard,{locale:'en',readOnly:true});
   assert.deepEqual(generic.calls.map(c=>c.name),startup.slice(0,2));
   assert.equal(generic.get('new-goal').hidden,true);assert.equal(generic.get('header-main').hidden,true);
@@ -1117,7 +1126,9 @@ test('progress and goal missing states are independent of repository acceptance 
   d.goalAvailability='absent';d.planProgress={total:0,verified:0};await p.event('refresh','click');
   assert.equal(p.get('goal').textContent,'No goal recorded');assert.equal(p.get('progress').hidden,true);
   d.planProgress={total:3,verified:2};await p.event('refresh','click');
-  assert.equal(p.get('progress').textContent,'2 of 3 planned tasks verified');
+  assert.equal(p.get('progress').textContent,'Plan tasks 2 / 3');
+  // Unconfirmed criteria leave the bar to the plan and say so instead of counting zero.
+  assert.equal(p.get('progress-track').hidden,false);assert.match(p.get('criteria-summary').textContent,/unconfirmed/);
   assert.equal(p.get('outcome').hidden,true);
 });
 test('language persists on reopen without fetching or replacing the focused draft',async()=>{
@@ -1144,14 +1155,14 @@ test('state badges carry a semantic tone and the progress bar follows the progre
   const [codex,claude,agy]=p.get('leads').children;
   const badge=entry=>entry.children.find(e=>e.className==='state');
   assert.equal(badge(codex.children[2]).getAttribute('data-tone'),'active');
-  assert.equal(badge(claude.children[2]).getAttribute('data-tone'),'attention');
+  assert.equal(badge(claude.children[2]).getAttribute('data-tone'),'decision');
   assert.equal(badge(claude.children[2]).textContent,'! Blocked');
   assert.equal(agy.children[1].children.find(e=>e.className==='state').getAttribute('data-tone'),'muted');
   const presence=slot=>slot.children.find(e=>e.className==='slot-heading').children.find(e=>e.className==='avatar').getAttribute('data-presence');
-  assert.deepEqual([codex,claude,agy].map(presence),['working','attention','idle']);
+  assert.deepEqual([codex,claude,agy].map(presence),['working','decision','idle']);
   assert.equal(p.get('avatar').getAttribute('data-presence'),'working');
   assert.equal(p.get('progress-track').hidden,false);assert.equal(p.get('progress-fill').style.width,'25%');
-  assert.equal(p.get('progress').textContent,'1 of 4 planned tasks verified');
+  assert.equal(p.get('progress').textContent,'Plan tasks 1 / 4');
   d.planProgress={total:4,verified:4};await p.event('refresh','click');assert.equal(p.get('progress-fill').style.width,'100%');
   d.planProgress={total:5,verified:2};await p.event('refresh','click');
   const segments=p.get('progress-track').children.filter(e=>e.className?.startsWith('seg'));
@@ -1161,6 +1172,38 @@ test('state badges carry a semantic tone and the progress bar follows the progre
   assert.equal(p.get('progress').hidden,true);assert.equal(p.get('progress-track').hidden,true);
   d.conversationMain=undefined;await p.event('refresh','click');
   assert.equal(p.get('avatar').textContent,'–');assert.equal(p.get('avatar').getAttribute('data-presence'),null);
+});
+test('v33 tones split decision from failure, rank the presence dot and keep the header to three groups',async()=>{
+  const p=await panel(['one'],dashboard,{locale:'en'});
+  const tone=state=>p.run('stateTone('+JSON.stringify(state)+')');
+  for(const state of ['waiting_for_input','waiting_for_review','waiting_approval','blocked'])assert.equal(tone(state),'decision',state);
+  for(const state of ['failed','timed_out','guard_stop','rejected','interrupted','orphaned'])assert.equal(tone(state),'failure',state);
+  for(const state of ['degraded','unconfirmed','unavailable','queued','',null])assert.equal(tone(state),'muted',String(state));
+  assert.equal(tone('running'),'active');assert.equal(tone('verified'),'done');
+  const rank=(...tones)=>p.run('presenceOf(new Set('+JSON.stringify(tones)+'),false,true)');
+  assert.deepEqual([rank('done','active','decision','failure'),rank('active','decision'),rank('done','active'),rank('done'),
+    p.run('presenceOf(new Set(["muted"]),false,false)')],['failure','decision','working','live','idle']);
+  assert.doesNotMatch(html,/data-(tone|presence)=attention/);
+  for(const name of ['decision','failure'])assert.match(html,new RegExp('\\.state\\[data-tone='+name+'\\]'));
+  // Project, language and the refresh segment; Inspect moved to the closing row of the view.
+  const tools=html.match(/<div class="tools">([\s\S]*?)<\/div><\/header>/)[1];
+  assert.deepEqual([...tools.matchAll(/<(select|button|span) id="([^"]+)"|<span class="([^"]+)"/g)].map(m=>m[2]||m[3]),['language-choice','refresh-group','refresh','auto-refresh','display-mode']);
+  assert.ok(html.indexOf('id="inspect-open"')>html.indexOf('id="more-results"'));
+  assert.equal(p.get('leads-heading').textContent,'Leads 3');
+  const ko=await panel(['one'],dashboard,{locale:'ko'});assert.equal(ko.get('leads-heading').textContent,'Lead 3');
+  assert.equal(ko.get('leads-help').textContent,'질문은 읽기 전용 상담 · 작업 배정은 Main에서');
+});
+test('criteria lead the bar when the whole list is projected, and the plan bar returns when none are recorded',async()=>{
+  const criterion=(id,status,stale=false)=>({id,label:'Criterion '+id,status,evidence:[{reference:'artifact:'+id,kind:'verification',status:'passed',stale}],evidenceOmitted:0});
+  const d={...dashboard,planProgress:{total:5,verified:2},acceptance:{available:true,scope:'repository',total:3,verified:1,complete:false,omitted:0,
+    criteria:[criterion('a','verified'),criterion('b','pending',true),criterion('c','pending')]}};
+  const p=await panel(['one'],d,{locale:'en'});
+  const segments=()=>p.get('progress-track').children.filter(e=>e.className?.startsWith('seg')).map(e=>e.className);
+  assert.deepEqual(segments(),['seg done','seg stale','seg']);
+  assert.equal(p.get('criteria-summary').textContent,'Criteria 1 / 3 verified');assert.equal(p.get('progress').textContent,'Plan tasks 2 / 5');
+  d.acceptance={available:true,scope:'repository',total:0,verified:0,complete:false,omitted:0,criteria:[]};await p.event('refresh','click');
+  assert.deepEqual(segments(),['seg done','seg done','seg current','seg','seg']);
+  assert.equal(p.get('criteria-summary').textContent,'No repository completion criteria recorded.');
 });
 test('the observed time localizes beside the goal while a clean status stays empty',async()=>{
   const stamp='2026-06-01T03:04:00Z', local=new Date(stamp);
@@ -1332,8 +1375,10 @@ test('goal evidence separates repository criteria, task readiness and a scoped c
   const copied=[],key='b'.repeat(64),p=await panel(['one','two'],d,{locale:'en',context:true,navigator:{clipboard:{writeText:async text=>copied.push(text)}},
     tools:{oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:key,two:'c'.repeat(64)}})}});
   await p.open('input',{arguments:{project:'one'}});
-  assert.match(p.get('progress').textContent,/4 of 7 planned tasks/);
-  assert.match(p.get('criteria-summary').textContent,/2 of 3 repository criteria/);assert.equal(p.get('outcome').hidden,true);
+  assert.equal(p.get('progress').textContent,'Plan tasks 4 / 7');
+  // One criterion is omitted, so the bar fills by ratio without segments and never adds the plan count.
+  assert.equal(p.get('criteria-summary').textContent,'Criteria 2 / 3 verified · partly shown');
+  assert.equal(p.get('progress-fill').style.width,'67%');assert.equal(p.get('progress-track').getAttribute('data-segments'),'false');assert.equal(p.get('outcome').hidden,true);
   assert.match(p.get('attention-summary').textContent,/Review error guidance.*Waiting for Main review/);
   assert.match(p.get('next-step').textContent,/Inspect the last criterion/);
   const mark=p.calls.length;await p.event('evidence-toggle','click');
@@ -1434,8 +1479,24 @@ test('only an independently confirmed physical binding retains a public stale sn
   assert.equal(p.get('view').hidden,true);assert.equal(p.run('dashboardData'),undefined);
 });
 
+const droppedFindingFields=['projectKey','room','owner','provider','participant','leadRequestId','operation','leadAttempt','workerAttempt','attempt','format','digest','pageCursor'];
+function collectObjectKeys(value,keys=new Set()){
+  if(!value || typeof value!=='object')return keys;
+  if(Array.isArray(value)){for(const item of value)collectObjectKeys(item,keys);return keys;}
+  for(const [k,v] of Object.entries(value)){keys.add(k);collectObjectKeys(v,keys);}
+  return keys;
+}
+function assertPrivateFindingOmitted(delivered,internalValues=[],allowTurnId=false){
+  const keys=collectObjectKeys(delivered);
+  for(const field of droppedFindingFields)assert.equal(keys.has(field),false,field);
+  if(!allowTurnId)assert.equal(keys.has('turnId'),false,'turnId');
+  else if(delivered?.structuredContent?.source)assert.equal(Object.hasOwn(delivered.structuredContent.source,'turnId'),false,'source.turnId');
+  const serialized=JSON.stringify(delivered);
+  for(const internal of internalValues)assert.ok(!serialized.includes(internal),internal);
+}
+
 test('recorded Lead answer pages are lazy, digest-bound and prepare only an exact scoped draft',async()=>{
-  const id=randomUUID(),copied=[],digest='d'.repeat(64);let changed=false;
+  const id=randomUUID(),copied=[],digest='d'.repeat(64);let changed=false,wrongHandoff=false;
   const claudeReq=leadStatus({provider:'claude'},'ready').leads[0].requestId,askParticipant='ask-'+claudeReq;
   const d={...dashboard,goal:'한'.repeat(2000),
     planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]},
@@ -1449,7 +1510,7 @@ test('recorded Lead answer pages are lazy, digest-bound and prepare only an exac
         v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Question',turnId:id,status:'replied'},{role:'claude',text:'Excerpt',turnId:id,truncated:true}]}};
         if(a.answerPage!==undefined)v._private.answer={turnId:id,text:a.answerPage?'tail':'한글',offset:a.answerPage?6:0,bytes:a.answerPage?4:6,totalBytes:10,
           digest:changed?'e'.repeat(64):digest,nextCursor:a.answerPage?null:'next-part',hasMore:!a.answerPage,source:'recorded-answer',
-          handoff:{room:a.room,participant:askParticipant,provider:a.provider,leadRequestId:a.leadRequestId,turnId:id,operation:'recorded-operation'}};
+          handoff:{room:a.room,participant:askParticipant,provider:a.provider,leadRequestId:a.leadRequestId,turnId:id,operation:wrongHandoff?'other-operation':'recorded-operation'}};
       }
       return v;
     }
@@ -1485,6 +1546,27 @@ test('recorded Lead answer pages are lazy, digest-bound and prepare only an exac
   await p.event('answer-followup','click');await p.event('followup-add','click');
   assert.equal(p.host.contexts.at(-1).structuredContent.task,'task-b');
   assert.match(p.get('followup-text').value,/^Task: task-b$/m);assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
+  open.dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button').dispatchEvent(new Event('click'));await setImmediate();
+  await p.event('answer-more','click');await p.event('answer-followup','click');
+  // Ask about this result prepares references only; the excerpt waits for Include.
+  assert.equal(p.get('finding-preview').hidden,true);assert.equal(p.get('finding-text').textContent,'');
+  assert.equal(p.get('followup-include').hidden,false);await p.event('followup-include','click');
+  assert.equal(p.get('followup-include').hidden,true);
+  assert.equal(p.get('finding-text').textContent,'tail');assert.match(p.get('finding-range').textContent,/bytes 7–10 of 10.*partial/);
+  assert.ok(!p.host.contexts.some(c=>c.structuredContent?.kind==='oms-selected-finding'));
+  await p.event('finding-share','click');
+  const deliveredLead=p.host.contexts.at(-1),shared=JSON.parse(JSON.stringify(deliveredLead.structuredContent));
+  assert.deepEqual(shared,{kind:'oms-selected-finding',authority:'context-only',project:'one',task:'task-b',turnId:id,
+    source:{kind:'lead-answer',summary:'OMS Lead · Claude · Recorded output'},
+    selection:{text:'tail',offset:6,bytes:4,totalBytes:10,truncated:true,displayedBytes:4,
+      excerptSha256:createHash('sha256').update('tail').digest('hex')},
+    text:p.get('followup-text').value});
+  assertPrivateFindingOmitted(deliveredLead,['recorded-operation',askParticipant,claudeReq,'b'.repeat(64),digest,main.room,main.participant,'next-part'],true);
+  assert.doesNotMatch(JSON.stringify(shared),/Question|Excerpt/);assert.equal(p.host.messages.length,0);
+  wrongHandoff=true;await p.event('finding-share','click');
+  assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length,1);
+  assert.equal(p.get('finding-text').textContent,'');assert.match(p.get('followup-status').textContent,/Nothing was shared/);wrongHandoff=false;
   open.dispatchEvent(new Event('click'));await setImmediate();const fresh=p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button');
   p.host.delayTool=managedRead;fresh.dispatchEvent(new Event('click'));await setImmediate();
   await p.open('input',{arguments:{project:'two'}});p.host.release();await setImmediate();
@@ -1515,6 +1597,17 @@ test('Room result truncation links a bounded evidence read and keeps the reader 
   for(const internal of [key,digest,lead.participant,main.room])assert.ok(!JSON.stringify(p.host.contexts.at(-1)).includes(internal),internal);
   assert.match(p.get('followup-text').value,/^Task: task-b$/m);assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
   p.get('leads').children[1].children[2].dispatchEvent(new Event('click'));await setImmediate();
+  await p.event('chat-result-full','click');await p.event('answer-more','click');await p.event('answer-followup','click');await p.event('followup-include','click');
+  assert.equal(p.get('finding-text').textContent,'last');await p.event('finding-share','click');
+  const deliveredRoom=p.host.contexts.at(-1),shared=JSON.parse(JSON.stringify(deliveredRoom.structuredContent));
+  assert.deepEqual(shared,{kind:'oms-selected-finding',authority:'context-only',project:'one',task:'task-b',
+    source:{kind:'room-result',summary:'OMS Lead · Claude · Recorded output'},
+    selection:{text:'last',offset:5,bytes:4,totalBytes:9,truncated:true,displayedBytes:4,
+      excerptSha256:createHash('sha256').update('last').digest('hex')},
+    text:p.get('followup-text').value});
+  assertPrivateFindingOmitted(deliveredRoom,[key,digest,lead.participant,main.room,main.participant]);
+  assert.doesNotMatch(JSON.stringify(shared),/Message [12]|Result excerpt/);assert.equal(p.host.messages.length,0);
+  p.get('leads').children[1].children[2].dispatchEvent(new Event('click'));await setImmediate();
   wrongAttempt=true;await p.event('chat-result-full','click');
   assert.equal(p.get('full-answer-body').textContent,'');assert.match(p.get('answer-status').textContent,/changed/);assert.equal(p.get('answer-followup').hidden,true);assert.equal(p.get('answer-copy').hidden,true);
   wrongAttempt=false;wrongKey=true;await p.event('chat-result-full','click');
@@ -1540,6 +1633,402 @@ test('worker full output pages keep the exact pair and reject a changed digest',
   await p.event('output-more','click');assert.equal(p.get('output-body').textContent,'tail');assert.equal(p.get('output-more').hidden,true);
   emptyPrefix=true;await p.event('output-refresh','click');assert.equal(p.get('output-body').textContent,'');assert.equal(p.get('output-copy').hidden,true);
   assert.ok(p.calls.filter(c=>c.name==='oms_worker_output').every(c=>c.args.leadAttempt==='l' && c.args.workerAttempt==='child'));
+});
+
+async function findingFixture(){
+  const key='b'.repeat(64),digest='d'.repeat(64),displayed='한'.repeat(2000),tail='PRIVATE OFF-PAGE CONTENT';
+  const workers=['task-a','task-b'].map((task,i)=>({id:'worker-'+i,parentAttempt:'l',provider:'codex',role:'worker',state:'done',task}));
+  const d={...dashboard,goal:'Review selected findings',conversationAttempts:[...dashboard.conversationAttempts,...workers],
+    planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]}};
+  const state={key,readOnly:false,snapshot:d,fault:null};
+  const p=await panel(['one','two'],d,{locale:'en',context:true,tools:{
+    oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:state.key,two:'c'.repeat(64)},readOnly:state.readOnly}),
+    oms_panel_snapshot:()=>{if(state.fault==='offline')throw Error('offline');return {dashboard:state.snapshot};},
+    oms_worker_output:a=>{
+      const {project,answerPage,...pair}=a,publicData={...pair,status:'complete'};
+      if(state.fault==='pair')publicData.workerAttempt='worker-0';
+      const text=state.fault==='body'?'x'+displayed.slice(1):answerPage==='next'?tail:displayed;
+      const out={...publicData,text,source:state.fault==='format'?'native-report':'indexed-answer',truncated:answerPage!=='next'};
+      if(answerPage!==undefined)out.page={offset:answerPage==='next'?Buffer.byteLength(displayed):0,bytes:Buffer.byteLength(text),
+        totalBytes:Buffer.byteLength(displayed+tail),digest:(state.fault==='digest'?'e'.repeat(64):digest),nextCursor:answerPage==='next'?null:'next',hasMore:answerPage!=='next'};
+      return {structuredContent:publicData,_meta:{workerOutput:out}};
+    }
+  }});
+  await p.open('input',{arguments:{project:'one'}});
+  const list=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul');
+  const open=list.children.filter(e=>e.tagName==='li')[1].children.find(e=>e.className?.includes('worker-output-link'));
+  open.dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');
+  assert.equal(p.get('finding-preview').hidden,true);assert.ok(!p.calls.some(c=>c.name==='oms_worker_output' && c.args.answerPage!==undefined));
+  await p.event('followup-include','click');
+  assert.equal(p.get('finding-preview').hidden,false);assert.equal(p.get('worker-output').open,false);
+  return {p,state,d,key,digest,displayed,tail};
+}
+
+test('selected worker findings stay private through preview and references-only drafts until an exact bounded Share',async()=>{
+  const {p,key,digest,displayed,tail}=await findingFixture(),selection='한'.repeat(1333);
+  assert.match(p.get('attention-summary').textContent,/Review task A/);
+  assert.equal(p.get('finding-text').textContent,selection);assert.equal(Buffer.byteLength(selection),3999);
+  assert.match(p.get('finding-range').textContent,/Sharing bytes 1–3999 of 6024.*partial result/);
+  assert.match(p.get('finding-range').textContent,/first 3999 bytes/);
+  assert.doesNotMatch(JSON.stringify(p.host.contexts),/한|PRIVATE OFF-PAGE/);
+  assert.match(p.get('followup-text').value,/^Task: task-b$/m);assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
+  await p.event('followup-add','click');
+  assert.equal(p.host.contexts.at(-1).structuredContent.kind,'oms-followup-draft');
+  assert.doesNotMatch(JSON.stringify(p.host.contexts),/한|PRIVATE OFF-PAGE/);
+  const mark=p.calls.length;await p.event('finding-share','click');
+  const deliveredWorker=p.host.contexts.at(-1),shared=JSON.parse(JSON.stringify(deliveredWorker.structuredContent));
+  assert.deepEqual(shared,{kind:'oms-selected-finding',authority:'context-only',project:'one',task:'task-b',
+    source:{kind:'worker-output',summary:'Codex Worker · Worker output'},
+    selection:{text:selection,offset:0,bytes:3999,totalBytes:Buffer.byteLength(displayed+tail),truncated:true,
+      displayedBytes:6000,excerptSha256:createHash('sha256').update(selection).digest('hex')},
+    text:p.get('followup-text').value});
+  assertPrivateFindingOmitted(deliveredWorker,[key,digest,main.room,main.participant,'worker-1','indexed-answer']);
+  assert.deepEqual(p.calls.slice(mark).map(c=>c.name),['oms_list_projects','oms_panel_snapshot','oms_worker_output','oms_list_projects','oms_panel_snapshot']);
+  assert.equal(p.calls.slice(mark)[2].args.answerPage,'');assert.equal(p.host.messages.length,0);
+  assert.doesNotMatch(JSON.stringify(shared),/PRIVATE OFF-PAGE/);assert.match(p.get('followup-status').textContent,/no execution authority/);
+});
+
+test('finding Share rejects changed source, binding, Room, task, read-only state and missing context capability',async()=>{
+  for(const fault of ['digest','body','pair','format','binding','room','owner','task','readOnly','capability','offline']){
+    const {p,state,d}=await findingFixture();
+    if(fault==='binding')state.key='c'.repeat(64);
+    else if(fault==='readOnly')state.readOnly=true;
+    else if(fault==='capability')p.run('contextTypes={};paintFollowup()');
+    else if(['room','owner'].includes(fault))state.snapshot={...d,conversationMain:{...d.conversationMain,[fault==='room'?'room':'participant']:'changed'}};
+    else if(fault==='task')state.snapshot={...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='worker-1'?{...a,task:'task-a'}:a)};
+    else state.fault=fault;
+    await p.event('finding-share','click');
+    assert.ok(!p.host.contexts.some(c=>c.structuredContent?.kind==='oms-selected-finding'),fault);
+    assert.doesNotMatch(JSON.stringify(p.host.contexts),/한|PRIVATE OFF-PAGE/,fault);assert.equal(p.host.messages.length,0,fault);
+    if(fault==='capability')assert.equal(p.get('finding-share').hidden,true);
+    else {assert.equal(p.get('finding-text').textContent,'',fault);assert.match(p.get('followup-status').textContent,/Nothing was shared/,fault);}
+  }
+});
+
+test('pending finding Share is fenced by project changes, teardown, source-scope changes and draft edits; text-only hosts remain supported',async()=>{
+  for(const change of ['project','teardown','room','draft','stale']){
+    const {p,state,d}=await findingFixture();p.host.delayTool='oms_worker_output';await p.event('finding-share','click');
+    const before=p.calls.length;
+    if(change==='project')await p.open('input',{arguments:{project:'two'}});
+    else if(change==='teardown')p.notify({method:'ui/resource-teardown',id:'close-finding',params:{}});
+    else if(change==='room')state.snapshot={...d,conversationMain:{...d.conversationMain,room:'room-b'}};
+    else if(change==='stale'){state.fault='offline';await p.event('refresh','click');}
+    else {p.get('followup-text').value='Edited after clicking Share';await p.event('followup-text','input');}
+    p.host.release();await setImmediate();
+    assert.ok(!p.host.contexts.some(c=>c.structuredContent?.kind==='oms-selected-finding'),change);
+    assert.equal(p.get('finding-text').textContent,'',change);
+    if(change==='teardown')assert.equal(p.calls.length,before);
+  }
+  const {p,key,digest}=await findingFixture();p.run('contextTypes={text:{}}');await p.event('finding-share','click');
+  const deliveredText=p.host.contexts.at(-1),text=JSON.parse(deliveredText.content[0].text);
+  assert.equal(text.kind,'oms-selected-finding');assert.equal(text.selection.bytes,3999);assert.equal(text.authority,'context-only');
+  assertPrivateFindingOmitted(deliveredText,[key,digest,main.room,main.participant,'worker-1','indexed-answer']);
+  assertPrivateFindingOmitted(text,[key,digest,main.room,main.participant,'worker-1','indexed-answer']);
+});
+
+test('worker task attribution resolves Share rechecks only from the fresh snapshot and refuses unattributable snapshots',async()=>{
+  const key='b'.repeat(64),digest='d'.repeat(64);
+  const memberWorkers=[0,1].map(i=>({room:main.room,participant:'member-worker-'+i,parent:lead.participant,role:'worker',provider:'codex',joined:true}));
+  const workerAttempts=[{room:main.room,id:'mw-0',participant:'member-worker-0',role:'worker',provider:'codex',state:'done',task:'task-member'},
+    {room:main.room,id:'mw-1',participant:'member-worker-1',role:'worker',provider:'codex',state:'done',task:null}];
+  const d={...dashboard,conversationMain:{...main,participants:[lead,...memberWorkers]},
+    planReadiness:{available:true,scope:'repository',tasks:[{id:'task-a',title:'Review task A',reason:'parent-review-pending'}]},
+    conversationAttempts:[...dashboard.conversationAttempts,...workerAttempts]};
+  let snapshot=d;
+  const p=await panel([],d,{locale:'en',context:true,tools:{
+    oms_list_projects:()=>({projects:[],binding:'pinned',projectKey:key}),
+    oms_panel_snapshot:()=>({dashboard:snapshot}),
+    oms_worker_output:a=>{
+      const {project,answerPage,...pair}=a,publicData={...pair,status:'complete'},body='Member worker finding';
+      const out={...publicData,text:body,source:'indexed-answer',truncated:false};
+      if(answerPage!==undefined)out.page={offset:0,bytes:Buffer.byteLength(body),totalBytes:Buffer.byteLength(body),digest,nextCursor:null,hasMore:false};
+      return {structuredContent:publicData,_meta:{workerOutput:out}};
+    }
+  }});
+  const open=i=>p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li')[i]
+    .children.find(e=>e.className?.includes('worker-output-link'));
+  open(0).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');
+  assert.match(p.get('followup-text').value,/^Task: task-member$/m);
+  assert.doesNotMatch(p.get('followup-text').value,/task-a|Review task A/);
+  await p.event('followup-add','click');
+  assert.equal(p.host.contexts.at(-1).structuredContent.task,'task-member');
+  assert.equal(Object.hasOwn(p.host.contexts.at(-1).structuredContent,'project'),false);
+  // Fresh snapshot with member-parent workers resolves task-member from its own rows[].workers.
+  open(0).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');await p.event('followup-include','click');
+  await p.event('finding-share','click');
+  const sharedMember=p.host.contexts.at(-1);
+  assert.equal(sharedMember.structuredContent.kind,'oms-selected-finding');
+  assert.equal(sharedMember.structuredContent.task,'task-member');
+  assert.equal(Object.hasOwn(sharedMember.structuredContent,'project'),false);
+  assertPrivateFindingOmitted(sharedMember,[key,digest,main.room,main.participant,'mw-0','member-worker-0','indexed-answer']);
+  // Fresh snapshot confirms unattributed member-parent worker when present with task: null.
+  open(1).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');await p.event('followup-include','click');
+  assert.doesNotMatch(p.get('followup-text').value,/^Task:|task-a|Review task A/m);
+  await p.event('followup-add','click');
+  assert.equal(Object.hasOwn(p.host.contexts.at(-1).structuredContent,'task'),false);
+  await p.event('finding-share','click');
+  const sharedUnattributed=p.host.contexts.at(-1);
+  assert.equal(sharedUnattributed.structuredContent.kind,'oms-selected-finding');
+  assert.equal(Object.hasOwn(sharedUnattributed.structuredContent,'task'),false);
+  assertPrivateFindingOmitted(sharedUnattributed,[key,digest,main.room,main.participant,'mw-1','member-worker-1','indexed-answer']);
+  // Fresh snapshot without conversationAttempts (or missing the worker, or changed parent/task) refuses Share as changed instead of reading rendered rows.
+  for(const [index,fresh] of [
+    [0,{conversationBinding:'matched',conversationMain:d.conversationMain}],
+    [1,{conversationBinding:'matched',conversationMain:d.conversationMain}],
+    [1,{...d,conversationAttempts:d.conversationAttempts.filter(a=>a.id!=='mw-1')}],
+    [0,{...d,conversationMain:{...d.conversationMain,participants:[lead,{...memberWorkers[0],parent:'other-lead'},memberWorkers[1]]}}],
+    [0,{...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='mw-0'?{...a,task:'task-a'}:a)}],
+    [1,{...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='mw-1'?{...a,task:'task-a'}:a)}]
+  ]){
+    snapshot=d;await p.event('refresh','click');
+    open(index).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');await p.event('followup-include','click');
+    snapshot=fresh;
+    const sharedBefore=p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length;
+    await p.event('finding-share','click');
+    assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length,sharedBefore);
+    assert.equal(p.get('finding-text').textContent,'');
+    assert.match(p.get('followup-status').textContent,/Nothing was shared/);
+  }
+});
+
+const inspectReads=['oms_panel_usage','oms_panel_tui_view','oms_panel_project_graph'];
+function inspectionTools(state){
+  return {
+    oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:state.key,two:'c'.repeat(64)},readOnly:state.readOnly}),
+    oms_panel_usage:a=>{
+      assert.deepEqual(Object.keys(a),['project']);
+      return {scope:'repository-recent-attempts',providers:[{provider:'codex',contextUsed:0,cacheReadShare:null,windowsOmitted:1,
+        windows:[{name:'5 hour',used:0,source:'cached observation',stale:true,resets_at:null,age_seconds:12}],
+        recent7d:{calls:1,input:0,output:17,cacheRead:null}}],attempts:[
+        {id:'reported-zero',provider:'codex',tokens:0,source:'receipt',reportedCalls:1,calls:1,breakdown:[],costMicrousd:1500000,costSource:'events'},
+        {id:'unreported',provider:'claude',tokens:null,source:null,reportedCalls:null,calls:null,breakdown:[],costMicrousd:null,costSource:null}],
+        attemptsOmitted:0,providerTotals:[],providerTotalsOmitted:0,diagnostic:'PRIVATE DEBUG JSON'};
+    },
+    oms_panel_tui_view:a=>{
+      assert.deepEqual(Object.keys(a).sort(),['page','project','view']);assert.ok(['routes','modelcatalog'].includes(a.view));
+      return {view:a.view,page:a.page,status:'ready',nextPage:a.view==='routes' && a.page===1?2:null,incomplete:false,
+        columns:[{key:a.view==='routes'?'role':'model',label:'항목'}],rows:a.view==='routes'?
+        [{role:'reviewer '+a.page,access:'read-only',tier:'review',status:'ready',provider:'claude',model:'fixture-model',effort:'high',
+          requestedModel:null,requestedEffort:null,requestedAccount:null,selectedAccount:null,versionEvidence:'cached',probeAge:12,inFlight:0,recentAttempts:4,issue:null}]:
+        [{provider:'codex',model:'cached-model',efforts:null,providerEfforts:'low, high',routable:null,source:'oms models · cache',probe:'unavailable',age:null}]};
+    },
+    oms_panel_project_graph:a=>{
+      assert.ok(Object.keys(a).every(k=>['project','node','query','depth','limit'].includes(k)));
+      assert.equal(a.depth,2);assert.equal(a.limit,20);assert.ok(!(a.node && a.query));
+      return {schema:1,kind:'oms-panel-project-graph',status:'ready',completeness:'complete',
+        provenance:{source:'indexed-graph',mode:'indexed',indexState:'present',indexFreshness:'fresh',verifiedRelationships:true,readOnly:true,wroteIndex:false},
+        scope:{repository:'fixture',focusNode:a.node||null,query:a.query||null,includeTests:false,depth:a.depth,limit:a.limit},
+        limits:{maxNodes:20,maxEdges:180,truncated:false},counts:{shown_nodes:2,total_nodes:2,shown_edges:2,total_edges:2,confidence:{EXTRACTED:1,INFERRED:1}},
+        nodes:[{id:'file:src/a.rs',label:'a.rs',kind:'file',path:'src/a.rs'},{id:'file:src/b.rs',label:'b.rs',kind:'file',path:'src/b.rs'}],
+        edges:[{source:'file:src/a.rs',target:'file:src/b.rs',relation:'imports',confidence:'EXTRACTED'},
+          {source:'file:src/b.rs',target:'file:src/a.rs',relation:'related',confidence:'INFERRED'}],selection:null};
+    }
+  };
+}
+
+test('Inspect reads only the selected view and renders usage, paged routes, catalog evidence and graph neighborhoods',async()=>{
+  const state={key:'b'.repeat(64)},p=await panel(['one','two'],dashboard,{locale:'en',tools:inspectionTools(state)});
+  await p.open('input',{arguments:{project:'one'}});
+  assert.ok(!p.calls.some(c=>inspectReads.includes(c.name)));assert.equal(p.get('inspect-open').disabled,false);
+  await p.event('inspect-open','click');
+  assert.deepEqual(p.calls.filter(c=>inspectReads.includes(c.name)).map(c=>c.name),['oms_panel_usage']);
+  const content=p.get('inspect-content');
+  assert.match(content.textContent,/Observed context used0%Cache read shareStatus unknown/);
+  assert.match(content.textContent,/tokens in the last 7 days/);assert.match(content.textContent,/Reported tokens0SourceUsage receipt/);
+  assert.match(content.textContent,/Reported cost \(USD\)1.5/);assert.match(content.textContent,/Reported tokensStatus unknown/);
+  assert.doesNotMatch(content.textContent,/PRIVATE DEBUG JSON|"providers"|"scope"/);
+  assert.match(p.get('inspect-status').textContent,/Only part/);assert.match(p.get('inspect-note').textContent,/not totals for this Room/);
+  p.get('inspect-kind').value='routes';await p.event('inspect-kind','change');
+  assert.match(content.textContent,/reviewer 1/);assert.equal(p.get('inspect-prev').hidden,true);assert.equal(p.get('inspect-next').hidden,false);
+  assert.match(p.get('inspect-note').textContent,/proposals/);await p.event('inspect-next','click');
+  assert.match(content.textContent,/reviewer 2/);assert.equal(p.get('inspect-prev').hidden,false);assert.equal(p.get('inspect-next').hidden,true);
+  await p.event('inspect-prev','click');assert.match(content.textContent,/reviewer 1/);
+  p.get('inspect-kind').value='modelcatalog';await p.event('inspect-kind','change');
+  assert.match(content.textContent,/cached-model/);assert.match(content.textContent,/Model-specific effortsStatus unknownProvider-wide effortslow, high/);
+  assert.match(p.get('inspect-note').textContent,/does not confirm current account access/);assert.equal(p.get('inspect-next').hidden,true);
+  p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
+  assert.equal(p.get('inspect-graph-form').hidden,false);assert.match(content.textContent,/Cached project relationships/);
+  assert.match(content.textContent,/imports · Extracted/);assert.match(content.textContent,/related · Inferred/);
+  const nodes=content.children[0].children.find(e=>e.className==='inspect-nodes');nodes.children.find(e=>e.tagName==='button').dispatchEvent(new Event('click'));await setImmediate();
+  assert.deepEqual({...p.calls.filter(c=>c.name==='oms_panel_project_graph').at(-1).args},{project:'one',node:'file:src/a.rs',limit:20,depth:2});
+  p.get('inspect-query').value='src';await p.event('inspect-graph-form','submit');
+  assert.deepEqual({...p.calls.filter(c=>c.name==='oms_panel_project_graph').at(-1).args},{project:'one',query:'src',limit:20,depth:2});
+  await p.event('inspect-root','click');assert.equal(Object.hasOwn(p.calls.filter(c=>c.name==='oms_panel_project_graph').at(-1).args,'query'),false);
+  await choose(p,'ko');assert.match(content.textContent,/추출됨/);assert.match(p.get('inspect-note').textContent,/관계/);
+  await p.event('inspect-close','click');assert.equal(content.textContent,'');assert.equal(p.get('inspection').open,false);
+  assert.equal(p.host.messages.length,0);assert.ok(!p.calls.some(c=>/^oms_(start|send|update|open_lead|assign)/.test(c.name)));
+  const readOnly=await panel(['one'],dashboard,{locale:'en',tools:inspectionTools({key:'b'.repeat(64),readOnly:true})});
+  await readOnly.open('input',{arguments:{project:'one'}});await readOnly.event('inspect-open','click');
+  assert.match(readOnly.get('inspect-content').textContent,/provider observation/);assert.equal(readOnly.get('followup-open').hidden,true);
+});
+
+test('Inspect drops late views and private scope changes, and clears unverifiable or malformed results',async()=>{
+  const state={key:'b'.repeat(64)},p=await panel(['one','two'],dashboard,{locale:'en',tools:inspectionTools(state)});
+  await p.open('input',{arguments:{project:'one'}});await p.event('inspect-open','click');
+  p.host.delayTool='oms_panel_project_graph';p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
+  p.get('inspect-kind').value='routes';await p.event('inspect-kind','change');p.host.release();await setImmediate();
+  assert.match(p.get('inspect-content').textContent,/reviewer 1/);assert.doesNotMatch(p.get('inspect-content').textContent,/a.rs|Cached project/);
+  p.host.delayTool='oms_panel_usage';p.get('inspect-kind').value='usage';await p.event('inspect-kind','change');
+  state.key='d'.repeat(64);p.host.release();await setImmediate();
+  assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Could not verify/);
+  state.key='b'.repeat(64);await p.event('inspect-refresh','click');assert.match(p.get('inspect-content').textContent,/provider observation/);
+  p.host.delayTool='oms_panel_usage';await p.event('inspect-refresh','click');const before=p.calls.length;
+  await p.event('inspect-close','click');p.host.release();await setImmediate();
+  assert.equal(p.calls.length,before);assert.equal(p.get('inspect-content').textContent,'');
+  p.host.delayTool='oms_panel_usage';await p.event('inspect-open','click');
+  await p.open('input',{arguments:{project:'two'}});p.host.release();await setImmediate();
+  assert.equal(p.get('inspection').open,false);assert.equal(p.get('inspect-content').textContent,'');
+  await p.open('input',{arguments:{project:'one'}});await p.event('inspect-open','click');
+  const good=p.host.tools.oms_panel_tui_view;
+  for(const fault of ['view','page','nextPage','rows']){
+    p.host.tools.oms_panel_tui_view=a=>{const v=good(a);if(fault==='view')v.view='plan';if(fault==='page')v.page++;
+      if(fault==='nextPage')v.nextPage=999;if(fault==='rows')v.rows=Array(21).fill(v.rows[0]);return v;};
+    p.get('inspect-kind').value='routes';await p.event('inspect-kind','change');
+    assert.equal(p.get('inspect-content').textContent,'',fault);assert.match(p.get('inspect-status').textContent,/Could not verify/,fault);
+    assert.equal(p.get('inspect-next').hidden,true,fault);
+  }
+  const graph=p.host.tools.oms_panel_project_graph;p.host.tools.oms_panel_project_graph=a=>({...graph(a),scope:{focusNode:'different',query:null}});
+  p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
+  assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Could not verify/);
+  p.host.tools.oms_panel_usage=()=>({scope:'repository-recent-attempts',providers:[],attempts:[]});
+  p.get('inspect-kind').value='usage';await p.event('inspect-kind','change');assert.match(p.get('inspect-content').textContent,/No records/);
+});
+
+test('Inspect graph distinguishes unavailable provenance from zero cached relationships',async()=>{
+  const state={key:'b'.repeat(64)},tools=inspectionTools(state),good=tools.oms_panel_project_graph;
+  tools.oms_panel_project_graph=a=>({...good(a),status:'unknown',completeness:'unknown',
+    provenance:{source:'git-ls-files',mode:'unavailable',indexState:'unindexed',indexFreshness:'absent',verifiedRelationships:false,readOnly:true,wroteIndex:false},
+    counts:{shown_nodes:0,total_nodes:0,shown_edges:0,total_edges:0,confidence:{}},nodes:[],edges:[]});
+  const p=await panel(['one'],dashboard,{locale:'en',tools});
+  await p.open('input',{arguments:{project:'one'}});await p.event('inspect-open','click');
+  p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
+  assert.equal(p.get('inspect-content').textContent,'');
+  assert.doesNotMatch(p.get('inspect-content').textContent,/Cached project relationships|0 \/ 0|No records/);
+  assert.match(p.get('inspect-status').textContent,/Status unknown/);
+  await choose(p,'ko');assert.match(p.get('inspect-status').textContent,/상태 미확인/);
+});
+
+test('Include stays hidden on hosts without updateModelContext',async()=>{
+  const key='b'.repeat(64),id=randomUUID(),digest='d'.repeat(64);
+  const claudeReq=leadStatus({provider:'claude'},'ready').leads[0].requestId,askParticipant='ask-'+claudeReq;
+  const worker={id:'worker-0',parentAttempt:'l',provider:'codex',role:'worker',state:'done'};
+  const d={...dashboard,conversationAttempts:[...dashboard.conversationAttempts,worker]};
+  const p=await panel(['one'],d,{locale:'en',tools:{
+    oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
+    oms_worker_output:a=>{
+      const {project,...pair}=a,publicData={...pair,status:'complete'};
+      return {structuredContent:publicData,_meta:{workerOutput:{...publicData,text:'Worker answer',source:'indexed-answer',truncated:false}}};
+    },
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      if(a.provider){
+        v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Q',turnId:id,status:'replied'},{role:'claude',text:'A',turnId:id,truncated:true}]}};
+        if(a.answerPage!==undefined)v._private.answer={turnId:id,text:'Full Lead answer',offset:0,bytes:16,totalBytes:16,digest,nextCursor:null,hasMore:false,
+          source:'recorded-answer',handoff:{room:a.room,participant:askParticipant,provider:a.provider,leadRequestId:a.leadRequestId,turnId:id,operation:'recorded-operation'}};
+      }
+      return v;
+    },
+    oms_panel_chat:a=>a.section?{...a,projectKey:a.projectKey,source:'room',messages:[],evidence:{attempt:a.attempt,section:a.section,text:'Room full',offset:0,bytes:9,totalBytes:9,digest,nextCursor:null,hasMore:false}}:
+      {...a,source:'room',messages:[],result:{attempt:'l',text:'Room excerpt',truncated:true}}
+  }});
+  const group=p.get('leads').children[1].children[2],list=group.children.find(e=>e.tagName==='ul'),openWorker=list.children.find(e=>e.tagName==='li').children.find(e=>e.className?.includes('worker-output-link'));
+  openWorker.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('output-copy').hidden,false);assert.equal(p.get('output-followup').hidden,false);
+  await p.event('output-followup','click');assert.equal(p.get('followup-include').hidden,true);
+  const openLead=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');openLead.dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-messages').children.at(-1).children.find(e=>e.tagName==='button').dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('answer-copy').hidden,false);assert.equal(p.get('answer-followup').hidden,false);
+  await p.event('answer-followup','click');assert.equal(p.get('followup-include').hidden,true);
+  group.children.find(e=>e.className==='person').dispatchEvent(new Event('click'));await setImmediate();await p.event('chat-result-full','click');
+  assert.equal(p.get('answer-copy').hidden,false);assert.equal(p.get('answer-followup').hidden,false);
+  await p.event('answer-followup','click');assert.equal(p.get('followup-include').hidden,true);
+});
+
+test('a failed Include keeps the excerpt private, and a superseded Include never fills a newer draft',async()=>{
+  const key='b'.repeat(64),digest='d'.repeat(64);let failPage=true;
+  const workers=[0,1].map(i=>({id:'worker-'+i,parentAttempt:'l',provider:'codex',role:'worker',state:'done'}));
+  const d={...dashboard,conversationAttempts:[...dashboard.conversationAttempts,...workers]};
+  const p=await panel(['one'],d,{locale:'en',context:true,tools:{
+    oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
+    oms_worker_output:a=>{
+      const {project,answerPage,...pair}=a,publicData={...pair,status:'complete'};
+      const text=answerPage!==undefined?(failPage?'changed body':'Previewable output'):'Previewable output';
+      const out={...publicData,text,source:'indexed-answer',truncated:true};
+      if(answerPage!==undefined)out.page={offset:0,bytes:Buffer.byteLength(text),totalBytes:Buffer.byteLength(text)+4,digest,nextCursor:'next',hasMore:true};
+      return {structuredContent:publicData,_meta:{workerOutput:out}};
+    }
+  }});
+  const items=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.filter(e=>e.tagName==='li');
+  const open=async i=>{items[i].children.find(e=>e.className?.includes('worker-output-link')).dispatchEvent(new Event('click'));await setImmediate();await p.event('output-followup','click');};
+  await open(0);await p.event('followup-include','click');
+  assert.equal(p.get('finding-preview').hidden,true);assert.equal(p.get('followup-include').hidden,true);
+  assert.match(p.get('followup-status').textContent,/Nothing was shared/);
+  assert.ok(!p.host.contexts.some(c=>c.structuredContent?.kind==='oms-selected-finding'));
+  failPage=false;await open(0);p.host.delayTool='oms_worker_output';await p.event('followup-include','click');
+  const firstRelease=p.host.release;assert.equal(p.get('followup-include').disabled,true);
+  await open(1);p.host.delayTool='oms_worker_output';await p.event('followup-include','click');const secondRelease=p.host.release;
+  firstRelease();await setImmediate();assert.equal(p.get('finding-preview').hidden,true);
+  secondRelease();await setImmediate();
+  assert.equal(p.get('finding-preview').hidden,false);assert.equal(p.get('finding-text').textContent,'Previewable output');
+});
+
+// v34 usage card and More: read-only reads on demand, cached per binding scope.
+function moreFixture(state){
+  const jobs=new Map(),timers={setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const tools={...inspectionTools(state),
+    oms_panel_usage:()=>({scope:'repository-recent-attempts',providers:[
+      {provider:'codex',windows:[{name:'5 hour',used:40,stale:false,age_seconds:30},{name:'weekly',used:86,stale:true,age_seconds:2700,source:'session log'}]},
+      {provider:'claude',windows:[{name:'weekly',used:38,stale:false,age_seconds:120}]}],attempts:[]}),
+    oms_panel_git_status:()=>({git:{available:true,branch:'feat',dirty:false,upstream:'origin/feat'},github:{status:'available',repository:'o/r',observedAt:null,
+      pullRequests:[{number:1,title:'Pass',checks:{passed:2},url:'https://github.com/o/r/pull/1'},
+        {number:2,title:'Broken',baseBranch:'dev',checks:{failed:1,passed:1,items:[{name:'lint',status:'failed'}]},url:'https://evil.example/o/r/pull/2'},
+        {number:3,title:'Running',checks:{pending:1}}]}}),
+  };
+  const fire=async ms=>{for(const [id,j] of jobs)if(j.ms===ms){jobs.delete(id);j.fn();}for(let i=0;i<4;i++)await setImmediate();};
+  return {jobs,timers,tools,fire};
+}
+const count=(p,name)=>p.calls.filter(c=>c.name===name).length,kids=e=>e.children.filter(c=>typeof c!=='string');
+const settle=async()=>{for(let i=0;i<4;i++)await setImmediate();};
+
+test('v34 usage card reads once after the first screen, warns low and keeps no record apart from zero',async()=>{
+  const state={key:'b'.repeat(64)},f=moreFixture(state),p=await panel(['one','two'],dashboard,{locale:'en',timers:f.timers,tools:f.tools});
+  await p.open('input',{arguments:{project:'one'}});await settle();
+  assert.ok(!p.calls.some(c=>/^oms_panel_(usage|git_status|work_items|tui_view)$/.test(c.name)));
+  await f.fire(1500);assert.equal(count(p,'oms_panel_usage'),1);
+  const rows=p.get('usage-rows').children.map(li=>kids(li)[0]);
+  assert.deepEqual(rows.map(r=>r.getAttribute('data-tone')),['warn','plain',null,null]);
+  assert.equal(rows[0].getAttribute('data-stale'),'true');assert.match(rows[0].textContent,/14%Stale · 45m/);
+  assert.match(rows[0].getAttribute('aria-label'),/^Codex Weekly 14% left, Stale · 45/);
+  assert.equal(kids(rows[2])[2].getAttribute('data-known'),'false');assert.match(rows[2].textContent,/No record/);assert.doesNotMatch(rows[2].textContent,/0%/);
+  assert.match(rows[2].getAttribute('aria-label'),/has no recorded limit/);
+  rows[0].dispatchEvent(new Event('click'));const detail=kids(p.get('usage-rows').children[0])[1];
+  assert.equal(detail.hidden,false);assert.match(detail.textContent,/86% used · 14% left/);assert.match(detail.textContent,/Stale value/);
+  await p.event('refresh','click');await settle();assert.equal(count(p,'oms_panel_usage'),1);
+  assert.equal(kids(p.get('usage-rows').children[0])[1].hidden,false);
+  await p.event('usage-refresh','click');await settle();assert.equal(count(p,'oms_panel_usage'),2);
+  await p.open('input',{arguments:{project:'two'}});await settle();
+  assert.equal(p.get('usage-rows').children.length,0);await f.fire(1500);assert.equal(count(p,'oms_panel_usage'),3);
+  assert.equal(kids(p.get('usage-rows').children[0])[1].hidden,true);
+});
+
+test('v34 More PR · CI reads on first expand, sorts PRs by failure and keeps the read across auto refresh',async()=>{
+  const state={key:'b'.repeat(64)},f=moreFixture(state),p=await panel(['one','two'],dashboard,{locale:'en',timers:f.timers,tools:f.tools,openLinks:true});
+  await p.open('input',{arguments:{project:'one'}});await settle();
+  await p.event('more-pr','click');await settle();
+  const pr=p.get('more-pr-body');assert.equal(p.get('more-pr').getAttribute('aria-expanded'),'true');assert.equal(count(p,'oms_panel_git_status'),1);
+  const list=pr.children.find(e=>e.tagName==='ul'),items=kids(list).map(li=>li.row.textContent);
+  assert.deepEqual(items.map(s=>s.slice(0,s.indexOf(' '))),['×Broken','●Running','✓Pass']);
+  assert.match(items[0],/1 failed · 1 passed · lint · → dev/);assert.match(p.get('more-pr-chip').textContent,/1 failed/);
+  const link=li=>li.head.children.at(-1);
+  assert.equal(link(kids(list)[0]).tagName,'span');assert.equal(link(kids(list)[2]).tagName,'button');
+  await p.event('more-pr','click');await p.event('more-pr','click');await settle();assert.equal(count(p,'oms_panel_git_status'),1);
+  kids(kids(pr)[0])[1].dispatchEvent(new Event('click'));await settle();assert.equal(count(p,'oms_panel_git_status'),2);
+  assert.equal(p.get('more-work'),undefined);assert.equal(p.get('more-results'),undefined);
+  await p.event('refresh','click');await settle();
+  assert.equal(p.get('more-pr').getAttribute('aria-expanded'),'true');assert.equal(count(p,'oms_panel_git_status'),2);assert.match(pr.textContent,/Broken/);
+  await p.open('input',{arguments:{project:'two'}});await settle();
+  for(const k of ['pr']){assert.equal(p.get('more-'+k).getAttribute('aria-expanded'),'false',k);assert.equal(p.get('more-'+k+'-body').hidden,true,k);
+    assert.equal(kids(p.get('more-'+k+'-body')).length,0,k);}
 });
 
 test('pending-turn polling pauses visibly and slot badges change only after a confirmed metadata read',async()=>{
@@ -1580,4 +2069,298 @@ test('pending-turn polling pauses visibly and slot badges change only after a co
   assert.doesNotMatch(p.get('leads').children[2].textContent,/withheld|unreadable|unconfirmed/);
   open.dispatchEvent(new Event('click'));await setImmediate();await p.event('chat-back','click');assert.match(p.get('leads').children[1].textContent,/Reply read/);
   assert.ok(!p.calls.some(c=>c.name==='oms_send_lead_message'));
+});
+
+test('auto-refresh pauses while the follow-up preview or finding Share is active and resumes on close without weakening rechecks',async()=>{
+  let now=1000;
+  const jobs=new Map(),memory=new Map([['oms.panel.auto-refresh.v1','on']]),key='b'.repeat(64),digest='d'.repeat(64),body='Scoped worker finding';
+  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
+  const autos=()=>[...jobs].filter(([,job])=>job.ms===20000);
+  const d={...dashboard,conversationAttempts:[...dashboard.conversationAttempts,{id:'worker-0',parentAttempt:'l',provider:'codex',role:'worker',state:'done',task:'task-b'}]};
+  let snapshot=d;
+  const p=await panel(['one'],d,{locale:'en',context:true,timers,storage,visibility:true,tools:{
+    oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
+    oms_panel_snapshot:()=>({dashboard:snapshot}),
+    oms_worker_output:a=>{
+      const {project,answerPage,...pair}=a,publicData={...pair,status:'complete'};
+      const out={...publicData,text:body,source:'indexed-answer',truncated:false};
+      if(answerPage!==undefined)out.page={offset:0,bytes:Buffer.byteLength(body),totalBytes:Buffer.byteLength(body),digest,nextCursor:null,hasMore:false};
+      return {structuredContent:publicData,_meta:{workerOutput:out}};
+    }
+  }});
+  await p.open('input',{arguments:{project:'one'}});
+  assert.equal(autos().length,1);
+  const staleCallback=autos()[0][1].fn;
+  const open=p.get('leads').children[1].children[2].children.find(e=>e.tagName==='ul').children.find(e=>e.tagName==='li')
+    .children.find(e=>e.className?.includes('worker-output-link'));
+  open.dispatchEvent(new Event('click'));await setImmediate();
+  await p.event('output-followup','click');await p.event('followup-include','click');
+  assert.equal(p.get('followup-panel').hidden,false);
+  assert.equal(p.get('finding-preview').hidden,false);
+  assert.equal(autos().length,0);
+  // Stale focus/visibility and timer callbacks skip while the preview and pending Share are active.
+  now+=25000;
+  p.host.delayTool='oms_worker_output';
+  await p.event('finding-share','click');
+  assert.equal(p.get('finding-share').disabled,true);
+  const callsDuringShare=p.calls.length;
+  staleCallback();
+  p.window.dispatchEvent(new Event('focus'));
+  p.document.show(false);p.document.show(true);
+  p.run('autoReload()');
+  await setImmediate();
+  assert.equal(p.calls.length,callsDuringShare);
+  assert.equal(p.run('busy'),false);
+  assert.equal(p.get('finding-text').textContent,body);
+  p.host.release();await setImmediate();
+  assert.equal(p.host.contexts.at(-1)?.structuredContent?.kind,'oms-selected-finding');
+  assert.equal(p.host.contexts.at(-1)?.structuredContent?.task,'task-b');
+  assert.equal(p.get('finding-preview').hidden,false);
+  assert.equal(autos().length,0);
+  // Post-load verifiedFindingScope still enforces exact recheck.
+  p.host.delayTool='oms_worker_output';
+  await p.event('finding-share','click');
+  snapshot={...d,conversationAttempts:d.conversationAttempts.map(a=>a.id==='worker-0'?{...a,task:'task-changed'}:a)};
+  p.host.release();await setImmediate();
+  assert.equal(p.host.contexts.filter(c=>c.structuredContent?.kind==='oms-selected-finding').length,1);
+  assert.equal(p.get('finding-text').textContent,'');
+  assert.match(p.get('followup-status').textContent,/Nothing was shared/);
+  await p.event('followup-close','click');
+  assert.equal(autos().length,1);
+});
+
+test('hostToolsUnavailable sets only for host transport refusal before any tools/call succeeds, offers Retry, and clears on Retry success',async()=>{
+  const ipcUnavailable={code:-32603,message:'IPC not available for MCP tool call'};
+  const serverBusy={code:-32000,message:'OMS panel is busy. The request was not executed.'};
+  const invalidParams={code:-32602,message:'unknown or invalid desktop tool arguments'};
+  const methodNotFound={code:-32601,message:'method not found'};
+  const key='b'.repeat(64);
+
+  // Server's own JSON-RPC errors (-32000 busy, -32602, -32601) and tool isError results must never set hostToolsUnavailable,
+  // even when no panel tools/call has succeeded yet.
+  for(const rpcError of [serverBusy,invalidParams,methodNotFound]){
+    const s=await panel(['one'],{...dashboard,goal:'Live after transient server error'},{
+      locale:'en',
+      tools:{oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}})},
+      toolError:rpcError
+    });
+    assert.equal(s.run('hostToolsUnavailable'),false);
+    assert.equal(s.get('host-retry').hidden,true);
+    assert.equal(s.get('refresh').disabled,false);
+    assert.equal(s.get('auto-refresh').disabled,false);
+    s.host.toolError=null;
+    await s.event('refresh','click');
+    assert.equal(s.run('hostToolsUnavailable'),false);
+    assert.equal(s.get('goal').textContent,'Live after transient server error');
+  }
+
+  let initialToolError=true;
+  const toolIsErrorPanel=await panel(['one'],{...dashboard,goal:'Live after tool isError'},{
+    locale:'en',
+    tools:{oms_list_projects:()=>{if(initialToolError)throw new Error('server tool error');return {projects:['one'],projectKeys:{one:key}};}},
+  });
+  assert.equal(toolIsErrorPanel.run('hostToolsUnavailable'),false);
+  assert.equal(toolIsErrorPanel.get('host-retry').hidden,true);
+  assert.equal(toolIsErrorPanel.get('refresh').disabled,false);
+  initialToolError=false;
+  await toolIsErrorPanel.event('refresh','click');
+  assert.equal(toolIsErrorPanel.get('goal').textContent,'Live after tool isError');
+
+  // A host that refuses every tools/call renders the initial open dashboard, disables regular controls, and offers Retry.
+  const timers=new Map(),memory=new Map([['oms.panel.auto-refresh.v1','on']]),attempts=[];
+  let activeError=ipcUnavailable;
+  const p=await panel(['one','two'],{...dashboard,goal:'Live snapshot from tools/call'},{
+    locale:'en',
+    context:true,
+    storage:{getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)},
+    timers:{setTimeout(fn,ms){const id=Symbol();timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}},
+    tools:{oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:key,two:'c'.repeat(64)}})},
+    toolError:params=>{attempts.push(params.name);return activeError;}
+  });
+  assert.equal(p.run('hostToolsUnavailable'),true);
+  assert.equal(p.get('host-retry').hidden,false);
+  assert.equal(p.get('host-retry').disabled,false);
+  assert.equal(p.get('host-retry').textContent,'Retry');
+  assert.equal(p.get('refresh').disabled,true);
+  assert.equal(p.get('auto-refresh').disabled,true);
+
+  await p.open('input',{arguments:{project:'one'}});
+  await p.open('result',{structuredContent:{
+    panel:'OMS',project:'one',readOnly:false,
+    dashboard:{...dashboard,project:'one',goal:'Ignored public dashboard'}
+  }});
+  assert.equal(p.get('view').hidden,true);
+  await p.open('result',{
+    structuredContent:{panel:'OMS',project:'one',readOnly:false,snapshot:'attached'},
+    _meta:{dashboard:{...dashboard,project:'one',goal:'Rendered from initial open'}}
+  });
+  assert.equal(p.get('view').hidden,false);
+  assert.equal(p.get('project').textContent,'one');
+  assert.equal(p.get('goal').textContent,'Rendered from initial open');
+  assert.equal(p.get('main-name').textContent,'OMS Main · Codex');
+  assert.equal(p.run('hostToolsUnavailable'),true);
+  assert.equal(p.get('host-retry').hidden,false);
+  assert.equal(p.get('host-retry').disabled,false);
+  assert.equal(p.get('refresh').disabled,true);
+  assert.equal(p.get('auto-refresh').disabled,true);
+  assert.equal(p.get('new-goal').disabled,true);
+  assert.equal(p.get('header-main').disabled,true);
+  assert.equal(p.get('inspect-open').disabled,true);
+  assert.equal(p.get('open-leads').disabled,true);
+  // The usage card and More never read through a host that refuses tools/call.
+  assert.equal(p.get('more-pr').disabled,true);assert.equal(p.get('usage-refresh').disabled,true);
+  assert.equal([...timers.values()].filter(t=>t.ms===1500).length,0);
+  const memberButton=p.get('leads').children[1].children[2];
+  assert.equal(memberButton.disabled,true);
+  assert.equal([...timers.values()].filter(t=>t.ms===20000).length,0);
+  assert.match(p.get('status').textContent,/Refresh and actions are unavailable in this host.*Request a refresh in the conversation/);
+  await choose(p,'ko');
+  assert.equal(p.get('host-retry').textContent,'다시 시도');
+  assert.match(p.get('status').textContent,/새로고침과 작업을 사용할 수 없습니다.*대화에서 새로고침을 요청하세요/);
+  await choose(p,'en');
+
+  const mark=attempts.length;
+  await p.event('refresh','click');
+  await p.event('auto-refresh','click');
+  await p.event('new-goal','click');
+  await p.event('header-main','click');
+  await p.event('inspect-open','click');
+  memberButton.dispatchEvent(new Event('click'));await setImmediate();
+  p.window.dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'r',altKey:true}));await setImmediate();
+  assert.equal(attempts.length,mark);
+  assert.equal(p.get('goal').textContent,'Rendered from initial open');
+  assert.equal(p.get('launcher').open ?? false,false);
+  assert.equal(p.get('conversation').open ?? false,false);
+  assert.equal(p.get('inspection').open ?? false,false);
+
+  // Clicking Retry while the host still refuses attempts a single refresh, keeps the rendered dashboard, and keeps Retry available.
+  p.document.activeElement=p.get('host-retry');
+  await p.event('host-retry','click');
+  assert.deepEqual(attempts.slice(mark),['oms_list_projects']);
+  assert.equal(p.run('hostToolsUnavailable'),true);
+  assert.equal(p.get('view').hidden,false);
+  assert.equal(p.get('goal').textContent,'Rendered from initial open');
+  assert.equal(p.get('host-retry').hidden,false);
+  assert.equal(p.get('host-retry').disabled,false);
+  assert.equal(p.get('refresh').focused ?? 0,0);
+  assert.equal([...timers.values()].filter(t=>t.ms===20000).length,0);
+
+  // Existing hostRejected classification for -32601/-32602 keeps its meaning.
+  activeError={code:-32601,message:'Method not found'};
+  const rejected=await p.run(`request('tools/call',{name:'oms_list_projects',arguments:{}}).then(()=>null,e=>({hostRejected:e.hostRejected,message:e.message}))`);
+  assert.equal(rejected.hostRejected,true);
+  activeError=ipcUnavailable;
+  const generic=await p.run(`request('tools/call',{name:'oms_list_projects',arguments:{}}).then(()=>null,e=>({hostRejected:e.hostRejected,message:e.message}))`);
+  assert.equal(generic.hostRejected,false);
+
+  // Retry success clears hostToolsUnavailable, hides Retry, renders live state, re-enables controls, moves focus to refresh, and arms auto-refresh.
+  activeError=null;
+  p.document.activeElement=p.get('host-retry');
+  await p.event('host-retry','click');
+  assert.equal(p.run('hostToolsUnavailable'),false);
+  assert.equal(p.get('host-retry').hidden,true);
+  assert.equal(p.get('host-retry').disabled,true);
+  assert.equal(p.get('refresh').focused,1);
+  assert.equal(p.get('project').textContent,'one');
+  assert.equal(p.get('goal').textContent,'Live snapshot from tools/call');
+  assert.equal(p.get('refresh').disabled,false);
+  assert.equal(p.get('auto-refresh').disabled,false);
+  assert.equal(p.get('new-goal').disabled,false);
+  assert.equal(p.get('inspect-open').disabled,false);
+  assert.equal(p.get('status').textContent,'');
+  assert.equal([...timers.values()].filter(t=>t.ms===20000).length,1);
+
+  // Once a newer snapshot from a successful tools/call has rendered for the same project and generation,
+  // a late open result dashboard does not overwrite it.
+  await p.open('input',{arguments:{project:'two'}});
+  assert.equal(p.get('project').textContent,'two');
+  assert.equal(p.get('goal').textContent,'Live snapshot from tools/call');
+  await p.open('result',{structuredContent:{panel:'OMS',project:'two',snapshot:'attached'},_meta:{dashboard:{project:'two',goal:'Stale open dashboard'}}});
+  assert.equal(p.get('goal').textContent,'Live snapshot from tools/call');
+
+  // Once any panel tools/call has succeeded, neither server errors (-32000, -32602, -32601, isError) nor later JSON-RPC errors ever set hostToolsUnavailable.
+  const approval={id:'r-1',version:1,digest:'a'.repeat(64),summary:'Approve?',action:'Main scope decision',object:main.room};
+  const q=await panel(['one'],{...dashboard,goal:'Initial live'},{locale:'en',context:true,tools:{
+    oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}}),
+    oms_list_approvals:()=>({approvals:[approval]})
+  }});
+  const approveButton=()=>q.get('approvals').children[0].children.at(-1).children.at(-1).children.find(b=>b.type==='button');
+  assert.equal(approveButton().disabled,false);
+  await q.event('followup-open','click');
+  assert.equal(q.get('followup-main').disabled,false);
+  q.host.tools.oms_panel_snapshot=()=>{throw new Error('server tool error');};
+  await q.event('refresh','click');
+  assert.equal(q.run('hostToolsUnavailable'),false);
+  q.host.tools.oms_panel_snapshot=args=>({dashboard:{...dashboard,project:args.project,goal:'Recovered live'}});
+  await q.event('refresh','click');
+  assert.equal(q.get('goal').textContent,'Recovered live');
+  for(const laterError of [serverBusy,invalidParams,methodNotFound,ipcUnavailable]){
+    q.host.toolError=laterError;
+    await q.event('refresh','click');
+    assert.equal(q.run('hostToolsUnavailable'),false);
+    assert.equal(q.get('host-retry').hidden,true);
+    assert.equal(q.get('refresh').disabled,false);
+    assert.equal(q.get('auto-refresh').disabled,false);
+  }
+  q.host.toolError=null;
+  await q.event('refresh','click');
+  assert.equal(q.get('goal').textContent,'Recovered live');
+  assert.equal(approveButton().disabled,false);
+  assert.equal(q.get('status').textContent,'');
+});
+
+test('initial open renders _meta.dashboard without a second snapshot read until the next refresh tick, while snapshotOmitted still fetches',async()=>{
+  const key='b'.repeat(64);
+  let now=1000;
+  const jobs=new Map(),memory=new Map([['oms.panel.auto-refresh.v1','on']]);
+  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
+  const autos=()=>[...jobs].filter(([,job])=>job.ms===20000);
+  const p=await panel(['one','two'],{...dashboard,goal:'Refreshed snapshot'},{
+    locale:'en',
+    timers,
+    storage,
+    tools:{oms_list_projects:()=>({projects:['one','two'],projectKeys:{one:key,two:'c'.repeat(64)}})},
+    initialOpen:[
+      ['input',{arguments:{project:'one'}}],
+      ['result',{
+        structuredContent:{panel:'OMS',project:'one',snapshot:'attached'},
+        _meta:{dashboard:{...dashboard,project:'one',goal:'Delivered in _meta.dashboard'}}
+      }]
+    ]
+  });
+  const snapshots=()=>p.calls.filter(c=>c.name==='oms_panel_snapshot');
+  assert.equal(p.get('view').hidden,false);
+  assert.equal(p.get('goal').textContent,'Delivered in _meta.dashboard');
+  assert.equal(p.get('main-name').textContent,'OMS Main · Codex');
+  assert.equal(snapshots().length,0);
+  assert.deepEqual(p.calls.map(c=>c.name),['oms_list_projects','oms_list_approvals',managedRead]);
+  assert.equal(autos().length,1);
+
+  const [tickId,tickJob]=autos()[0];
+  jobs.delete(tickId);
+  now+=20000;
+  tickJob.fn();
+  await setImmediate();
+  assert.equal(snapshots().length,1);
+  assert.equal(p.get('goal').textContent,'Refreshed snapshot');
+  assert.equal(autos().length,1);
+
+  for(const reason of ['busy','size']){
+    const omittedJobs=new Map();
+    const omitted=await panel(['one'],{...dashboard,goal:'Fetched after '+reason},{
+      locale:'en',
+      storage,
+      timers:{Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();omittedJobs.set(id,{fn,ms});return id;},clearTimeout(id){omittedJobs.delete(id);}},
+      tools:{oms_list_projects:()=>({projects:['one'],projectKeys:{one:key}})},
+      initialOpen:[
+        ['input',{arguments:{project:'one'}}],
+        ['result',{structuredContent:{panel:'OMS',project:'one',snapshotOmitted:reason}}]
+      ]
+    });
+    assert.equal(omitted.calls.filter(c=>c.name==='oms_panel_snapshot').length,1);
+    assert.equal(omitted.get('goal').textContent,'Fetched after '+reason);
+    assert.equal([...omittedJobs.values()].filter(j=>j.ms===20000).length,1);
+  }
 });

@@ -65,6 +65,9 @@ const DETACH_ERR_PREFIX: &str = "OMS_DETACH_ERR:";
 type Output = (i32, Vec<u8>, Vec<u8>);
 static WAKE_SEQ: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+type AfterTeamRoomJoinHook<'a> = Box<dyn FnOnce(&str) + Send + 'a>;
+
 pub(crate) struct CollabServices<'a> {
     control: ControlServices<'a>,
     interrupted: &'a Arc<AtomicBool>,
@@ -81,6 +84,158 @@ pub(crate) struct CollabServices<'a> {
     /// repository swept through this instance creates it; the file is removed
     /// when the instance drops, so each tick run starts clean.
     wake_once: PathBuf,
+    #[cfg(test)]
+    after_team_room_join: std::sync::Mutex<Option<AfterTeamRoomJoinHook<'a>>>,
+    #[cfg(test)]
+    team_child_spawns: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FileIdentity {
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
+    pub(crate) nlink: u64,
+    pub(crate) size: u64,
+    pub(crate) mtime: i64,
+    pub(crate) mtime_nsec: i64,
+    pub(crate) ctime: i64,
+    pub(crate) ctime_nsec: i64,
+}
+
+impl FileIdentity {
+    #[cfg(any(not(target_os = "linux"), test))]
+    pub(crate) fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            nlink: meta.nlink(),
+            size: meta.size(),
+            mtime: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+            ctime: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::unnecessary_cast)]
+    fn from_stat(stat: &rustix::fs::Stat) -> Self {
+        Self {
+            dev: stat.st_dev as u64,
+            ino: stat.st_ino as u64,
+            nlink: stat.st_nlink as u64,
+            size: stat.st_size as u64,
+            mtime: stat.st_mtime as i64,
+            mtime_nsec: stat.st_mtime_nsec as i64,
+            ctime: stat.st_ctime as i64,
+            ctime_nsec: stat.st_ctime_nsec as i64,
+        }
+    }
+}
+
+pub(crate) fn current_executable_identity() -> Result<FileIdentity, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{
+            AtFlags, Mode, OFlags, PROC_SUPER_MAGIC, fstatfs, open, readlinkat, statat,
+        };
+        let proc_root = open(
+            "/proc",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| e.to_string())?;
+        if fstatfs(&proc_root).map_err(|e| e.to_string())?.f_type != PROC_SUPER_MAGIC {
+            return Err("native executing-artifact procfs proof unavailable".into());
+        }
+        let pid = std::process::id();
+        let named = readlinkat(&proc_root, "self", Vec::new()).map_err(|e| e.to_string())?;
+        if named.to_bytes() != pid.to_string().as_bytes() {
+            return Err("native executing-artifact PID namespace is unproven".into());
+        }
+        let stat = statat(&proc_root, format!("{pid}/exe"), AtFlags::empty())
+            .map_err(|e| e.to_string())?;
+        Ok(FileIdentity::from_stat(&stat))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let exe = std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .map_err(|e| e.to_string())?;
+        let meta = std::fs::symlink_metadata(exe).map_err(|e| e.to_string())?;
+        Ok(FileIdentity::from_metadata(&meta))
+    }
+}
+
+pub(crate) struct IdentityCache<T> {
+    entry: std::sync::Mutex<Option<(u32, FileIdentity, T)>>,
+}
+
+impl<T: Clone> IdentityCache<T> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            entry: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn get_or_compute(
+        &self,
+        observe_identity: impl Fn() -> Result<FileIdentity, String>,
+        recheck: impl Fn(&T) -> Result<(), String>,
+        compute: impl FnOnce() -> Result<T, String>,
+    ) -> Result<(FileIdentity, T), String> {
+        let pid = std::process::id();
+        let current = observe_identity()?;
+        let cached = self
+            .entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|(cached_pid, cached_id, _)| *cached_pid == pid && *cached_id == current)
+            .map(|(_, _, value)| value.clone());
+        if let Some(value) = cached
+            && recheck(&value).is_ok()
+            && observe_identity()? == current
+        {
+            return Ok((current, value));
+        }
+        let computed = compute()?;
+        recheck(&computed)?;
+        let after = observe_identity()?;
+        if after != current {
+            return Err("controller executable identity changed during capture".into());
+        }
+        *self
+            .entry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((pid, after, computed.clone()));
+        Ok((after, computed))
+    }
+}
+
+static CONTROLLER_CACHE: IdentityCache<oms_reference::controller::Controller> =
+    IdentityCache::new();
+
+#[derive(Clone)]
+pub(super) struct CheckedController {
+    controller: oms_reference::controller::Controller,
+    identity: FileIdentity,
+    observe: fn() -> Result<FileIdentity, String>,
+}
+
+impl CheckedController {
+    pub(super) fn check(&self) -> Result<(), String> {
+        if (self.observe)()? != self.identity {
+            return Err("native executing-artifact generation changed".into());
+        }
+        self.controller.check().map_err(|e| e.to_string())
+    }
+
+    pub(super) fn digest(&self) -> Result<&str, String> {
+        self.check()?;
+        self.controller.digest().map_err(|e| e.to_string())
+    }
 }
 
 impl Drop for CollabServices<'_> {
@@ -163,7 +318,26 @@ impl<'a> CollabServices<'a> {
             protected_stage: None,
             detach_worker,
             wake_once,
+            #[cfg(test)]
+            after_team_room_join: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            team_child_spawns: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    pub(super) fn controller(&self) -> Result<CheckedController, String> {
+        let (identity, controller) = CONTROLLER_CACHE.get_or_compute(
+            current_executable_identity,
+            |cached| cached.check().map_err(|e| e.to_string()),
+            || oms_reference::controller::Controller::capture_current().map_err(|e| e.to_string()),
+        )?;
+        let checked = CheckedController {
+            controller,
+            identity,
+            observe: current_executable_identity,
+        };
+        checked.check()?;
+        Ok(checked)
     }
 
     #[cfg(target_os = "linux")]
@@ -193,6 +367,37 @@ impl<'a> CollabServices<'a> {
     fn with_native(mut self, native: Vec<OsString>) -> Self {
         self.native = native;
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_after_team_room_join(self, hook: impl FnOnce(&str) + Send + 'a) -> Self {
+        *self
+            .after_team_room_join
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(hook));
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn run_after_team_room_join(&self, participant: &str) {
+        if let Some(hook) = self
+            .after_team_room_join
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            hook(participant);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_team_child_spawn(&self) {
+        self.team_child_spawns.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn team_child_spawns(&self) -> usize {
+        self.team_child_spawns.load(Ordering::SeqCst)
     }
 
     /// Replace a leading bare `oms` with the staged launcher; fail closed when
@@ -242,6 +447,7 @@ pub(crate) fn prelaunch_error(
 
 trait OwnedDuplexConsumer {
     fn check(&self) -> oms_command_peer::Result<()>;
+    fn note_spawned(&mut self) {}
     fn issuance_stage(&self) -> team_requests::IssuanceStage {
         team_requests::IssuanceStage::Unavailable
     }
@@ -402,6 +608,9 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
             channel.check().map_err(|e| e.message)?;
         }
         let id = reactor.start(request).map_err(|e| e.to_string())?;
+        if let Some(channel) = &mut channel {
+            channel.note_spawned();
+        }
         if job.acknowledge_start {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut failed = false;
@@ -515,9 +724,15 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
             while let Some(event) = reactor.receive(id).map_err(|e| e.to_string())? {
                 if !channel_failed && channel.event(&mut reactor, id, event).is_err() {
                     channel_failed = true;
-                    reactor
-                        .stop(id, StopReason::SupervisorError)
-                        .map_err(|e| e.to_string())?;
+                    let reason = if interrupted.load(Ordering::Acquire) {
+                        cancelling = true;
+                        job.cancel
+                    } else if channel.check().is_err() {
+                        StopReason::Deadline
+                    } else {
+                        StopReason::SupervisorError
+                    };
+                    reactor.stop(id, reason).map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -1239,6 +1454,7 @@ impl oms_command_room::OperationsRead for RoomOperations<'_> {
                 "room operation interrupted or deadline expired",
             ));
         }
+        self._guard.check().map_err(room_error)?;
         if room_operations_projection(&self.repo)?.0 != self.fingerprint {
             return Err(oms_command_room::Error::new(
                 "operations changed during room publication",
@@ -1246,6 +1462,32 @@ impl oms_command_room::OperationsRead for RoomOperations<'_> {
         }
         Ok(())
     }
+}
+
+pub(super) fn room_operations_before<'a, S: oms_command_plan::Services>(
+    control: &'a S,
+    repo: &Path,
+    deadline: Instant,
+    stop: &'a AtomicBool,
+) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>> {
+    if stop.load(Ordering::Acquire) {
+        return Err(room_error("interrupted"));
+    }
+    let guard = control
+        .lifecycle_writer_before(repo, deadline)
+        .map_err(room_error)?;
+    let (fingerprint, attempts) = room_operations_projection(repo)?;
+    if Instant::now() >= deadline {
+        return Err(room_error("native Room operation deadline expired"));
+    }
+    Ok(Box::new(RoomOperations {
+        repo: repo.to_owned(),
+        attempts,
+        fingerprint,
+        deadline: Some(deadline),
+        stop,
+        _guard: guard,
+    }))
 }
 
 fn room_delivery_receipt(
@@ -1329,21 +1571,7 @@ impl oms_command_room::Services for CollabServices<'_> {
         deadline: Instant,
     ) -> oms_command_room::Result<Box<dyn oms_command_room::OperationsRead + 'a>> {
         self.check(self.interrupted).map_err(room_error)?;
-        let guard =
-            oms_command_plan::Services::lifecycle_writer_before(&self.control, repo, deadline)
-                .map_err(room_error)?;
-        let (fingerprint, attempts) = room_operations_projection(repo)?;
-        if Instant::now() >= deadline {
-            return Err(room_error("native Room operation deadline expired"));
-        }
-        Ok(Box::new(RoomOperations {
-            repo: repo.to_owned(),
-            attempts,
-            fingerprint,
-            deadline: Some(deadline),
-            stop: self.interrupted,
-            _guard: guard,
-        }))
+        room_operations_before(&self.control, repo, deadline, self.interrupted)
     }
     fn delivery_available(&self, _: oms_command_room::App) -> bool {
         // This is availability of the compiled producer, not proof of a live
@@ -4973,5 +5201,69 @@ esac"#,
             rejected.2,
             b"error: incoming staged binary failed list check\n"
         );
+    }
+
+    #[test]
+    fn controller_identity_cache_rechecks_and_rehashes_replaced_binary() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let host = CollabServices::new(&stop, source()).expect("source is available");
+        let first = host.controller().expect("current controller");
+        let digest = first.digest().expect("checked digest").to_owned();
+        let second = host.controller().expect("cached current controller");
+        assert_eq!(second.digest().expect("rechecked digest"), digest);
+
+        let fixture = Fixture::new();
+        let target = fixture.path().join("controller-bin");
+        std::fs::write(&target, b"binary-v1").unwrap();
+        let observe = || {
+            std::fs::symlink_metadata(&target)
+                .map(|meta| FileIdentity::from_metadata(&meta))
+                .map_err(|e| e.to_string())
+        };
+        let cache = IdentityCache::<String>::new();
+        let hashes = std::cell::Cell::new(0usize);
+        let compute = |path: &Path| {
+            hashes.set(hashes.get() + 1);
+            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            Ok(format!("{:x}", Sha256::digest(bytes)))
+        };
+
+        let (id_v1, d1) = cache
+            .get_or_compute(observe, |_| Ok(()), || compute(&target))
+            .unwrap();
+        assert_eq!(hashes.get(), 1);
+        let (id_cached, d1_cached) = cache
+            .get_or_compute(observe, |_| Ok(()), || compute(&target))
+            .unwrap();
+        assert_eq!(hashes.get(), 1, "unchanged identity must reuse digest");
+        assert_eq!((id_cached, d1_cached.as_str()), (id_v1, d1.as_str()));
+
+        // Atomic replacement (same 9-byte length, new inode) must invalidate and re-hash.
+        let replacement = fixture.path().join("controller-bin.next");
+        std::fs::write(&replacement, b"binary-v2").unwrap();
+        std::fs::rename(&replacement, &target).unwrap();
+        assert_ne!(
+            observe().unwrap(),
+            id_v1,
+            "inode/timestamp change must change FileIdentity"
+        );
+        let (id_v2, d2) = cache
+            .get_or_compute(observe, |_| Ok(()), || compute(&target))
+            .unwrap();
+        assert_eq!(hashes.get(), 2, "replaced binary must be re-hashed");
+        assert_ne!(d2, d1);
+        assert_ne!(id_v2, id_v1);
+
+        // In-place overwrite (same dev+ino, new size/mtime_nsec/ctime_nsec) must also re-hash.
+        std::fs::write(&target, b"binary-v3-extended").unwrap();
+        let (_, d3) = cache
+            .get_or_compute(observe, |_| Ok(()), || compute(&target))
+            .unwrap();
+        assert_eq!(
+            hashes.get(),
+            3,
+            "in-place modified binary must be re-hashed"
+        );
+        assert_ne!(d3, d2);
     }
 }

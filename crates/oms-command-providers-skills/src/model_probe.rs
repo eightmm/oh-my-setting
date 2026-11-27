@@ -167,6 +167,15 @@ pub fn provider_family(provider: &str) -> &'static str {
     }
 }
 
+/// Version/help probes cannot identify the configured family of a multi-model
+/// transport. Catalog routing keeps its separate provider-family preference.
+pub fn diagnostic_family(provider: &str) -> &'static str {
+    match provider {
+        "antigravity" | "vibe" => "unknown",
+        _ => provider_family(provider),
+    }
+}
+
 pub fn clean_catalog_rows(provider: &str, raw: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     if provider == "antigravity" {

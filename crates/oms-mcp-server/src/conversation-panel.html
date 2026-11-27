@@ -51,8 +51,8 @@ header h1{margin:0;font-size:1rem;font-weight:750;letter-spacing:-.02em}
 .tools{gap:4px}
 button,select,input,textarea{font:inherit;color:inherit}
 button,select{cursor:pointer;border:1px solid var(--line);border-radius:var(--r-sm);background-color:var(--raised);padding:4px 12px;min-height:var(--tap)}
-#start,#chat-send,#approvals .review{color:var(--on-primary);background-color:var(--primary);border-color:var(--primary);font-weight:620;min-height:var(--tap-lg);padding-inline:16px}
-#start:hover:not(:disabled),#chat-send:hover:not(:disabled),#approvals .review:hover:not(:disabled){border-color:var(--primary);opacity:.88}
+#start,#chat-send,#approvals .review,.actions .primary{color:var(--on-primary);background-color:var(--primary);border-color:var(--primary);font-weight:620;min-height:var(--tap-lg);padding-inline:16px}
+#start:hover:not(:disabled),#chat-send:hover:not(:disabled),#approvals .review:hover:not(:disabled),.actions .primary:hover:not(:disabled){border-color:var(--primary);opacity:.88}
 code,kbd,pre,samp{font-family:var(--mono)}
 button:hover:not(:disabled),select:hover{border-color:var(--soft)}
 button:disabled{opacity:.55;cursor:wait}
@@ -64,15 +64,13 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 #view{display:flex;flex-direction:column;gap:16px;margin-top:16px}
 #goal-section{--goal-lines:3;display:flex;flex-direction:column;padding:16px clamp(16px,2.5vw,20px);background-color:var(--surface);border-radius:var(--r)}
 #goal-expand{align-self:flex-start}
-/* The count reads under the track; order also applies to the grid's auto placement. */
-#progress{order:1;margin-top:4px}
 .goal-heading{display:flex;align-items:baseline;gap:.5rem;min-width:0;flex-wrap:wrap}
 @media(min-width:36rem){
   #goal-section{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:1.25rem;align-items:start}
   #goal-section .section-head{display:contents}
   .goal-heading{grid-column:1}
   #new-goal{grid-column:2;grid-row:1 / 3;align-self:center}
-  #goal,#goal-expand,#progress,#progress-track{grid-column:1}
+  #goal,#goal-expand,#progress-line,#progress-track{grid-column:1}
   #goal-journey{grid-column:1 / -1}
   #goal-expand{justify-self:start}
 }
@@ -86,33 +84,47 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 .subtle,.note,.state,small{color:var(--soft);font-size:.83rem}
 .subtle,#new-goal{background:transparent;border:0;min-height:var(--tap);padding:4px 8px}
 #new-goal{color:var(--ink);font-size:.86rem;font-weight:620}
-#progress{font-size:.82rem;color:var(--soft)}
+/* One line under the bar: criteria on the left, plan tasks as a separate count on the right; never summed. */
+#progress-line{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 12px;margin-top:6px;font-variant-numeric:tabular-nums}
+#progress-line:not(:has(:not([hidden]))){display:none}
+#criteria-summary{font-size:.86rem;font-weight:620}
+#progress{font-size:.8rem;color:var(--soft)}
 #main-card{--dot-ring:var(--surface);background-color:var(--surface);border:1px solid var(--main-line);border-radius:var(--r);padding:16px}
 /* The wrapper keeps DOM order while the approval card reads directly under the goal. */
 #view>div{display:flex;flex-direction:column;gap:12px;min-width:0}
 .identity{margin:8px 0 4px;min-width:0}
 #main-name,#main-status{overflow-wrap:anywhere}
-@media(min-width:24rem){#main-card{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:.85rem}#main-card :is(h2,.identity,#main-status){grid-column:1}#main-card #header-main{grid-column:2;grid-row:1 / 4;align-self:center;margin:0}}
-#main-name{font-size:1rem;font-weight:680}
+/* Main · provider · state on one line; the continue link wraps under it when the card is narrow. */
+#main-card .identity{flex-wrap:wrap;margin:0;column-gap:10px}
+.main-line{flex:1 1 12rem;min-width:0;margin:0}
+#main-status{color:var(--soft);font-size:.86rem}
+#main-status:not(:empty)::before{content:" · ";content:" · "/""}
+#main-name{font-size:.95rem;font-weight:680}
 .avatar{position:relative;width:36px;height:36px;display:grid;place-items:center;flex:none;background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm);color:var(--soft);font-size:.95rem;font-weight:650}
 .avatar:is([data-provider=codex],[data-provider=claude],[data-provider=agy])::before{content:"";width:100%;height:100%;background:var(--mark) center / var(--mark-size,100%) no-repeat}
 /* The official SVG artboards have different insets; each visible mark is about 21px. */
 .avatar[data-provider=codex]{--mark:var(--blossom);--mark-size:135%}
 .avatar[data-provider=claude]{--mark-size:71%;--mark:url("data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQ4IiBoZWlnaHQ9IjI0OCIgdmlld0JveD0iMCAwIDI0OCAyNDgiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik01Mi40Mjg1IDE2Mi44NzNMOTguNzg0NCAxMzYuODc5TDk5LjU0ODUgMTM0LjYwMkw5OC43ODQ0IDEzMy4zMzRIOTYuNDkyMUw4OC43MjM3IDEzMi44NjJMNjIuMjM0NiAxMzIuMTUzTDM5LjMxMTMgMTMxLjIwN0wxNy4wMjQ5IDEzMC4wMjZMMTEuNDIxNCAxMjguODQ0TDYuMiAxMjEuODczTDYuNzA5NCAxMTguNDQ3TDExLjQyMTQgMTE1LjI1N0wxOC4xNzEgMTE1Ljg0N0wzMy4wNzExIDExNi45MTFMNTUuNDg1IDExOC40NDdMNzEuNjU4NiAxMTkuMzkyTDk1LjcyOCAxMjEuODczSDk5LjU0ODVMMTAwLjA1OCAxMjAuMzM3TDk4Ljc4NDQgMTE5LjM5Mkw5Ny43NjU2IDExOC40NDdMNzQuNTg3NyAxMDIuNzMyTDQ5LjQ5OTUgODYuMTkwNUwzNi4zODIzIDc2LjYyTDI5LjM3NzkgNzEuNzc1N0wyNS44MTIxIDY3LjI4NThMMjQuMjgzOSA1Ny4zNjA4TDMwLjY1MTUgNTAuMjcxNkwzOS4zMTEzIDUwLjg2MjNMNDEuNDc2MyA1MS40NTMxTDUwLjI2MzYgNTguMTg3OUw2OC45ODQyIDcyLjcyMDlMOTMuNDM1NyA5MC42ODA0TDk3LjAwMTUgOTMuNjM0M0w5OC40Mzc0IDkyLjY2NTJMOTguNjU3MSA5MS45ODAxTDk3LjAwMTUgODkuMjYyNUw4My43NTcgNjUuMjc3Mkw2OS42MjEgNDAuODE5Mkw2My4yNTM0IDMwLjY1NzlMNjEuNTk3OCAyNC42MzJDNjAuOTU2NSAyMi4xMDMyIDYwLjU3OSAyMC4wMTExIDYwLjU3OSAxNy40MjQ2TDY3LjgzODEgNy40OTk2NUw3MS45MTMzIDYuMTk5OTVMODEuNzE5MyA3LjQ5OTY1TDg1Ljc5NDYgMTEuMDQ0M0w5MS45MDc0IDI0Ljk4NjVMMTAxLjcxNCA0Ni44NDUxTDExNi45OTYgNzYuNjJMMTIxLjQ1MyA4NS40ODE2TDEyMy44NzMgOTMuNjM0M0wxMjQuNzY0IDk2LjExNTVIMTI2LjI5MlY5NC42OTc2TDEyNy41NjYgNzcuOTE5N0wxMjkuODU4IDU3LjM2MDhMMTMyLjE1IDMwLjg5NDJMMTMyLjkxNSAyMy40NTA1TDEzNi42MDggMTQuNDcwOEwxNDMuOTk0IDkuNjI2NDNMMTQ5LjcyNSAxMi4zNDRMMTU0LjQzNyAxOS4wNzg4TDE1My44IDIzLjQ1MDVMMTUwLjk5OCA0MS42NDYzTDE0NS41MjIgNzAuMTIxNUwxNDEuOTU3IDg5LjI2MjVIMTQzLjk5NEwxNDYuNDE0IDg2Ljc4MTNMMTU2LjA5MyA3NC4wMjA2TDE3Mi4yNjYgNTMuNjk4TDE3OS4zOTggNDUuNjYzNUwxODcuODAzIDM2LjgwMkwxOTMuMTUyIDMyLjU0ODRIMjAzLjM0TDIxMC43MjYgNDMuNjU0OUwyMDcuNDE1IDU1LjExNTlMMTk2Ljk3MiA2OC4zNDkyTDE4OC4zMTIgNzkuNTczOUwxNzUuODk2IDk2LjIwOTVMMTY4LjE5MSAxMDkuNTg1TDE2OC44ODIgMTEwLjY4OUwxNzAuNzM4IDExMC41M0wxOTguNzU1IDEwNC41MDRMMjEzLjkxIDEwMS43ODdMMjMxLjk5NCA5OC43MTQ5TDI0MC4xNDQgMTAyLjQ5NkwyNDEuMDM2IDEwNi4zOTVMMjM3Ljg1MiAxMTQuMzExTDIxOC40OTUgMTE5LjAzN0wxOTUuODI2IDEyMy42NDVMMTYyLjA3IDEzMS41OTJMMTYxLjY5NiAxMzEuODkzTDE2Mi4xMzcgMTMyLjU0N0wxNzcuMzYgMTMzLjkyNUwxODMuODU1IDEzNC4yNzlIMTk5Ljc3NEwyMjkuNDQ3IDEzNi41MjRMMjM3LjIxNSAxNDEuNjA1TDI0MS44IDE0Ny44NjdMMjQxLjAzNiAxNTIuNzExTDIyOS4wNjUgMTU4LjczN0wyMTMuMDE5IDE1NC45NTZMMTc1LjQ1IDE0NS45NzdMMTYyLjU4NyAxNDIuNzg3SDE2MC44MDVWMTQzLjg1TDE3MS41MDIgMTU0LjM2NkwxOTEuMjQyIDE3Mi4wODlMMjE1LjgyIDE5NS4wMTFMMjE3LjA5NCAyMDAuNjgyTDIxMy45MSAyMDUuMTcyTDIxMC41OTkgMjA0LjY5OUwxODguOTQ5IDE4OC4zOTRMMTgwLjU0NCAxODEuMDY5TDE2MS42OTYgMTY1LjExOEgxNjAuNDIyVjE2Ni43NzJMMTY0Ljc1MiAxNzMuMTUyTDE4Ny44MDMgMjA3Ljc3MUwxODguOTQ5IDIxOC40MDVMMTg3LjI5NCAyMjEuODMyTDE4MS4zMDggMjIzLjk1OUwxNzQuODEzIDIyMi43NzdMMTYxLjE4NyAyMDMuNzU0TDE0Ny4zMDUgMTgyLjQ4NkwxMzYuMDk4IDE2My4zNDVMMTM0Ljc0NSAxNjQuMkwxMjguMDc1IDIzNS40MkwxMjUuMDE5IDIzOS4wODJMMTE3Ljg4NyAyNDEuOEwxMTEuOTAyIDIzNy4zMUwxMDguNzE4IDIyOS45ODRMMTExLjkwMiAyMTUuNDUyTDExNS43MjIgMTk2LjU0N0wxMTguNzc5IDE4MS41NDFMMTIxLjU4IDE2Mi44NzNMMTIzLjI5MSAxNTYuNjM2TDEyMy4xNCAxNTYuMjE5TDEyMS43NzMgMTU2LjQ0OUwxMDcuNjk5IDE3NS43NTJMODYuMzA0IDIwNC42OTlMNjkuMzY2MyAyMjIuNzc3TDY1LjI5MSAyMjQuNDMxTDU4LjI4NjcgMjIwLjc2OEw1OC45MjM1IDIxNC4yN0w2Mi44NzEzIDIwOC40OEw4Ni4zMDQgMTc4LjcwNUwxMDAuNDQgMTYwLjE1NUwxMDkuNTUxIDE0OS41MDdMMTA5LjQ2MiAxNDcuOTY3TDEwOC45NTkgMTQ3LjkyNEw0Ni42OTc3IDE4OC41MTJMMzUuNjE4MiAxODkuOTNMMzAuNzc4OCAxODUuNDRMMzEuNDE1NiAxNzguMTE1TDMzLjcwNzkgMTc1Ljc1Mkw1Mi40Mjg1IDE2Mi44NzNaIiBmaWxsPSIjRDk3NzU3Ii8+Cjwvc3ZnPgo=")}
 .avatar[data-provider=agy]{--mark-size:90%;--mark:url("data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTgwIiBoZWlnaHQ9IjE4MCIgdmlld0JveD0iMCAwIDE4MCAxODAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xNDQuMjQ4IDE0OS4wNjJDMTUxLjc0OCAxNTQuNjg4IDE2Mi45OTggMTUwLjkzOCAxNTIuNjg1IDE0MC42MjVDMTIxLjc0OCAxMTAuNjI1IDEyOC4zMSAyOC4xMjUgODkuODcyNyAyOC4xMjVDNTEuNDM1MiAyOC4xMjUgNTcuOTk3NyAxMTAuNjI1IDI3LjA2MDIgMTQwLjYyNUMxNS44MTAyIDE1MS44NzUgMjcuOTk3NyAxNTQuNjg4IDM1LjQ5NzcgMTQ5LjA2MkM2NC41NjAyIDEyOS4zNzUgNjIuNjg1MiA5NC42ODc1IDg5Ljg3MjcgOTQuNjg3NUMxMTcuMDYgOTQuNjg3NSAxMTUuMTg1IDEyOS4zNzUgMTQ0LjI0OCAxNDkuMDYyWiIgZmlsbD0iIzMxODZGRiIvPgo8bWFzayBpZD0ibWFzazBfNjAwMV80MDkiIHN0eWxlPSJtYXNrLXR5cGU6YWxwaGEiIG1hc2tVbml0cz0idXNlclNwYWNlT25Vc2UiIHg9IjIyIiB5PSIyOCIgd2lkdGg9IjEzNiIgaGVpZ2h0PSIxMjUiPgo8cGF0aCBkPSJNMTQ0LjI0OCAxNDkuMDYyQzE1MS43NDggMTU0LjY4OCAxNjIuOTk4IDE1MC45MzggMTUyLjY4NSAxNDAuNjI1QzEyMS43NDggMTEwLjYyNSAxMjguMzEgMjguMTI1IDg5Ljg3MjcgMjguMTI1QzUxLjQzNTIgMjguMTI1IDU3Ljk5NzcgMTEwLjYyNSAyNy4wNjAyIDE0MC42MjVDMTUuODEwMiAxNTEuODc1IDI3Ljk5NzcgMTU0LjY4OCAzNS40OTc3IDE0OS4wNjJDNjQuNTYwMiAxMjkuMzc1IDYyLjY4NTIgOTQuNjg3NSA4OS44NzI3IDk0LjY4NzVDMTE3LjA2IDk0LjY4NzUgMTE1LjE4NSAxMjkuMzc1IDE0NC4yNDggMTQ5LjA2MloiIGZpbGw9IndoaXRlIi8+CjwvbWFzaz4KPGcgbWFzaz0idXJsKCNtYXNrMF82MDAxXzQwOSkiPgo8ZyBmaWx0ZXI9InVybCgjZmlsdGVyMF9mXzYwMDFfNDA5KSI+CjxlbGxpcHNlIGN4PSIzNi42MjI1IiBjeT0iNDMuMDg3MiIgcng9IjM2LjYyMjUiIHJ5PSI0My4wODcyIiB0cmFuc2Zvcm09Im1hdHJpeCgtMC4xMTI3ODQgMC45OTM2MiAtMC45OTM2MiAtMC4xMTI3ODEgMTA2LjU1NyAtMjYuNDg0NykiIGZpbGw9IiNGRkU0MzIiLz4KPC9nPgo8ZyBmaWx0ZXI9InVybCgjZmlsdGVyMV9mXzYwMDFfNDA5KSI+CjxlbGxpcHNlIGN4PSIxNTUuMTYzIiBjeT0iNTQuOTI5MiIgcng9IjQ3LjQxMTgiIHJ5PSI0OC40NTQxIiB0cmFuc2Zvcm09InJvdGF0ZSg3Ni45MjQzIDE1NS4xNjMgNTQuOTI5MikiIGZpbGw9IiNGQzQxM0QiLz4KPC9nPgo8ZyBmaWx0ZXI9InVybCgjZmlsdGVyMl9mXzYwMDFfNDA5KSI+CjxlbGxpcHNlIGN4PSIxNC42MDA2IiBjeT0iNjUuNDQyNSIgcng9IjQ5LjU1MTUiIHJ5PSI2NC4xOTIiIHRyYW5zZm9ybT0icm90YXRlKDc0LjEyNTcgMTQuNjAwNiA2NS40NDI1KSIgZmlsbD0iIzAwQjk1QyIvPgo8L2c+CjxnIGZpbHRlcj0idXJsKCNmaWx0ZXIzX2ZfNjAwMV80MDkpIj4KPGVsbGlwc2UgY3g9IjE0LjYwMDYiIGN5PSI2NS40NDI1IiByeD0iNDkuNTUxNSIgcnk9IjY0LjE5MiIgdHJhbnNmb3JtPSJyb3RhdGUoNzQuMTI1NyAxNC42MDA2IDY1LjQ0MjUpIiBmaWxsPSIjMDBCOTVDIi8+CjwvZz4KPGcgZmlsdGVyPSJ1cmwoI2ZpbHRlcjRfZl82MDAxXzQwOSkiPgo8ZWxsaXBzZSBjeD0iMTguMTIyNiIgY3k9IjY3LjQxNCIgcng9IjQ4LjU2NzkiIHJ5PSI1My40Njg4IiB0cmFuc2Zvcm09InJvdGF0ZSg0NS42MDY1IDE4LjEyMjYgNjcuNDE0KSIgZmlsbD0iIzAwQjk1QyIvPgo8L2c+CjxnIGZpbHRlcj0idXJsKCNmaWx0ZXI1X2ZfNjAwMV80MDkpIj4KPGVsbGlwc2UgY3g9IjEyMS44MzciIGN5PSIxNjYuOTQ1IiByeD0iNDYuNjM1NiIgcnk9IjQ0LjkwODQiIHRyYW5zZm9ybT0icm90YXRlKDc2LjkyNDMgMTIxLjgzNyAxNjYuOTQ1KSIgZmlsbD0iIzMxODZGRiIvPgo8L2c+CjxnIGZpbHRlcj0idXJsKCNmaWx0ZXI2X2ZfNjAwMV80MDkpIj4KPGVsbGlwc2UgY3g9IjUzLjk0NTYiIGN5PSI1Ni44OTk3IiByeD0iNTMuOTQ1NiIgcnk9IjU2Ljg5OTciIHRyYW5zZm9ybT0ibWF0cml4KC0wLjQwOTUzOSAwLjkxMjI5MyAtMC45MTIyOTQgLTAuNDA5NTM3IDE2Mi44MTEgLTI1Ljg5NSkiIGZpbGw9IiNGQkJDMDQiLz4KPC9nPgo8ZyBmaWx0ZXI9InVybCgjZmlsdGVyN19mXzYwMDFfNDA5KSI+CjxwYXRoIGQ9Ik00LjIxNTU3IDIzOS4wNjNDLTI1LjMyMzEgMjI3LjQ2NyAyNS4xNTc3IDEzMi4wNjEgMzcuNzEwNSAxMDAuMDg1QzUwLjI2MzQgNjguMTA5NyA4NC4zODUzIDUxLjU4ODggMTEzLjkyNCA2My4xODQ4QzE0My40NjMgNzQuNzgwOSAxNzguNDc0IDEzOC42NSAxNjUuOTIxIDE3MC42MjZDMTUzLjM2OCAyMDIuNjAxIDMzLjc1NDMgMjUwLjY1OSA0LjIxNTU3IDIzOS4wNjNaIiBmaWxsPSIjMzE4NkZGIi8+CjwvZz4KPGcgZmlsdGVyPSJ1cmwoI2ZpbHRlcjhfZl82MDAxXzQwOSkiPgo8cGF0aCBkPSJNMTgzLjE5NyAxMjAuMzE1QzE3NS4yODkgMTI5LjU0NSAxNTQuNjUyIDEyNC44MzkgMTM3LjEwMiAxMDkuODAzQzExOS41NTMgOTQuNzY2OCAxMTEuNzM4IDc1LjA5NTUgMTE5LjY0NiA2NS44NjU2QzEyNy41NTQgNTYuNjM1NyAxNDguMTkxIDYxLjM0MjMgMTY1Ljc0IDc2LjM3ODJDMTgzLjI4OSA5MS40MTQgMTkxLjEwNSAxMTEuMDg1IDE4My4xOTcgMTIwLjMxNVoiIGZpbGw9IiM3NDlCRkYiLz4KPC9nPgo8ZyBmaWx0ZXI9InVybCgjZmlsdGVyOV9mXzYwMDFfNDA5KSI+CjxlbGxpcHNlIGN4PSIxNDguOTI4IiBjeT0iMzYuNzI1MiIgcng9IjcxLjEwMTgiIHJ5PSI0NC4xOTkiIHRyYW5zZm9ybT0icm90YXRlKDM0LjA3NjMgMTQ4LjkyOCAzNi43MjUyKSIgZmlsbD0iI0ZDNDEzRCIvPgo8L2c+CjxnIGZpbHRlcj0idXJsKCNmaWx0ZXIxMF9mXzYwMDFfNDA5KSI+CjxlbGxpcHNlIGN4PSIzNy44NDgiIGN5PSI0Ni4wMzQ2IiByeD0iMzguMTAwOCIgcnk9IjIyLjE1NzUiIHRyYW5zZm9ybT0icm90YXRlKDExMi41MTYgMzcuODQ4IDQ2LjAzNDYpIiBmaWxsPSIjRkZFRTQ4Ii8+CjwvZz4KPC9nPgo8ZGVmcz4KPGZpbHRlciBpZD0iZmlsdGVyMF9mXzYwMDFfNDA5IiB4PSI0LjA5NTkxIiB5PSItNDQuMTc2MSIgd2lkdGg9IjExMS4wMzciIGhlaWdodD0iOTguNDQxNiIgZmlsdGVyVW5pdHM9InVzZXJTcGFjZU9uVXNlIiBjb2xvci1pbnRlcnBvbGF0aW9uLWZpbHRlcnM9InNSR0IiPgo8ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSI2LjI1MjM0Ii8+CjwvZmlsdGVyPgo8ZmlsdGVyIGlkPSJmaWx0ZXIxX2ZfNjAwMV80MDkiIHg9IjQ2LjI5NzQiIHk9Ii01My4wMDA5IiB3aWR0aD0iMjE3LjczMSIgaGVpZ2h0PSIyMTUuODYiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMzAuMjI2OCIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyMl9mXzYwMDFfNDA5IiB4PSItMTAwLjAxOCIgeT0iLTM2Ljc1NTgiIHdpZHRoPSIyMjkuMjM4IiBoZWlnaHQ9IjIwNC4zOTciIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMjUuNjk1NyIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyM19mXzYwMDFfNDA5IiB4PSItMTAwLjAxOCIgeT0iLTM2Ljc1NTgiIHdpZHRoPSIyMjkuMjM4IiBoZWlnaHQ9IjIwNC4zOTciIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMjUuNjk1NyIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyNF9mXzYwMDFfNDA5IiB4PSItODQuMzk4NSIgeT0iLTM1LjAwMyIgd2lkdGg9IjIwNS4wNDIiIGhlaWdodD0iMjA0LjgzNCIgZmlsdGVyVW5pdHM9InVzZXJTcGFjZU9uVXNlIiBjb2xvci1pbnRlcnBvbGF0aW9uLWZpbHRlcnM9InNSR0IiPgo8ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSIyNS42OTU3Ii8+CjwvZmlsdGVyPgo8ZmlsdGVyIGlkPSJmaWx0ZXI1X2ZfNjAwMV80MDkiIHg9IjI3Ljk5MTUiIHk9IjcxLjU0OTMiIHdpZHRoPSIxODcuNjkxIiBoZWlnaHQ9IjE5MC43OTEiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMjQuNDE4NCIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyNl9mXzYwMDFfNDA5IiB4PSItMTEuODgwOCIgeT0iLTk4LjcwODUiIHdpZHRoPSIyMDEuMzgiIGhlaWdodD0iMTk3LjQ1IiBmaWx0ZXJVbml0cz0idXNlclNwYWNlT25Vc2UiIGNvbG9yLWludGVycG9sYXRpb24tZmlsdGVycz0ic1JHQiI+CjxmZUdhdXNzaWFuQmx1ciBzdGREZXZpYXRpb249IjIyLjEzMDEiLz4KPC9maWx0ZXI+CjxmaWx0ZXIgaWQ9ImZpbHRlcjdfZl82MDAxXzQwOSIgeD0iLTQ0LjQ0MzIiIHk9IjE5Ljk1MjIiIHdpZHRoPSIyNTIuNTEzIiBoZWlnaHQ9IjI2MC40MDQiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMTkuNzYzMSIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyOF9mXzYwMDFfNDA5IiB4PSI4MS4xOTE1IiB5PSIyNS43NzIyIiB3aWR0aD0iMTQwLjQ2IiBoZWlnaHQ9IjEzNC42MzciIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMTcuNjg0MyIvPgo8L2ZpbHRlcj4KPGZpbHRlciBpZD0iZmlsdGVyOV9mXzYwMDFfNDA5IiB4PSI1NS4xNDk5IiB5PSItNDcuMjUzMSIgd2lkdGg9IjE4Ny41NTUiIGhlaWdodD0iMTY3Ljk1NyIgZmlsdGVyVW5pdHM9InVzZXJTcGFjZU9uVXNlIiBjb2xvci1pbnRlcnBvbGF0aW9uLWZpbHRlcnM9InNSR0IiPgo8ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSIxNC45MzY1Ii8+CjwvZmlsdGVyPgo8ZmlsdGVyIGlkPSJmaWx0ZXIxMF9mXzYwMDFfNDA5IiB4PSItMjQuMjYzMyIgeT0iLTI3LjE1MTUiIHdpZHRoPSIxMjQuMjIzIiBoZWlnaHQ9IjE0Ni4zNzIiIGZpbHRlclVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgY29sb3ItaW50ZXJwb2xhdGlvbi1maWx0ZXJzPSJzUkdCIj4KPGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMTguNDg2NSIvPgo8L2ZpbHRlcj4KPC9kZWZzPgo8L3N2Zz4K")}
-/* Provider identity lives only in the mark and this presence dot: ok = live, info = working, warm = attention, muted = idle. */
+/* Provider identity lives only in the mark and this presence dot: ok = live, info = working, warm = decision, danger = failure, muted = idle. */
 .avatar[data-presence]::after{content:"";position:absolute;inset-inline-end:-3px;bottom:-3px;width:10px;height:10px;border-radius:50%;border:2px solid var(--dot-ring);background-color:var(--soft)}
 .avatar[data-presence=live]::after{background-color:var(--ok)}
 .avatar[data-presence=working]::after{background-color:var(--info)}
-.avatar[data-presence=attention]::after{background-color:var(--warm)}
-#header-main{margin-top:12px;min-height:var(--tap-lg)}
+.avatar[data-presence=decision]::after{background-color:var(--warm)}
+.avatar[data-presence=failure]::after{background-color:var(--danger)}
+#header-main{min-height:44px;margin-inline-start:auto;color:var(--ink);font-weight:620}
 #leads{margin-top:8px;display:grid;background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r)}
 #leads:empty{display:none}
 #leads>*+*{border-top:1px solid var(--line)}
 #leads>:is(.person,.lead-group){padding-inline:14px}
 .lead-slot{padding:10px 14px}
 .slot-heading{display:flex;align-items:center;gap:8px}
-.slot-heading h3{font-size:.92rem;font-weight:650;flex:1;min-width:0}
+.slot-heading{flex-wrap:wrap}
+.slot-heading h3{font-size:.92rem;font-weight:650;flex:0 1 auto;min-width:0;overflow-wrap:anywhere}
+/* Connect and Chat are never shown together, so whichever is visible takes the one slot at the end of the title row. */
+.slot-heading>button{margin-inline-start:auto;flex:none;min-height:44px}
+.slot-heading .lead-turn{flex-basis:100%;padding-inline-start:44px}
+.slot-heading .lead-turn:empty{display:none}
 .slot-heading .subtle{color:var(--ink);background-color:var(--raised);border:1px solid var(--line);border-radius:999px;font-weight:600;text-align:center;padding-inline:12px}
 .slot-heading .subtle:hover{text-decoration:none;border-color:var(--soft)}
 /* The task title is the strong line without a member label and the small line with one; both stay one line. */
@@ -135,7 +147,8 @@ h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 #output-worker{font-weight:650;overflow-wrap:anywhere;margin-top:.65rem}
 #output-body{margin:12px 0 0;padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere;font:.82rem/1.55 var(--mono);background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm)}
 #output-status:not(:empty),#output-limited:not([hidden]){margin-top:.4rem}
-#output-refresh{margin-top:.65rem}
+#output-refresh{font:1.1rem/1 system-ui,sans-serif;width:var(--tap);padding:0}
+#followup-include{margin-top:10px}
 .slot-heading .state[data-tone]{flex:none;max-width:60%}
 .person{width:100%;background:none;text-align:start;border:0;border-radius:0;padding:10px 0;cursor:default}
 button.person{cursor:pointer;border-radius:var(--r-xs)}
@@ -145,15 +158,22 @@ button.person{cursor:pointer;border-radius:var(--r-xs)}
 .arrow{color:var(--soft);font-size:1.2rem}
 .state{white-space:normal;font-weight:600;max-width:35%;text-align:end}
 .state[data-tone]{border:1px solid var(--line);border-radius:999px;padding:1px 10px;font-size:.75rem;line-height:1.5;overflow-wrap:anywhere}
-.state[data-tone=attention]{color:var(--warm);background-color:var(--warm-bg);border-color:currentColor}
+/* Each tone also has a shape: decision a ring, failure ×, active a dot, done a square, muted a dashed edge. */
+.state[data-tone=decision]{color:var(--warm);background-color:var(--warm-bg);border-color:currentColor}
+.state[data-tone=failure]{color:var(--danger);background-color:var(--danger-bg);border-color:currentColor}
 .state[data-tone=active]{color:var(--info);background-color:var(--info-bg)}
 .state[data-tone=done]{color:var(--ok);background-color:var(--ok-bg)}
-.state[data-tone=muted]{color:var(--soft);background-color:transparent}
+.state[data-tone=muted]{color:var(--soft);background-color:transparent;border-style:dashed}
+.state:is([data-tone=failure],[data-tone=active],[data-tone=done])::before{margin-inline-end:.3em;font-weight:700}
+.state[data-tone=failure]::before{content:"×";content:"×"/""}
+.state[data-tone=active]::before{content:"●";content:"●"/"";font-size:.7em;vertical-align:.1em}
+.state[data-tone=done]::before{content:"■";content:"■"/"";font-size:.65em;vertical-align:.15em}
 button.person:hover:not(:disabled),button.person:active:not(:disabled){background-color:var(--surface)}
 button.person:hover .arrow,button.person:active .arrow{transform:translateX(3px)}
 .muted{color:var(--soft)}
 #status:not(:empty){margin-top:6px;font-size:.8rem;overflow-wrap:anywhere}
 #status:not(:empty)[data-tone=warn]{color:var(--warm);font-weight:600}
+#host-retry{margin-top:8px;font-size:.8rem}
 #receipt:not(:empty){padding:8px 12px;border:1px solid var(--line);border-radius:var(--r-sm);overflow-wrap:anywhere}
 #receipt:not(:empty){color:var(--ink);background-color:var(--surface)}
 #receipt.error:not(:empty){color:var(--danger);background-color:var(--danger-bg);border-color:currentColor}
@@ -164,8 +184,52 @@ button.person:hover .arrow,button.person:active .arrow{transform:translateX(3px)
 .seg{border-radius:999px;background-color:var(--line)}
 .seg.done{background-color:var(--ok)}
 .seg.current{background-color:var(--info)}
+.seg.stale{background-color:var(--warm)}
 .observed{margin-inline-start:0;color:var(--soft);font-size:.75rem;font-variant-numeric:tabular-nums}
 #auto-refresh[aria-pressed=true]{color:var(--info);background-color:var(--info-bg);border-color:currentColor}
+/* Refresh and Auto read as one segmented control; Auto on puts a dot on the refresh mark. */
+.refresh-group{display:inline-flex}
+.refresh-group>button{border-radius:0}
+.refresh-group>button:first-child{border-start-start-radius:var(--r-sm);border-end-start-radius:var(--r-sm)}
+.refresh-group>button:last-child{border-start-end-radius:var(--r-sm);border-end-end-radius:var(--r-sm);margin-inline-start:-1px}
+#refresh{position:relative}
+.refresh-group:has(#auto-refresh[aria-pressed=true]) #refresh::after{content:"";position:absolute;top:6px;inset-inline-end:6px;width:6px;height:6px;border-radius:50%;background-color:var(--info)}
+/* Usage and More read on demand; a missing window is a dashed empty meter, never 0%. */
+.plain{list-style:none;margin:0;padding:0}
+.icon{min-width:var(--tap);padding:4px;border:0;background:none;color:var(--soft)}
+.usage-row,.more-row,.item-row{display:grid;align-items:center;column-gap:10px;width:100%;text-align:start;border:0;border-top:1px solid var(--line);border-radius:0;background:none;padding:6px 2px}
+.usage-row{grid-template-columns:30px 4.4rem 1fr auto;min-height:48px}
+.usage-row .avatar{width:30px;height:30px;font-size:.72rem}
+.usage-row b,.more-row strong{display:block;font-size:.86rem;font-weight:650}
+:is(.usage-row,.more-row,.item-row) small{display:block;font-size:.72rem}
+.meter{position:relative;height:8px;border-radius:4px;background-color:var(--line);overflow:hidden}
+.meter i{position:absolute;inset:0 auto 0 0;border-radius:4px;background-color:var(--ink)}
+.meter[data-known=false]{background:none;border:1.5px dashed var(--line)}
+.usage-row[data-tone=warn] .meter i{background-color:var(--warm)}
+.usage-row[data-tone=warn] .pct b{color:var(--warm)}
+.usage-row[data-stale=true] .meter i{opacity:.5}
+.usage-row[data-stale=true] .pct small{color:var(--warm)}
+.pct{text-align:end;min-width:4.6rem;font-variant-numeric:tabular-nums}
+.detail{margin:2px 0 8px;padding:10px 12px;border-radius:var(--r-xs);background-color:var(--surface);font-size:.82rem}
+.detail dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0}
+.detail dd{margin:0;text-align:end;font-weight:600;overflow-wrap:anywhere}
+.warn-box{margin:6px 0 0;padding:6px 8px;border:1px dashed var(--warm);border-radius:var(--r-xs);color:var(--warm);font-weight:600}
+.more-row{grid-template-columns:1fr auto auto;min-height:52px;color:var(--ink)}
+.more-row::after{content:"›";content:"›"/"";color:var(--soft)}
+.more-row[aria-expanded=true]::after{transform:rotate(90deg)}
+#inspect-open{grid-template-columns:1fr auto}
+.chip{font-size:.72rem;padding:1px 8px;border:1px solid var(--line);border-radius:999px;color:var(--soft);white-space:nowrap}
+.chip:empty{display:none}
+.chip[data-tone=failure]{color:var(--danger);border-color:currentColor}
+.chip[data-tone=decision]{color:var(--warm);border-color:currentColor}
+.chip[data-tone=done]{color:var(--ok)}
+.more-body{padding:2px 0 12px}
+.more-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.item-row{grid-template-columns:1.1rem 1fr auto;min-height:44px}
+.item-row .state{border:0;padding:0;background:none}
+.mark{font-weight:800;text-align:center}
+.mark[data-tone=failure]{color:var(--danger)}.mark[data-tone=active]{color:var(--info)}.mark[data-tone=done]{color:var(--ok)}.mark[data-tone=decision]{color:var(--warm)}.mark[data-tone=muted]{color:var(--soft)}
+.link{padding:0;min-height:0;border:0;background:none;color:var(--info);text-decoration:underline}
 @media(prefers-reduced-motion:no-preference){.arrow{transition:transform .12s ease}#refresh[aria-busy=true]{animation:spin 1.6s linear infinite}}
 @keyframes spin{to{transform:rotate(360deg)}}
 .note:not(:empty),#receipt:not(:empty){margin-top:12px}
@@ -235,7 +299,14 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 #issue-evidence:not(:empty){padding:10px 12px;background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm)}
 #chat-messages p,#chat-result,#issue-evidence{white-space:pre-wrap;overflow-wrap:anywhere}
 #goal-journey{margin-top:.7rem;min-width:0}
-#criteria-summary{font-size:.9rem}
+.journey-line{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 10px;width:100%;margin-top:10px;padding:8px 12px;text-align:start;font-size:.84rem;background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm)}
+.journey-line[data-tone=warn]{color:var(--warm);background-color:var(--warm-bg);border-color:currentColor}
+.journey-line:not([data-tone]){width:auto;margin-top:6px;padding:4px 0;background:transparent;border:0;color:var(--soft)}
+.journey-line:not([data-tone]):hover{color:var(--ink);text-decoration:underline;text-underline-offset:.2em}
+#attention-summary{font-weight:650}
+#attention-summary:empty,#next-step:empty{display:none}
+.journey-line[data-tone] #evidence-label{margin-inline-start:auto;font-weight:620;white-space:nowrap}
+.journey-line[data-tone] #evidence-label::after{content:" ›";content:" ›"/""}
 #goal-evidence{padding-top:.7rem}
 #criteria-list{list-style:none;margin:0;padding:0}
 #criteria-list li{padding:.55rem 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
@@ -243,7 +314,25 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 #criteria-list small{display:block;margin-top:.2rem;white-space:pre-wrap}
 #followup-panel{margin-top:.7rem;padding:.7rem;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm)}
 #followup-text{display:block;width:100%;margin-top:.35rem;min-height:6rem;resize:vertical;background:var(--bg);border:1px solid var(--line);border-radius:var(--r-xs);padding:.5rem}
+#finding-preview{margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:var(--r-sm)}
+#finding-text{max-height:18rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:.84rem/1.5 var(--mono);margin:8px 0}
+#finding-scope,#finding-range{overflow-wrap:anywhere}
+#inspection{max-width:min(52rem,calc(100% - 1.5rem))}
+#inspect-content{display:grid;gap:12px;margin-top:12px}
+.inspect-card{padding:12px;border:1px solid var(--line);border-radius:var(--r-sm);min-width:0;overflow-wrap:anywhere}
+.inspect-card h3{font-size:.95rem;color:var(--ink)}
+.inspect-card dl{display:grid;grid-template-columns:minmax(7rem,1fr) minmax(0,2fr);gap:4px 12px;margin:8px 0 0}
+.inspect-card dt{color:var(--soft);font-size:.8rem}.inspect-card dd{margin:0;font-size:.85rem;white-space:pre-wrap}
+#inspect-query{flex:1;min-width:8rem;padding:6px 8px;background:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm)}
+#inspect-kind{max-width:100%}.inspect-nodes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+#inspect-graph-form{align-items:center}
 #lead-auto-label{display:flex;align-items:center;gap:.4rem;margin-top:.5rem;color:var(--soft)}
+#lead-settings{position:relative}
+#lead-settings summary{font-size:.8rem;color:var(--soft);padding-inline:8px;border-radius:var(--r-xs);list-style-position:inside}
+#lead-settings[open] summary{color:var(--ink)}
+.lead-settings-body{position:absolute;inset-inline-end:0;z-index:2;width:min(19rem,calc(100vw - 2.5rem));padding:12px;background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm);box-shadow:0 6px 24px #0002}
+.lead-settings-body>*:first-child{margin-top:0}
+#leads-help:not(:empty){margin-top:2px}
 .lead-turn{display:block;color:var(--soft);font-size:.78rem}
 #full-answer{margin-top:.7rem;padding-top:.6rem;border-top:1px solid var(--line)}
 #full-answer-body{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
@@ -286,21 +375,26 @@ header{gap:8px;padding-bottom:8px}
 <body><main>
 <header><div class="scope"><h1>OMS</h1><strong id="project"></strong><label id="scope" hidden><span class="sr-only" data-i18n="project">프로젝트</span><select id="project-choice"></select></label></div><div class="tools">
 <select id="language-choice" aria-label="언어 / Language"><option value="ko">한국어</option><option value="en">English</option></select>
-<button id="auto-refresh" type="button" aria-pressed="false" data-i18n="auto">자동</button><button id="refresh" type="button" aria-keyshortcuts="Alt+R" aria-label="새로고침" disabled>↻</button><button id="display-mode" type="button" hidden></button></div></header>
-<p id="status" class="note" role="status"></p><p id="receipt" class="note" role="status"></p>
+<span class="refresh-group"><button id="refresh" type="button" aria-keyshortcuts="Alt+R" aria-label="새로고침" disabled>↻</button><button id="auto-refresh" type="button" aria-pressed="false" data-i18n="auto">자동</button></span><button id="display-mode" type="button" hidden></button></div></header>
+<p id="status" class="note" role="status"></p><button id="host-retry" type="button" data-i18n="retry" hidden>다시 시도</button><p id="receipt" class="note" role="status"></p>
 <noscript><p lang="ko">대화에서 OMS에 프로젝트 상태를 물어보세요.</p><p lang="en">Ask OMS for project status in the conversation.</p></noscript>
 <div id="view" hidden>
 <section id="goal-section" aria-labelledby="goal-label"><div class="section-head"><div class="goal-heading"><h2 id="goal-label" data-i18n="goalLabel">프로젝트 목표</h2><span id="observed-at" class="observed" hidden></span></div><button id="new-goal" type="button" data-i18n="newGoal">새 목표</button></div>
-<p id="goal" tabindex="-1" class="clamp"></p><button id="goal-expand" class="subtle" aria-controls="goal" aria-expanded="false" hidden></button><p id="progress" hidden></p><div id="progress-track" class="progress-track" aria-hidden="true" hidden><span id="progress-fill"></span></div>
-<div id="goal-journey"><p id="criteria-summary" hidden></p><p id="attention-summary" class="note"></p><p id="next-step" class="note"></p><div class="actions"><button id="evidence-toggle" type="button" aria-expanded="false" aria-controls="goal-evidence" data-i18n="evidence.open">결과 근거 보기</button><button id="followup-open" type="button" data-i18n="followup.prepare" hidden>현재 Main에 요청할 초안 준비</button></div>
-<section id="goal-evidence" hidden><h3 data-i18n="evidence.title">프로젝트 완료 기준과 근거</h3><ul id="criteria-list"></ul><p id="evidence-note" class="note"></p><ul id="readiness-list"></ul></section>
-<section id="followup-panel" hidden><label for="followup-text" data-i18n="followup.label">현재 대화에 추가할 요청 초안</label><textarea id="followup-text" rows="3" maxlength="4000"></textarea><p class="note" data-i18n="followup.note">초안 추가는 작업 배정이나 실행 시작이 아닙니다.</p><div class="actions"><button id="followup-add" type="button" data-i18n="followup.add">대화 문맥에 추가</button><button id="followup-copy" type="button" data-i18n="copy">복사</button><button id="followup-main" type="button" data-i18n="main.continue">Main 대화에서 이어가기</button><button id="followup-close" type="button" data-i18n="close">닫기</button></div><p id="followup-status" class="note" role="status"></p></section></div></section>
+<p id="goal" tabindex="-1" class="clamp"></p><button id="goal-expand" class="subtle" aria-controls="goal" aria-expanded="false" hidden></button><div id="progress-track" class="progress-track" aria-hidden="true" hidden><span id="progress-fill"></span></div><p id="progress-line"><span id="criteria-summary" hidden></span><span id="progress" hidden></span></p>
+<div id="goal-journey"><button id="evidence-toggle" class="journey-line" type="button" aria-expanded="false" aria-controls="goal-evidence"><span id="attention-summary"></span><span id="next-step"></span><span id="evidence-label" data-i18n="evidence.open">근거 보기</span></button>
+<section id="goal-evidence" hidden><h3 data-i18n="evidence.title">프로젝트 완료 기준과 근거</h3><ul id="criteria-list"></ul><p id="evidence-note" class="note"></p><ul id="readiness-list"></ul><div class="actions"><button id="followup-open" type="button" data-i18n="followup.prepare" hidden>현재 Main에 요청할 초안 준비</button></div></section>
+<section id="followup-panel" hidden><label for="followup-text" data-i18n="followup.label">현재 대화에 추가할 요청 초안</label><textarea id="followup-text" rows="3" maxlength="4000"></textarea><p class="note" data-i18n="followup.note">초안 추가는 작업 배정이나 실행 시작이 아닙니다.</p><button id="followup-include" type="button" data-i18n="finding.include" hidden>발췌문 포함</button><section id="finding-preview" hidden><h3 data-i18n="finding.title">공유할 선택 결과 미리보기</h3><p id="finding-scope" class="note"></p><p id="finding-range" class="note"></p><pre id="finding-text"></pre><p class="note" data-i18n="finding.note">아래 공유 버튼을 누를 때만 이 발췌문과 요청 초안을 현재 대화 문맥에 추가합니다. 전체 대화는 공유하지 않습니다.</p><button id="finding-share" type="button" data-i18n="finding.share">이 발췌문과 초안을 Main 문맥에 공유</button></section><div class="actions"><button id="followup-add" type="button" data-i18n="followup.add">대화 문맥에 추가</button><button id="followup-copy" type="button" data-i18n="copy">복사</button><button id="followup-main" type="button" data-i18n="main.continue">Main 대화에서 이어가기</button><button id="followup-close" type="button" data-i18n="close">닫기</button></div><p id="followup-status" class="note" role="status"></p></section></div></section>
 <div>
-<section id="main-card" aria-labelledby="main-name"><h2 id="main-scope" class="label"></h2><div class="identity"><span id="avatar" class="avatar" aria-hidden="true"></span><strong id="main-name" tabindex="-1"></strong></div><p id="main-status" class="note"></p><button id="header-main" type="button" data-i18n="main.continue" hidden>Main 대화에서 이어가기</button></section>
+<section id="main-card" aria-labelledby="main-name"><h2 id="main-scope" class="sr-only"></h2><div class="identity"><span id="avatar" class="avatar" aria-hidden="true"></span><p class="main-line"><strong id="main-name" tabindex="-1"></strong><span id="main-status"></span></p><button id="header-main" class="subtle" type="button" data-i18n="main.continue" hidden>Main 대화에서 이어가기</button></div></section>
 <section id="approval-card" aria-labelledby="approvals-heading" hidden><h2 id="approvals-heading" tabindex="-1"></h2><div id="approvals"></div></section>
 </div>
-<section id="leads-section" aria-labelledby="leads-heading"><div class="section-head"><h2 id="leads-heading">Leads</h2><button id="open-leads" type="button" aria-describedby="lead-opt-in-note" data-i18n="openLeads" hidden>세 Lead 연결</button></div><p id="lead-opt-in-note" class="note" data-i18n="leadOptIn" hidden></p><label id="lead-auto-label" hidden><input id="lead-auto" type="checkbox"><span data-i18n="autoLeads">다음에도 세 Lead 자동 연결</span></label><p id="lead-control-status" class="note" role="status"></p><button id="lead-refresh" type="button" class="subtle" data-i18n="turn.check" hidden>상태 확인</button><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
+<section id="leads-section" aria-labelledby="leads-heading"><div class="section-head"><h2 id="leads-heading">Lead</h2><details id="lead-settings" hidden><summary data-i18n="leads.settings">연결 설정</summary><div class="lead-settings-body"><button id="open-leads" type="button" aria-describedby="lead-opt-in-note" data-i18n="openLeads" hidden>세 Lead 연결</button><p id="lead-opt-in-note" class="note" data-i18n="leadOptIn" hidden></p><label id="lead-auto-label" hidden><input id="lead-auto" type="checkbox"><span data-i18n="autoLeads">다음에도 세 Lead 자동 연결</span></label><button id="lead-refresh" type="button" class="subtle" data-i18n="turn.check" hidden>상태 확인</button></div></details></div><p id="leads-help" class="note" data-i18n="leads.help">질문은 읽기 전용 상담 · 작업 배정은 Main에서</p><p id="lead-control-status" class="note" role="status"></p><div id="leads" class="lead-children"></div><p id="lead-note" class="note"></p></section>
 
+<section id="usage-card" aria-labelledby="usage-heading"><div class="section-head"><h2 id="usage-heading" data-i18n="use.title">남은 사용량</h2><span class="tools"><span id="usage-at" class="note"></span><button id="usage-refresh" class="icon" type="button" aria-label="사용량 다시 읽기">↻</button></span></div><ul id="usage-rows" class="plain"></ul><p class="note" data-i18n="use.note">기록된 한도만 표시합니다. 기록 없음은 0이 아닙니다.</p></section>
+<section id="more" aria-labelledby="more-heading"><h2 id="more-heading" class="sr-only" data-i18n="more.title">더 보기</h2>
+<div><button id="more-pr" class="more-row" type="button" aria-expanded="false" aria-controls="more-pr-body"><span><strong data-i18n="pr.title">PR · CI</strong><small data-i18n="pr.desc">이 작업트리와 연결된 PR과 check</small></span><span id="more-pr-chip" class="chip"></span></button><div id="more-pr-body" class="more-body" hidden></div></div>
+<button id="inspect-open" class="more-row" type="button" aria-haspopup="dialog" disabled><span><strong data-i18n="inspect.open">더 살펴보기</strong><small data-i18n="inspect.desc">사용량 상세·프로젝트 관계·라우팅·모델</small></span></button>
+</section>
 <p id="outcome" hidden></p>
 </div>
 <dialog id="launcher" aria-labelledby="launch-title"><div class="dialog-body"><div class="section-head"><h2 id="launch-title" data-i18n="newGoal">새 목표</h2><button id="close-launch" type="button" data-i18n="close">닫기</button></div><form id="launch"><fieldset id="controls">
@@ -311,9 +405,9 @@ header{gap:8px;padding-bottom:8px}
 <p id="launch-status" class="note" role="status"></p>
 <button id="issue-review" type="button" hidden data-i18n="reviewIssue">현재 Main에 전달할 이슈 확인</button><p id="issue-evidence" class="note" role="status"></p><button id="issue-record" type="button" hidden></button>
 </div></dialog>
-<dialog id="worker-output" aria-labelledby="output-title"><div class="dialog-body"><div class="section-head"><h2 id="output-title" data-i18n="out.title">워커 출력</h2><button id="output-close" type="button" data-i18n="close">닫기</button></div>
+<dialog id="worker-output" aria-labelledby="output-title"><div class="dialog-body"><div class="section-head"><h2 id="output-title" data-i18n="out.title">워커 출력</h2><div class="dialog-actions"><button id="output-refresh" type="button" aria-label="새로고침">↻</button><button id="output-close" type="button" data-i18n="close">닫기</button></div></div>
 <p id="output-worker"></p><p id="output-status" class="note" role="status"></p><pre id="output-body" hidden></pre><p id="output-limited" class="note" data-i18n="out.limited" hidden>기록된 출력의 일부입니다.</p>
-<div class="actions"><button id="output-refresh" type="button" data-i18n="refresh">새로고침</button><button id="output-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="output-more" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button><button id="output-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="output-followup" type="button" data-i18n="followup.result" hidden>이 결과로 요청 초안 준비</button></div><p id="output-copy-status" class="note" role="status"></p></div></dialog>
+<div class="actions"><button id="output-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="output-more" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button><button id="output-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="output-followup" class="primary" type="button" data-i18n="followup.result" hidden>이 결과로 요청</button></div><p id="output-copy-status" class="note" role="status"></p></div></dialog>
 <dialog id="conversation" aria-labelledby="chat-title"><div class="section-head"><div class="identity"><span id="chat-avatar" class="avatar" aria-hidden="true" hidden></span><h2 id="chat-title"></h2></div><span class="dialog-actions"><button id="settings-toggle" type="button" aria-controls="chat-settings" aria-expanded="false" data-i18n="prefs.title" hidden>대화 설정</button><button id="chat-refresh" type="button" aria-label="대화 새로고침">↻</button><button id="chat-back" type="button" data-i18n="close">닫기</button></span></div>
 <section id="chat-settings" tabindex="-1" aria-labelledby="settings-toggle" hidden>
 <p id="settings-scope" class="note"></p><p id="settings-saved"></p><p id="settings-actual" class="note" hidden></p><p id="settings-catalog" class="note"></p>
@@ -322,9 +416,10 @@ header{gap:8px;padding-bottom:8px}
 <label><span data-i18n="prefs.effort">추론 강도</span><select id="settings-effort"></select></label></fieldset>
 <p id="settings-hint" class="note"></p><div id="settings-controls"><p id="settings-status" class="note" role="status"></p><button id="settings-read" type="button" data-i18n="refresh" hidden>새로고침</button><button id="settings-save" type="button" data-i18n="prefs.save" hidden>저장</button></div></section>
 <p id="chat-status" class="note" role="status"></p><button id="chat-new" type="button" class="subtle" data-i18n="chat.new" hidden>새 메시지 보기</button><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-result"></p><p id="chat-result-limited" class="note" data-i18n="turn.partial" hidden>부분 답변</p><button id="chat-result-full" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button>
-<section id="full-answer" hidden><div class="section-head"><h3 data-i18n="answer.title">기록된 출력</h3><button id="answer-close" type="button" data-i18n="close">닫기</button></div><pre id="full-answer-body"></pre><p id="answer-status" class="note" role="status"></p><div class="actions"><button id="answer-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="answer-more" type="button" data-i18n="answer.more" hidden>다음 부분 읽기</button><button id="answer-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="answer-followup" type="button" data-i18n="followup.result" hidden>이 결과로 요청 초안 준비</button></div></section></div>
+<section id="full-answer" hidden><div class="section-head"><h3 data-i18n="answer.title">기록된 출력</h3><button id="answer-close" type="button" data-i18n="close">닫기</button></div><pre id="full-answer-body"></pre><p id="answer-status" class="note" role="status"></p><div class="actions"><button id="answer-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="answer-more" type="button" data-i18n="answer.more" hidden>다음 부분 읽기</button><button id="answer-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="answer-followup" class="primary" type="button" data-i18n="followup.result" hidden>이 결과로 요청</button></div></section></div>
 <form id="chat-compose" hidden><label for="chat-text" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000" aria-describedby="chat-count chat-delivery"></textarea><span id="chat-count" class="count"></span>
 <div class="actions"><span id="chat-delivery" role="status"></span><button id="chat-check" type="button" hidden></button><button id="chat-send" type="submit" data-i18n="chatSend">보내기</button></div></form></dialog>
+<dialog id="inspection" aria-labelledby="inspect-title"><div class="dialog-body"><div class="section-head"><h2 id="inspect-title" data-i18n="inspect.title">프로젝트 더 살펴보기</h2><button id="inspect-close" type="button" data-i18n="close">닫기</button></div><div class="actions"><label for="inspect-kind" class="sr-only" data-i18n="inspect.choose">살펴볼 항목</label><select id="inspect-kind"><option value="usage" data-i18n="inspect.usage">사용량과 쿼터</option><option value="graph" data-i18n="inspect.graph">프로젝트 관계</option><option value="routes" data-i18n="inspect.routes">예상 라우팅</option><option value="modelcatalog" data-i18n="inspect.modelcatalog">모델 카탈로그</option></select><button id="inspect-refresh" type="button" data-i18n="refresh">새로고침</button></div><form id="inspect-graph-form" class="actions" hidden><label for="inspect-query" class="sr-only" data-i18n="inspect.searchLabel">이름 또는 경로</label><input id="inspect-query" maxlength="256" placeholder="이름 또는 경로"><button id="inspect-search" type="submit" data-i18n="inspect.search">찾기</button><button id="inspect-root" type="button" data-i18n="inspect.root">전체 범위</button></form><p id="inspect-note" class="note"></p><p id="inspect-status" class="note" role="status"></p><div id="inspect-content"></div><div class="actions"><button id="inspect-prev" type="button" data-i18n="inspect.prev" hidden>이전 페이지</button><button id="inspect-next" type="button" data-i18n="inspect.next" hidden>다음 페이지</button></div></div></dialog>
 </main><script>
 'use strict';
 const el=id=>document.getElementById(id);
@@ -346,7 +441,6 @@ const messages = {
   "appr.mismatch": ["결정 응답이 요청과 다릅니다. 승인 목록을 확인하세요.", "The decision response does not match the request. Check the approval list."],
   "appr.partial": ["승인 목록을 일부만 조회했습니다.", "Only part of the approval list was retrieved."],
   "appr.scope": ["결정 범위 · Main이 요청한 다음 작업", "Decision scope · next work requested by Main"],
-  "appr.sender": ["요청자 · {v}", "Requester · {v}"],
   "appr.target": ["대상 · {v}", "Target · {v}"],
   "briefLabel": ["작업 목표", "Goal"],
   "chatLoading": ["대화 여는 중…", "Opening conversation…"],
@@ -418,11 +512,11 @@ const messages = {
   "host.collapse": ["축소", "Collapse"],
   "host.expand": ["확대", "Expand"],
   "hostFail": ["앱이 요청을 처리하지 못했습니다.", "The app could not process the request."],
+  "hostToolsUnavailable": ["이 호스트에서는 새로고침과 작업을 사용할 수 없습니다. 대화에서 새로고침을 요청하세요.", "Refresh and actions are unavailable in this host. Request a refresh in the conversation."],
   "issueVersion": ["확인한 버전 · {revision}", "Reviewed version · {revision}"],
   "joined": ["작업방에 참여 중", "Joined this room"],
   "launchMain": ["이 목표로 새 Main 시작", "Start a new Main"],
   "less": ["접기", "Show less"],
-  "main.headerAria": ["이 대화의 {name} 작업방 대화 보기", "View the room conversation of {name} for this conversation"],
   "more": ["목표 전체 보기", "Read full goal"],
   "mutate.working": ["요청을 처리하는 중…", "Processing the request…"],
   "newGoal": ["새 작업 시작", "Start new work"],
@@ -437,6 +531,9 @@ const messages = {
   "observedAt": ["관측 {time}", "Updated {time}"],
   "refreshChat": ["대화 새로고침", "Refresh conversation"],
   "autoLeads": ["다음에도 이 프로젝트의 세 Lead 자동 연결", "Automatically connect all three on future project visits"],
+  "leads.heading": ["Lead {n}", "Leads {n}"],
+  "leads.help": ["질문은 읽기 전용 상담 · 작업 배정은 Main에서", "Questions are read-only consultations · assign work in Main"],
+  "leads.settings": ["연결 설정", "Connection settings"],
   "leadOptIn": ["Lead 질문은 읽기 전용 상담입니다. 작업 배정은 현재 Main에서 이어가세요.", "Lead questions are read-only consultations. Continue work assignment in the current Main."],
   "transcriptPartial": ["최근 대화 일부입니다.", "Showing part of the recorded conversation."],
   "startingLeads": ["Lead 대화를 여는 중…", "Opening Lead conversations…"],
@@ -449,7 +546,7 @@ const messages = {
   "waitingAssignment": ["배정 대기", "Waiting for assignment"],
   "unknownAssignment": ["배정 미확인", "Assignment unknown"],
   "partialLeads": ["조회된 담당 기록이 일부입니다.", "Only part of the assignment history is available."],
-  "progress": ["계획 작업 {total}개 중 {verified}개 검증 완료", "{verified} of {total} planned tasks verified"],
+  "progress": ["계획 작업 {verified} / {total}", "Plan tasks {verified} / {total}"],
   "projChanged": ["프로젝트가 변경되었습니다.", "The project changed."],
   "project": ["프로젝트", "Project"],
   "project.choose": ["OMS를 사용할 프로젝트를 선택하세요.", "Select a project to use with OMS."],
@@ -462,6 +559,7 @@ const messages = {
   "recordIssue": ["현재 Main에 이 이슈 전달", "Record this issue for the current Main"],
   "refresh": ["새로고침", "Refresh"],
   "refreshing": ["새로고침 중…", "Refreshing…"],
+  "retry": ["다시 시도", "Retry"],
   "repositoryMain": ["프로젝트 기록", "Project record"],
   "reviewIssue": ["현재 Main에 전달할 이슈 확인", "Review issue for the current Main"],
   "selectProject": ["프로젝트 선택", "Choose a project"],
@@ -540,27 +638,96 @@ const messages = {
   "answer.first": ["처음부터 읽기", "Read from the start"],
   "answer.copy": ["표시된 부분 복사", "Copy displayed part"],
   "answer.changed": ["출력 또는 범위가 변경되어 읽기를 중단했습니다. 다시 열어 확인하세요.", "Output or scope changed. Reopen it to read again."],
-  "evidence.open": ["결과 근거 보기", "View result evidence"],
-  "evidence.close": ["결과 근거 접기", "Hide result evidence"],
+  "evidence.open": ["근거 보기", "View evidence"],
+  "evidence.close": ["근거 접기", "Hide evidence"],
   "evidence.title": ["프로젝트 완료 기준과 근거", "Repository completion criteria and evidence"],
-  "evidence.count": ["프로젝트 완료 기준 {total}개 중 {verified}개 검증 · 작업 수와 별도", "{verified} of {total} repository criteria verified · separate from task count"],
+  "evidence.count": ["완료 기준 {verified} / {total} 검증", "Criteria {verified} / {total} verified"],
+  "evidence.partialShort": ["일부만 표시", "partly shown"],
   "evidence.none": ["기록된 프로젝트 완료 기준이 없습니다.", "No repository completion criteria recorded."],
   "evidence.unknown": ["프로젝트 완료 기준을 확인할 수 없습니다.", "Repository completion criteria are unconfirmed."],
   "evidence.partial": ["일부 기준 또는 근거만 표시합니다. 생략된 항목은 미확인입니다.", "Only part of the criteria or evidence is shown. Omitted items remain unknown."],
   "evidence.reference": ["근거 · {v}", "Evidence · {v}"],
   "evidence.stale": ["오래된 근거", "Stale evidence"],
   "evidence.noRef": ["근거 미확인", "Evidence unconfirmed"],
-  "journey.attention": ["프로젝트 확인 필요 · {v}", "Repository needs attention · {v}"],
-  "journey.next": ["다음 확인 · {v}", "Next check · {v}"],
+  "journey.attention": ["확인 필요 · {v}", "Needs attention · {v}"],
+  "journey.next": ["다음: {v}", "Next: {v}"],
   "followup.prepare": ["현재 Main에 요청할 초안 준비", "Prepare a follow-up for Main"],
-  "followup.result": ["이 결과로 요청 초안 준비", "Prepare a follow-up on this result"],
+  "followup.result": ["이 결과로 요청", "Ask Main about this result"],
+  "finding.include": ["발췌문 포함", "Include an excerpt"],
   "followup.reference": ["선택한 결과 참조: {v}", "Selected result reference: {v}"],
   "followup.label": ["현재 대화에 추가할 요청 초안", "Request draft for the current conversation"],
   "followup.note": ["초안 추가는 작업 배정이나 실행 시작이 아닙니다.", "Adding a draft does not assign a task or start execution."],
   "followup.add": ["대화 문맥에 추가", "Add to conversation context"],
+  "followup.referencesOnly": ["참조와 초안만 추가", "Add draft and references only"],
   "followup.done": ["현재 대화의 문맥에 요청 초안을 추가했습니다. Main 수신이나 실행은 확인되지 않았습니다.", "Added the request draft to this conversation's context. Main receipt and execution are unconfirmed."],
   "followup.failed": ["대화 문맥 추가를 확인하지 못했습니다. 초안을 복사해 현재 Main 대화에서 이어가세요.", "Context update is unconfirmed. Copy the draft and continue in Main's conversation."],
   "followup.text": ["프로젝트 목표: {goal}\n확인할 항목: {item}\n현재 범위에서 근거와 미완료 기준을 확인하고 다음 조치를 제안해 주세요.", "Project goal: {goal}\nItem to check: {item}\nCheck the evidence and unmet criteria within the current scope, then propose the next action."],
+  "finding.title": ["공유할 선택 결과 미리보기", "Selected finding to share"],
+  "finding.note": ["공유 버튼을 누를 때만 이 발췌문과 요청 초안을 현재 대화 문맥에 추가합니다. 전체 대화는 공유하지 않습니다.", "Only Share adds this excerpt and your draft to the current conversation context. The rest of the private conversation stays private."],
+  "finding.share": ["이 발췌문과 초안을 Main 문맥에 공유", "Share this excerpt and draft with Main context"],
+  "finding.range": ["공유 범위 {start}–{end} / {total}바이트 · {extent}", "Sharing bytes {start}–{end} of {total} · {extent}"],
+  "finding.partial": ["결과의 일부", "partial result"],
+  "finding.complete": ["기록된 결과 전체", "complete recorded result"],
+  "finding.limit": ["표시된 부분의 앞 {n}바이트까지 공유합니다.", "Shares the first {n} bytes of the displayed part."],
+  "finding.checking": ["공유 전 현재 범위와 원문을 다시 확인하는 중…", "Rechecking the current scope and source before sharing…"],
+  "finding.changed": ["범위나 원문을 다시 확인할 수 없어 공유하지 않았습니다. 결과를 다시 열어 선택하세요.", "Scope or source could not be reverified. Nothing was shared. Reopen the result to select it again."],
+  "finding.done": ["선택한 발췌문과 초안을 현재 대화 문맥에 추가했습니다. 실행 권한이나 Main 수신 확인은 아닙니다.", "Added the selected excerpt and draft to this conversation's context. This grants no execution authority and does not confirm Main receipt."],
+  "inspect.open": ["더 살펴보기", "Inspect"],
+  "inspect.desc": ["사용량 상세·프로젝트 관계·라우팅·모델", "Usage detail, relationships, routing, models"],
+  "use.title": ["남은 사용량", "Remaining usage"],
+  "use.note": ["기록된 한도만 표시합니다. 기록 없음은 0이 아닙니다.", "Only recorded limits are shown. No record is not 0."],
+  "use.refresh": ["사용량 다시 읽기", "Read usage again"],
+  "use.failed": ["사용량 확인 실패", "Usage check failed"],
+  "use.none": ["기록 없음", "No record"],
+  "use.limit": ["한도", "Limit"],
+  "use.weekly": ["주간", "Weekly"],
+  "use.split": ["{used}% 사용 · {left}% 남음", "{used}% used · {left}% left"],
+  "use.stale": ["오래됨 · {age}", "Stale · {age}"],
+  "use.staleOnly": ["오래됨", "Stale"],
+  "use.staleNote": ["오래된 값 — {name}를 다시 쓰면 갱신됩니다", "Stale value — it refreshes the next time {name} runs"],
+  "use.resets": ["초기화", "Resets"],
+  "use.source": ["출처", "Source"],
+  "use.aria": ["{name} {win} {n}% 남음, {age}", "{name} {win} {n}% left, {age}"],
+  "use.ariaNone": ["{name} 한도 기록 없음", "{name} has no recorded limit"],
+  "ago.now": ["방금", "just now"], "ago.m": ["{n}분 전", "{n}m ago"], "ago.h": ["{n}시간 전", "{n}h ago"], "ago.d": ["{n}일 전", "{n}d ago"],
+  "in.h": ["{n}시간 후", "in {n}h"], "in.d": ["{n}일 후", "in {n}d"],
+  "checked": ["{time} 확인", "Checked {time}"],
+  "more.title": ["더 보기", "More"],
+  "more.rest": ["외 {n}", "+{n} more"],
+  "more.failed": ["읽기 실패 · ↻로 다시 읽기", "Read failed · use ↻ to retry"],
+  "pr.title": ["PR · CI", "PR · CI"],
+  "pr.desc": ["이 작업트리와 연결된 PR과 check", "PRs and checks linked to this worktree"],
+  "pr.gitUnknown": ["Git 상태 미확인", "Git status unconfirmed"],
+  "pr.dirty": ["변경 있음", "changes"], "pr.clean": ["깨끗함", "clean"],
+  "pr.same": ["{u}과 같음", "even with {u}"], "pr.ahead": ["앞섬 {n}", "ahead {n}"], "pr.behind": ["뒤처짐 {n}", "behind {n}"],
+  "pr.counts": ["실패 {f} · 통과 {p}", "{f} failed · {p} passed"],
+  "pr.pending": ["진행 {n}", "{n} running"],
+  "pr.pass": ["통과", "Passing"],
+  "pr.none": ["연결된 PR 없음", "No linked PRs"],
+  "pr.otherHead": ["로컬 HEAD와 다름", "Differs from local HEAD"],
+  "pr.footer": ["이 프로젝트 작업트리의 PR {n} / 열린 PR {m} · {time}", "{n} worktree PRs / {m} open · {time}"],
+  "pr.list": ["PR 목록", "All pull requests"],
+  "pr.github": ["GitHub 미확인", "GitHub unconfirmed"],
+  "res.failCount": ["실패 {n}", "{n} failed"],
+  "inspect.title": ["프로젝트 더 살펴보기", "Inspect project"],
+  "inspect.choose": ["살펴볼 항목", "What to inspect"],
+  "inspect.usage": ["사용량과 쿼터", "Usage and quota"],
+  "inspect.graph": ["프로젝트 관계", "Project relationships"],
+  "inspect.routes": ["예상 라우팅", "Proposed routes"],
+  "inspect.modelcatalog": ["모델 카탈로그", "Model catalog"],
+  "inspect.searchLabel": ["이름 또는 경로", "Name or path"],
+  "inspect.search": ["찾기", "Search"],
+  "inspect.root": ["전체 범위", "Overview"],
+  "inspect.prev": ["이전 페이지", "Previous page"],
+  "inspect.next": ["다음 페이지", "Next page"],
+  "inspect.page": ["{page}페이지 · {n}개 표시", "Page {page} · {n} shown"],
+  "inspect.partial": ["일부 기록만 표시합니다. 생략된 값은 미확인입니다.", "Only part of the records is shown. Omitted values are unconfirmed."],
+  "inspect.empty": ["표시할 기록이 없습니다.", "No records to display."],
+  "inspect.failed": ["현재 프로젝트의 읽기 결과를 확인하지 못했습니다. 새로고침해 주세요.", "Could not verify this read for the current project. Refresh to try again."],
+  "inspect.usageNote": ["저장소의 최근 시도와 공급자 쿼터를 표시합니다. 현재 Room이나 이 답변만의 사용량이 아닙니다. 미보고 값은 0으로 계산하지 않습니다.", "Recent repository attempts and provider quota windows. These are not totals for this Room or this reply. Unreported values are not counted as zero."],
+  "inspect.graphNote": ["추출된 관계, 추정 관계, 모호한 관계와 파일 구조를 구분합니다. 노드를 선택하면 그 주변만 읽습니다.", "Extracted, inferred, ambiguous and structural relationships are distinguished. Select a node to read its neighborhood."],
+  "inspect.routesNote": ["현재 근거로 예상한 선택입니다. 실제 실행 기록이나 실행 권한이 아닙니다.", "Expected choices from current evidence. These are proposals, not records of execution or permission to run."],
+  "inspect.modelcatalogNote": ["캐시된 모델·추론 강도 근거입니다. 목록에 있다는 이유로 현재 계정의 접근이나 실제 응답 모델을 보장하지 않습니다.", "Cached model and effort evidence. A catalog entry does not confirm current account access or the model that served a reply."],
   "prefs.scope": ["이 Lead의 읽기 전용 상담 · 다음 메시지부터 적용 · 워커에 상속되지 않음", "This Lead's read-only consultation · applies to the next message · not inherited by workers"],
   "prefs.continuity": ["OMS 대화 기록을 이어갑니다. 공급자의 native 세션 재개 여부는 별도입니다.", "Continues the OMS thread. Native provider session resumption is separate."],
   "prefs.catalogAge": ["모델 목록 확인 후 {n}초 경과", "Model catalog observed {n} seconds ago"],
@@ -604,12 +771,16 @@ function paintObserved() {
 function setStatus(value,tone='info') {
   el('status').setAttribute('data-tone',tone);put('status',value);
 }
+// Observation quality (degraded, unconfirmed, unavailable) is not a work outcome, so it falls through to muted.
 const TONES={
-  attention:['blocked','waiting_for_input','waiting_for_review','waiting_approval','failed','timed_out','guard_stop','rejected','interrupted','orphaned','degraded','unconfirmed','unavailable'],
+  decision:['blocked','waiting_for_input','waiting_for_review','waiting_approval'],
+  failure:['failed','timed_out','guard_stop','rejected','interrupted','orphaned'],
   active:['working','running','verifying','review','in_review','in_progress','active','claimed','landing','starting'],
   done:['completed','done','accepted','passed','verified'],
 };
 const stateTone=state=>Object.keys(TONES).find(tone=>TONES[tone].includes(state))||'muted';
+// The presence dot ranks failure › decision › working › live › idle.
+const presenceOf=(tones,working,live)=>tones.has('failure')?'failure':tones.has('decision')?'decision':working || tones.has('active')?'working':live?'live':'idle';
 function syncBriefCount() {
   const count=el('brief-count'), length=Array.from(launchDraft().goal).length;
   count.textContent=String(length).replace(/\B(?=(\d{3})+$)/g,',')+' / 2,000';
@@ -626,7 +797,12 @@ function localize() {
   el('refresh').setAttribute('aria-label',t('refresh'));
   el('auto-refresh').setAttribute('aria-label',t('autoLabel'));
   el('chat-refresh').setAttribute('aria-label',t('refreshChat'));
+  el('output-refresh').setAttribute('aria-label',t('refresh'));
+  el('usage-refresh').setAttribute('aria-label',t('use.refresh'));
+  for(const [e,fn] of ariaBindings){if(e.isConnected===false)ariaBindings.delete(e);else e.setAttribute('aria-label',fn());}
   el('brief').setAttribute('placeholder',t('briefPlaceholder'));
+  el('inspect-query').setAttribute('placeholder',t('inspect.searchLabel'));
+  if(followupDraft)paintFollowup();
   paintObserved();syncBriefCount();
   if(managedChat)paintComposer(managedChat);
   el('language-choice').value=lang;
@@ -645,6 +821,7 @@ function setLanguage(next,explicit) {
 const stateLabel=state=>messages['state.'+state]?t('state.'+state):state||t('statusUnknown');
 let dashboardData, members=[], rows=[], selectedChat, chatOrigin, chatCursor, chatPage=0;
 let selectedOutput;
+let inspection;
 let staleView=false,bindingKey=null,lastGoodBinding=null,lastGoodGeneration=-1,followupDraft=null,fullAnswer=null,roomResult=null,roomPageSeen=false;
 const roomMessageKeys=new Map();
 let approvedScope=0, issueTicket=0, reviewedIssue;
@@ -657,8 +834,13 @@ const pending = new Map();
 let sequence = 0;
 let hostOrigin = '*';
 let initializing;
-let busy = false;
+let busy = false, busyWriting = false;
 let disposed = false;
+let hostToolsUnavailable = false, hostToolsSucceeded = false, seenOpenResult = false;
+let snapshotClock = 0, renderedToolSnapshot = {seq:0, generation:-1, project:null};
+let awaitingSnapshotFor = -1, openDashboard = null;
+const personButtons = [], approvalButtons = [], turnAnswerButtons = [], inspectNodeButtons = [];
+let issueReviewBusy = false, chatReading = false;
 const AUTO_KEY='oms.panel.auto-refresh.v1';
 let autoRefresh=false, autoTimer, lastLoadedAt=0;
 // A retained public snapshot never restores write authority; retries stay bounded.
@@ -675,17 +857,19 @@ const pendingOpens = [];
 const pendingErrors = [];
 let retryStart;
 let contextTypes;
+const hasContext=()=>Boolean(contextTypes?.text || contextTypes?.structuredContent);
 
 let canOpenLinks=false, readOnly=false, contextKey, contextQueue=Promise.resolve();
 const MODES=['inline','fullscreen','pip'];
 let hostModes=[],displayMode='',autoExpanded=false,modeBusy=false;
-function updateContext(data, textOnly = false) {
-  if (!contextTypes || (textOnly && !contextTypes.text)) return Promise.resolve(false);
+function updateContext(data, textOnly = false, current = ()=>true) {
+  if (!hasContext() || (textOnly && !contextTypes.text)) return Promise.resolve(false);
   const key = JSON.stringify(data);
   if (key === contextKey) return contextQueue;
   contextKey = key;
   contextQueue = contextQueue.then(async () => {
     if (key !== contextKey) return false;
+    if (!current() || !hasContext() || (textOnly && !contextTypes.text)) { contextKey=undefined; return false; }
     const params = !data ? {content:[]} : !textOnly && contextTypes.structuredContent ? {structuredContent:data}
       : {content:[{type:'text', text:key}]};
     try {
@@ -710,7 +894,7 @@ function request(method, params, timeout = 90000) {
       pending.delete(id);
       reject(uiError('timeout'));
     }, timeout);
-    pending.set(id, {resolve, reject, timer});
+    pending.set(id, {resolve, reject, timer, method});
     send({id, method, params});
   });
 }
@@ -740,7 +924,7 @@ window.addEventListener('message', event => {
     if (msg.method === 'ui/resource-teardown' && !disposed) {
       disposed = true;
       generation++;resetLeadControl();
-      closeDialogs(); resetIssue();
+      closeDialogs(); resetIssue(); clearFollowup(); resetMore();
       setBusy(true, true);
       syncDisplayMode();
       el('view').hidden = true;
@@ -774,7 +958,7 @@ window.addEventListener('message', event => {
     seenInputOrManual = true;
     leadIntent=undefined;
     switchProject(target);
-    pendingOpens.push({id:++openSeq,target,explicit,generation,room:joinedMain()?.room,owner:joinedMain()?.participant});
+    pendingOpens.push({id:++openSeq,seq:++snapshotClock,target,explicit,generation,room:joinedMain()?.room,owner:joinedMain()?.participant});
     return;
   }
   if (msg.method === 'ui/notifications/tool-result') {
@@ -786,17 +970,19 @@ window.addEventListener('message', event => {
       if (!seenInputOrManual) switchProject(invalidProject);
       return;
     }
-    const result = msg.params?.structuredContent;
-    if (result?.panel === 'OMS') {
-      const target = projectArgument(result.project);
+    const result = msg.params, summary = result?.structuredContent;
+    if (summary?.panel === 'OMS') {
+      const priorOpen = seenOpenResult;
+      seenOpenResult = true;
+      const target = projectArgument(summary.project);
       let index = -1;
       for (let i = pendingOpens.length - 1; i >= 0; i--) {
         if (pendingOpens[i].target === target) { index = i; break; }
       }
+      const opened = index >= 0 ? pendingOpens[index] : null;
       if (index >= 0) {
-        const opened=pendingOpens[index];
         const authorized=opened.explicit && opened.id===openSeq && opened.generation===generation &&
-          pendingOpens.length===1 && !pendingErrors.length && result.leadConversations===true && result.readOnly!==true;
+          pendingOpens.length===1 && !pendingErrors.length && summary.leadConversations===true && summary.readOnly!==true;
         pendingOpens.splice(index, 1);
         reconcileOpens();
         if(authorized && target!==invalidProject && requestedProject===target){
@@ -806,6 +992,36 @@ window.addEventListener('message', event => {
         }
       } else {
         switchProject(target);
+      }
+      if (target !== invalidProject && requestedProject === target) {
+        const d = result._meta?.dashboard;
+        if (d && typeof d === 'object' && !Array.isArray(d)) {
+          const scope = target || project || (typeof d.project === 'string' && d.project) || null;
+          const openBaseline = opened ? opened.seq : (priorOpen ? snapshotClock : 0);
+          const hasNewerSnapshot = renderedToolSnapshot.generation === generation &&
+            renderedToolSnapshot.project === scope &&
+            renderedToolSnapshot.seq > openBaseline;
+          if (!hasNewerSnapshot) {
+            if (renderedToolSnapshot.generation !== generation) readOnly = summary.readOnly === true;
+            if (!project && typeof target === 'string') project = target;
+            if (awaitingSnapshotFor === generation) openDashboard = {generation, target, dashboard:d};
+            staleView = false;
+            resetAutoRetry();
+            const savedIntent = busy ? leadIntent : undefined;
+            render(d);
+            if (savedIntent && !leadIntent) leadIntent = savedIntent;
+            lastLoadedAt = Date.now();
+            syncHostTools();
+            syncMore();
+            if (hostToolsUnavailable) setStatus('hostToolsUnavailable', 'warn');
+            else {
+              const notice = snapshotNotice(d);
+              setStatus(() => notice ? t(notice) : '', notice ? 'warn' : 'info');
+            }
+          }
+        } else if (summary.snapshotOmitted && !busy && !hostToolsUnavailable) {
+          refresh();
+        }
       }
     }
     return;
@@ -818,9 +1034,17 @@ window.addEventListener('message', event => {
   if (msg.error) {
     const error = msg.error.message ? new Error(msg.error.message) : uiError('hostFail');
     error.hostRejected = [-32601,-32602].includes(msg.error.code);
+    if (call.method === 'tools/call' && !hostToolsSucceeded && ![-32000,-32601,-32602].includes(msg.error.code)) {
+      setHostToolsUnavailable(true);
+    }
     call.reject(error);
+  } else {
+    if (call.method === 'tools/call' && msg.result && !msg.result.isError) {
+      hostToolsSucceeded = true;
+      if (hostToolsUnavailable) setHostToolsUnavailable(false);
+    }
+    call.resolve(msg.result);
   }
-  else call.resolve(msg.result);
 });
 
 async function tool(name, args = {}, expected = generation) {
@@ -880,7 +1104,7 @@ function chooseProject(aliases) {
     return false;
   }
   const selected = target || (aliases.length === 1 ? aliases[0] : '');
-  if (selected !== project) clearProject();
+  if (selected !== project && !(project === '' && dashboardData && (!dashboardData.project || dashboardData.project === selected))) clearProject();
   project = selected;
   if (aliases.length > 1) select.add(selectProjectOption());
   for (const alias of aliases) select.add(new Option(alias, alias));
@@ -1009,14 +1233,14 @@ function nativeMainUri(page,member) {
 
 function roleTitle(role,provider){return 'OMS '+role+' · '+providerName(provider);}
 function assignmentLabel(row) { return row.role==='lead'?roleTitle('Lead',row.provider):providerName(row.provider)+choice(' 배정',' assignment'); }
-function attemptMember(row) {
+function attemptMember(row,list=members) {
   // Native Codex assignments enrol the exact attempt ID as the Room participant.
-  return members.find(m => m.room === row.room && (row.participant ? m.participant === row.participant :
+  return list.find(m => m.room === row.room && (row.participant ? m.participant === row.participant :
     row.tool === 'panel-native-assignment' && row.provider === 'codex' && m.provider === 'codex' && m.role === 'worker' && m.participant === row.id));
 }
 
 function clearChat() {
-  clearSettings();el('settings-toggle').hidden=true;
+  clearSettings();el('settings-toggle').hidden=true;turnAnswerButtons.length=0;
   clearTimeout(managedChat?.timer);selectedChat=undefined;managedChat=undefined;chatCursor=null;chatPage++;
   el('chat-compose').hidden=true;el('chat-avatar').hidden=true;el('chat-text').value='';el('chat-delivery').textContent='';
   el('chat-messages').replaceChildren();el('chat-result').textContent='';
@@ -1025,23 +1249,25 @@ function clearChat() {
   el('chat-result-limited').hidden=el('chat-result-full').hidden=true;clearFullAnswer();
 }
 function closeDialogs() {
+  if(el('inspection').open)el('inspection').close();
   closeWorkerOutput();
   for(const id of ['conversation','launcher']) if(el(id).open) el(id).close();
   clearChat();
 }
 function resetIssue() {
-  issueTicket++;reviewedIssue=null;el('issue-record').hidden=true;el('issue-evidence').textContent='';
-  el('issue-review').hidden=!issueInput() || !issueOwner();el('issue-review').disabled=false;
+  issueTicket++;issueReviewBusy=false;reviewedIssue=null;el('issue-record').hidden=true;el('issue-evidence').textContent='';
+  el('issue-review').hidden=!issueInput() || !issueOwner();el('issue-review').disabled=hostToolsUnavailable || disposed;
 }
 function clearProject() {
-  staleView=false;bindingKey=null;lastGoodBinding=null;lastGoodGeneration=-1;clearFollowup();
+  personButtons.length=0;approvalButtons.length=0;
+  openDashboard=null;staleView=false;bindingKey=null;lastGoodBinding=null;lastGoodGeneration=-1;clearFollowup();
   resetLeadControl();leadSlots.clear();paintLeadControls();
   dashboardData=undefined;members=[];rows=[];retryStart=undefined;approvalState.clear();approvedScope++;
   stopAuto();lastLoadedAt=0;paintObserved();
   el('view').hidden=true;el('project').textContent='';el('receipt').textContent='';
   el('goal-expand').setAttribute('aria-expanded','false');el('goal').className='clamp';goalToggleLabel();
   el('launch-status').textContent='';el('launch').reset();el('brief').setCustomValidity('');briefInvalid=false;syncBriefCount();
-  closeDialogs();resetIssue();el('leads').replaceChildren();el('approvals').replaceChildren();
+  closeDialogs();resetIssue();resetMore();el('leads').replaceChildren();el('approvals').replaceChildren();
   updateContext(null);
 }
 function conversationMainName(main) {
@@ -1057,7 +1283,7 @@ function issueOwner() {
   const m=joinedMain();
   return m?.provider==='codex' && typeof m.incomplete==='boolean' ? m : null;
 }
-function verifiedLeads(main,d) {
+function verifiedLeads(main,d,list=members) {
   const scoped=Array.isArray(d.conversationAttempts), active=Array.isArray(d.activeAttempts)?d.activeAttempts:[];
   const records=scoped?d.conversationAttempts:[...active,...(d.attempts||[])];
   // A panel-main row projects its harness as provider, which may differ from the Room's dispatch provider.
@@ -1069,7 +1295,7 @@ function verifiedLeads(main,d) {
   const seen=new Set(), leads=[];
   for(const r of scoped?records:active) {
     if(!r || !isLead(r) || r.room!==main.room || r.participant===main.participant)continue;
-    const member=attemptMember(r);
+    const member=attemptMember(r,list);
     if(member && (member.joined===false || (member.parent && member.parent!==main.participant) ||
       !['lead','worker'].includes(member.role) || (member.provider && r.provider && providerName(member.provider)!==providerName(r.provider))))continue;
     if(r.parentAttempt ? !owners.has(r.parentAttempt) : member?.parent!==main.participant)continue;
@@ -1084,7 +1310,7 @@ function verifiedLeads(main,d) {
   return {leads,ownerRun:ownerRecords[0],partial:(source!=null && source!=='ok') || main.incomplete!==false || !Array.isArray(main.participants) || main.participantsOmitted>0 ||
     (scoped?d.conversationAttemptsOmitted>0 || d.conversationAttemptsTrimmed>0:!Array.isArray(d.activeAttempts)||d.activeAttemptsTrimmed>0 || d.active!==active.length)};
 }
-function workersForLead(lead,records) {
+function workersForLead(lead,records,list=members) {
   const workers=[], seen=new Set();
   const parent=lead.member?.participant;
   const add=(attempt,member)=>{
@@ -1094,7 +1320,7 @@ function workersForLead(lead,records) {
   for(const r of records){
     if(!r?.id || r.id===lead.attempt.id || r.role && r.role!=='worker' || isMain(r) || isLead(r))continue;
     if(r.room!=null && r.room!==lead.attempt.room)continue;
-    const member=r.participant && members.find(m=>m.participant===r.participant);
+    const member=r.participant && list.find(m=>m.participant===r.participant);
     const memberParent=Boolean(parent && member?.parent===parent);
     if(r.parentAttempt ? r.parentAttempt!==lead.attempt.id : !memberParent || !r.room)continue;
     if(member && (member.role!=='worker' || member.joined!==true && !r.parentAttempt || member.parent && !memberParent ||
@@ -1102,11 +1328,22 @@ function workersForLead(lead,records) {
     if(r.role==='worker' || member?.role==='worker')add(r,memberParent && member.joined===true?member:null);
   }
   // A joined member proves membership even before an attempt records its state.
-  for(const m of members){
+  for(const m of list){
     if(parent && m.parent===parent && m.role==='worker' && m.joined===true &&
       !records.some(r=>r?.participant===m.participant || r?.id===m.participant))add({provider:m.provider},m);
   }
   return workers;
+}
+function snapshotMembers(main){
+  const list=main && Array.isArray(main.participants)?main.participants.filter(m=>m?.room===main.room && m.participant):[];
+  if(main && !list.some(m=>m.participant===main.participant))list.push(main);
+  return list;
+}
+function snapshotRows(main,d){
+  const list=snapshotMembers(main),{leads,partial,ownerRun}=main?verifiedLeads(main,d,list):{leads:[],partial:false};
+  const records=Array.isArray(d?.conversationAttempts)?d.conversationAttempts:[];
+  for(const lead of leads)lead.workers=workersForLead(lead,records,list);
+  return {list,leads,partial,ownerRun};
 }
 function paintAvatar(element,provider) {
   element.setAttribute('data-provider',provider==='antigravity'?'agy':provider||'');
@@ -1126,9 +1363,8 @@ function personEntry({attempt,member},kind) {
   const title=typeof attempt.taskTitle==='string'?attempt.taskTitle.trim():'';
   const body=node('span','','body');
   if(kind==='slot' && attempt.role==='lead'){
-    if(member)body.append(node('span',()=>assignmentLabel(attempt)+' · ','sr-only'));
-    body.append(node('strong',label || title || 'Lead'));
-    if(label && title)body.append(node('small',title));
+    if(member)body.append(node('span',()=>[assignmentLabel(attempt),title && label].filter(Boolean).join(' · ')+' · ','sr-only'));
+    body.append(node('strong',title || label || 'Lead'));
   }else{
     body.append(node('strong',identity));
     if(title)body.append(node('small',title));
@@ -1139,7 +1375,8 @@ function personEntry({attempt,member},kind) {
   if(member){
     if(selectedChat?.room===member.room && selectedChat.participant===member.participant &&
        selectedChat.parent===member.parent && selectedChat.provider===member.provider)chatOrigin=entry;
-    entry.type='button';const arrow=node('span','›','arrow');arrow.setAttribute('aria-hidden','true');entry.append(arrow);
+    entry.type='button';entry.disabled=hostToolsUnavailable || disposed;personButtons.push(entry);
+    const arrow=node('span','›','arrow');arrow.setAttribute('aria-hidden','true');entry.append(arrow);
     entry.append(node('span',message('openChat'),'sr-only'));
     entry.addEventListener('click',()=>openConversation(member,identity,entry));
   }
@@ -1178,10 +1415,20 @@ function closeWorkerOutput(){
   if(el('worker-output').open)el('worker-output').close();
   clearWorkerOutput();
 }
+function checkedWorkerOutput(result,args,paged){
+  const data=result.structuredContent, out=result._meta?.workerOutput;
+  if(!data || !out || ['projectKey','room','leadAttempt','workerAttempt'].some(k=>data[k]!==args[k] || out[k]!==args[k]) ||
+    !['running','complete','not_recorded','unavailable'].includes(data.status) || out.status!==data.status ||
+    typeof out.truncated!=='boolean' || (data.status==='complete'
+      ? !['native-report','indexed-answer'].includes(out.source) || typeof out.text!=='string' || !(paged?out.text:out.text.trim()) ||
+        out.text.length>16384 || new TextEncoder().encode(out.text).length>16384
+      : out.text!==null || out.source!==null || out.truncated))throw uiError('out.unavailable');
+  return out;
+}
 async function readWorkerOutput(s,paged=false){
-  if(!s || s!==selectedOutput || s.loading)return;
-  const args={projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt};
-  if(paged)args.answerPage=s.cursor||'';else{s.cursor=null;s.digest=null;s.end=0;}
+  if(hostToolsUnavailable || !s || s!==selectedOutput || s.loading)return;
+  const args={projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt},cursor=paged?s.cursor||'':null;
+  if(paged)args.answerPage=cursor;else{s.cursor=null;s.digest=null;s.end=0;s.pageCursor=null;}
   el('output-body').hidden=true;el('output-body').textContent='';el('output-limited').hidden=true;
   if(!currentWorkerOutput(s)){put('output-status','out.unavailable');return;}
   s.loading=true;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=true;put('output-status','out.loading');
@@ -1189,19 +1436,13 @@ async function readWorkerOutput(s,paged=false){
   try{
     const result=await tool('oms_worker_output',args,s.ctl.generation);
     if(!currentWorkerOutput(s))return;
-    const data=result.structuredContent, out=result._meta?.workerOutput;
-    if(!data || !out || ['projectKey','room','leadAttempt','workerAttempt'].some(k=>data[k]!==args[k] || out[k]!==args[k]) ||
-      !['running','complete','not_recorded','unavailable'].includes(data.status) || out.status!==data.status ||
-      typeof out.truncated!=='boolean' || (data.status==='complete'
-        ? !['native-report','indexed-answer'].includes(out.source) || typeof out.text!=='string' || !(paged?out.text:out.text.trim()) ||
-          out.text.length>16384 || new TextEncoder().encode(out.text).length>16384
-        : out.text!==null || out.source!==null || out.truncated))throw uiError('out.unavailable');
+    const out=checkedWorkerOutput(result,args,paged);
     if(paged){
       if(out.status!=='complete')throw uiError('answer.changed');
-      acceptChunk(s,{...out.page,text:out.text});
+      acceptChunk(s,{...out.page,text:out.text});s.pageCursor=cursor;
       put('output-status',()=>t('answer.loaded',{start:s.start+1,n:s.end,total:s.total}));
     }else put('output-status','out.'+out.status);
-    s.text=out.text||'';
+    s.text=out.text||'';s.format=out.source;
     el('output-body').textContent=out.text||'';el('output-body').hidden=!out.text;
     el('output-limited').hidden=!(out.text && out.truncated);
     el('output-copy').hidden=el('output-followup').hidden=!out.text;
@@ -1209,13 +1450,13 @@ async function readWorkerOutput(s,paged=false){
     el('output-first').hidden=!paged || !s.start;
     put('output-more',paged?'answer.more':'answer.full');
   }catch{if(currentWorkerOutput(s)){s.text='';s.cursor=null;put('output-status',paged?'answer.changed':'out.unavailable');}}
-  finally{if(selectedOutput===s){s.loading=false;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=false;}}
+  finally{if(selectedOutput===s){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=blocked;}}
 }
 function openWorkerOutput(lead,worker,origin){
-  if(!currentLeadControl(leadControl) || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
+  if(hostToolsUnavailable || !currentLeadControl(leadControl) || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
   const label=()=>[workerName(worker),worker.attempt.taskTitle].filter(Boolean).join(' · ');
   const s={ctl:leadControl,room:leadControl.room,projectKey:leadControl.projectKey,leadAttempt:lead.attempt.id,workerAttempt:worker.attempt.id,label,origin};
-  selectedOutput=s;el('output-refresh').disabled=false;
+  selectedOutput=s;el('output-refresh').disabled=hostToolsUnavailable || disposed;
   put('output-worker',label);
   el('worker-output').showModal();el('output-close').focus();armAuto();readWorkerOutput(s);
 }
@@ -1225,8 +1466,10 @@ onClick('output-first',()=>{const s=selectedOutput;if(currentWorkerOutput(s) && 
 onClick('output-copy',()=>{const s=selectedOutput;copyDisplayed(s?.text,'output-copy-status',()=>currentWorkerOutput(s) && !s.loading);});
 onClick('output-followup',()=>{
   const s=selectedOutput;if(!currentWorkerOutput(s) || s.loading || !s.text)return;
-  const source={kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,summary:[s.label(),t('out.title')].filter(Boolean).join(' · '),...(s.digest?{digest:s.digest}:{})};
-  closeWorkerOutput();prepareFollowup(source);
+  const summary=[s.label(),t('out.title')].filter(Boolean).join(' · ');
+  const source={kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,summary,...(s.digest?{digest:s.digest}:{})};
+  const candidate=s.text.trim()?{...readerState(s),ref:{kind:'worker-output',projectKey:s.projectKey,room:s.room,leadAttempt:s.leadAttempt,workerAttempt:s.workerAttempt,format:s.format},summary}:null;
+  closeWorkerOutput();prepareFollowup(source,candidate);
 });
 onClick('output-close',()=>el('worker-output').close());
 on('worker-output','close',()=>{
@@ -1252,58 +1495,72 @@ function currentFullAnswer(s){
   return s && s===fullAnswer && s.generation===generation && !el('full-answer').hidden && (s.kind==='lead'?currentManaged(s.c):
     s.projectKey===bindingKey && s.member===selectedChat && canChat(s.member) && el('conversation').open);
 }
+async function loadResultPage(ref,cursor,expected){
+  const scope={projectKey:ref.projectKey,room:ref.room};
+  if(ref.kind==='worker-output'){
+    const args={...scope,leadAttempt:ref.leadAttempt,workerAttempt:ref.workerAttempt,answerPage:cursor};
+    const out=checkedWorkerOutput(await tool('oms_worker_output',args,expected),args,true);
+    if(out.status!=='complete')throw uiError('answer.changed');
+    return {page:{...out.page,text:out.text},source:{kind:ref.kind,...scope,leadAttempt:ref.leadAttempt,workerAttempt:ref.workerAttempt,format:out.source,...(ref.summary?{summary:ref.summary}:{})}};
+  }
+  if(ref.kind==='lead-answer'){
+    const args={...scope,provider:ref.provider,leadRequestId:ref.leadRequestId,turnId:ref.turnId,answerPage:cursor};
+    const result=await tool('oms_lead_conversation_status',args,expected);
+    const item=validatedTeam(result,scope,ref.provider).items.get(ref.provider),data=result._meta?.leadConversation;
+    if(item.status!=='ready' || item.requestId!==ref.leadRequestId || data?.room!==ref.room ||
+      data.provider!==ref.provider || data.requestId!==ref.leadRequestId || data.answer?.turnId!==ref.turnId ||
+      data.answer.source!=='recorded-answer')throw uiError('answer.changed');
+    const handoff=data.answer.handoff;
+    const valid=handoff && handoff.room===ref.room && handoff.provider===ref.provider && handoff.leadRequestId===ref.leadRequestId &&
+      handoff.turnId===ref.turnId && typeof handoff.participant==='string' && typeof handoff.operation==='string' &&
+      /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.participant) && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.operation);
+    return {page:data.answer,source:valid?{kind:ref.kind,...scope,summary:[roleTitle('Lead',ref.provider),t('answer.title')].join(' · '),
+      provider:ref.provider,leadRequestId:ref.leadRequestId,turnId:ref.turnId,participant:handoff.participant,operation:handoff.operation,pageCursor:cursor}:null};
+  }
+  if(ref.kind!=='room-result')throw uiError('answer.changed');
+  const args={...scope,participant:ref.participant,section:'transcript',attempt:ref.attempt,evidenceCursor:cursor};
+  const result=await tool('oms_panel_chat',args,expected),data=result._meta?.chat;
+  if(data?.source!=='room' || data.room!==ref.room || data.participant!==ref.participant ||
+    data.projectKey!==ref.projectKey || result.structuredContent?.projectKey!==ref.projectKey ||
+    data.evidence?.attempt!==ref.attempt || data.evidence.section!=='transcript')throw uiError('answer.changed');
+  return {page:data.evidence,source:{kind:ref.kind,...scope,participant:ref.participant,attempt:ref.attempt,
+    summary:ref.summary||[el('chat-title').textContent,t('answer.title')].filter(Boolean).join(' · ')}};
+}
 async function readFullAnswer(s){
-  if(!currentFullAnswer(s) || s.loading)return;
+  if(hostToolsUnavailable || !currentFullAnswer(s) || s.loading)return;
   s.loading=true;el('answer-more').disabled=el('answer-first').disabled=true;put('answer-status','chatLoading');
   try{
-    let page,source;
-    if(s.kind==='lead'){
-      const c=s.c,args={...settingsScope(c),turnId:s.turnId,answerPage:s.cursor||''};
-      const result=await tool('oms_lead_conversation_status',args,c.ctl.generation);
-      if(!currentFullAnswer(s))return;
-      const item=validatedTeam(result,c.ctl,c.provider).items.get(c.provider),privateData=result._meta?.leadConversation;
-      if(item.status!=='ready' || item.requestId!==c.requestId || privateData?.room!==c.ctl.room ||
-        privateData.provider!==c.provider || privateData.requestId!==c.requestId || privateData.answer?.turnId!==s.turnId ||
-        privateData.answer.source!=='recorded-answer')throw uiError('answer.changed');
-      page=privateData.answer;
-      const handoff=page.handoff;
-      if(handoff && handoff.room===c.ctl.room && handoff.provider===c.provider && handoff.leadRequestId===c.requestId &&
-        handoff.turnId===s.turnId && typeof handoff.participant==='string' && typeof handoff.operation==='string' &&
-        /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.participant) && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.operation))
-        source={kind:'lead-answer',projectKey:c.ctl.projectKey,summary:[roleTitle('Lead',c.provider),t('answer.title')].join(' · '),...handoff};
-    }else{
-      const m=s.member,result=await tool('oms_panel_chat',{projectKey:s.projectKey,room:m.room,participant:m.participant,section:'transcript',attempt:s.attempt,evidenceCursor:s.cursor||''},s.generation);
-      if(!currentFullAnswer(s))return;
-      const data=result._meta?.chat;
-      if(data?.source!=='room' || data.room!==m.room || data.participant!==m.participant ||
-        data.projectKey!==s.projectKey || result.structuredContent?.projectKey!==s.projectKey ||
-        data.evidence?.attempt!==s.attempt || data.evidence.section!=='transcript')throw uiError('answer.changed');
-      page=data.evidence;source={kind:'room-result',projectKey:s.projectKey,room:m.room,participant:m.participant,attempt:s.attempt,summary:[el('chat-title').textContent,t('answer.title')].filter(Boolean).join(' · ')};
-    }
-    acceptChunk(s,page);s.source=source;el('full-answer-body').textContent=s.text;
+    const ref=s.kind==='lead'?{kind:'lead-answer',projectKey:s.projectKey,room:s.c.ctl.room,provider:s.c.provider,leadRequestId:s.c.requestId,turnId:s.turnId}:
+      {kind:'room-result',projectKey:s.projectKey,room:s.member.room,participant:s.member.participant,attempt:s.attempt,
+        summary:[el('chat-title').textContent,t('answer.title')].filter(Boolean).join(' · ')};
+    const cursor=s.cursor||'',{page,source}=await loadResultPage(ref,cursor,s.generation);
+    if(!currentFullAnswer(s))return;
+    acceptChunk(s,page);s.pageCursor=cursor;s.source=source;el('full-answer-body').textContent=s.text;
     put('answer-status',()=>t('answer.loaded',{start:s.text?s.start+1:0,n:s.end,total:s.total}));
     el('answer-first').hidden=!s.start;el('answer-more').hidden=!s.cursor;el('answer-copy').hidden=!s.text;el('answer-followup').hidden=!source || !joinedMain();
   }catch{
     if(currentFullAnswer(s)){s.text='';s.cursor=null;s.source=null;el('full-answer-body').textContent='';el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=true;put('answer-status','answer.changed');}
-  }finally{if(currentFullAnswer(s)){s.loading=false;el('answer-more').disabled=el('answer-first').disabled=false;}}
+  }finally{if(currentFullAnswer(s)){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('answer-more').disabled=el('answer-first').disabled=blocked;}}
 }
 function openFullAnswer(selection){
-  if(selection.kind==='lead'?!currentManaged(selection.c):!canChat(selection.member) || !/^[a-f0-9]{64}$/.test(bindingKey))return;
+  if(hostToolsUnavailable || (selection.kind==='lead'?!currentManaged(selection.c):!canChat(selection.member) || !/^[a-f0-9]{64}$/.test(bindingKey)))return;
   clearFullAnswer();fullAnswer={...selection,projectKey:selection.kind==='room'?bindingKey:selection.c.ctl.projectKey,generation,cursor:null,end:0};el('full-answer').hidden=false;
   el('answer-close').focus();readFullAnswer(fullAnswer);
 }
 onClick('answer-close',()=>{const s=fullAnswer;clearFullAnswer();s?.origin?.focus();});
 onClick('answer-more',()=>readFullAnswer(fullAnswer));
-onClick('answer-first',()=>{const s=fullAnswer;if(currentFullAnswer(s) && !s.loading){s.cursor=null;s.digest=null;s.end=0;readFullAnswer(s);}});
+onClick('answer-first',()=>{const s=fullAnswer;if(!hostToolsUnavailable && currentFullAnswer(s) && !s.loading){s.cursor=null;s.digest=null;s.end=0;readFullAnswer(s);}});
 onClick('answer-copy',()=>{const s=fullAnswer;copyDisplayed(s?.text,'answer-status',()=>currentFullAnswer(s));});
 onClick('answer-followup',()=>{
   const s=fullAnswer;if(!currentFullAnswer(s) || !s.source)return;
-  const source={...s.source,digest:s.digest};el('conversation').close();clearChat();prepareFollowup(source);
+  const source={...s.source,digest:s.digest},candidate=s.text?.trim()?readerState(s):null;
+  el('conversation').close();clearChat();prepareFollowup(source,candidate);
 });
 onClick('chat-result-full',()=>{
-  if(selectedChat && roomResult?.attempt)openFullAnswer({kind:'room',member:selectedChat,attempt:roomResult.attempt,origin:el('chat-result-full')});
+  if(!hostToolsUnavailable && selectedChat && roomResult?.attempt)openFullAnswer({kind:'room',member:selectedChat,attempt:roomResult.attempt,origin:el('chat-result-full')});
 });
 function renderLeadSlots(leads,complete) {
+  personButtons.length=0;
   const list=el('leads');list.replaceChildren();leadSlots.clear();
   const providerOf=record=>record.attempt.provider==='antigravity'?'agy':record.attempt.provider;
   for(const provider of providers) {
@@ -1318,12 +1575,13 @@ function renderLeadSlots(leads,complete) {
     open.addEventListener('click',()=>openManagedChat(ctl,provider,open));
     connect.addEventListener('click',()=>writeLeads(ctl,[provider]));
     heading.append(status,open,connect,turn);
-    leadSlots.set(provider,{status,open,connect,turn,avatar,working:entries.some(e=>stateTone(e.attempt.state)==='active'),attention:entries.some(e=>stateTone(e.attempt.state)==='attention'),placeholder:entries.length?null:(complete?'waitingAssignment':'unknownAssignment')});
+    leadSlots.set(provider,{status,open,connect,turn,avatar,tones:new Set(entries.map(e=>stateTone(e.attempt.state))),placeholder:entries.length?null:(complete?'waitingAssignment':'unknownAssignment')});
     slot.append(heading);
     for(const entry of entries)slot.append(leadEntry(entry,true));
     list.append(slot);
   }
   for(const entry of leads)if(!providers.includes(providerOf(entry)))list.append(leadEntry(entry,false));
+  const n=list.children.length;put('leads-heading',()=>t('leads.heading',{n}));
   paintLeadControls();
 }
 function currentLeadControl(ctl) {
@@ -1341,18 +1599,18 @@ function rememberLeads(ctl,on) {
   try {const key=preferenceKey(ctl);if(key)localStorage.setItem(key,on?'on':'off');} catch {}
 }
 function paintLeadControls(){
-  const ctl=leadControl, known=currentLeadControl(ctl);
-  for(const lead of rows)for(const worker of lead.workers)if(worker.outputButton)worker.outputButton.disabled=!(known && ctl.observed && ctl.projectKey);
+  const ctl=leadControl, known=currentLeadControl(ctl), blocked=hostToolsUnavailable || disposed;
+  for(const lead of rows)for(const worker of lead.workers)if(worker.outputButton)worker.outputButton.disabled=blocked || !(known && ctl.observed && ctl.projectKey);
   if(selectedOutput && !currentWorkerOutput(selectedOutput))closeWorkerOutput();
   const opener=el('open-leads');
-  opener.hidden=!known;opener.disabled=!known || !ctl.observed || ctl.reading || ctl.writing;
+  opener.hidden=!known;opener.disabled=blocked || !known || !ctl.observed || ctl.reading || ctl.writing;
   const auto=known && autoLeads(ctl);
   el('lead-auto-label').hidden=!known;el('lead-auto').checked=Boolean(auto);
-  el('lead-auto').disabled=!known || !ctl.observed;
-  el('lead-opt-in-note').hidden=!known;
+  el('lead-auto').disabled=blocked || !known || !ctl.observed;
+  el('lead-opt-in-note').hidden=!known;el('lead-settings').hidden=!known;
   const pendingTurn=known && [...ctl.items.values()].some(r=>['reserved','running','unconfirmed'].includes(r.latestTurn?.status) || r.turnState);
   el('lead-refresh').hidden=!known || !(ctl.failed || ctl.pollPaused || pendingTurn);
-  el('lead-refresh').disabled=!known || ctl.reading || ctl.writing;
+  el('lead-refresh').disabled=blocked || !known || ctl.reading || ctl.writing;
   if(managedChat && (!known || ctl.items.get(managedChat.provider)?.requestId!==managedChat.requestId ||
       ctl.items.get(managedChat.provider)?.status!=='ready')){
     el('conversation').close();clearChat();
@@ -1364,12 +1622,12 @@ function paintLeadControls(){
     slot.status.hidden=!key;
     slot.status.setAttribute('data-tone',stateTone(row && key==='lead.'+row.status?row.status:''));
     if(key)put(slot.status,key);else slot.status.textContent='';
-    slot.avatar.setAttribute('data-presence',slot.attention || stateTone(row?.status)==='attention'?'attention':slot.working || row?.status==='starting'?'working':ready?'live':'idle');
+    slot.avatar.setAttribute('data-presence',presenceOf(new Set([...slot.tones,stateTone(row?.status)]),row?.status==='starting',ready));
     slot.open.hidden=!ready;
-    slot.open.disabled=!known || !ctl.observed || ctl.writing;
+    slot.open.disabled=blocked || !known || !ctl.observed || ctl.writing;
     if(ready)put(slot.open,()=>t('lead.ready',{provider:names[provider]}));else slot.open.textContent='';
     slot.connect.hidden=!known || row?.status!=='not_started';
-    slot.connect.disabled=!known || !ctl.observed || ctl.reading || ctl.writing;
+    slot.connect.disabled=blocked || !known || !ctl.observed || ctl.reading || ctl.writing;
     if(!slot.connect.hidden)put(slot.connect,()=>t('lead.connect',{provider:names[provider]}));else slot.connect.textContent='';
     const latest=row?.latestTurn,turnState=row?.turnState;
     put(slot.turn,()=>!latest?(turnState?t(Object.hasOwn(messages,'turn.'+turnState.reason)?'turn.'+turnState.reason:'turn.unconfirmed'):''):['reserved','running','unconfirmed'].includes(latest.status)?t('lead.waitingReply'):
@@ -1416,16 +1674,16 @@ function scheduleLeadRead(ctl){
   clearTimeout(ctl.pollTimer);
   const waiting=currentLeadControl(ctl) && [...ctl.items.values()].some(r=>r.status==='starting');
   if(!waiting){if(ctl)ctl.pollPaused=false;return;}
-  if(ctl.reading || ctl.writing || managedChat)return;
+  if(hostToolsUnavailable || ctl.reading || ctl.writing || managedChat)return;
   const delay=ctl.pollDelay;
   if(Date.now()+delay>ctl.pollUntil){ctl.pollPaused=true;paintLeadControls();return;}
   ctl.pollDelay=Math.min(delay+4000,15000);
   ctl.pollTimer=setTimeout(()=>{
-    if(currentLeadControl(ctl) && Date.now()<=ctl.pollUntil)observeLeads(ctl,true);
+    if(!hostToolsUnavailable && currentLeadControl(ctl) && Date.now()<=ctl.pollUntil)observeLeads(ctl,true);
   },delay);
 }
 async function observeLeads(ctl,poll=false){
-  if(!currentLeadControl(ctl) || ctl.reading || ctl.writing)return;
+  if(hostToolsUnavailable || !currentLeadControl(ctl) || ctl.reading || ctl.writing)return;
   clearTimeout(ctl.pollTimer);
   if(!poll){ctl.pollUntil=Date.now()+120000;ctl.pollDelay=8000;ctl.pollPaused=false;}
   ctl.reading=true;paintLeadControls();
@@ -1441,7 +1699,7 @@ async function observeLeads(ctl,poll=false){
   }}
 }
 async function writeLeads(ctl,selection=providers){
-  if(!currentLeadControl(ctl) || !ctl.observed || ctl.writing || ctl.reading)return;
+  if(hostToolsUnavailable || !currentLeadControl(ctl) || !ctl.observed || ctl.writing || ctl.reading)return;
   if(!Array.isArray(selection) || !selection.length || selection.some(p=>!providers.includes(p)) || new Set(selection).size!==selection.length)return;
   clearTimeout(ctl.pollTimer);
   ctl.attempted=true;ctl.writing=true;ctl.failed=false;paintLeadControls();
@@ -1459,14 +1717,14 @@ async function writeLeads(ctl,selection=providers){
 }
 onClick('open-leads',()=>{
   const ctl=leadControl;
-  if(currentLeadControl(ctl) && ctl.observed && !ctl.reading && !ctl.writing){
+  if(!hostToolsUnavailable && currentLeadControl(ctl) && ctl.observed && !ctl.reading && !ctl.writing){
     writeLeads(ctl);
   }
 });
-on('lead-auto','change',()=>{if(currentLeadControl(leadControl) && leadControl.observed){
+on('lead-auto','change',()=>{if(!hostToolsUnavailable && currentLeadControl(leadControl) && leadControl.observed){
   rememberLeads(leadControl,el('lead-auto').checked);leadControl.autoOnVisit=false;paintLeadControls();
 }});
-onClick('lead-refresh',()=>observeLeads(leadControl));
+onClick('lead-refresh',()=>{if(!hostToolsUnavailable)observeLeads(leadControl);});
 const turnUuid=v=>typeof v==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(v);
 function currentManaged(c){
   return c && c===managedChat && currentLeadControl(c.ctl) && el('conversation').open &&
@@ -1537,16 +1795,18 @@ function paintSettings(c){
   const option=data?.options.find(o=>o.model===model);
   const allowed=model===null?!effort:option && (effort? !option.fixed && option.efforts.includes(effort):!option.requiresEffort);
   const changed=data && (model!==data.selection.model || effort!==data.selection.effort);
+  const blocked=hostToolsUnavailable || disposed;
   el('settings-fields').hidden=el('settings-save').hidden=!data;
   el('settings-actual').hidden=!data || !el('settings-actual').textContent || p.observedTurn!==c.latestTurn ||
     !c.verified || !!c.session.pending || !!c.session.writing || !!c.previous;
-  el('settings-fields').disabled=p.busy || c.session.settingsSaving;
-  el('settings-save').disabled=!changed || !allowed || p.busy || c.session.settingsSaving || c.session.writing || !c.verified;
+  el('settings-fields').disabled=blocked || p.busy || c.session.settingsSaving;
+  el('settings-save').disabled=blocked || !changed || !allowed || p.busy || c.session.settingsSaving || c.session.writing || !c.verified;
   el('settings-read').hidden=!!data || !!p.busy || c.session.settingsSaving;
+  el('settings-read').disabled=blocked || Boolean(p.busy || c.session.settingsSaving);
   put('settings-status',()=>p.status?t(p.status):'');
 }
 async function loadSettings(c,p){
-  if(!currentManaged(c) || c.settings!==p || p.busy || c.session.settingsSaving)return;
+  if(hostToolsUnavailable || !currentManaged(c) || c.settings!==p || p.busy || c.session.settingsSaving)return;
   const observedTurn=c.latestTurn;
   p.busy=true;p.status='prefs.loading';paintSettings(c);
   try{
@@ -1591,7 +1851,7 @@ function closeSettings(){
 onClick('settings-toggle',()=>{
   const c=managedChat;if(!currentManaged(c))return;
   if(c.settings){closeSettings();return;}
-  if(!c.verified)return;
+  if(hostToolsUnavailable || !c.verified)return;
   const p={status:c.session.settingsSaving?'prefs.saving':'prefs.loading'};c.settings=p;
   el('settings-toggle').setAttribute('aria-expanded','true');el('chat-settings').hidden=false;el('chat-settings').focus();
   paintSettings(c);loadSettings(c,p);
@@ -1600,22 +1860,23 @@ on('conversation','cancel',e=>{if(managedChat?.settings){e.preventDefault();clos
 on('settings-model','change',()=>{const c=managedChat;if(currentManaged(c) && c.settings?.data){effortChoices(c);c.settings.status='';paintSettings(c);}});
 on('settings-effort','change',()=>{const c=managedChat;if(currentManaged(c) && c.settings?.data){c.settings.status='';paintSettings(c);}});
 onClick('settings-save',saveSettings);
-onClick('settings-read',()=>{const c=managedChat;if(currentManaged(c) && c.settings)loadSettings(c,c.settings);});
+onClick('settings-read',()=>{const c=managedChat;if(!hostToolsUnavailable && currentManaged(c) && c.settings)loadSettings(c,c.settings);});
 function validText(text){
   return typeof text==='string' && text.trim().length>0 && !/\p{Cc}/u.test(text.replace(/[\n\t]/g,'')) && new TextEncoder().encode(text).length<=4000;
 }
 function paintComposer(c){
   if(!currentManaged(c))return;
-  const s=c.session,p=s.pending;
+  const s=c.session,p=s.pending,blocked=hostToolsUnavailable || disposed;
   el('chat-compose').hidden=!c.verified && !p && !c.failed;
   el('settings-toggle').hidden=!c.verified && !c.settings;
+  el('settings-toggle').disabled=blocked && !c.settings;
   if(c.settings)paintSettings(c);
-  el('chat-send').disabled=!c.verified || c.reading || s.settingsSaving || s.writing || !!p || !!c.previous || !validText(s.draft);
+  el('chat-send').disabled=blocked || !c.verified || c.reading || s.settingsSaving || s.writing || !!p || !!c.previous || !validText(s.draft);
   const state=s.writing?'sending':c.previous?'previous':p?.status || s.outcome;
   const bytes=new TextEncoder().encode(s.draft||'').length;
   put('chat-count',()=>t('chat.bytes',{n:bytes.toLocaleString(lang)}));el('chat-count').setAttribute('data-tone',bytes>4000?'warn':'muted');
   put('chat-delivery',()=>c.pollPaused?t('poll.paused'):s.draft && !validText(s.draft)?t('turn.limit'):state?t('turn.'+state):'');
-  const check=el('chat-check');check.hidden=!p && !c.failed && !c.previous || s.writing;check.disabled=c.reading;
+  const check=el('chat-check');check.hidden=!p && !c.failed && !c.previous || s.writing;check.disabled=blocked || c.reading;
   put(check,p?.status==='not_found' && !c.previous?'turn.retry':p || c.previous?'turn.check':'refresh');
 }
 function settleTurn(c,result,p){
@@ -1642,7 +1903,7 @@ function paintTurns(c,page,before){
   const fresh=incoming.filter(r=>!c.keys.has(key(r)));
   const overlap=fresh.length<incoming.length;
   const replace=!before && (!c.keys.size || !overlap && fresh.length>0);
-  if(replace){list.replaceChildren();c.keys.clear();c.visited.clear();}
+  if(replace){list.replaceChildren();c.keys.clear();c.visited.clear();turnAnswerButtons.length=0;}
   const add=replace?incoming:fresh, nodes=[];
   for(const r of add){
     if(c.keys.has(key(r)))continue;
@@ -1658,7 +1919,8 @@ function paintTurns(c,page,before){
     if(r.truncated===true)row.append(node('small',message('turn.partial')));
     if(!user && turnUuid(r.turnId)){
       const button=node('button',message('answer.full'),'subtle');button.type='button';
-      button.addEventListener('click',()=>openFullAnswer({kind:'lead',c,turnId:r.turnId,origin:button}));row.append(button);
+      button.disabled=hostToolsUnavailable || disposed;turnAnswerButtons.push(button);
+      button.addEventListener('click',()=>{if(!hostToolsUnavailable)openFullAnswer({kind:'lead',c,turnId:r.turnId,origin:button});});row.append(button);
     }
     nodes.push(row);
   }
@@ -1708,16 +1970,16 @@ async function readManaged(c,before=null){
     if(currentManaged(c)){c.verified=false;c.failed=true;if(p)p.status='unconfirmed';put('chat-status','chatMismatch');}
   }finally{
     if(currentManaged(c)){
-      c.reading=false;el('chat-older').disabled=false;paintComposer(c);
+      c.reading=false;el('chat-older').disabled=hostToolsUnavailable || disposed;paintComposer(c);
       const waiting=['reserved','running'].includes(c.previous || c.session.pending?.status);
       c.pollPaused=waiting && Date.now()>=c.until;
-      if(waiting && !c.pollPaused)c.timer=setTimeout(()=>readManaged(c),8000);
+      if(!hostToolsUnavailable && waiting && !c.pollPaused)c.timer=setTimeout(()=>readManaged(c),8000);
       paintComposer(c);paintLeadControls();
     }
   }
 }
 async function sendManaged(c,retry=false){
-  if(!currentManaged(c) || !c.verified || c.reading || c.session.settingsSaving || c.session.writing || c.previous)return;
+  if(hostToolsUnavailable || !currentManaged(c) || !c.verified || c.reading || c.session.settingsSaving || c.session.writing || c.previous)return;
   const s=c.session;
   if(retry ? s.pending?.status!=='not_found' : !!s.pending || !validText(s.draft))return;
   const p=retry?s.pending:{id:crypto.randomUUID(),text:s.draft,status:'unconfirmed'};
@@ -1748,7 +2010,7 @@ function chatRow(from,text,record){
   return row;
 }
 async function openManagedChat(ctl,provider,origin){
-  if(!currentLeadControl(ctl) || ctl.items.get(provider)?.status!=='ready')return;
+  if(hostToolsUnavailable || !currentLeadControl(ctl) || ctl.items.get(provider)?.status!=='ready')return;
   clearTimeout(ctl.pollTimer);ctl.pollTimer=undefined;
   const requestId=ctl.items.get(provider).requestId;
   ctl.sessions??=new Map();
@@ -1767,7 +2029,7 @@ on('chat-text','input',()=>{const c=managedChat;if(currentManaged(c)){
 on('chat-compose','submit',e=>{e.preventDefault();sendManaged(managedChat);});
 on('chat-text','keydown',e=>{if(e.key==='Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing){e.preventDefault();sendManaged(managedChat);}});
 onClick('chat-check',()=>{
-  const c=managedChat;if(!currentManaged(c))return;
+  const c=managedChat;if(hostToolsUnavailable || !currentManaged(c))return;
   if(c.session.pending?.status==='not_found' && !c.previous)sendManaged(c,true);
   else{c.until=Date.now()+120000;c.pollPaused=false;readManaged(c);}
 });
@@ -1833,18 +2095,49 @@ function paintEvidence(){
   const readiness=el('readiness-list');readiness.replaceChildren();
   for(const task of readinessTasks(d))readiness.append(node('li',()=>task.title+' · '+readinessLabel(task),'note'));
 }
+function validCriteria(c){
+  return c?.available===true && c.scope==='repository' && Number.isSafeInteger(c.total) && c.total>=0 &&
+    Number.isSafeInteger(c.verified) && c.verified>=0 && c.verified<=c.total;
+}
+// Segments need the whole list: every criterion projected, none omitted, each readable.
+function criteriaListed(c){
+  const items=Array.isArray(c?.criteria)?c.criteria:[];
+  return validCriteria(c) && !(Number(c.omitted)>0) && c.total<=8 && items.length===c.total &&
+    items.every(r=>displayText(r?.id,160) && displayText(r.label,2000) && displayText(r.status,96) && !(Number(r.evidenceOmitted)>0));
+}
+// One bar: repository criteria when any are recorded, otherwise the plan's tasks. The two counts are never summed.
+function paintProgress(d){
+  const {verified,total}=d.planProgress||{},c=d.acceptance;
+  const planned=Number.isSafeInteger(total) && total>0 && Number.isSafeInteger(verified) && verified>=0 && verified<=total;
+  const criteria=validCriteria(c) && c.total>0,track=el('progress-track');
+  el('progress').hidden=!planned;put('progress',()=>planned?t('progress',{verified,total}):'');
+  track.hidden=!criteria && !planned;
+  const [done,all]=criteria?[c.verified,c.total]:planned?[verified,total]:[0,1];
+  el('progress-fill').style.width=Math.round(done/all*100)+'%';
+  let segments=[];
+  if(criteria && criteriaListed(c))segments=c.criteria.map(r=>node('span','',stateTone(r.status)==='done'?'seg done':
+    Array.isArray(r.evidence) && r.evidence.slice(0,3).some(e=>e?.stale===true)?'seg stale':'seg'));
+  // A short plan reads as one segment per task: verified, the next one, then the rest.
+  else if(!criteria && planned && total<=12)segments=Array.from({length:total},(_,i)=>node('span','',i<verified?'seg done':i===verified?'seg current':'seg'));
+  track.setAttribute('data-segments',String(segments.length>0));track.replaceChildren(el('progress-fill'),...segments);
+}
 function paintJourney(d){
-  const c=d.acceptance, valid=c?.available===true && c.scope==='repository' && Number.isSafeInteger(c.total) && c.total>=0 && Number.isSafeInteger(c.verified) && c.verified>=0 && c.verified<=c.total;
+  const c=d.acceptance, valid=validCriteria(c);
   el('criteria-summary').hidden=false;
-  put('criteria-summary',()=>!valid?t('evidence.unknown'):c.total?t('evidence.count',{total:c.total,verified:c.verified}):t('evidence.none'));
+  put('criteria-summary',()=>!valid?t('evidence.unknown'):c.total?t('evidence.count',{total:c.total,verified:c.verified})+(criteriaListed(c)?'':' · '+t('evidence.partialShort')):t('evidence.none'));
   const focus=journeyFocus(d),next=d.nextStep?.scope==='repository'?displayText(d.nextStep.summary,1200):'';
   put('attention-summary',()=>focus.summary?t('journey.attention',{v:focus.summary}):'');
   put('next-step',()=>next?t('journey.next',{v:next}):'');
+  // With nothing to check the line falls back to a plain text button that only opens the evidence.
+  if(focus.summary)el('evidence-toggle').setAttribute('data-tone','warn');
+  else if(next)el('evidence-toggle').setAttribute('data-tone','plain');
+  else el('evidence-toggle').removeAttribute('data-tone');
   el('followup-open').hidden=!joinedMain();el('followup-open').disabled=staleView || busy;
   if(!el('goal-evidence').hidden)paintEvidence();
 }
 function clearFollowup(){
   followupDraft=null;el('followup-panel').hidden=true;el('followup-text').value='';put('followup-status',()=>'');
+  clearFinding();
 }
 function currentFollowup(d){
   const main=joinedMain();
@@ -1852,9 +2145,13 @@ function currentFollowup(d){
     main?.room===d.room && main.participant===d.owner && !el('followup-panel').hidden;
 }
 function paintFollowup(){
-  const current=currentFollowup(followupDraft),valid=validText(el('followup-text').value);
-  el('followup-add').hidden=!contextTypes;el('followup-add').disabled=!current || !valid || followupDraft?.pending;
-  el('followup-copy').disabled=!current || !valid;el('followup-main').disabled=!current;
+  const current=currentFollowup(followupDraft),valid=validText(el('followup-text').value),blocked=disposed || hostToolsUnavailable;
+  el('followup-add').hidden=!hasContext();el('followup-add').disabled=!current || !valid || followupDraft?.pending;
+  put('followup-add',followupDraft?.finding?'followup.referencesOnly':'followup.add');
+  el('followup-include').hidden=!followupDraft?.candidate || !!followupDraft.finding || !hasContext() || !findingScope();
+  el('followup-include').disabled=blocked || !current || followupDraft?.pending;
+  el('finding-share').hidden=!hasContext();el('finding-share').disabled=blocked || !current || !valid || !findingScope() || !followupDraft?.finding || followupDraft.pending;
+  el('followup-copy').disabled=!current || !valid;el('followup-main').disabled=blocked || !current;
   if(current && !valid)put('followup-status','turn.limit');
   else if(current && el('followup-status').textContent===t('turn.limit'))put('followup-status',()=>'');
 }
@@ -1868,48 +2165,453 @@ async function copyDisplayed(text,target,current=()=>true){
 }
 onClick('evidence-toggle',()=>{
   const show=el('goal-evidence').hidden;el('goal-evidence').hidden=!show;
-  el('evidence-toggle').setAttribute('aria-expanded',String(show));put('evidence-toggle',show?'evidence.close':'evidence.open');
+  el('evidence-toggle').setAttribute('aria-expanded',String(show));put('evidence-label',show?'evidence.close':'evidence.open');
   if(show)paintEvidence();
 });
-function resultTask(source){
-  if(source.projectKey!==bindingKey || source.room!==joinedMain()?.room)return null;
-  let attempt;
+const validTaskId=v=>typeof v==='string' && /^[A-Za-z0-9._-]{1,160}$/.test(v)?v:null;
+function resolveResultTask(source,d=dashboardData){
+  const m=d===dashboardData?joinedMain():(d?.conversationBinding==='matched' && d.conversationMain?.source==='room-session' &&
+    d.conversationMain.state==='joined' && d.conversationMain.room && d.conversationMain.participant &&
+    Object.hasOwn(names,d.conversationMain.provider)?d.conversationMain:null);
+  if(!source || source.projectKey!==bindingKey || !m || source.room!==m.room || !Array.isArray(d?.conversationAttempts))return {known:false,task:null};
+  const records=d.conversationAttempts;
+  const id=source.kind==='worker-output'?source.workerAttempt:source.kind==='room-result'?source.attempt:source.kind==='lead-answer'?source.operation:null;
+  if(!id)return {known:false,task:null};
   if(source.kind==='worker-output'){
-    const lead=rows.find(r=>r.attempt.id===source.leadAttempt);
-    attempt=lead?.workers.find(r=>r.attempt.id===source.workerAttempt)?.attempt;
-  }else{
-    const id=source.kind==='room-result'?source.attempt:source.kind==='lead-answer'?source.operation:null;
-    const records=Array.isArray(dashboardData?.conversationAttempts)?dashboardData.conversationAttempts:[];
-    const matches=records.filter(r=>id && r?.id===id && r.room===source.room &&
-      (r.participant||r.id)===source.participant && (!source.provider || providerName(r.provider)===providerName(source.provider)));
-    if(matches.length===1)attempt=matches[0];
+    const direct=records.filter(r=>r?.id===id && (r.room==null || r.room===source.room) && r.parentAttempt===source.leadAttempt);
+    if(direct.length>1)return {known:false,task:null};
+    const {leads}=snapshotRows(m,d),lead=leads.find(r=>r.attempt.id===source.leadAttempt);
+    const worker=lead?.workers.find(w=>w.attempt.id===source.workerAttempt)?.attempt;
+    const sameId=records.filter(r=>r?.id===id && (r.room==null || r.room===source.room));
+    const attempt=direct[0] || (worker && sameId.length===1?worker:null);
+    if(!attempt || !lead || !worker || (attempt.task!=null && !validTaskId(attempt.task)))return {known:false,task:null};
+    return {known:true,task:validTaskId(attempt.task)};
   }
-  return typeof attempt?.task==='string' && /^[A-Za-z0-9._-]{1,160}$/.test(attempt.task)?attempt.task:null;
+  const matches=records.filter(r=>r?.id===id && r.room===source.room && (r.participant||r.id)===source.participant &&
+    (!source.provider || providerName(r.provider)===providerName(source.provider)));
+  if(matches.length===1){
+    if(matches[0].task!=null && !validTaskId(matches[0].task))return {known:false,task:null};
+    return {known:true,task:validTaskId(matches[0].task)};
+  }
+  if(matches.length>1)return {known:false,task:null};
+  const incomplete=d.conversationAttemptsOmitted>0 || d.conversationAttemptsTrimmed>0 ||
+    (d.observation?.sources?.attempts!=null && d.observation.sources.attempts!=='ok');
+  return {known:!incomplete,task:null};
 }
-function prepareFollowup(source=null){
+function resultTask(source,d=dashboardData){return resolveResultTask(source,d).task;}
+const resultSourceFields=['kind','projectKey','room','provider','participant','leadRequestId','turnId','operation','leadAttempt','workerAttempt','attempt','format','digest','pageCursor'];
+const cleanSource=source=>source?Object.fromEntries(resultSourceFields.filter(k=>source[k]!==undefined).map(k=>[k,source[k]])):null;
+// A result follow-up keeps the displayed page as a candidate; no excerpt is selected until Include is pressed.
+function prepareFollowup(source=null,candidate=null){
   const main=joinedMain();if(!main || staleView || busy)return;
+  clearFinding();
   const excerpt=(value,max)=>Array.from(value).length>max?Array.from(value).slice(0,max).join('')+'…':value;
   const focus=source?null:journeyFocus(dashboardData),task=source?resultTask(source):focus.task?.id||null;
   const goal=excerpt(displayText(dashboardData.goal,2000)||t('goalUnknown'),400);
   const summary=excerpt(displayText(source?source.summary:focus.summary,512)||(source?t('answer.title'):t('evidence.title')),200);
   const turnId=source && turnUuid(source.turnId)?source.turnId:null;
-  followupDraft={project,projectKey:bindingKey,generation,room:main.room,owner:main.participant,task,goal,summary,turnId,source};
+  followupDraft={project,projectKey:bindingKey,generation,room:main.room,owner:main.participant,mainProvider:main.provider,task,goal,summary,turnId,source:cleanSource(source),finding:null,candidate};
   el('followup-text').value=[turnId&&t('followup.reference',{v:'Turn: '+turnId}),task&&'Task: '+task,
     t('followup.text',{goal,item:summary})].filter(Boolean).join('\n');
-  el('followup-panel').hidden=false;put('followup-status',()=>'');paintFollowup();el('followup-text').focus();
+  el('followup-panel').hidden=false;armAuto();put('followup-status',()=>'');paintFollowup();el('followup-text').focus();
 }
+function showFinding(draft){
+  const selected=draft.finding.selection,src=draft.source;
+  el('finding-preview').hidden=false;el('finding-text').textContent=selected.text;
+  const reference=[['Kind',src.kind],['Provider',src.provider],['Participant',src.participant],
+    ['Lead request',src.leadRequestId],['Turn',src.turnId],['Operation',src.operation],['Lead attempt',src.leadAttempt],
+    ['Worker attempt',src.workerAttempt],['Attempt',src.attempt],['Digest',src.digest]]
+    .filter(([,value])=>value).map(([label,value])=>label+': '+value).join(' · ');
+  put('finding-scope',()=>[t('project')+': '+(project||displayText(dashboardData.project,255)||'OMS'),'Room: '+draft.room,reference].filter(Boolean).join(' · '));
+  put('finding-range',()=>t('finding.range',{start:selected.offset+1,end:selected.offset+selected.bytes,total:selected.totalBytes,
+    extent:t(selected.truncated?'finding.partial':'finding.complete')})+(selected.bytes<selected.displayedBytes?' · '+t('finding.limit',{n:selected.bytes}):''));
+}
+const FINDING_BYTES=4000;
+function findingScope(){return hasContext() && !disposed && !hostToolsUnavailable && !busy && !readOnly && !staleView && !!joinedMain() && /^[a-f0-9]{64}$/.test(bindingKey);}
+function utf8Prefix(text,limit){
+  let result='',bytes=0;
+  for(const char of text){const n=new TextEncoder().encode(char).length;if(bytes+n>limit)break;result+=char;bytes+=n;}
+  return result;
+}
+function clearFinding(){
+  el('finding-preview').hidden=true;el('finding-text').textContent='';
+  put('finding-scope',()=>'');put('finding-range',()=>'');el('finding-share').disabled=true;
+}
+function selectedFinding(reader,displayed=reader.text){
+  const text=utf8Prefix(displayed,FINDING_BYTES),bytes=new TextEncoder().encode(text).length,displayedBytes=new TextEncoder().encode(displayed).length;
+  if(!text.trim() || !/^[a-f0-9]{64}$/.test(reader.digest) || !Number.isSafeInteger(reader.start) || reader.start<0 ||
+    !Number.isSafeInteger(reader.total) || reader.start+displayedBytes>reader.total)throw uiError('answer.changed');
+  return {cursor:reader.pageCursor||'',selection:{text,offset:reader.start,bytes,totalBytes:reader.total,digest:reader.digest,
+    truncated:reader.start>0 || reader.start+bytes<reader.total,displayedBytes}};
+}
+function readerState(r){return {text:r.text,digest:r.digest,start:r.start,total:r.total,end:r.end,pageCursor:r.pageCursor};}
+onClick('followup-include',async()=>{
+  const draft=followupDraft,c=draft?.candidate;
+  if(!currentFollowup(draft) || !c || draft.finding || draft.pending || !findingScope())return;
+  draft.pending=true;paintFollowup();
+  try{
+    let reader=c,source=draft.source;
+    if(c.ref){
+      source={...c.ref,summary:c.summary};
+      if(!c.digest){
+        const result=await loadResultPage(c.ref,'',draft.generation);
+        if(!currentFollowup(draft))return;
+        if(result.source.format!==c.ref.format || !result.page.text.startsWith(utf8Prefix(c.text,FINDING_BYTES)))throw uiError('answer.changed');
+        reader={end:0,pageCursor:''};acceptChunk(reader,result.page);
+      }
+    }
+    if(!currentFollowup(draft) || !findingScope())return;
+    draft.finding=selectedFinding(reader,c.text);draft.source=cleanSource({...source,digest:reader.digest});draft.candidate=null;showFinding(draft);
+  }catch{if(currentFollowup(draft)){draft.candidate=null;put('followup-status','finding.changed');}}
+  finally{if(currentFollowup(draft)){draft.pending=false;paintFollowup();}}
+});
+async function verifiedFindingScope(draft){
+  if(!currentFollowup(draft) || !findingScope())throw uiError('finding.changed');
+  const registry=(await tool('oms_list_projects',{},draft.generation)).structuredContent;
+  const key=draft.project?registry?.projectKeys?.[draft.project]:registry?.projectKey;
+  if(registry?.readOnly===true || key!==draft.projectKey || !currentFollowup(draft) || !findingScope())throw uiError('finding.changed');
+  const response=await tool('oms_panel_snapshot',{},draft.generation),d=response.structuredContent?.dashboard||response._meta?.dashboard,m=d?.conversationMain;
+  const resolved=resolveResultTask(draft.source,d);
+  if(d?.conversationBinding!=='matched' || m?.source!=='room-session' || m.state!=='joined' || m.room!==draft.room ||
+    m.participant!==draft.owner || m.provider!==draft.mainProvider || !resolved.known || resolved.task!==draft.task || !currentFollowup(draft))throw uiError('finding.changed');
+}
+onClick('finding-share',async()=>{
+  const draft=followupDraft,text=el('followup-text').value,finding=draft?.finding;
+  if(hostToolsUnavailable || !currentFollowup(draft) || !finding || draft.pending || !findingScope() || !hasContext() || !validText(text))return;
+  draft.pending=true;stopAuto();paintFollowup();put('followup-status','finding.checking');
+  try{
+    await verifiedFindingScope(draft);
+    const {page,source}=await loadResultPage(draft.source,finding.cursor,draft.generation),selected=finding.selection;
+    const check={end:selected.offset,digest:selected.digest,total:selected.totalBytes};acceptChunk(check,page);
+    await verifiedFindingScope(draft);
+    if(!source || resultSourceFields.some(k=>({...source,digest:check.digest})[k]!==draft.source[k]) || !page.text.startsWith(selected.text) ||
+      !currentFollowup(draft) || !findingScope() || !hasContext() || el('followup-text').value!==text)throw uiError('finding.changed');
+    const excerptSha256=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(selected.text))),
+      byte=>byte.toString(16).padStart(2,'0')).join('');
+    const delivered=await updateContext({kind:'oms-selected-finding',authority:'context-only',...(draft.project?{project:draft.project}:{}),
+      ...(draft.task?{task:draft.task}:{}),...(turnUuid(draft.turnId)?{turnId:draft.turnId}:{}),source:{kind:draft.source.kind,summary:draft.summary},
+      selection:{text:selected.text,offset:selected.offset,bytes:selected.bytes,totalBytes:selected.totalBytes,truncated:selected.truncated,
+        displayedBytes:selected.displayedBytes,excerptSha256},text},false,
+      ()=>currentFollowup(draft) && findingScope() && hasContext() && el('followup-text').value===text && draft.finding===finding);
+    if(currentFollowup(draft))put('followup-status',delivered?'finding.done':'followup.failed');
+  }catch{if(currentFollowup(draft)){draft.finding=null;clearFinding();put('followup-status','finding.changed');}}
+  finally{if(currentFollowup(draft)){draft.pending=false;paintFollowup();armAuto();}}
+});
 onClick('followup-open',()=>prepareFollowup());
 on('followup-text','input',paintFollowup);
-onClick('followup-close',()=>{clearFollowup();el('followup-open').focus();});
+onClick('followup-close',()=>{clearFollowup();armAuto();el('followup-open').focus();});
 onClick('followup-copy',()=>{const draft=followupDraft;copyDisplayed(el('followup-text').value,'followup-status',()=>currentFollowup(draft));});
-onClick('followup-main',()=>{const m=joinedMain();if(currentFollowup(followupDraft))openConversation(m,()=>conversationMainName(m),el('followup-main'));});
+onClick('followup-main',()=>{const m=joinedMain();if(!hostToolsUnavailable && currentFollowup(followupDraft))openConversation(m,()=>conversationMainName(m),el('followup-main'));});
 onClick('followup-add',async()=>{
   const draft=followupDraft,text=el('followup-text').value;
-  if(!currentFollowup(draft) || draft.pending || !validText(text) || !contextTypes)return;
+  if(!currentFollowup(draft) || draft.pending || !validText(text) || !hasContext())return;
   draft.pending=true;paintFollowup();
   const delivered=await updateContext({kind:'oms-followup-draft',...(project?{project}:{}),goal:draft.goal,summary:draft.summary,...(draft.task?{task:draft.task}:{}),...(draft.turnId?{turnId:draft.turnId}:{}),text});
   if(currentFollowup(draft)){draft.pending=false;put('followup-status',delivered?'followup.done':'followup.failed');paintFollowup();}
 });
+const inspectionKinds=['usage','graph','routes','modelcatalog'];
+function canInspect(){return !disposed && !busy && !hostToolsUnavailable && !staleView && dashboardData && !el('view').hidden && /^[a-f0-9]{64}$/.test(bindingKey);}
+function inspectionRoom(){const m=dashboardData?.conversationMain;return [m?.room||null,m?.participant||null].join(':');}
+function currentInspection(s,ticket=s?.ticket){
+  return s && s===inspection && !disposed && !staleView && s.generation===generation && s.project===project &&
+    s.projectKey===bindingKey && s.room===inspectionRoom() && s.ticket===ticket && el('inspection').open;
+}
+const inspectedNumber=v=>typeof v==='number' && Number.isFinite(v) && v>=0?v.toLocaleString(lang==='ko'?'ko-KR':'en-US'):t('statusUnknown');
+const inspectedValue=v=>typeof v==='boolean'?choice(v?'예':'아니요',v?'Yes':'No'):typeof v==='number'?inspectedNumber(v):displayText(v,1024)||t('statusUnknown');
+const inspectedPercent=v=>typeof v==='number' && Number.isFinite(v) && v>=0 && v<=100?inspectedNumber(v)+'%':t('statusUnknown');
+function inspectedDate(v){
+  try{const d=new Date(typeof v==='number'?v*1000:typeof v==='string'?v:NaN);return Number.isFinite(d.getTime())?d.toLocaleString(lang==='ko'?'ko-KR':'en-US'):t('statusUnknown');}
+  catch{return t('statusUnknown');}
+}
+const inspectLabels={
+  provider:['공급자','Provider'],model:['예상 모델','Expected model'],effort:['예상 추론 강도','Expected effort'],access:['접근 모드','Access'],
+  status:['상태','Status'],requestedModel:['요청 모델','Requested model'],requestedEffort:['요청 추론 강도','Requested effort'],
+  inFlight:['실행 중','In flight'],recentAttempts:['최근 시도','Recent attempts'],probeAge:['근거 경과(초)','Evidence age (seconds)'],issue:['확인할 항목','Issue'],
+  efforts:['모델별 추론 강도','Model-specific efforts'],providerEfforts:['공급자 단위 강도','Provider-wide efforts'],routable:['라우팅 후보','Routing candidate'],
+  source:['출처','Source'],probe:['캐시 상태','Cache status'],age:['캐시 경과(초)','Cache age (seconds)'],
+  contextUsed:['관측된 문맥 사용률','Observed context used'],cacheReadShare:['캐시 읽기 비율','Cache read share'],calls:['보고된 호출 수','Reported calls'],
+  tokens:['보고된 토큰','Reported tokens'],cost:['보고된 비용(USD)','Reported cost (USD)'],used:['사용률','Used'],stale:['오래된 관측','Stale observation'],
+  resets:['초기화 시각','Resets at'],input:['입력 토큰','Input tokens'],output:['출력 토큰','Output tokens'],cacheRead:['캐시 읽기 토큰','Cache read tokens']
+};
+function inspectCard(title,fields){
+  const card=node('section','','inspect-card'),list=node('dl','');card.append(node('h3',title));
+  for(const [key,value] of fields){
+    list.append(node('dt',()=>choice(...inspectLabels[key])),node('dd',typeof value==='function'?value:()=>inspectedValue(value)));
+  }
+  card.append(list);return card;
+}
+function inspectUsage(data){
+  if(data?.scope!=='repository-recent-attempts' || !Array.isArray(data.providers) || data.providers.length>4 ||
+    !Array.isArray(data.attempts) || data.attempts.length>16)throw uiError('inspect.failed');
+  const content=el('inspect-content');let partial=Number(data.attemptsOmitted)>0 || Number(data.providerTotalsOmitted)>0;
+  for(const p of data.providers){
+    if(!p || !displayText(p.provider,64) || !Array.isArray(p.windows) || p.windows.length>8)throw uiError('inspect.failed');
+    const fields=[['contextUsed',()=>inspectedPercent(p.contextUsed)],['cacheReadShare',()=>inspectedPercent(p.cacheReadShare)]];
+    content.append(inspectCard(()=>providerName(p.provider)+' · '+choice('공급자 관측','provider observation'),fields));
+    if(p.recent7d)content.append(inspectCard(()=>providerName(p.provider)+' · '+choice('최근 7일 토큰','tokens in the last 7 days'),
+      [['calls',p.recent7d.calls],['input',p.recent7d.input],['output',p.recent7d.output],['cacheRead',p.recent7d.cacheRead]]));
+    for(const w of p.windows){
+      if(!w || !displayText(w.name,160))throw uiError('inspect.failed');
+      content.append(inspectCard(()=>providerName(p.provider)+' · '+w.name,[['used',()=>inspectedPercent(w.used)],['stale',w.stale],
+        ['source',w.source],['age',w.age_seconds],['resets',()=>inspectedDate(w.resets_at)]]));
+    }
+    partial ||= Number(p.windowsOmitted)>0;
+  }
+  for(const a of data.attempts){
+    if(!a || !displayText(a.id,160))throw uiError('inspect.failed');
+    content.append(inspectCard(()=>providerName(a.provider)+' · '+a.id,[['tokens',a.tokens],['source',()=>a.source==='receipt'?choice('사용량 receipt','Usage receipt'):a.source==='events'?choice('기록된 event','Recorded event'):t('statusUnknown')],
+      ['calls',a.reportedCalls],['cost',()=>typeof a.costMicrousd==='number' && Number.isFinite(a.costMicrousd) && a.costMicrousd>=0?(a.costMicrousd/1000000).toLocaleString(lang==='ko'?'ko-KR':'en-US',{maximumFractionDigits:6}):t('statusUnknown')]]));
+  }
+  return {count:data.providers.length+data.attempts.length,partial};
+}
+function inspectTable(data,kind,page){
+  if(data?.view!==kind || data.page!==page || !['ready','unavailable'].includes(data.status) || !Array.isArray(data.rows) ||
+    data.rows.length>20 || !Array.isArray(data.columns) || data.nextPage!=null && (!Number.isSafeInteger(data.nextPage) || data.nextPage!==page+1 || data.nextPage>1000))throw uiError('inspect.failed');
+  if(data.status==='unavailable')return {count:0,unavailable:true,partial:true};
+  for(const row of data.rows){
+    if(!row || typeof row!=='object' || Array.isArray(row))throw uiError('inspect.failed');
+    const keys=kind==='routes'?['provider','model','effort','access','status','requestedModel','requestedEffort','inFlight','recentAttempts','probeAge','issue']:
+      ['efforts','providerEfforts','routable','source','probe','age'];
+    const title=kind==='routes'?()=>displayText(row.role,96)||t('statusUnknown'):
+      ()=>providerName(row.provider)+' · '+(displayText(row.model,160)||t('statusUnknown'));
+    el('inspect-content').append(inspectCard(title,keys.filter(k=>k!=='issue' || row.issue!=null).map(k=>[k,row[k]])));
+  }
+  return {count:data.rows.length,next:data.nextPage,partial:data.incomplete===true};
+}
+const graphConfidence={EXTRACTED:['추출됨','Extracted'],INFERRED:['추정됨','Inferred'],AMBIGUOUS:['모호함','Ambiguous'],STRUCTURAL:['파일 구조','Structural']};
+function inspectGraph(data,args,s,ticket){
+  if(data?.schema!==1 || data.kind!=='oms-panel-project-graph' || !['ready','partial','empty','not_found','unknown'].includes(data.status) ||
+    data.provenance?.readOnly!==true || data.provenance.wroteIndex!==false || !['indexed','fallback','unavailable'].includes(data.provenance.mode) ||
+    !Array.isArray(data.nodes) || data.nodes.length>60 || !Array.isArray(data.edges) || data.edges.length>180 ||
+    (data.scope?.focusNode||null)!==(args.node||null) || (data.scope?.query||null)!==(args.query||null))throw uiError('inspect.failed');
+  if(data.provenance.mode==='unavailable' || data.status==='unknown')return {count:0,unavailable:true,partial:true};
+  const content=el('inspect-content'),card=node('section','','inspect-card'),nodes=node('div','','inspect-nodes'),labels=new Map();
+  card.append(node('h3',()=>data.provenance.mode==='fallback'?choice('기록된 파일 구조','Recorded file structure'):choice('캐시된 프로젝트 관계','Cached project relationships')),
+    node('p',()=>choice('노드 ','Nodes ')+inspectedNumber(data.counts?.shown_nodes)+' / '+inspectedNumber(data.counts?.total_nodes)+' · '+
+      choice('관계 ','Relationships ')+inspectedNumber(data.counts?.shown_edges)+' / '+inspectedNumber(data.counts?.total_edges),'note'));
+  for(const n of data.nodes){
+    if(!n || !displayText(n.id,512))throw uiError('inspect.failed');
+    const label=displayText(n.label,512)||displayText(n.path,512)||n.id;labels.set(n.id,label);
+    const button=node('button',label);button.type='button';button.disabled=disposed || hostToolsUnavailable || Boolean(s.loading);inspectNodeButtons.push(button);
+    button.addEventListener('click',()=>{if(!hostToolsUnavailable && currentInspection(s,ticket))readInspection(s,{node:n.id});});nodes.append(button);
+  }
+  card.append(nodes);content.append(card);
+  if(data.edges.length){
+    const relationships=node('section','','inspect-card'),list=node('ul','');relationships.append(node('h3',message('inspect.graph')));
+    for(const e of data.edges.slice(0,40)){
+      if(!e || !labels.has(e.source) || !labels.has(e.target) || !displayText(e.relation,96) || !graphConfidence[e.confidence])throw uiError('inspect.failed');
+      list.append(node('li',()=>labels.get(e.source)+' → '+labels.get(e.target)+' · '+e.relation+' · '+choice(...graphConfidence[e.confidence])));
+    }
+    relationships.append(list);content.append(relationships);
+  }
+  return {count:data.nodes.length,partial:data.completeness!=='complete' || data.limits?.truncated===true || data.edges.length>40,
+    unavailable:data.status==='not_found'};
+}
+async function verifyInspectionBinding(s,ticket){
+  if(!currentInspection(s,ticket))throw uiError('inspect.failed');
+  const data=(await tool('oms_list_projects',{},s.generation)).structuredContent;
+  if(!currentInspection(s,ticket) || (s.project?data?.projectKeys?.[s.project]:data?.projectKey)!==s.projectKey)throw uiError('inspect.failed');
+}
+async function readInspection(s,graph=s.graph||{}){
+  if(hostToolsUnavailable || !currentInspection(s) || !inspectionKinds.includes(s.kind))return;
+  const ticket=++s.ticket,kind=s.kind,page=s.page;s.graph=kind==='graph'?graph:{};s.loading=true;s.next=null;
+  inspectNodeButtons.length=0;
+  el('inspect-content').replaceChildren();el('inspect-prev').hidden=el('inspect-next').hidden=true;
+  syncInspectControls();el('inspect-graph-form').hidden=kind!=='graph';
+  put('inspect-note','inspect.'+kind+'Note');put('inspect-status','chatLoading');
+  try{
+    await verifyInspectionBinding(s,ticket);
+    const args=kind==='graph'?{...graph,limit:20,depth:2}:kind==='usage'?{}:{view:kind,page};
+    const result=await tool(kind==='graph'?'oms_panel_project_graph':kind==='usage'?'oms_panel_usage':'oms_panel_tui_view',args,s.generation);
+    await verifyInspectionBinding(s,ticket);
+    const data=result.structuredContent;
+    // A verified Inspect read refills the usage card's cache.
+    if(kind==='usage')shared.set('usage',{scope:scopeKey(),promise:Promise.resolve(data),at:new Date()});
+    const summary=kind==='graph'?inspectGraph(data,args,s,ticket):kind==='usage'?inspectUsage(data):inspectTable(data,kind,page);
+    if(kind==='usage')try{paintUsage(data);}catch{}
+    if(!summary.count && !summary.unavailable)el('inspect-content').append(node('p',message('inspect.empty'),'note'));
+    put('inspect-status',()=>summary.unavailable?t('statusUnknown'):
+      [(['routes','modelcatalog'].includes(kind)?t('inspect.page',{page,n:summary.count}):''),summary.partial?t('inspect.partial'):''].filter(Boolean).join(' · '));
+    s.next=summary.next||null;el('inspect-next').hidden=!s.next;el('inspect-prev').hidden=!['routes','modelcatalog'].includes(kind) || page<=1;
+  }catch{if(currentInspection(s,ticket)){inspectNodeButtons.length=0;el('inspect-content').replaceChildren();put('inspect-status','inspect.failed');}}
+  finally{if(currentInspection(s,ticket)){s.loading=false;syncInspectControls();}}
+}
+onClick('inspect-open',()=>{
+  if(!canInspect())return;
+  const kind=inspectionKinds.includes(el('inspect-kind').value)?el('inspect-kind').value:'usage';el('inspect-kind').value=kind;
+  inspection={project,projectKey:bindingKey,generation,room:inspectionRoom(),kind,page:1,ticket:0};
+  el('inspection').showModal();el('inspect-close').focus();armAuto();readInspection(inspection);
+});
+onClick('inspect-close',()=>el('inspection').close());
+on('inspection','close',()=>{
+  if(el('inspection').open)return;
+  inspection=null;inspectNodeButtons.length=0;el('inspect-content').replaceChildren();el('inspect-query').value='';put('inspect-status',()=>'');put('inspect-note',()=>'');
+  el('inspect-prev').hidden=el('inspect-next').hidden=true;armAuto();if(!disposed)el('inspect-open').focus();
+});
+on('inspect-kind','change',()=>{
+  const s=inspection;if(!hostToolsUnavailable && currentInspection(s) && inspectionKinds.includes(el('inspect-kind').value)){
+    s.kind=el('inspect-kind').value;s.page=1;el('inspect-query').value='';readInspection(s,{});
+  }
+});
+onClick('inspect-refresh',()=>{if(!hostToolsUnavailable && currentInspection(inspection) && !inspection.loading)readInspection(inspection);});
+onClick('inspect-next',()=>{const s=inspection;if(!hostToolsUnavailable && currentInspection(s) && !s.loading && s.next){s.page=s.next;readInspection(s);}});
+onClick('inspect-prev',()=>{const s=inspection;if(!hostToolsUnavailable && currentInspection(s) && !s.loading && s.page>1){s.page--;readInspection(s);}});
+on('inspect-graph-form','submit',event=>{
+  event.preventDefault();const s=inspection,query=el('inspect-query').value.trim();
+  if(!hostToolsUnavailable && currentInspection(s) && s.kind==='graph' && (!query || displayText(query,256)))readInspection(s,query?{query}:{});
+});
+onClick('inspect-root',()=>{const s=inspection;if(!hostToolsUnavailable && currentInspection(s) && s.kind==='graph'){el('inspect-query').value='';readInspection(s,{});}});
+
+// Usage and More read existing read-only tools: usage once after the first screen, each section on its first expand.
+// Reads are cached per binding scope; auto refresh never re-reads, and a scope change clears and collapses them.
+const shared=new Map(),usageOpen=new Set(),more={},ariaBindings=new Map();
+function aria(e,fn){if(ariaBindings.size>64)for(const k of ariaBindings.keys())if(k.isConnected===false)ariaBindings.delete(k);ariaBindings.set(e,fn);e.setAttribute('aria-label',fn());}let moreScope=null,usageTimer;
+const scopeKey=()=>[generation,project,bindingKey,inspectionRoom()].join('|');
+const canRead=()=>!disposed && !hostToolsUnavailable && !staleView && !!dashboardData && !el('view').hidden && /^[a-f0-9]{64}$/.test(bindingKey);
+function readShared(name,toolName,args={},force=false){
+  const scope=scopeKey(),hit=shared.get(name);
+  if(!force && hit?.scope===scope)return hit.promise;
+  const expected=generation,key=bindingKey,alias=project;
+  const promise=(async()=>{
+    const data=(await tool(toolName,args,expected)).structuredContent;
+    const reg=(await tool('oms_list_projects',{},expected)).structuredContent;
+    if(scopeKey()!==scope || (alias?reg?.projectKeys?.[alias]:reg?.projectKey)!==key)throw uiError('inspect.failed');
+    return data;
+  })(),entry={scope,promise,at:null};
+  shared.set(name,entry);
+  promise.then(()=>{entry.at=new Date();},()=>{if(shared.get(name)===entry)shared.delete(name);});
+  return promise;
+}
+const hhmm=d=>d?[d.getHours(),d.getMinutes()].map(n=>String(n).padStart(2,'0')).join(':'):'';
+const checkedAt=name=>()=>shared.get(name)?.at?t('checked',{time:hhmm(shared.get(name).at)}):'';
+function ago(sec){
+  if(typeof sec!=='number' || !Number.isFinite(sec) || sec<0)return '';
+  return sec<60?t('ago.now'):sec<3600?t('ago.m',{n:Math.floor(sec/60)}):sec<86400?t('ago.h',{n:Math.floor(sec/3600)}):t('ago.d',{n:Math.floor(sec/86400)});
+}
+function resetMore(){
+  shared.clear();usageOpen.clear();ariaBindings.clear();clearTimeout(usageTimer);usageTimer=undefined;moreScope=null;
+  for(const k of ['pr']){
+    more[k]={open:false,ticket:(more[k]?.ticket||0)+1};
+    el('more-'+k).setAttribute('aria-expanded','false');el('more-'+k+'-body').hidden=true;el('more-'+k+'-body').replaceChildren();
+    put('more-'+k+'-chip',()=>'');el('more-'+k+'-chip').removeAttribute('data-tone');
+  }
+  el('usage-rows').replaceChildren();put('usage-at',()=>'');
+}
+function syncMore(){
+  if(moreScope===scopeKey())return;
+  resetMore();if(!canRead())return;moreScope=scopeKey();
+  usageTimer=setTimeout(()=>{usageTimer=undefined;readUsage();},1500);usageTimer?.unref?.();
+}
+async function readUsage(force=false){
+  if(!canRead())return;const scope=scopeKey();el('usage-refresh').disabled=true;
+  try{const data=await readShared('usage','oms_panel_usage',{},force);if(scope===scopeKey())paintUsage(data);}
+  catch{if(scope===scopeKey()){el('usage-rows').replaceChildren(node('li',message('use.failed'),'note'));put('usage-at',()=>'');}}
+  finally{if(scope===scopeKey())el('usage-refresh').disabled=false;}
+}
+const pct=v=>typeof v==='number' && Number.isFinite(v) && v>=0 && v<=100;
+function paintUsage(data){
+  if(data?.scope!=='repository-recent-attempts' || !Array.isArray(data.providers) || data.providers.length>4 ||
+    data.providers.some(p=>!p || !Array.isArray(p.windows) || p.windows.length>8))throw uiError('use.failed');
+  const list=el('usage-rows');list.replaceChildren();
+  for(const id of ['codex','claude','antigravity','pi']){
+    const p=data.providers.find(x=>x.provider===id || id==='antigravity' && x.provider==='agy'),name=providerName(id);
+    const wins=(p?.windows||[]).filter(w=>w && pct(w.used) && displayText(w.name,160));
+    const top=wins.reduce((a,w)=>!a || w.used>a.used?w:a,null),left=top?Math.round(100-top.used):null;
+    const win=w=>w.name==='weekly'?t('use.weekly'):w.name;
+    const li=node('li',''),row=node('button','','usage-row'),mark=node('span','','avatar'),bar=node('span','','meter'),fill=node('i','');
+    row.type='button';paintAvatar(mark,id);mark.setAttribute('aria-hidden','true');bar.setAttribute('aria-hidden','true');
+    bar.setAttribute('data-known',String(!!top));fill.style.width=(top?left:0)+'%';bar.append(fill);
+    const label=node('span','');label.append(node('b',name),node('small',()=>top?win(top):t('use.limit')));
+    const age=()=>{const a=top?ago(top.age_seconds):'';return top?.stale===true?(a?t('use.stale',{age:a}):t('use.staleOnly')):a||'—';};
+    const num=node('span','','pct');num.append(node('b',()=>top?left+'%':t('use.none')),node('small',age));
+    row.append(mark,label,bar,num);
+    if(top){row.setAttribute('data-tone',left<=20?'warn':'plain');row.setAttribute('data-stale',String(top.stale===true));}
+    aria(row,()=>top?t('use.aria',{name,win:win(top),n:left,age:age()}):t('use.ariaNone',{name}));
+    li.append(row);
+    if(top){
+      const detail=node('div','','detail'),dl=node('dl','');detail.hidden=!usageOpen.has(id);
+      for(const w of wins){
+        dl.append(node('dt',()=>win(w)),node('dd',()=>t('use.split',{used:Math.round(w.used),left:Math.round(100-w.used)})));
+        const at=new Date(typeof w.resets_at==='number'?w.resets_at*1000:w.resets_at??NaN);
+        if(Number.isFinite(at.getTime()))dl.append(node('dt',message('use.resets')),node('dd',()=>{
+          const s=(at-Date.now())/1000;
+          return at.toLocaleString(lang==='ko'?'ko-KR':'en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})+
+            (s>0?' · '+(s<86400?t('in.h',{n:Math.max(1,Math.round(s/3600))}):t('in.d',{n:Math.round(s/86400)})):'');
+        }));
+        dl.append(node('dt',message('use.source')),node('dd',()=>[displayText(w.source,160),ago(w.age_seconds)].filter(Boolean).join(' · ')||t('statusUnknown')));
+      }
+      detail.append(dl);if(wins.some(w=>w.stale===true))detail.append(node('p',()=>t('use.staleNote',{name}),'warn-box'));
+      row.setAttribute('aria-expanded',String(!detail.hidden));
+      row.addEventListener('click',()=>{detail.hidden=!detail.hidden;row.setAttribute('aria-expanded',String(!detail.hidden));
+        if(detail.hidden)usageOpen.delete(id);else usageOpen.add(id);});
+      li.append(detail);
+    }
+    list.append(li);
+  }
+  put('usage-at',checkedAt('usage'));
+}
+const ghLink=(repo,kind,n)=>/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo||'') && Number.isSafeInteger(n) && n>0?`https://github.com/${repo}/${kind}/${n}`:null;
+function linkNode(text,url){
+  if(!url || !canOpenLinks)return node('span',text);
+  const b=node('button',text,'link');b.type='button';b.addEventListener('click',()=>request('ui/open-link',{url},5000).catch(()=>{}));return b;
+}
+function chip(k,text,tone){put('more-'+k+'-chip',text);if(tone)el('more-'+k+'-chip').setAttribute('data-tone',tone);else el('more-'+k+'-chip').removeAttribute('data-tone');}
+function sectionHead(k,body){
+  const head=node('div','','more-head'),again=node('button','↻','icon');again.type='button';
+  aria(again,message('refresh'));
+  again.addEventListener('click',()=>readSection(k,true));head.append(node('span',checkedAt(k),'note'),again);body.append(head);
+}
+function itemRow(tone,mark,title,meta){
+  const li=node('li',''),b=node('div','','item-row'),m=node('span',mark,'mark');m.setAttribute('data-tone',tone);m.setAttribute('aria-hidden','true');
+  const text=node('span',''),head=node('strong',title);text.append(head);if(meta)text.append(node('small',meta));
+  b.append(m,text);li.append(b);li.row=b;li.head=head;
+  return li;
+}
+function paintPr(body,d){
+  const g=d?.git,gh=d?.github;if(!g || typeof g!=='object' || !gh || typeof gh!=='object')throw uiError('inspect.failed');
+  const u=displayText(g.upstream,160),n=x=>Number.isSafeInteger(x) && x>0;
+  body.append(node('p',()=>g.available===false?t('pr.gitUnknown'):[displayText(g.branch,160),t(g.dirty?'pr.dirty':'pr.clean'),
+    n(g.ahead)?t('pr.ahead',{n:g.ahead}):n(g.behind)?t('pr.behind',{n:g.behind}):u?t('pr.same',{u}):''].filter(Boolean).join(' · ')));
+  if(gh.status!=='available'){chip('pr',message('pr.github'));body.append(node('p',message('pr.github'),'note'));return;}
+  const prs=(Array.isArray(gh.pullRequests)?gh.pullRequests:[]).filter(p=>p && Number.isSafeInteger(p.number)).slice(0,20),c=p=>p.checks||{};
+  const rank=p=>c(p).failed>0?0:c(p).pending>0?1:2;prs.sort((a,b)=>rank(a)-rank(b));
+  const failed=prs.filter(p=>rank(p)===0).length,running=prs.filter(p=>rank(p)===1).length;
+  chip('pr',()=>failed?t('res.failCount',{n:failed}):running?t('pr.pending',{n:running}):prs.length?t('pr.pass'):t('pr.none'),failed?'failure':running?'active':prs.length?'done':null);
+  const list=node('ul','','plain');
+  for(const p of prs){
+    const r=rank(p),url=p.url===ghLink(gh.repository,'pull',p.number)?p.url:null,names=(Array.isArray(c(p).items)?c(p).items:[]).filter(i=>i?.status==='failed').map(i=>displayText(i.name,96)).filter(Boolean);
+    const li=itemRow(['failure','active','done'][r],['×','●','✓'][r],displayText(p.title,240)||'#'+p.number,()=>[t('pr.counts',{f:c(p).failed||0,p:c(p).passed||0}),
+      c(p).pending>0?t('pr.pending',{n:c(p).pending}):'',names.length?names.slice(0,3).join(', ')+(names.length>3?' '+t('more.rest',{n:names.length-3}):''):'',
+      p.baseBranch && !['main','master'].includes(p.baseBranch)?'→ '+displayText(p.baseBranch,160):'',p.matchesLocalHead===false?t('pr.otherHead'):''].filter(Boolean).join(' · '));
+    li.head.append(' ',linkNode('#'+p.number,url));list.append(li);
+  }
+  if(!prs.length)list.append(node('li',message('pr.none'),'note'));
+  body.append(list);
+  const all=Array.isArray(gh.work?.pullRequests?.items)?gh.work.pullRequests.items.length:0,listUrl=ghLink(gh.repository,'pulls',1)?.replace(/\/1$/,'');
+  const foot=node('p','','note');foot.append(node('span',()=>t('pr.footer',{n:prs.length,m:all,time:clock(gh.observedAt)}).replace(/ · $/,'')+' '),linkNode(t('pr.list'),listUrl));body.append(foot);
+}
+async function readSection(k,force=false){
+  const s=more[k];if(!canRead() || !s?.open)return;const scope=scopeKey(),ticket=++s.ticket,body=el('more-'+k+'-body');
+  body.replaceChildren(node('p',message('chatLoading'),'note'));
+  try{
+    s.data=await readShared('pr','oms_panel_git_status',{},force);
+    if(scope===scopeKey() && ticket===s.ticket)paintSection(k);
+  }catch{if(scope===scopeKey() && ticket===s.ticket)body.replaceChildren(node('p',message('more.failed'),'note'));}
+}
+function paintSection(k){
+  const s=more[k],body=el('more-'+k+'-body');body.replaceChildren();sectionHead(k,body);
+  try{paintPr(body,s.data);}
+  catch{body.replaceChildren();sectionHead(k,body);body.append(node('p',message('more.failed'),'note'));}
+}
+function openSection(k){
+  const s=more[k];if(!canRead())return;s.open=true;el('more-'+k).setAttribute('aria-expanded','true');el('more-'+k+'-body').hidden=false;
+  if(shared.get(k)?.at && s.data)paintSection(k);else readSection(k);
+}
+for(const k of ['pr'])onClick('more-'+k,()=>{
+  const s=more[k];if(s.open){s.open=false;s.ticket++;el('more-'+k).setAttribute('aria-expanded','false');el('more-'+k+'-body').hidden=true;}else openSection(k);
+});
+onClick('usage-refresh',()=>readUsage(true));
+
 function render(d) {
   for(const element of bindings.keys())if(element.isConnected===false)bindings.delete(element);
   const prior=joinedMain();dashboardData=d;const main=joinedMain();
@@ -1922,14 +2624,7 @@ function render(d) {
   const goal=(!Object.hasOwn(d,'goalAvailability') || d.goalAvailability==='available') && typeof d.goal==='string' && d.goal.trim()?d.goal:'';
   put('goal',()=>goal || t(d.goalAvailability==='absent' && d.goal==null?'goalNone':'goalUnknown'));
 
-  const {verified,total}=d.planProgress||{};
-  const counted=Number.isSafeInteger(total) && total>0 && Number.isSafeInteger(verified) && verified>=0 && verified<=total;
-  el('progress').hidden=el('progress-track').hidden=!counted;
-  el('progress-fill').style.width=(counted?Math.round(verified/total*100):0)+'%';
-  // A short plan reads as one segment per task: verified, the next one, then the rest.
-  const segmented=counted && total<=12;el('progress-track').setAttribute('data-segments',String(segmented));
-  el('progress-track').replaceChildren(el('progress-fill'),...(segmented?Array.from({length:total},(_,i)=>node('span','',i<verified?'seg done':i===verified?'seg current':'seg')):[]));
-  put('progress',()=>t('progress',{verified,total}));
+  paintProgress(d);
   el('project').textContent=d.project || project || 'OMS';el('new-goal').hidden=readOnly;
   const owner=main || (readOnly?d.main:null);
   put('main-scope',main?'currentMain':readOnly?'repositoryMain':'currentMain');
@@ -1937,17 +2632,14 @@ function render(d) {
   put('main-name',()=>main?conversationMainName(main):owner?.provider?roleTitle('Main',owner.provider):t('unknownMain'));
   if(main && selectedChat?.room===main.room && selectedChat.participant===main.participant)put('chat-title',()=>conversationMainName(main));
   el('header-main').hidden=!main;
-  members=main && Array.isArray(main.participants)?main.participants.filter(m=>m?.room===main.room && m.participant):[];
-  if(main && !members.some(m=>m.participant===main.participant))members.push(main);
-  const {leads,partial,ownerRun}=main?verifiedLeads(main,d):{leads:[],partial:false};
+  const {list,leads,partial,ownerRun}=snapshotRows(main,d);
+  members=list;
   const mainTone=stateTone((main?ownerRun:owner)?.state);
   // An unknown Main shows the '–' placeholder and no presence; a joined Main with an unrecognised harness stays present.
   if(!main && !owner?.provider)el('avatar').removeAttribute('data-presence');
-  else el('avatar').setAttribute('data-presence',mainTone==='attention'?'attention':mainTone==='active'?'working':main?'live':'idle');
+  else el('avatar').setAttribute('data-presence',presenceOf(new Set([mainTone]),false,Boolean(main)));
   put('main-status',()=>main ? [ownerRun?.state?stateLabel(ownerRun.state):t('joined'),ownerRun?.taskTitle].filter(Boolean).join(' · ') :
     owner?stateLabel(owner.state):t(readOnly?'noRecordedMain':'noJoinedMain'));
-  const records=Array.isArray(d.conversationAttempts)?d.conversationAttempts:[];
-  for(const lead of leads)lead.workers=workersForLead(lead,records);
   rows=leads;
   renderLeadSlots(leads,Boolean(main) && !partial);
   if(managedChat)chatOrigin=leadSlots.get(managedChat.provider)?.open;
@@ -1968,7 +2660,7 @@ function canChat(member) {
       entry.member.parent===member.parent && entry.member.provider===member.provider))));
 }
 async function openConversation(member,label,origin) {
-  if(!canChat(member) || disposed)return;
+  if(!canChat(member) || disposed || hostToolsUnavailable)return;
   clearChat();selectedChat=member;chatOrigin=origin;put('chat-title',label);
   showChat();
   await readChat(null,member.participant===joinedMain()?.participant && canOpenLinks);
@@ -1977,7 +2669,7 @@ async function readChat(before,openNative=false) {
   const m=selectedChat,expected=generation,ticket=++chatPage;
   if(!canChat(m))return;
   const current=()=>ticket===chatPage && expected===generation && canChat(m) && el('conversation').open;
-  put('chat-status','chatLoading');el('chat-older').disabled=true;
+  chatReading=true;put('chat-status','chatLoading');el('chat-older').disabled=true;
   try {
     const response=await tool('oms_panel_chat',{room:m.room,participant:m.participant,...(before==null?{}:{before})},expected);
     if(!current())return;
@@ -1999,6 +2691,7 @@ async function readChat(before,openNative=false) {
       el('chat-result').textContent=page.result?.text||'';
       el('chat-result-limited').hidden=page.result?.truncated!==true;
       el('chat-result-full').hidden=!roomResult || !/^[a-f0-9]{64}$/.test(bindingKey);
+      el('chat-result-full').disabled=hostToolsUnavailable || disposed;
     }
     if(first || before!=null)chatCursor=Number.isSafeInteger(page.nextBefore) && page.messages.length && page.nextBefore<=page.messages[0].seq && (before==null || page.nextBefore<before)?page.nextBefore:null;
     if(chatCursor==null && document.activeElement===el('chat-older'))scroll.focus({preventScroll:true});
@@ -2009,14 +2702,15 @@ async function readChat(before,openNative=false) {
     roomPageSeen=true;
     put('chat-status',()=>!list.children.length && !el('chat-result').textContent?t('emptyChat'):t('main.records'));
   } catch {if(current())put('chat-status','chatMismatch');}
-  finally {if(current())el('chat-older').disabled=false;}
+  finally {chatReading=false;if(current())el('chat-older').disabled=hostToolsUnavailable || disposed;}
 }
-onClick('header-main',()=>{const m=joinedMain();if(m)openConversation(m,()=>conversationMainName(m),el('header-main'));});
-onClick('chat-older',()=>{if(managedChat?.cursor)readManaged(managedChat,managedChat.cursor);else if(chatCursor!=null)readChat(chatCursor);});
+onClick('header-main',()=>{const m=joinedMain();if(m && !hostToolsUnavailable)openConversation(m,()=>conversationMainName(m),el('header-main'));});
+onClick('chat-older',()=>{if(hostToolsUnavailable)return;if(managedChat?.cursor)readManaged(managedChat,managedChat.cursor);else if(chatCursor!=null)readChat(chatCursor);});
 function closeChat(){el('conversation').close();(chatOrigin?.isConnected===false?el('main-name'):chatOrigin)?.focus();}
 function closeLauncher(){el('launcher').close();el('new-goal').focus();}
 onClick('chat-back',closeChat);
 onClick('chat-refresh',()=>{
+  if(hostToolsUnavailable)return;
   if(managedChat){managedChat.until=Date.now()+120000;readManaged(managedChat);}
   else if(selectedChat)readChat(null,false);
 });
@@ -2031,7 +2725,7 @@ on('conversation','close',()=>{
   clearChat();if(leadControl)scheduleLeadRead(leadControl);armAuto();
   if(!el('view').hidden && !el('launcher').open && !disposed && (document.activeElement===document.body || document.activeElement===el('chat-back')))(chatOrigin?.isConnected===false?el('main-name'):chatOrigin)?.focus();
 });
-onClick('new-goal',()=>{if(!readOnly && !staleView && !busy && !el('view').hidden){el('launcher').showModal();el('brief').focus();resetIssue();syncBriefCount();armAuto();}});
+onClick('new-goal',()=>{if(!readOnly && !staleView && !busy && !hostToolsUnavailable && !el('view').hidden){el('launcher').showModal();el('brief').focus();resetIssue();syncBriefCount();armAuto();}});
 onClick('close-launch',closeLauncher);
 on('launcher','close',()=>{if(!el('launcher').open){resetIssue();armAuto();}});
 onClick('goal-expand',()=>{
@@ -2058,11 +2752,11 @@ function sameIssue(p) {
 function paintIssue(p) {
   if(!sameIssue(p))return;
   put('issue-evidence',()=>p.reference+'\n'+t('issueVersion',{revision:p.revision})+'\n'+t(p.state));
-  el('issue-record').hidden=false;el('issue-record').disabled=p.pending || p.state==='received';
+  el('issue-record').hidden=false;el('issue-record').disabled=hostToolsUnavailable || disposed || p.pending || p.state==='received';
   put('issue-record',p.state==='absent'?'recordIssue':'checkReceipt');
 }
 async function receiptStatus(p,write=false) {
-  if(!sameIssue(p) || p.pending || p.state==='received' || (write && (busy || p.state!=='absent' || !p.id)))return;
+  if(hostToolsUnavailable || !sameIssue(p) || p.pending || p.state==='received' || (write && (busy || p.state!=='absent' || !p.id)))return;
   p.pending=true;paintIssue(p);
   const address={room:p.room,owner:p.owner},source={issue:p.issue,sha256:p.sha256};
   try {
@@ -2088,7 +2782,7 @@ onClick('issue-review',async()=>{
   resetIssue();const ticket=issueTicket,expected=generation;
   const current=()=>ticket===issueTicket && expected===generation && issueInput()?.url===source.url && el('launcher').open &&
     issueOwner()?.room===owner.room && issueOwner()?.participant===owner.participant;
-  el('issue-review').disabled=true;put('issue-evidence','readingIssue');
+  issueReviewBusy=true;el('issue-review').disabled=true;put('issue-evidence','readingIssue');
   try{
     const {structuredContent}=await tool('oms_panel_git_status',{issuePreview:source.number},expected);
     if(!current())return;
@@ -2099,7 +2793,7 @@ onClick('issue-review',async()=>{
     reviewedIssue={...source,...v,issue:m[1]+'#'+m[2],room:owner.room,owner:owner.participant,state:'readingIssue'};
     await receiptStatus(reviewedIssue);
   }catch{if(current())put('issue-evidence','unverifiedIssue');}
-  finally{if(current())el('issue-review').disabled=false;}
+  finally{issueReviewBusy=false;if(current())el('issue-review').disabled=hostToolsUnavailable || disposed;}
 });
 onClick('issue-record',()=>receiptStatus(reviewedIssue,reviewedIssue?.state==='absent'));
 function briefChanged(){briefInvalid=false;el('brief').setCustomValidity('');resetIssue();syncBriefCount();}
@@ -2117,32 +2811,89 @@ on('brief','paste',event=>{
   input.setSelectionRange?.(start+clean.length,start+clean.length);
   briefChanged();
 });
-function setBusy(value,writing=false) {
-  busy=value;el('refresh').disabled=value;el('project-choice').disabled=value && writing;
-  el('controls').disabled=value || staleView;el('view').ariaBusy=String(value);
-  el('new-goal').disabled=value || staleView;el('header-main').disabled=staleView;
-  el('followup-open').disabled=value || staleView;
-  for(const b of el('approvals').querySelectorAll('button'))b.disabled=value || staleView;
-  el('refresh').setAttribute('aria-busy',String(value && !disposed));
+function syncInspectControls() {
+  const inspectBusy=disposed || hostToolsUnavailable || Boolean(inspection?.loading);
+  for(const id of ['inspect-kind','inspect-refresh','inspect-search','inspect-root','inspect-prev','inspect-next'])el(id).disabled=inspectBusy;
+  for(const b of inspectNodeButtons)b.disabled=inspectBusy;
+}
+function syncHostTools() {
+  const blocked=disposed || hostToolsUnavailable;
+  el('host-retry').hidden=disposed || !hostToolsUnavailable;
+  el('host-retry').disabled=busy || disposed || !hostToolsUnavailable;
+  el('refresh').disabled=busy || blocked;
+  el('auto-refresh').disabled=blocked;
+  el('project-choice').disabled=(busy && busyWriting) || blocked;
+  el('controls').disabled=busy || staleView || blocked;
+  el('start').disabled=busy || staleView || blocked;
+  el('new-goal').disabled=busy || staleView || blocked;
+  el('header-main').disabled=staleView || blocked;
+  el('followup-open').disabled=busy || staleView;
+  el('inspect-open').disabled=!canInspect();
+  el('issue-review').disabled=blocked || issueReviewBusy;
+  if(reviewedIssue)paintIssue(reviewedIssue);else el('issue-record').disabled=blocked;
+  const outBusy=blocked || Boolean(selectedOutput?.loading);
+  for(const id of ['output-refresh','output-more','output-first'])el(id).disabled=outBusy;
+  const ansBusy=blocked || Boolean(fullAnswer?.loading);
+  for(const id of ['answer-more','answer-first'])el(id).disabled=ansBusy;
+  el('chat-result-full').disabled=blocked;
+  for(const b of turnAnswerButtons)b.disabled=blocked;
+  el('chat-refresh').disabled=blocked;
+  el('chat-older').disabled=blocked || Boolean(managedChat?.reading || chatReading);
+  el('settings-toggle').disabled=blocked && !managedChat?.settings;
+  el('settings-read').disabled=blocked || Boolean(managedChat?.settings?.busy || managedChat?.session?.settingsSaving);
+  el('more-pr').disabled=blocked || !canRead();
+  el('usage-refresh').disabled=blocked || !canRead();
+  syncInspectControls();
+  if(followupDraft)paintFollowup();
+  for(const b of el('approvals').querySelectorAll('button'))b.disabled=busy || staleView || blocked;
+  for(const b of approvalButtons)b.disabled=busy || staleView || blocked;
+  for(const b of personButtons)b.disabled=blocked;
+  paintLeadControls();
+  if(managedChat && currentManaged(managedChat))paintComposer(managedChat);
   armAuto();
 }
+function setHostToolsUnavailable(next) {
+  if(hostToolsUnavailable===next){
+    if(next && !disposed){stopAuto();clearTimeout(leadControl?.pollTimer);clearTimeout(managedChat?.timer);syncHostTools();setStatus('hostToolsUnavailable','warn');}
+    return;
+  }
+  hostToolsUnavailable=next;
+  if(next){
+    stopAuto();resetAutoRetry();clearTimeout(leadControl?.pollTimer);clearTimeout(managedChat?.timer);
+    syncHostTools();
+    if(!disposed)setStatus('hostToolsUnavailable','warn');
+  }else{
+    syncHostTools();
+    if(!disposed){
+      if(busy)setStatus(dashboardData?'refreshing':'connecting');
+      else if(staleView)setStatus('snapshot.stale','warn');
+      else{const notice=dashboardData?snapshotNotice(dashboardData):'';setStatus(()=>notice?t(notice):'',notice?'warn':'info');}
+    }
+  }
+}
+function setBusy(value,writing=false) {
+  busy=value;busyWriting=writing;el('view').ariaBusy=String(value);
+  el('refresh').setAttribute('aria-busy',String(value && !disposed));
+  syncHostTools();
+}
 function panelIdle() {
-  return Boolean(!disposed && !el('conversation').open && !el('launcher').open && !el('worker-output').open &&
+  return Boolean(!disposed && !el('conversation').open && !el('launcher').open && !el('worker-output').open && !el('inspection').open &&
+    !(followupDraft && el('followup-panel').hidden===false) && !followupDraft?.pending &&
     (transientError?autoRetryCount<AUTO_RETRY_LIMIT:dashboardData && !el('view').hidden));
 }
 function resetAutoRetry(){transientError=false;autoRetryCount=0;}
-function autoReload(){if(transientError)autoRetryCount+=1;refresh();}
-function manualRefresh(){autoRetryCount=0;refresh();}
+function autoReload(){if(hostToolsUnavailable || disposed || followupDraft?.pending)return;if(transientError)autoRetryCount+=1;refresh();}
+function manualRefresh(){if(hostToolsUnavailable || disposed)return;autoRetryCount=0;refresh();}
 function stopAuto(){clearTimeout(autoTimer);autoTimer=undefined;}
 function armAuto() {
   stopAuto();
-  if(!autoRefresh || busy || !panelIdle() || document?.hidden)return;
+  if(!autoRefresh || busy || hostToolsUnavailable || !panelIdle() || document?.hidden)return;
   // Stays above the 8-15s Lead status poll cadence.
-  autoTimer=setTimeout(()=>{autoTimer=undefined;if(autoRefresh && panelIdle() && !document?.hidden)autoReload();},20000);
+  autoTimer=setTimeout(()=>{autoTimer=undefined;if(autoRefresh && !hostToolsUnavailable && panelIdle() && !document?.hidden)autoReload();},20000);
   autoTimer?.unref?.();
 }
 function refetchStale() {
-  if(!autoRefresh || document?.hidden || lastLoadedAt<=0 || Date.now()-lastLoadedAt<15000 || busy || !panelIdle())return; autoReload();
+  if(!autoRefresh || hostToolsUnavailable || document?.hidden || lastLoadedAt<=0 || Date.now()-lastLoadedAt<15000 || busy || !panelIdle())return; autoReload();
 }
 function paintAuto(){el('auto-refresh').setAttribute('aria-pressed',String(autoRefresh));}
 function isTyping(target) {
@@ -2152,6 +2903,7 @@ function launchNotice(value){
   put('receipt',value);put('launch-status',value);
 }
 async function loadStatus(expected,recover=true) {
+  if(!busyWriting)awaitingSnapshotFor=expected;
   setStatus(dashboardData?'refreshing':'connecting');
   let confirmedBinding=null;
   try{
@@ -2170,30 +2922,48 @@ async function loadStatus(expected,recover=true) {
     }
     bindingKey=confirmedBinding;
     if(project && (!contextKey||contextKey==='null'))updateContext({project});
-    const snapshot=await tool('oms_panel_snapshot',{},expected), d=snapshot.structuredContent?.dashboard||snapshot._meta?.dashboard;
-    if(!d || typeof d!=='object' || Array.isArray(d))throw uiError('status.badSnapshot');
-    staleView=false;render(d);lastGoodBinding=confirmedBinding;lastGoodGeneration=generation;
-    resetAutoRetry();lastLoadedAt=Date.now();const notice=snapshotNotice(d);setStatus(()=>notice?t(notice):'',notice?'warn':'info');
-    if(readOnly){retryStart=undefined;el('approval-card').hidden=true;el('approvals').replaceChildren();return;}
+    if(awaitingSnapshotFor===expected)awaitingSnapshotFor=-1;
+    let d;
+    if(!busyWriting && openDashboard?.generation===expected &&
+       (openDashboard.target?openDashboard.target===project:requestedProject===null && (!project || !openDashboard.dashboard.project || openDashboard.dashboard.project===project))){
+      d=openDashboard.dashboard;openDashboard=null;
+    }else{
+      if(openDashboard?.generation===expected)openDashboard=null;
+      const snapshot=await tool('oms_panel_snapshot',{},expected);
+      d=snapshot.structuredContent?.dashboard||snapshot._meta?.dashboard;
+      if(!d || typeof d!=='object' || Array.isArray(d))throw uiError('status.badSnapshot');
+    }
+    staleView=false;render(d);syncMore();lastGoodBinding=confirmedBinding;lastGoodGeneration=generation;
+    renderedToolSnapshot={seq:++snapshotClock,generation:expected,project:project||(typeof d.project==='string'&&d.project)||null};
+    syncHostTools();resetAutoRetry();lastLoadedAt=Date.now();const notice=snapshotNotice(d);setStatus(()=>notice?t(notice):'',notice?'warn':'info');
+    if(readOnly){retryStart=undefined;el('approval-card').hidden=true;el('approvals').replaceChildren();approvalButtons.length=0;return;}
     try{
       const response=await tool('oms_list_approvals',{},expected);
       if(!Array.isArray(response.structuredContent?.approvals))throw uiError('appr.bad');
       renderApprovals(response.structuredContent.approvals,response.structuredContent.incomplete);
-    }catch{if(expected===generation){approvedScope++;el('approval-card').hidden=false;put('approvals-heading','appr.list');el('approvals').replaceChildren(node('p',message('appr.bad')));}}
-    if(expected===generation && leadControl)observeLeads(leadControl);
-    if(expected===generation && recover && retryStart){
-      try{await recoverStart(expected);}catch{if(expected===generation)launchNotice('start.unknown');}
+    }catch{if(expected===generation && !hostToolsUnavailable){approvedScope++;approvalButtons.length=0;el('approval-card').hidden=false;put('approvals-heading','appr.list');el('approvals').replaceChildren(node('p',message('appr.bad')));}}
+    if(expected===generation && !hostToolsUnavailable && leadControl)observeLeads(leadControl);
+    if(expected===generation && !hostToolsUnavailable && recover && retryStart){
+      try{await recoverStart(expected);}catch{if(expected===generation && !hostToolsUnavailable)launchNotice('start.unknown');}
     }
   }catch{if(expected===generation && !disposed){
+    if(hostToolsUnavailable){
+      resetAutoRetry();clearTimeout(leadControl?.pollTimer);clearTimeout(managedChat?.timer);
+      leadIntent=undefined;syncHostTools();setStatus('hostToolsUnavailable','warn');
+      return;
+    }
     transientError=true;
     const retained=dashboardData && confirmedBinding && confirmedBinding===lastGoodBinding && lastGoodGeneration===expected;
     staleView=Boolean(retained);
     resetLeadControl();leadIntent=undefined;paintLeadControls();
-    members=[];approvedScope++;closeDialogs();resetIssue();clearFollowup();updateContext(null);
-    if(!retained){dashboardData=undefined;rows=[];el('view').hidden=true;}
+    members=[];approvedScope++;approvalButtons.length=0;closeDialogs();resetIssue();clearFollowup();resetMore();updateContext(null);
+    if(!retained){dashboardData=undefined;rows=[];personButtons.length=0;el('view').hidden=true;}
     else{el('view').hidden=false;el('approvals').replaceChildren();el('approval-card').hidden=true;paintObserved();}
     setStatus(retained?'snapshot.stale':'connectionFailed','warn');
-  }}
+  }}finally{
+    if(awaitingSnapshotFor===expected)awaitingSnapshotFor=-1;
+    if(openDashboard?.generation===expected)openDashboard=null;
+  }
 }
 function renderApprovals(rows, incomplete) {
   const card = el('approval-card');
@@ -2209,6 +2979,7 @@ function renderApprovals(rows, incomplete) {
     }
   }
   list.replaceChildren();
+  approvalButtons.length = 0;
   if (incomplete) list.append(node('p', message('appr.partial'), 'muted'));
   for (const row of rows) {
     const details = document.createElement('details');
@@ -2236,9 +3007,9 @@ function renderApprovals(rows, incomplete) {
     for (const decision of ['approve', 'deny']) {
       const button = node('button', () => t(decision === 'approve' ? 'appr.approve' : 'appr.deny'), decision === 'approve' ? 'review' : '');
       button.type = 'button';
-      button.disabled = busy;
+      button.disabled = busy || staleView || hostToolsUnavailable || disposed;
       button.addEventListener('click', async () => {
-        if(readOnly || staleView || scope!==approvedScope || disposed || expected!==generation || !row.id || !row.digest || !Number.isSafeInteger(row.version))return;
+        if(readOnly || staleView || hostToolsUnavailable || scope!==approvedScope || disposed || expected!==generation || !row.id || !row.digest || !Number.isSafeInteger(row.version))return;
         const hadFocus = document.activeElement === button;
         let acknowledged = false;
         await mutate(
@@ -2257,7 +3028,7 @@ function renderApprovals(rows, incomplete) {
         const next = Array.from(list.children).find(child => child._approvalId && child._approvalId !== row.id);
         (next?.children[0] || el(card.hidden ? 'main-name' : 'approvals-heading')).focus();
       });
-      if (!readOnly) buttons.append(button);
+      if (!readOnly) { buttons.append(button); approvalButtons.push(button); }
     }
     body.append(buttons);
     details.append(summary, body);
@@ -2274,7 +3045,7 @@ async function refresh() {
 }
 
 async function mutate(action, onSuccess, expected = generation, recoverAfter = () => true) {
-  if (busy || staleView || readOnly || expected !== generation || el('view').hidden) return;
+  if (busy || hostToolsUnavailable || staleView || readOnly || expected !== generation || el('view').hidden) return;
   setBusy(true, true);
   el('receipt').className = '';
   launchNotice('mutate.working');
@@ -2287,7 +3058,7 @@ async function mutate(action, onSuccess, expected = generation, recoverAfter = (
     launchNotice( () => error.message);
   } finally {
     if (expected === generation) {
-      try { await loadStatus(expected, recoverAfter()); } finally { if (expected === generation) setBusy(false); }
+      try { if (!hostToolsUnavailable) await loadStatus(expected, recoverAfter()); } finally { if (expected === generation) setBusy(false); }
     }
   }
 }
@@ -2304,7 +3075,7 @@ function finishStart(request) {
 }
 on('launch','submit', event => {
   event.preventDefault();
-  if (readOnly || staleView || busy || el('view').hidden) return;
+  if (readOnly || staleView || busy || hostToolsUnavailable || el('view').hidden) return;
   const draft = launchDraft(), {main, goal} = draft;
   if (!goal || Array.from(goal).length > 2000 || /[\x00-\x1f\x7f]/u.test(goal)) {
     if(!el('launcher').open){el('launcher').showModal();armAuto();}
@@ -2356,8 +3127,15 @@ on('project-choice','change', () => {
 });
 onClick('display-mode',()=>{const n=nextDisplayMode();if(n)requestDisplayMode(n.mode);});
 onClick('refresh', manualRefresh);
+onClick('host-retry',async()=>{
+  if(!hostToolsUnavailable || busy || disposed)return;
+  const hadFocus=document.activeElement===el('host-retry');
+  autoRetryCount=0;
+  await refresh();
+  if(hadFocus && !hostToolsUnavailable && !disposed && (document.activeElement===document.body || document.activeElement===el('host-retry')))el('refresh').focus();
+});
 onClick('auto-refresh',()=>{
-  if(disposed)return;
+  if(disposed || hostToolsUnavailable)return;
   autoRefresh=!autoRefresh;
   if(autoRefresh)autoRetryCount=0;
   try{globalThis.localStorage?.setItem(AUTO_KEY,autoRefresh?'on':'off');}catch{}
@@ -2372,7 +3150,7 @@ window.addEventListener('keydown',event=>{
   // WCAG 2.1.4: never a bare character key. The physical code covers layouts where Alt composes another character.
   if(!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat || event.isComposing || event.defaultPrevented ||
      !(event.code==='KeyR' || event.key==='r' || event.key==='R'))return;
-  if(busy || disposed || el('conversation').open || el('launcher').open || el('worker-output').open || isTyping(event.target) || isTyping(document.activeElement))return;
+  if(busy || disposed || hostToolsUnavailable || el('conversation').open || el('launcher').open || el('worker-output').open || el('inspection').open || isTyping(event.target) || isTyping(document.activeElement))return;
   event.preventDefault();manualRefresh();
 });
 on('language-choice','change', () => { const value = el('language-choice').value; if (LANGS.includes(value)) setLanguage(value, true); });
