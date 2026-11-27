@@ -251,7 +251,7 @@ fn select(
         legacy(&normalized)
     }
 }
-fn unknown_tool(tool: &OsStr) -> Error {
+pub fn unknown_tool(tool: &OsStr) -> Error {
     let mut output = b"error: unknown tool: ".to_vec();
     output.extend_from_slice(tool.as_bytes());
     output.extend_from_slice(b" (run: oms list --all)");

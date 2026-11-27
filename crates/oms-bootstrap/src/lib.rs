@@ -21,7 +21,7 @@ pub use payload::{CheckedExec, SourceFile, SourceInventory, ValidatedPayload};
 pub use producer::ReferenceProducer;
 pub use route::{
     CommandAdapter, CommandOutput, Frontdoor, LegacyCommand, Navigation, Prepared,
-    PrivateInvocation, Route, Terminal,
+    PrivateInvocation, Route, Terminal, unknown_tool,
 };
 pub use source::{Discovery, DiscoveryKind, ReceiptLocation, discover, receipt_location};
 
