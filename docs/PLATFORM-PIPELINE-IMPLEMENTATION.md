@@ -111,7 +111,7 @@ flowchart TD
 | 계층 | 기존 owner | 관련 패킷 |
 | --- | --- | --- |
 | L5 플랫폼 | GitHub / Jira / Linear | PIPE-02, PIPE-06, PIPE-09, PIPE-10, PIPE-11 |
-| L4 플랫폼 연동 | platform adapters · `oms-gateway` (#434/#435) | PIPE-01, PIPE-02, PIPE-06, PIPE-08, PIPE-09 |
+| L4 플랫폼 연동 | `oms-gateway` (#434/#435/#445) 위의 플랫폼 연동 | PIPE-01, PIPE-02, PIPE-06, PIPE-08, PIPE-09 |
 | L3 제어 표면 | CLI, MCP, Panel (`oms-control-api` · host plugins) | PIPE-00, PIPE-01, PIPE-04, PIPE-07, PIPE-08 |
 | L2 도메인 owner | plan, autonomy, panel-core, memory, runtime | PIPE-00, PIPE-02, PIPE-03, PIPE-04, PIPE-05, PIPE-06, PIPE-07 |
 | L1-P Provider 실행 | `provider adapters` · `oms-provider-codex` · `peer` (#436) | PIPE-00, PIPE-01, PIPE-03, PIPE-04 |

@@ -95,7 +95,7 @@ receipt 연결과 복구를 조정한다. 각 owner는 기존 guard·claim·CAS�
 
 | 경계 | 로드맵 §3 대응 | 맡을 일 | 기존 재사용점 |
 | --- | --- | --- | --- |
-| 업무 플랫폼 adapter | platform adapters · `oms-gateway` (#434/#435) | 설치·사용자·이슈·대화 문맥, 입출력 변환, 결과 전달 | 기존 GitHub intake/landing; Jira·Linear 계약은 별도 adapter |
+| 업무 플랫폼 adapter | `oms-gateway` (#434/#435/#445) 위의 논리 경계 | 설치·사용자·이슈·대화 문맥, 입출력 변환, 결과 전달 | 기존 GitHub intake/landing; Jira·Linear 계약은 별도 adapter |
 | Provider adapter | `provider adapters` · `oms-provider-codex` (#432/#436) | native session·호출 방식·지원 기능·결과 관측 | 기존 Codex·Claude·AGY·Pi 및 custom adapter 경로 |
 | 실행 환경 adapter | `oms-host` (#444) | execution root·process·자원·custody·cleanup | runtime, supervisor와 검증된 multi-host owner |
 | Application service | `oms-control-api` action writer (#432/#433/#437) | 작업의 입력부터 결과까지 기존 owner 연결 | `CollabServices`, `RuntimeServices`, 기존 Plan/Panel service ports [S1] |
@@ -205,7 +205,7 @@ Patch가 없는 action에 가짜 patch 필드를 요구하지 않고, owner별 �
 | 내부 전달 단계 | wire `operation_receipt` / 복구 조건 | 의미 | 후속 처리 |
 | --- | --- | --- | --- |
 | `not_dispatched` | 보류(native `operation_receipt` 미발행; 별도 비동기 접수 시에만 내부 queue 기록) | 실행 owner에게 아직 전달·수락되지 않음 | 기존 intent와 현재 권한·expiry로 전달 적격성 재검사 |
-| `dispatched` | 시도·응답 대기(`delivery_unknown` 복구 조건; `delivered`로 간주하지 않음) | owner 호출/전달을 시도했으나 수신·전달 증거가 아직 미확정 | 원래 owner와 native reference로 재관측 후 `accepted`/`delivered` 확정 |
+| `dispatched` | 호출 진행 중(응답 유실·시간 초과 시 `delivery_unknown` 복구 조건; `delivered`로 간주하지 않음) | owner 호출/전달을 시도해 결과를 기다리는 중 | 응답을 받으면 `accepted`/`delivered` 확정, 유실·초과 시 원래 owner와 native reference로 재관측 |
 | owner 수신·전달 확인 | `outcome: "accepted"` 또는 `"delivered"` | 대상 owner(예: `owner: "room"`)가 요청을 수락했거나 전달 확인 증거가 확보됨 | 각 단계의 `receipt_ref`와 owner 상태로 추적 |
 | `confirmed` | `outcome: "completed"` | 해당 동작의 효과가 owner 증거로 확인됨 | 의미가 맞는 receipt와 projection 반환 |
 | `outcome_unknown` | `delivery_unknown` 복구 조건(`outcome` 미승격) | 효과가 발생했을 수 있으나 확정할 근거가 부족함 | 재관측·reconciliation; 새 ID로 무조건 재실행하지 않음 |
