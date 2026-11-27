@@ -3862,16 +3862,11 @@ mod tests {
             let fake = temp.0.join("ssh");
             std::fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$OMS_TEST_ARGS\"\nfor last do :; done\ncase \"$last\" in *oms-bundle*) cat > \"$OMS_TEST_BUNDLE\"; exec sh -c \"$last\" < \"$OMS_TEST_BUNDLE\";; *) exec sh -c \"$last\";; esac\n").unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "ssh_adapter::tests::transport", "--nocapture"])
+            let status = isolated_child("ssh_adapter::tests::transport", &temp, &rt_dir)
                 .env("OMS_TEST_SSH_CHILD", "1")
                 .env("OMS_SSH_BIN", &fake)
                 .env("OMS_TEST_ARGS", temp.0.join("args"))
                 .env("OMS_TEST_BUNDLE", temp.0.join("bundle"))
-                .env("OMS_TEST_DIR", &temp.0)
-                .env("OMS_LOCK_DIR", temp.0.join("locks"))
-                .env("XDG_RUNTIME_DIR", &rt_dir.0)
-                .env_remove("OMS_HARNESS_CHILD")
                 .status()
                 .unwrap();
             assert!(status.success());
@@ -4126,19 +4121,21 @@ mod tests {
     #[test]
     fn remote_op_id_validation_and_child_read_only_gate() {
         if std::env::var_os("OMS_TEST_SSH_CHILD_GATE").is_none() {
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "ssh_adapter::tests::remote_op_id_validation_and_child_read_only_gate",
-                    "--nocapture",
-                ])
-                .env("OMS_TEST_SSH_CHILD_GATE", "1")
-                .env("OMS_HARNESS_CHILD", "1")
-                .status()
-                .unwrap();
+            let temp = TempDir::new().unwrap();
+            let rt_dir = short_runtime_dir("gat");
+            let status = isolated_child(
+                "ssh_adapter::tests::remote_op_id_validation_and_child_read_only_gate",
+                &temp,
+                &rt_dir,
+            )
+            .env("OMS_TEST_SSH_CHILD_GATE", &temp.0)
+            .env("OMS_HARNESS_CHILD", "1")
+            .status()
+            .unwrap();
             assert!(status.success());
             return;
         }
+        let root = PathBuf::from(std::env::var_os("OMS_TEST_SSH_CHILD_GATE").unwrap());
         for bad in ["", "-op", ".op", "a/../b", "a/b", &"x".repeat(65)] {
             assert!(validate_op_id(bad).is_err(), "{bad}");
         }
@@ -4157,7 +4154,7 @@ mod tests {
         assert!(validate_remote_rel_path("outputs/artifact.bin").is_ok());
 
         for blocked in ["sync-bundle", "exec", "cancel", "collect"] {
-            let resp = invoke(&[blocked, "--host", "example"], Path::new("."));
+            let resp = invoke(&[blocked, "--host", "example"], &root);
             assert_eq!(resp.code, 2, "{blocked}");
             assert!(
                 String::from_utf8_lossy(&resp.stderr)
@@ -4165,7 +4162,7 @@ mod tests {
             );
         }
         // reconcile passes the child gate and fails only on missing --repo / --op-id
-        let rec = invoke(&["reconcile", "--host", "example"], Path::new("."));
+        let rec = invoke(&["reconcile", "--host", "example"], &root);
         assert!(
             !String::from_utf8_lossy(&rec.stderr).contains("read-only runtime actions"),
             "{}",
@@ -4230,12 +4227,16 @@ mod tests {
             )
             .unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let result=Command::new(std::env::current_exe().unwrap())
-                .args(["--exact","ssh_adapter::tests::connected_exec_reconcile_and_cancel_observers_share_a_wall_deadline","--nocapture"])
-                .env("OMS_SSH_WALL_CHILD","1").env("OMS_SSH_BIN",fake)
-                .env("OMS_TEST_DIR",&temp.0).env("OMS_TEST_ARGS",temp.0.join("calls"))
-                .env("OMS_LOCK_DIR",temp.0.join("locks")).env("XDG_RUNTIME_DIR",&rt_dir.0).env_remove("OMS_HARNESS_CHILD")
-                .status().unwrap();
+            let result = isolated_child(
+                "ssh_adapter::tests::connected_exec_reconcile_and_cancel_observers_share_a_wall_deadline",
+                &temp,
+                &rt_dir,
+            )
+            .env("OMS_SSH_WALL_CHILD", "1")
+            .env("OMS_SSH_BIN", fake)
+            .env("OMS_TEST_ARGS", temp.0.join("calls"))
+            .status()
+            .unwrap();
             assert!(result.success());
             return;
         }
@@ -4349,23 +4350,18 @@ exec sh -c "$last"
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
             std::fs::write(temp.0.join("drop_once"), "1").unwrap();
             let rt_dir = short_runtime_dir("sc4");
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "ssh_adapter::tests::exec_op_id_disconnect_recovers_via_reconcile_without_duplicate",
-                    "--nocapture",
-                ])
-                .env("OMS_TEST_SCENARIO4", "1")
-                .env("OMS_SSH_BIN", &fake)
-                .env("OMS_TEST_DIR", &temp.0)
-                .env("OMS_TEST_ARGS", temp.0.join("args"))
-                .env("OMS_TEST_DROP_FLAG", temp.0.join("drop_once"))
-                .env("OMS_REMOTE_STATE_DIR", &state_dir)
-                .env("OMS_LOCK_DIR", temp.0.join("locks"))
-                .env("XDG_RUNTIME_DIR", &rt_dir.0)
-                .env_remove("OMS_HARNESS_CHILD")
-                .status()
-                .unwrap();
+            let status = isolated_child(
+                "ssh_adapter::tests::exec_op_id_disconnect_recovers_via_reconcile_without_duplicate",
+                &temp,
+                &rt_dir,
+            )
+            .env("OMS_TEST_SCENARIO4", "1")
+            .env("OMS_SSH_BIN", &fake)
+            .env("OMS_TEST_ARGS", temp.0.join("args"))
+            .env("OMS_TEST_DROP_FLAG", temp.0.join("drop_once"))
+            .env("OMS_REMOTE_STATE_DIR", &state_dir)
+            .status()
+            .unwrap();
             assert!(status.success());
             return;
         }
@@ -4529,28 +4525,23 @@ exec sh -c "$last"
             std::fs::write(&fake, script).unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
             let rt_dir = short_runtime_dir("sc7");
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "ssh_adapter::tests::pid_reuse_boot_id_and_conflicting_op_id_are_fenced",
-                    "--nocapture",
-                ])
-                .env("OMS_TEST_SCENARIO7", "1")
-                .env("OMS_TEST_REMOTE_EXE", std::env::current_exe().unwrap())
-                .env(
-                    "OMS_TEST_REMOTE_CASE",
-                    "ssh_adapter::tests::pid_reuse_boot_id_and_conflicting_op_id_are_fenced",
-                )
-                .env("OMS_SSH_BIN", &fake)
-                .env("OMS_TEST_DIR", &temp.0)
-                .env("OMS_TEST_ARGS", temp.0.join("args"))
-                .env("OMS_TEST_DROP_ACTIVE", temp.0.join("drop_active"))
-                .env("OMS_REMOTE_STATE_DIR", &state_dir)
-                .env("OMS_LOCK_DIR", temp.0.join("locks"))
-                .env("XDG_RUNTIME_DIR", &rt_dir.0)
-                .env_remove("OMS_HARNESS_CHILD")
-                .status()
-                .unwrap();
+            let status = isolated_child(
+                "ssh_adapter::tests::pid_reuse_boot_id_and_conflicting_op_id_are_fenced",
+                &temp,
+                &rt_dir,
+            )
+            .env("OMS_TEST_SCENARIO7", "1")
+            .env("OMS_TEST_REMOTE_EXE", std::env::current_exe().unwrap())
+            .env(
+                "OMS_TEST_REMOTE_CASE",
+                "ssh_adapter::tests::pid_reuse_boot_id_and_conflicting_op_id_are_fenced",
+            )
+            .env("OMS_SSH_BIN", &fake)
+            .env("OMS_TEST_ARGS", temp.0.join("args"))
+            .env("OMS_TEST_DROP_ACTIVE", temp.0.join("drop_active"))
+            .env("OMS_REMOTE_STATE_DIR", &state_dir)
+            .status()
+            .unwrap();
             assert!(status.success());
             return;
         }
@@ -4839,21 +4830,16 @@ exec sh -c "$last"
             std::fs::write(&fake, script).unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
             let rt_dir = short_runtime_dir("sc8");
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "ssh_adapter::tests::collect_enforces_paths_bounds_and_digest_atomically",
-                    "--nocapture",
-                ])
-                .env("OMS_TEST_SCENARIO8", "1")
-                .env("OMS_SSH_BIN", &fake)
-                .env("OMS_TEST_DIR", &temp.0)
-                .env("OMS_LOCK_DIR", temp.0.join("locks"))
-                .env("OMS_TEST_FAIL_STREAM", temp.0.join("fail_stream"))
-                .env("XDG_RUNTIME_DIR", &rt_dir.0)
-                .env_remove("OMS_HARNESS_CHILD")
-                .status()
-                .unwrap();
+            let status = isolated_child(
+                "ssh_adapter::tests::collect_enforces_paths_bounds_and_digest_atomically",
+                &temp,
+                &rt_dir,
+            )
+            .env("OMS_TEST_SCENARIO8", "1")
+            .env("OMS_SSH_BIN", &fake)
+            .env("OMS_TEST_FAIL_STREAM", temp.0.join("fail_stream"))
+            .status()
+            .unwrap();
             assert!(status.success());
             return;
         }
@@ -5347,21 +5333,16 @@ exec sh -c "$last"
             .unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
             let rt_dir = short_runtime_dir("snp");
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "ssh_adapter::tests::omitted_target_blocks_unapproved_host_and_snapshot_binds_remote_head",
-                    "--nocapture",
-                ])
-                .env("OMS_TEST_TARGET_SNAPSHOT", "1")
-                .env("OMS_SSH_BIN", &fake)
-                .env("OMS_TEST_DIR", &temp.0)
-                .env("OMS_TEST_ARGS", &args_log)
-                .env("OMS_LOCK_DIR", temp.0.join("locks"))
-                .env("XDG_RUNTIME_DIR", &rt_dir.0)
-                .env_remove("OMS_HARNESS_CHILD")
-                .status()
-                .unwrap();
+            let status = isolated_child(
+                "ssh_adapter::tests::omitted_target_blocks_unapproved_host_and_snapshot_binds_remote_head",
+                &temp,
+                &rt_dir,
+            )
+            .env("OMS_TEST_TARGET_SNAPSHOT", "1")
+            .env("OMS_SSH_BIN", &fake)
+            .env("OMS_TEST_ARGS", &args_log)
+            .status()
+            .unwrap();
             assert!(status.success());
             return;
         }
@@ -5648,27 +5629,22 @@ exec sh -c "$last"
             std::fs::write(&fake, script).unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
             let rt_dir = short_runtime_dir("can");
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "ssh_adapter::tests::cancel_escalates_sigkill_and_blocks_spoofed_frames_and_unverifiable_lstart",
-                    "--nocapture",
-                ])
-                .env("OMS_TEST_CANCEL_HARDENING", "1")
-                .env("OMS_TEST_REMOTE_EXE", std::env::current_exe().unwrap())
-                .env(
-                    "OMS_TEST_REMOTE_CASE",
-                    "ssh_adapter::tests::cancel_escalates_sigkill_and_blocks_spoofed_frames_and_unverifiable_lstart",
-                )
-                .env("OMS_SSH_BIN", &fake)
-                .env("OMS_TEST_DIR", &temp.0)
-                .env("OMS_TEST_DROP_ACTIVE", temp.0.join("drop_active"))
-                .env("OMS_REMOTE_STATE_DIR", &state_dir)
-                .env("OMS_LOCK_DIR", temp.0.join("locks"))
-                .env("XDG_RUNTIME_DIR", &rt_dir.0)
-                .env_remove("OMS_HARNESS_CHILD")
-                .status()
-                .unwrap();
+            let status = isolated_child(
+                "ssh_adapter::tests::cancel_escalates_sigkill_and_blocks_spoofed_frames_and_unverifiable_lstart",
+                &temp,
+                &rt_dir,
+            )
+            .env("OMS_TEST_CANCEL_HARDENING", "1")
+            .env("OMS_TEST_REMOTE_EXE", std::env::current_exe().unwrap())
+            .env(
+                "OMS_TEST_REMOTE_CASE",
+                "ssh_adapter::tests::cancel_escalates_sigkill_and_blocks_spoofed_frames_and_unverifiable_lstart",
+            )
+            .env("OMS_SSH_BIN", &fake)
+            .env("OMS_TEST_DROP_ACTIVE", temp.0.join("drop_active"))
+            .env("OMS_REMOTE_STATE_DIR", &state_dir)
+            .status()
+            .unwrap();
             assert!(status.success());
             return;
         }
@@ -6440,21 +6416,16 @@ exec sh -c "$last"
             std::fs::write(&fake, script).unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
             let rt_dir = short_runtime_dir("col");
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "ssh_adapter::tests::collect_rejects_symlink_ancestors_and_overflow_with_open_stderr",
-                    "--nocapture",
-                ])
-                .env("OMS_TEST_COLLECT_HARDENING", "1")
-                .env("OMS_SSH_BIN", &fake)
-                .env("OMS_TEST_DIR", &temp.0)
-                .env("OMS_LOCK_DIR", temp.0.join("locks"))
-                .env("OMS_TEST_OPEN_STDERR_FLOOD", temp.0.join("flood"))
-                .env("XDG_RUNTIME_DIR", &rt_dir.0)
-                .env_remove("OMS_HARNESS_CHILD")
-                .status()
-                .unwrap();
+            let status = isolated_child(
+                "ssh_adapter::tests::collect_rejects_symlink_ancestors_and_overflow_with_open_stderr",
+                &temp,
+                &rt_dir,
+            )
+            .env("OMS_TEST_COLLECT_HARDENING", "1")
+            .env("OMS_SSH_BIN", &fake)
+            .env("OMS_TEST_OPEN_STDERR_FLOOD", temp.0.join("flood"))
+            .status()
+            .unwrap();
             assert!(status.success());
             return;
         }
@@ -6606,15 +6577,36 @@ exec sh -c "$last"
     }
 
     fn short_runtime_dir(tag: &str) -> ShortRuntimeDir {
-        for n in 0..1000 {
-            let p = PathBuf::from(format!("/tmp/oms-rt-{tag}-{}-{n}", std::process::id()));
-            match std::fs::DirBuilder::new().mode(0o700).create(&p) {
-                Ok(()) => return ShortRuntimeDir(p),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("short runtime dir: {e}"),
+        let pid = std::process::id();
+        for raw_base in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+            let Ok(base) = std::fs::canonicalize(&raw_base) else {
+                continue;
+            };
+            for n in 0..1000 {
+                let p = base.join(format!("oms-rt-{tag}-{pid}-{n}"));
+                if p.to_string_lossy().len() > 48 {
+                    break;
+                }
+                match std::fs::DirBuilder::new().mode(0o700).create(&p) {
+                    Ok(()) => return ShortRuntimeDir(p),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(_) => break,
+                }
             }
         }
         panic!("cannot allocate short runtime dir");
+    }
+
+    fn isolated_child(exact: &str, temp: &TempDir, rt_dir: &ShortRuntimeDir) -> Command {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", exact, "--nocapture"])
+            .env("OMS_TEST_DIR", &temp.0)
+            .env("OMS_LOCK_DIR", temp.0.join("locks"))
+            .env("XDG_RUNTIME_DIR", &rt_dir.0)
+            .env("TMPDIR", &temp.0)
+            .env_remove("OMS_HARNESS_CHILD")
+            .env_remove("OMS_HARNESS_DELEGATE_DEPTH");
+        cmd
     }
 
     struct MuxSocketGuard {
@@ -6712,23 +6704,18 @@ exec sh -c "$last"
             );
             std::fs::write(&fake, script).unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "ssh_adapter::tests::control_persist_backoff_hourly_cap_interactive_auth_and_legacy_approval",
-                    "--nocapture",
-                ])
-                .env("OMS_TEST_SSH_SPEC3", "1")
-                .env("OMS_SSH_BIN", &fake)
-                .env("OMS_TEST_DIR", &temp.0)
-                .env("OMS_TEST_ARGS", temp.0.join("args"))
-                .env("OMS_TEST_CALLS", temp.0.join("calls"))
-                .env("OMS_TEST_MODE", temp.0.join("mode"))
-                .env("OMS_LOCK_DIR", temp.0.join("locks"))
-                .env("XDG_RUNTIME_DIR", &rt_dir.0)
-                .env_remove("OMS_HARNESS_CHILD")
-                .status()
-                .unwrap();
+            let status = isolated_child(
+                "ssh_adapter::tests::control_persist_backoff_hourly_cap_interactive_auth_and_legacy_approval",
+                &temp,
+                &rt_dir,
+            )
+            .env("OMS_TEST_SSH_SPEC3", "1")
+            .env("OMS_SSH_BIN", &fake)
+            .env("OMS_TEST_ARGS", temp.0.join("args"))
+            .env("OMS_TEST_CALLS", temp.0.join("calls"))
+            .env("OMS_TEST_MODE", temp.0.join("mode"))
+            .status()
+            .unwrap();
             assert!(status.success());
             return;
         }
@@ -7342,43 +7329,35 @@ exec sh -c "$last"
             );
             std::fs::write(&fake, script).unwrap();
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let status = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "ssh_adapter::tests::round2_connect_detection_host_state_locking_corruption_and_target_isolation",
-                    "--nocapture",
-                ])
-                .env("OMS_TEST_SSH_ROUND2", "1")
-                .env("OMS_SSH_BIN", &fake)
-                .env("OMS_TEST_DIR", &temp.0)
-                .env("OMS_TEST_MODE", temp.0.join("mode"))
-                .env("HOME", &fake_home)
-                .env("XDG_CACHE_HOME", &fake_xdg_cache)
-                .env("XDG_RUNTIME_DIR", &rt_dir.0)
-                .env("OMS_LOCK_TIMEOUT", "1")
-                .env_remove("OMS_LOCK_DIR")
-                .env_remove("OMS_HARNESS_CHILD")
-                .status()
-                .unwrap();
+            let status = isolated_child(
+                "ssh_adapter::tests::round2_connect_detection_host_state_locking_corruption_and_target_isolation",
+                &temp,
+                &rt_dir,
+            )
+            .env("OMS_TEST_SSH_ROUND2", "1")
+            .env("OMS_SSH_BIN", &fake)
+            .env("OMS_TEST_MODE", temp.0.join("mode"))
+            .env("HOME", &fake_home)
+            .env("XDG_CACHE_HOME", &fake_xdg_cache)
+            .env("OMS_LOCK_TIMEOUT", "1")
+            .env_remove("OMS_LOCK_DIR")
+            .status()
+            .unwrap();
             assert!(status.success());
 
             // Finding 4: invalid lock settings (relative HOME) must return an error (exit 2),
             // never falling back to /tmp.
-            let bad_lock_env = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "ssh_adapter::tests::round2_connect_detection_host_state_locking_corruption_and_target_isolation",
-                    "--nocapture",
-                ])
-                .env("OMS_TEST_SSH_ROUND2", "bad_home")
-                .env("OMS_SSH_BIN", &fake)
-                .env("OMS_TEST_DIR", &temp.0)
-                .env("HOME", "relative-home")
-                .env("XDG_RUNTIME_DIR", &rt_dir.0)
-                .env_remove("OMS_LOCK_DIR")
-                .env_remove("OMS_HARNESS_CHILD")
-                .status()
-                .unwrap();
+            let bad_lock_env = isolated_child(
+                "ssh_adapter::tests::round2_connect_detection_host_state_locking_corruption_and_target_isolation",
+                &temp,
+                &rt_dir,
+            )
+            .env("OMS_TEST_SSH_ROUND2", "bad_home")
+            .env("OMS_SSH_BIN", &fake)
+            .env("HOME", "relative-home")
+            .env_remove("OMS_LOCK_DIR")
+            .status()
+            .unwrap();
             assert!(bad_lock_env.success());
             return;
         }
@@ -7453,10 +7432,9 @@ exec sh -c "$last"
             "unexpected lock path: {}",
             lock_path.display()
         );
-        let tmp_state = PathBuf::from(format!("/tmp/oms-ssh-state-test-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp_state).unwrap();
-        let tmp_lock_path = ssh_connections_lock_path(&tmp_state, &root).unwrap();
-        let _ = std::fs::remove_dir_all(&tmp_state);
+        let tmp_state = short_runtime_dir("lck");
+        let tmp_lock_path = ssh_connections_lock_path(&tmp_state.0, &root).unwrap();
+        drop(tmp_state);
         assert!(
             tmp_lock_path.starts_with(fake_home.join(".cache/oh-my-setting/locks")),
             "lock for /tmp state must not fall back to /tmp: {}",

@@ -6,7 +6,30 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 static OMS_DIGEST: OnceLock<String> = OnceLock::new();
 
-struct Fixture(PathBuf);
+fn alloc_short_runtime_dir() -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    let pid = std::process::id();
+    for raw_base in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+        let Ok(base) = std::fs::canonicalize(&raw_base) else {
+            continue;
+        };
+        for _ in 0..1000 {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let cand = base.join(format!("oms-rt-{pid}-{n}"));
+            if cand.to_string_lossy().len() > 48 {
+                break;
+            }
+            match std::fs::DirBuilder::new().mode(0o700).create(&cand) {
+                Ok(()) => return cand,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => break,
+            }
+        }
+    }
+    panic!("cannot allocate short 0700 runtime directory");
+}
+
+struct Fixture(PathBuf, PathBuf);
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
@@ -57,7 +80,10 @@ impl Fixture {
             root.join("scripts/lib/platform.sh"),
         )
         .unwrap();
-        Self(root)
+        Self(root, alloc_short_runtime_dir())
+    }
+    fn runtime_dir(&self) -> &std::path::Path {
+        &self.1
     }
     fn binary(&self) -> PathBuf {
         self.0
@@ -136,6 +162,8 @@ impl Fixture {
             .current_dir(self.0.join("data"))
             .env("PATH", bin)
             .env("HOME", self.0.join("home"))
+            .env("XDG_RUNTIME_DIR", self.runtime_dir())
+            .env("OMS_LOCK_DIR", self.0.join("locks"))
             .env("OH_MY_SETTING_ROLES_DIR", self.0.join("global"))
             .env("OMS_PYTHON_RUNTIME_ROOT", self.0.join("missing-python"))
             .env("OMS_TEST_PREFLIGHT", self.0.join("preflight"))
@@ -174,6 +202,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.1);
         std::fs::remove_dir_all(&self.0).unwrap();
     }
 }
@@ -3790,6 +3819,8 @@ impl Landing {
             .env("PATH", &self.tools)
             .env("HOME", self.f.0.join("home"))
             .env("TMPDIR", self.f.0.join("tmp"))
+            .env("XDG_RUNTIME_DIR", self.f.runtime_dir())
+            .env("OMS_LOCK_DIR", self.f.0.join("locks"))
             .env("OMS_DELEGATE_WORKTREE_ROOT", self.f.0.join("wtroot"))
             .env("GIT_CONFIG_GLOBAL", self.f.0.join("gitconfig"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -6320,7 +6351,6 @@ fn target_status_preserves_control_master_under_linux_whole_tree_scope() {
     struct MasterCleanup {
         pid_file: PathBuf,
         stop_file: PathBuf,
-        rt_dir: PathBuf,
     }
     impl Drop for MasterCleanup {
         fn drop(&mut self) {
@@ -6330,7 +6360,6 @@ fn target_status_preserves_control_master_under_linux_whole_tree_scope() {
             {
                 let _ = kill(Pid::from_raw(pid), nix::sys::signal::Signal::SIGKILL);
             }
-            let _ = std::fs::remove_dir_all(&self.rt_dir);
         }
     }
 
@@ -6355,16 +6384,6 @@ fn target_status_preserves_control_master_under_linux_whole_tree_scope() {
             symlink(std::fs::canonicalize(found).unwrap(), l.tools.join(name)).unwrap();
         }
     }
-    let rt_dir = std::path::PathBuf::from(format!(
-        "/tmp/oms-wt-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&rt_dir)
-        .unwrap();
     let home = l.f.0.join("home");
     let repo = home.join("work/tree");
     let remote = l.f.0.join("remote-home/work/tree");
@@ -6400,7 +6419,6 @@ fn target_status_preserves_control_master_under_linux_whole_tree_scope() {
     let _cleanup = MasterCleanup {
         pid_file: master_pid_file.clone(),
         stop_file: stop_file.clone(),
-        rt_dir: rt_dir.clone(),
     };
 
     let fake_ssh = l.f.0.join("fake-ssh");
@@ -6451,7 +6469,6 @@ fn target_status_preserves_control_master_under_linux_whole_tree_scope() {
     std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
 
     let run_status = || {
-        let locks_dir = l.f.0.join("locks");
         let (code, out, err) = l.oms_env(
             &[
                 "runtime",
@@ -6462,11 +6479,7 @@ fn target_status_preserves_control_master_under_linux_whole_tree_scope() {
                 "status",
                 "cluster",
             ],
-            &[
-                ("XDG_RUNTIME_DIR", rt_dir.to_str().unwrap()),
-                ("OMS_LOCK_DIR", locks_dir.to_str().unwrap()),
-                ("OMS_SSH_BIN", fake_ssh.to_str().unwrap()),
-            ],
+            &[("OMS_SSH_BIN", fake_ssh.to_str().unwrap())],
         );
         assert_eq!(code, 0, "status failed: stdout={out} stderr={err}");
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -6496,7 +6509,7 @@ fn target_status_preserves_control_master_under_linux_whole_tree_scope() {
         !pid_alive_non_zombie(stray_pid),
         "supervised command stray child {stray_pid} must still be reaped by Scope::WholeTree"
     );
-    let state_file = rt_dir.join("oms-ssh-state/ssh-connections.json");
+    let state_file = l.f.runtime_dir().join("oms-ssh-state/ssh-connections.json");
     let state_after_1: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
     assert_eq!(

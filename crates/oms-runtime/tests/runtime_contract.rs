@@ -8,7 +8,30 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-struct Fixture(PathBuf);
+fn alloc_short_runtime_dir() -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    let pid = std::process::id();
+    for raw_base in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+        let Ok(base) = std::fs::canonicalize(&raw_base) else {
+            continue;
+        };
+        for _ in 0..1000 {
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let cand = base.join(format!("oms-rt-{pid}-{n}"));
+            if cand.to_string_lossy().len() > 48 {
+                break;
+            }
+            match std::fs::DirBuilder::new().mode(0o700).create(&cand) {
+                Ok(()) => return cand,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => break,
+            }
+        }
+    }
+    panic!("cannot allocate short 0700 runtime directory");
+}
+
+struct Fixture(PathBuf, PathBuf);
 impl Fixture {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
@@ -27,7 +50,28 @@ impl Fixture {
                 .unwrap()
                 .success()
         );
-        Self(path)
+        Self(path, alloc_short_runtime_dir())
+    }
+    fn runtime_dir(&self) -> &Path {
+        &self.1
+    }
+    fn child_command(&self, name: &str) -> std::process::Command {
+        let mut cmd = std::process::Command::new("bash");
+        cmd.args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "umask 077; exec \"$@\"",
+            "--",
+        ])
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", name])
+        .env_remove("OMS_HARNESS_CHILD")
+        .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+        .env_remove("OMS_REMOTE_STATE_DIR")
+        .env("OMS_LOCK_DIR", self.0.join("locks"))
+        .env("XDG_RUNTIME_DIR", self.runtime_dir());
+        cmd
     }
     fn run(&self, args: &[&str], interrupted: bool) -> oms_runtime::Response {
         let args: Vec<OsString> = args.iter().map(OsString::from).collect();
@@ -42,6 +86,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.1);
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -550,20 +595,9 @@ fn child_test(name: &str) -> bool {
     if std::env::var_os("OMS_HARNESS_CHILD").is_some_and(|v| v == "1") {
         assert_eq!(f.run(&["profile", "install", "core"], false).code, 2);
     }
-    let status = std::process::Command::new("bash")
-        .args([
-            "--noprofile",
-            "--norc",
-            "-c",
-            "umask 077; exec \"$@\"",
-            "--",
-        ])
-        .arg(std::env::current_exe().unwrap())
-        .args(["--exact", name])
-        .env_remove("OMS_HARNESS_CHILD")
-        .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+    let status = f
+        .child_command(name)
         .env("OMS_RUNTIME_TEST_CHILD", "1")
-        .env("OMS_LOCK_DIR", f.0.join("locks"))
         .status()
         .unwrap();
     assert!(status.success());
@@ -1856,15 +1890,38 @@ fn target_approval_is_bound_to_identity() {
     );
 }
 
-#[test]
-fn remote_experiment_reconciles_exact_results_without_relaunch() {
-    use std::process::Command;
-    if std::env::var_os("OMS_TEST_REMOTE_EXPERIMENT").is_none() {
-        let f = Fixture::new();
-        let fake = f.0.join("ssh-fixture");
-        std::fs::write(
-            &fake,
-            r#"#!/bin/sh
+fn snapshot_xdg_ssh_tree(xdg: Option<&OsStr>) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(raw) = xdg.filter(|v| !v.is_empty()) else {
+        return out;
+    };
+    let root = Path::new(raw);
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        out.insert(PathBuf::from(&name), Vec::new());
+        if name.to_string_lossy().starts_with("oms-ssh")
+            && entry.path().is_dir()
+            && let Ok(sub) = std::fs::read_dir(entry.path())
+        {
+            for leaf in sub.flatten() {
+                let rel = PathBuf::from(&name).join(leaf.file_name());
+                let bytes = std::fs::read(leaf.path()).unwrap_or_default();
+                out.insert(rel, bytes);
+            }
+        }
+    }
+    out
+}
+
+fn run_remote_experiment_child() {
+    let f = Fixture::new();
+    let fake = f.0.join("ssh-fixture");
+    std::fs::write(
+        &fake,
+        r#"#!/bin/sh
 printf 'call\n' >> "$OMS_TEST_REMOTE_EVENTS"
 for last do :; done
 if [ -f "$OMS_TEST_REMOTE_DROP" ]; then
@@ -1874,26 +1931,72 @@ if [ -f "$OMS_TEST_REMOTE_DROP" ]; then
 fi
 exec sh -c "$last"
 "#,
-        )
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let status = f
+        .child_command("remote_experiment_reconciles_exact_results_without_relaunch")
+        .arg("--nocapture")
+        .env("OMS_TEST_REMOTE_EXPERIMENT", &f.0)
+        .env("OMS_SSH_BIN", &fake)
+        .env("OMS_TEST_REMOTE_EVENTS", f.0.join("calls"))
+        .env("OMS_TEST_REMOTE_DROP", f.0.join("drop"))
+        .status()
         .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let status = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "remote_experiment_reconciles_exact_results_without_relaunch",
-                "--nocapture",
-            ])
-            .env("OMS_TEST_REMOTE_EXPERIMENT", &f.0)
-            .env("OMS_SSH_BIN", &fake)
-            .env("OMS_TEST_REMOTE_EVENTS", f.0.join("calls"))
-            .env("OMS_TEST_REMOTE_DROP", f.0.join("drop"))
-            .env("OMS_LOCK_DIR", f.0.join("locks"))
-            .env_remove("OMS_HARNESS_CHILD")
-            .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
-            .env_remove("OMS_REMOTE_STATE_DIR")
-            .status()
-            .unwrap();
-        assert!(status.success());
+    assert!(status.success());
+    assert!(
+        f.runtime_dir()
+            .join("oms-ssh-state")
+            .join(oms_runtime::ssh_adapter::RECONNECT_STATE_FILE)
+            .is_file(),
+        "SSH reconnect state must live inside the fixture runtime directory"
+    );
+}
+
+#[test]
+fn remote_experiment_reconciles_exact_results_without_relaunch() {
+    use std::process::Command;
+    if std::env::var_os("OMS_TEST_REMOTE_EXPERIMENT").is_none() {
+        if std::env::var_os("OMS_TEST_HOST_RUNTIME_SENTINEL").is_none() {
+            let ambient_xdg = std::env::var_os("XDG_RUNTIME_DIR");
+            let ambient_before = snapshot_xdg_ssh_tree(ambient_xdg.as_deref());
+            struct SentinelGuard(PathBuf);
+            impl Drop for SentinelGuard {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_dir_all(&self.0);
+                }
+            }
+            let sentinel = SentinelGuard(alloc_short_runtime_dir());
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "remote_experiment_reconciles_exact_results_without_relaunch",
+                    "--nocapture",
+                ])
+                .env("OMS_TEST_HOST_RUNTIME_SENTINEL", "1")
+                .env("XDG_RUNTIME_DIR", &sentinel.0)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            assert!(
+                std::fs::read_dir(&sentinel.0).unwrap().next().is_none(),
+                "no file or directory may be created under the test process XDG_RUNTIME_DIR"
+            );
+            assert_eq!(
+                snapshot_xdg_ssh_tree(ambient_xdg.as_deref()),
+                ambient_before,
+                "ambient host XDG_RUNTIME_DIR must remain untouched"
+            );
+            return;
+        }
+        let host_xdg = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+        for _ in 0..2 {
+            run_remote_experiment_child();
+            assert!(
+                std::fs::read_dir(&host_xdg).unwrap().next().is_none(),
+                "repeated remote experiment runs must not touch the test process XDG_RUNTIME_DIR"
+            );
+        }
         return;
     }
     let root = PathBuf::from(std::env::var_os("OMS_TEST_REMOTE_EXPERIMENT").unwrap());

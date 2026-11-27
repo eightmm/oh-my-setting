@@ -4125,6 +4125,35 @@ mod runtime_tests {
             dir.git(&["commit", "-q", "--allow-empty", "-m", "init"]);
             dir
         }
+        fn short_runtime() -> Self {
+            let pid = std::process::id();
+            for raw_base in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+                let Ok(base) = std::fs::canonicalize(&raw_base) else {
+                    continue;
+                };
+                for _ in 0..1000 {
+                    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+                    let cand = base.join(format!("oms-rt-{pid}-{n}"));
+                    let Some(text) = cand.to_str() else {
+                        break;
+                    };
+                    if text.len() > 48
+                        || !text
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"/_.-".contains(&b))
+                    {
+                        break;
+                    }
+                    use std::os::unix::fs::DirBuilderExt;
+                    match std::fs::DirBuilder::new().mode(0o700).create(&cand) {
+                        Ok(()) => return Self(cand),
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                        Err(_) => break,
+                    }
+                }
+            }
+            panic!("cannot allocate short 0700 runtime directory");
+        }
     }
     impl Drop for Dir {
         fn drop(&mut self) {
@@ -4166,7 +4195,7 @@ mod runtime_tests {
         if std::env::var_os("OMS_APPTAINER_TEST_CHILD").as_deref() == Some(OsStr::new(name)) {
             return false;
         }
-        let session = Dir::new();
+        let session = Dir::short_runtime();
         let bus = if needs_session {
             match std::os::unix::net::UnixListener::bind(session.path().join("bus")) {
                 Ok(bus) => Some(bus),
@@ -5841,6 +5870,11 @@ exit 92
             .unwrap();
         assert!(ok.get("ok").truth(), "{ok:?}");
         assert!(ok.opt("control_path").is_none(), "{ok:?}");
+        let status_ctrl = oms_runtime::ssh_adapter::ssh_control_path(&alias, None).unwrap();
+        assert_eq!(
+            oms_runtime::ssh_adapter::ssh_state_dir(&status_ctrl).unwrap(),
+            PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("oms-ssh-state")
+        );
         let recorded = std::fs::read_to_string(&args_log).unwrap();
         let recorded_lines: Vec<&str> = recorded.lines().collect();
         assert!(recorded_lines.contains(&"-a"), "{recorded}");
@@ -6061,6 +6095,10 @@ exit 92
         );
         let ctrl_str = oms_runtime::ssh_adapter::ssh_control_path(&alias, None).unwrap();
         let host_state_dir = oms_runtime::ssh_adapter::ssh_state_dir(&ctrl_str).unwrap();
+        assert_eq!(
+            host_state_dir,
+            PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("oms-ssh-state")
+        );
         assert!(
             host_state_dir
                 .join(oms_runtime::ssh_adapter::RECONNECT_STATE_FILE)
