@@ -1,7 +1,10 @@
 //! User messages in an existing Room-bound OMS Lead conversation. The original
 //! private operation owns the index. Each turn has one immutable reservation
 //! and a distinct peer operation, even when the same text is sent twice.
-use super::{PanelResult, SEND_LEAD, STOP_LEAD, assignment_address, checked_peer_directory, uuid};
+use super::{
+    PanelResult, READ_STREAM, SEND_LEAD, STOP_LEAD, assignment_address, checked_peer_directory,
+    uuid,
+};
 use crate::storage::{Directory, byte_prefix, hash};
 use crate::value::Value;
 use crate::{RUN_ROOT, Server};
@@ -21,6 +24,8 @@ mod settings;
 const INVALID: &str = "The Lead conversation receipt is unavailable or changed.";
 const HEAD: &str = "lead-turn-head.json";
 const PAGE: usize = 4;
+/// The owner caps its partial-reply log at this size.
+const STREAM_MAX: usize = 128 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TurnLookupError {
@@ -175,7 +180,10 @@ pub(super) fn validate(name: &str, args: &Value, provider: Option<&str>) -> Pane
         crate::output::outbound(args["text"].as_str().unwrap().as_bytes(), &Value::Null)
             .map_err(|_| "OMS withheld this message during its outbound scan.")?;
     }
-    if name == STOP_LEAD
+    if name == READ_STREAM && args["cursor"].as_u64().is_none_or(|c| c > 131_072) {
+        return Err("Invalid stream cursor.".into());
+    }
+    if matches!(name, STOP_LEAD | READ_STREAM)
         && (provider.is_none()
             || !args["projectKey"].is_string()
             || !args["leadRequestId"].as_str().is_some_and(uuid)
@@ -837,6 +845,73 @@ impl<'a> Conversation<'a> {
             "handoff":{"room":self.lead["room"],"participant":self.lead["participant"],"provider":self.provider,
                 "leadRequestId":self.lead["request"],"turnId":id,"operation":operation}}),
         )
+    }
+    /// Partial reply lines the latest turn's owner already scanned and published
+    /// (`oms-command-peer` `lead_observation::STREAM_LOG`), from a line-start cursor.
+    pub fn stream_page(
+        &self,
+        server: &Server<'_>,
+        args: &Value,
+        check: impl Fn() -> PanelResult<()>,
+    ) -> PanelResult<Value> {
+        let id = args["turnId"].as_str().ok_or(INVALID)?;
+        if self.head()?.as_deref() != Some(id) {
+            return Err("Only the latest Lead message streams its reply.".into());
+        }
+        let record = self.record(id)?.ok_or(INVALID)?;
+        let status = self.observe(server, &record)?.0;
+        let binding = record["binding"].as_str().ok_or(INVALID)?;
+        let op = assignment_address(self.lead, binding).ok_or(INVALID)?;
+        let digest = record["digest"].as_str().ok_or(INVALID)?;
+        let checked = checked_peer_directory(
+            self.repo,
+            self.lead,
+            &op,
+            self.thread,
+            binding,
+            true,
+            Some((digest, &record["route"])),
+        )?;
+        let log = match checked {
+            None => Vec::new(),
+            Some(_) => match oms_safe_fs::Root::open(self.repo).and_then(|r| {
+                r.read(
+                    &format!("{RUN_ROOT}/{op}/lead-stream.jsonl"),
+                    STREAM_MAX,
+                    oms_safe_fs::Policy::manifest(),
+                )
+            }) {
+                Ok(bytes) => bytes,
+                Err(oms_safe_fs::Error::Missing) => Vec::new(),
+                Err(_) => return Err(INVALID.into()),
+            },
+        };
+        let start = args["cursor"].as_u64().ok_or("Invalid stream cursor.")? as usize;
+        if start > log.len() || (start > 0 && log[start - 1] != b'\n') {
+            return Err("Invalid stream cursor.".into());
+        }
+        let (mut text, mut tool, mut end, mut at) =
+            (String::new(), Value::Null, Value::Null, start);
+        for line in log[start..].split_inclusive(|b| *b == b'\n') {
+            if !line.ends_with(b"\n") {
+                break;
+            }
+            let row = crate::value::from_slice(line).map_err(|_| INVALID)?;
+            let chunk = || row["text"].as_str().ok_or(INVALID);
+            match row["kind"].as_str() {
+                Some("text") => text.push_str(chunk()?),
+                Some("tool") => tool = json!(chunk()?),
+                Some(kind @ ("withheld" | "truncated")) => end = json!(kind),
+                _ => return Err(INVALID.into()),
+            }
+            at += line.len();
+        }
+        self.bound()?;
+        check()?;
+        if self.record(id)?.as_ref() != Some(&record) {
+            return Err(INVALID.into());
+        }
+        Ok(json!({"turnId":id,"status":status,"text":text,"tool":tool,"end":end,"cursor":at}))
     }
     pub fn exchange(
         &self,

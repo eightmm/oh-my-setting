@@ -364,7 +364,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v37.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v38.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -2533,6 +2533,45 @@ fn lead_turn_failure_degrades_per_row() {
             .clone()
     };
     until(|| status(&mut c) == "running");
+    // The running turn's owner publishes scanned partial lines; the panel pages them.
+    let child = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            std::fs::read_to_string(p.join("prompt.txt")).is_ok_and(|t| t == "Check seat 3\n")
+        })
+        .unwrap();
+    let log = child.join("lead-stream.jsonl");
+    let lines = "{\"kind\":\"tool\",\"text\":\"Read AGENTS.md\"}\n{\"kind\":\"text\",\"text\":\"Partial **reply**\\n\"}\n";
+    std::fs::write(&log, lines).unwrap();
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let read_stream = "oms_read_lead_stream";
+    let mut page = agy.clone();
+    page["cursor"] = json!(0);
+    let res = call(&mut c, read_stream, &page);
+    good(&res);
+    let streamed = &res["result"]["_meta"]["leadConversation"]["stream"];
+    assert_eq!(streamed["text"], "Partial **reply**\n");
+    assert_eq!(streamed["tool"], "Read AGENTS.md");
+    assert_eq!(streamed["status"], "running");
+    assert_eq!(streamed["cursor"], lines.len());
+    assert!(!res["result"]["content"].to_string().contains("Partial"));
+    page["cursor"] = json!(3);
+    bad(&call(&mut c, read_stream, &page), "cursor");
+    let mut stale_page = page.clone();
+    stale_page["cursor"] = json!(0);
+    stale_page["turnId"] = json!(codex_turn);
+    bad(&call(&mut c, read_stream, &stale_page), "latest");
+    let leaked = ["gh", "p_", &"8".repeat(36)].concat();
+    std::fs::write(
+        &log,
+        format!("{lines}{{\"kind\":\"text\",\"text\":\"{leaked}\\n\"}}\n"),
+    )
+    .unwrap();
+    page["cursor"] = json!(lines.len());
+    let withheld = call(&mut c, read_stream, &page);
+    assert!(!withheld.to_string().contains(&leaked));
+    bad(&withheld, "withheld");
     let mut stale = agy.clone();
     stale["turnId"] = json!(codex_turn);
     bad(&call(&mut c, stop, &stale), "latest");
@@ -3161,7 +3200,7 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 26);
+    assert_eq!(tools.as_array().unwrap().len(), 27);
     assert_eq!(tools[0]["name"], "oms_open_panel");
     assert_eq!(
         tools[0]["description"],
@@ -3172,7 +3211,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v37.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v38.html");
     for name in [
         "oms_panel_usage",
         "oms_panel_project_graph",
@@ -3261,6 +3300,7 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v34.html"),
         json!("ui://oms/conversation-panel/v35.html"),
         json!("ui://oms/conversation-panel/v36.html"),
+        json!("ui://oms/conversation-panel/v37.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);

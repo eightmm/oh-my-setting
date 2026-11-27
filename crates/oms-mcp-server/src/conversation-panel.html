@@ -431,7 +431,7 @@ header{gap:8px;padding-bottom:8px}
 <label><span data-i18n="prefs.model">모델</span><select id="settings-model"></select></label>
 <label><span data-i18n="prefs.effort">추론 강도</span><select id="settings-effort"></select></label></fieldset>
 <p id="settings-hint" class="note"></p><div id="settings-controls"><p id="settings-status" class="note" role="status"></p><button id="settings-read" type="button" data-i18n="refresh" hidden>새로고침</button><button id="settings-save" type="button" data-i18n="prefs.save" hidden>저장</button></div></section>
-<p id="chat-status" class="note" role="status"></p><button id="chat-new" type="button" class="subtle" data-i18n="chat.new" hidden>새 메시지 보기</button><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-typing" hidden><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span id="chat-typing-text"></span></p><p id="chat-result"></p><p id="chat-result-limited" class="note" data-i18n="turn.partial" hidden>부분 답변</p><button id="chat-result-full" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button>
+<p id="chat-status" class="note" role="status"></p><button id="chat-new" type="button" class="subtle" data-i18n="chat.new" hidden>새 메시지 보기</button><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><div id="chat-partial" class="md" hidden></div><p id="chat-typing" hidden><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span id="chat-typing-text"></span></p><p id="chat-result"></p><p id="chat-result-limited" class="note" data-i18n="turn.partial" hidden>부분 답변</p><button id="chat-result-full" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button>
 <section id="full-answer" hidden><div class="section-head"><h3 data-i18n="answer.title">기록된 출력</h3><button id="answer-close" type="button" data-i18n="close">닫기</button></div><pre id="full-answer-body"></pre><p id="answer-status" class="note" role="status"></p><div class="actions"><button id="answer-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="answer-more" type="button" data-i18n="answer.more" hidden>다음 부분 읽기</button><button id="answer-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="answer-followup" class="primary" type="button" data-i18n="followup.result" hidden>이 결과로 요청</button></div></section></div>
 <form id="chat-compose" hidden><label for="chat-text" class="sr-only" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000" aria-describedby="chat-count chat-delivery"></textarea><span id="chat-count" class="count"></span>
 <div class="actions"><span id="chat-delivery" role="status"></span><button id="chat-check" type="button" hidden></button><button id="chat-stop" type="button" data-i18n="chat.stop" hidden>중지</button><button id="chat-send" type="submit" data-i18n="chatSend">보내기</button></div></form></dialog>
@@ -1290,7 +1290,7 @@ function clearChat() {
   clearSettings();el('settings-toggle').hidden=true;turnAnswerButtons.length=0;
   clearTimeout(managedChat?.timer);selectedChat=undefined;managedChat=undefined;chatCursor=null;chatPage++;
   el('chat-compose').hidden=true;el('chat-avatar').hidden=true;el('chat-text').value='';el('chat-delivery').textContent='';
-  el('chat-messages').replaceChildren();el('chat-result').textContent='';
+  el('chat-messages').replaceChildren();el('chat-partial').replaceChildren();el('chat-partial').hidden=true;el('chat-result').textContent='';
   el('chat-older').hidden=el('chat-typing').hidden=el('chat-stop').hidden=true;el('chat-send').hidden=false;
   el('chat-new').hidden=true;el('chat-count').textContent='';roomResult=null;roomPageSeen=false;roomMessageKeys.clear();
   el('chat-result-limited').hidden=el('chat-result-full').hidden=true;clearFullAnswer();
@@ -1920,7 +1920,10 @@ function paintComposer(c){
   if(c.settings)paintSettings(c);
   el('chat-send').disabled=blocked || !c.verified || c.reading || s.settingsSaving || s.writing || !!p || !!c.previous || !validText(s.draft);
   const live=['reserved','running'].includes(c.previous || p?.status);
-  el('chat-typing').hidden=!live;put('chat-typing-text',()=>t('chat.typing',{v:names[c.provider]}));
+  const sp=live && c.stream?.turn===(p?.id || c.latestTurn)?c.stream:null,box=el('chat-partial'),scroll=el('chat-scroll');
+  box.hidden=!sp?.text;
+  if(sp && sp.painted!==sp.text){const end=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<36;sp.painted=sp.text;box.replaceChildren(md(sp.text));if(end)scroll.scrollTop=scroll.scrollHeight;}
+  el('chat-typing').hidden=!live;put('chat-typing-text',()=>sp?.tool?names[c.provider]+' · '+sp.tool:t('chat.typing',{v:names[c.provider]}));
   el('chat-stop').hidden=!live;el('chat-stop').disabled=blocked || !c.verified || !!c.stopping;el('chat-send').hidden=live;
   el('chat-text').placeholder=t('chat.hint',{v:names[c.provider]});
   const state=s.writing?'sending':c.previous?'previous':p?.status || s.outcome;
@@ -2024,7 +2027,7 @@ async function readManaged(c,before=null){
       c.reading=false;el('chat-older').disabled=hostToolsUnavailable || disposed;paintComposer(c);
       const waiting=['reserved','running'].includes(c.previous || c.session.pending?.status);
       c.pollPaused=waiting && Date.now()>=c.until;
-      if(!hostToolsUnavailable && waiting && !c.pollPaused)c.timer=setTimeout(()=>readManaged(c),4000);
+      if(!hostToolsUnavailable && waiting && !c.pollPaused){c.timer=setTimeout(()=>readManaged(c),4000);streamManaged(c);}else clearTimeout(c.streamTimer);
       paintComposer(c);paintLeadControls();
     }
   }
@@ -2057,6 +2060,21 @@ async function stopManaged(c){
   finally{c.stopping=false;if(currentManaged(c)){c.until=Date.now()+120000;c.pollPaused=false;await readManaged(c);}}
 }
 onClick('chat-stop',()=>stopManaged(managedChat));
+// Claude's scanned partial reply; the verified transcript still settles the turn.
+async function streamManaged(c){
+  const id=c.session.pending?.id || c.latestTurn,live=()=>currentManaged(c) && !hostToolsUnavailable && !c.pollPaused && ['reserved','running'].includes(c.previous || c.session.pending?.status);
+  if(c.provider!=='claude' || c.streaming || !turnUuid(id) || !live())return;
+  if(c.stream?.turn!==id)c.stream={turn:id,cursor:0,text:'',tool:''};
+  const st=c.stream;c.streaming=true;clearTimeout(c.streamTimer);
+  try{
+    const r=(await tool('oms_read_lead_stream',{room:c.ctl.room,projectKey:c.ctl.projectKey,provider:c.provider,leadRequestId:c.requestId,turnId:id,cursor:st.cursor},c.ctl.generation))._meta?.leadConversation?.stream;
+    if(c.stream===st && r?.turnId===id && typeof r.text==='string' && Number.isInteger(r.cursor) && r.cursor>=st.cursor){
+      st.cursor=r.cursor;st.text+=r.text;if(typeof r.tool==='string')st.tool=r.tool;if(r.end)st.end=true;
+      if(currentManaged(c)){paintComposer(c);if(!['reserved','running'].includes(r.status)){clearTimeout(c.timer);readManaged(c);}}
+    }
+  }catch{}
+  finally{c.streaming=false;if(live() && !st.end && c.stream===st)c.streamTimer=setTimeout(()=>streamManaged(c),1200);}
+}
 // Markdown as DOM nodes only: fences, headings, lists, paragraphs, `code`, **bold**.
 function md(text){
   const box=node('div','','md'),lines=text.split('\n');let list=null,kind='',para=[];
