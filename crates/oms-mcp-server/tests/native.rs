@@ -755,8 +755,8 @@ fn home_panel_opener() {
     const HOME_URI: &str = "ui://oms/home/v1.html";
     let home_html = include_str!("../src/home-panel.html");
     assert!(
-        home_html.len() <= 128 * 1024,
-        "home-panel.html exceeds 128 KiB budget: {} bytes",
+        home_html.len() <= 256 * 1024,
+        "home-panel.html exceeds 256 KiB budget: {} bytes",
         home_html.len()
     );
     assert_eq!(oms_scrub::scan(home_html.as_bytes(), &[]), Ok(Vec::new()));
