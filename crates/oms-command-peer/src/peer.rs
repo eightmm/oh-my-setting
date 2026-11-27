@@ -1053,6 +1053,9 @@ fn call_routed(
     if args.has("team-requests") && live_attempt.is_none() {
         return fail("Team request lead lifecycle enrollment unavailable");
     }
+    let heartbeat = live_attempt.as_deref().map(|id| {
+        crate::delegate::HeartbeatGuard::start(repo, id, crate::delegate::HEARTBEAT_INTERVAL)
+    });
     let mut usage_env = crate::usage::operation_env(&[])?;
     let cargo_guard = private
         .as_ref()
@@ -1133,6 +1136,7 @@ fn call_routed(
         },
     };
     if let Some(id) = live_attempt {
+        drop(heartbeat);
         // Re-recorded because a capacity overflow can move the call to another account.
         let account = providers::panel_account(&route);
         let retry_transition = |state: &str| {

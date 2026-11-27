@@ -481,6 +481,73 @@ impl Worktree {
     }
 }
 
+pub(crate) const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+pub(crate) struct HeartbeatGuard {
+    stop: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl HeartbeatGuard {
+    pub(crate) fn start(repo: &Path, attempt: &str, interval: std::time::Duration) -> Self {
+        let repo = repo.to_path_buf();
+        let attempt = attempt.to_owned();
+        let stop = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = std::sync::Arc::clone(&stop);
+        let cancel = std::sync::Arc::clone(&interrupted);
+        let worker = std::thread::Builder::new()
+            .name("oms-peer-heartbeat".into())
+            .spawn(move || {
+                let (lock, cvar) = &*signal;
+                let args: [OsString; 5] = [
+                    "heartbeat".into(),
+                    "--attempt".into(),
+                    attempt.into(),
+                    "--actor".into(),
+                    "peer".into(),
+                ];
+                loop {
+                    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let (guard, _) = cvar
+                        .wait_timeout_while(guard, interval, |stopped| !*stopped)
+                        .unwrap_or_else(|e| e.into_inner());
+                    if *guard {
+                        break;
+                    }
+                    drop(guard);
+                    let _ = oms_command_operations::run(
+                        oms_command_operations::App::Events,
+                        &args,
+                        &repo,
+                        &cancel,
+                    );
+                }
+            })
+            .ok();
+        Self {
+            stop,
+            interrupted,
+            worker,
+        }
+    }
+}
+impl Drop for HeartbeatGuard {
+    fn drop(&mut self) {
+        self.interrupted
+            .store(true, std::sync::atomic::Ordering::Release);
+        let (lock, cvar) = &*self.stop;
+        {
+            let mut stopped = lock.lock().unwrap_or_else(|e| e.into_inner());
+            *stopped = true;
+        }
+        cvar.notify_all();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 pub(crate) fn transition(
     repo: &Path,
     attempt: &str,
@@ -1096,6 +1163,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     )?;
     transition(&repo, &attempt, "starting", obj([]), context)?;
     transition(&repo, &attempt, "working", obj([]), context)?;
+    let heartbeat = HeartbeatGuard::start(&repo, &attempt, HEARTBEAT_INTERVAL);
     let mut code = 1;
     let mut body = header.into_bytes();
     let mut captured = Vec::new();
@@ -1422,6 +1490,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         // An overflow may have moved the run off the account bound at start.
         refs.set("panel_account", V::from(providers::panel_account(&route)));
     }
+    drop(heartbeat);
     transition(&repo, &attempt, state, refs, context)?;
     body.extend_from_slice(format!("\n## Exit\n\n{code}\n\n- outcome: {}\n- verification: {verified}\n- admission: pending\n",if no_change{"no_change"}else if code==0{"review"}else{"failed"}).as_bytes());
     let artifact_sha256 = storage::hash(&body);
@@ -1943,5 +2012,119 @@ mod tests {
                 "help mentions unknown option --{name}"
             );
         }
+    }
+
+    #[test]
+    fn heartbeat_guard_keeps_attempt_working_and_stops_on_drop() {
+        if crate::safety::child() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "delegate::tests::heartbeat_guard_keeps_attempt_working_and_stops_on_drop",
+                    "--nocapture",
+                ])
+                .env_remove("OMS_HARNESS_CHILD")
+                .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+                .output()
+                .unwrap();
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(out.status.success(), "{combined}");
+            assert!(combined.contains("1 passed;"), "{combined}");
+            return;
+        }
+        let repo = repo("heartbeat-guard");
+        let stop = AtomicBool::new(false);
+        let native = process::Native;
+        let context = Context {
+            cwd: &repo,
+            source: &repo,
+            interrupted: &stop,
+            executor: &native,
+        };
+        let start_working = || {
+            let id = oms_command_operations::create_attempt(
+                &repo,
+                &oms_command_operations::StartRequest {
+                    provider: "codex".into(),
+                    tool: "peer-delegate".into(),
+                    ..Default::default()
+                },
+                &stop,
+            )
+            .unwrap();
+            transition(&repo, &id, "starting", obj([]), &context).unwrap();
+            transition(&repo, &id, "working", obj([]), &context).unwrap();
+            id
+        };
+        let attempt = start_working();
+        let unguarded = start_working();
+
+        let guard = HeartbeatGuard::start(&repo, &attempt, std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        // Avoid whole-second truncation edges in last_heartbeat_at when stale-seconds is 1.
+        for _ in 0..5 {
+            let subsec_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_millis();
+            if (350..=750).contains(&subsec_ms) {
+                break;
+            }
+            let wait = if subsec_ms < 350 {
+                350 - subsec_ms
+            } else {
+                1350 - subsec_ms
+            };
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(wait)));
+        }
+        let reconcile = |repo: &Path| {
+            let (code, _, err) = oms_command_operations::run(
+                oms_command_operations::App::Events,
+                &[
+                    "reconcile".into(),
+                    "--stale-seconds".into(),
+                    "1".into(),
+                    "--apply".into(),
+                ],
+                repo,
+                &stop,
+            );
+            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        };
+        let projected = |repo: &Path, id: &str| {
+            let (_, attempts) = oms_command_operations::load_projection(repo).unwrap();
+            attempts
+                .into_iter()
+                .find(|row| row.get("attempt_id").text() == Some(id))
+                .unwrap()
+        };
+        reconcile(&repo);
+        assert_eq!(
+            projected(&repo, &attempt).get("state").text(),
+            Some("working")
+        );
+        let stale = projected(&repo, &unguarded);
+        assert_eq!(stale.get("state").text(), Some("blocked"));
+        assert_eq!(stale.get("reason_code").text(), Some("heartbeat_expired"));
+
+        drop(guard);
+        let dropped_at = std::time::Instant::now();
+        drop(HeartbeatGuard::start(
+            &repo,
+            &attempt,
+            std::time::Duration::from_secs(60),
+        ));
+        assert!(dropped_at.elapsed() < std::time::Duration::from_secs(1));
+
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        reconcile(&repo);
+        let after = projected(&repo, &attempt);
+        assert_eq!(after.get("state").text(), Some("blocked"));
+        assert_eq!(after.get("reason_code").text(), Some("heartbeat_expired"));
+        let _ = std::fs::remove_dir_all(&repo);
     }
 }
