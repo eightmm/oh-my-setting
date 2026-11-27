@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 const META: &str = "io.modelcontextprotocol/protocolVersion";
 const CAPS: &str = "io.modelcontextprotocol/clientCapabilities";
 const EXT: &str = "io.modelcontextprotocol/tasks";
+// A size budget, not a host limit: it began as 240 KiB when the server stripped indentation, and
+// now covers the verbatim panel with the #631 More sections and new-goal window.
+const PANEL_BUDGET: usize = 256 * 1024;
 fn timeout() -> Duration {
     Duration::from_secs(
         std::env::var("OMS_TEST_CALL_TIMEOUT")
@@ -361,11 +364,11 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v34.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v36.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
-        assert!(html.len() < 240 * 1024);
+        assert!(html.len() < PANEL_BUDGET);
         assert_eq!(
             html.as_bytes(),
             include_bytes!("../src/conversation-panel.html")
@@ -3129,7 +3132,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v34.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v36.html");
     for name in [
         "oms_panel_usage",
         "oms_panel_project_graph",
@@ -3170,7 +3173,7 @@ fn conversation_panel() {
     let current = read(&mut c, uri);
     assert_eq!(current["uri"], *uri);
     let html = current["text"].as_str().unwrap();
-    assert!(html.len() < 240 * 1024);
+    assert!(html.len() < PANEL_BUDGET);
     assert_eq!(
         html.as_bytes(),
         include_bytes!("../src/conversation-panel.html")
@@ -3215,6 +3218,8 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v31.html"),
         json!("ui://oms/conversation-panel/v32.html"),
         json!("ui://oms/conversation-panel/v33.html"),
+        json!("ui://oms/conversation-panel/v34.html"),
+        json!("ui://oms/conversation-panel/v35.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);

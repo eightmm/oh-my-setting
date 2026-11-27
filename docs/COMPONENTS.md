@@ -1758,7 +1758,9 @@ The detailed operating contract is in the harness state-memory reference.
 
 `oms plan-from-spec` proposes tasks from an active `PROJECT.md`; it refuses a
 draft spec and does not alter the plan until the proposal is explicitly
-applied. `oms plan-run` claims and executes at most one ready task. `oms
+applied. `oms plan-run` claims and executes at most one ready task; each
+provider and landing call is bounded by `OMS_PEER_TIMEOUT` (default 20 minutes,
+the same as `peer-delegate`). `oms
 goal-drive` repeats within a cycle cap and acceptance command; the cap counts
 task attempts across resumes of one autopilot contract, bounds attempts rather
 than provider cost, and an exhausted contract is retired with `oms autopilot
