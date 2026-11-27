@@ -124,10 +124,31 @@ fn executable_fixture(repo: &Repo, name: &str) {
     repo.write(name, "#!/bin/sh\nprintf 'fixture answer\\n'\n");
     fs::set_permissions(repo.0.join(name), fs::Permissions::from_mode(0o755)).unwrap();
 }
+fn host_executable(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).find_map(|dir| {
+        let candidate = dir.join(name);
+        fs::metadata(&candidate)
+            .ok()
+            .filter(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .map(|_| candidate)
+    })
+}
 fn provider_isolated(name: &str, layout: &str, body: impl FnOnce()) {
     provider_isolated_with_env(name, layout, &[], body);
 }
+fn provider_isolated_without_host_providers(name: &str, layout: &str, body: impl FnOnce()) {
+    provider_isolated_inner(name, layout, &[], true, body);
+}
 fn provider_isolated_with_env(name: &str, layout: &str, env: &[(&str, &str)], body: impl FnOnce()) {
+    provider_isolated_inner(name, layout, env, false, body);
+}
+fn provider_isolated_inner(
+    name: &str,
+    layout: &str,
+    env: &[(&str, &str)],
+    strict_path: bool,
+    body: impl FnOnce(),
+) {
     if std::env::var(CHILD_ENV).as_deref() == Ok(name) {
         if std::env::var("PROVIDER_LAYOUT").as_deref() == Ok(layout) {
             body();
@@ -163,10 +184,22 @@ fn provider_isolated_with_env(name: &str, layout: &str, env: &[(&str, &str)], bo
     }
     fixture.write("bin/oms-agent-adapter-disabled", "inert\n");
     fs::create_dir(fixture.0.join("tmp")).unwrap();
-    let mut paths = vec![fixture.0.join("bin")];
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
+    let paths = if strict_path {
+        let sysbin = fixture.0.join("sysbin");
+        fs::create_dir(&sysbin).unwrap();
+        for tool in ["bash", "sh", "git", "env", "true", "false"] {
+            if let Some(target) = host_executable(tool) {
+                std::os::unix::fs::symlink(target, sysbin.join(tool)).unwrap();
+            }
+        }
+        vec![fixture.0.join("bin"), sysbin]
+    } else {
+        let mut paths = vec![fixture.0.join("bin")];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        paths
+    };
     let mut command = if layout == "private" {
         let mut command = Command::new("bash");
         command
@@ -4939,7 +4972,7 @@ fn unavailable_services_refuse() {
 }
 #[test]
 fn adaptive_review_bounds_calls_and_keeps_gate_requirements() {
-    provider_isolated(
+    provider_isolated_without_host_providers(
         "adaptive_review_bounds_calls_and_keeps_gate_requirements",
         "private",
         || {
