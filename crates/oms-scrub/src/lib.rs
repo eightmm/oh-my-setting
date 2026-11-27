@@ -100,6 +100,31 @@ pub const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_ENV_BYTES: usize = 1024 * 1024;
 pub const MAX_ENV_ENTRIES: usize = 4096;
 pub const MAX_HITS: usize = 100_000;
+pub const OUTBOUND_PAGE_BYTES: usize = 8192;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutboundWithheld;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PageSelector {
+    Offset(usize),
+    Number(usize),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PageError {
+    OutboundWithheld,
+    InvalidRange,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClearedPage<'a> {
+    pub text: &'a str,
+    pub offset: usize,
+    pub end: usize,
+    pub total_bytes: usize,
+    pub has_more: bool,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -530,6 +555,106 @@ fn find(input: &[u8], env: &[(&[u8], &[u8])], machine: bool) -> Result<Found, Er
 /// Returns metadata only. An empty vector means clean; an error requires withholding.
 pub fn scan(input: &[u8], env: &[(&[u8], &[u8])]) -> Result<Vec<Hit>, Error> {
     Ok(find(input, env, true)?.hits)
+}
+
+/// Checks `input` against `env` using the outbound scanner; any hit or scan error withholds.
+pub fn check_outbound_with_env(
+    input: &[u8],
+    env: &[(&[u8], &[u8])],
+) -> Result<(), OutboundWithheld> {
+    match scan(input, env) {
+        Ok(hits) if hits.is_empty() => Ok(()),
+        _ => Err(OutboundWithheld),
+    }
+}
+
+/// Checks `input` against the bounded process environment using the outbound scanner.
+pub fn check_outbound(input: &[u8]) -> Result<(), OutboundWithheld> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut pairs = Vec::new();
+    let mut total = 0usize;
+    for (key, value) in std::env::vars_os() {
+        total = total
+            .saturating_add(key.as_bytes().len())
+            .saturating_add(value.as_bytes().len());
+        if pairs.len() >= MAX_ENV_ENTRIES || total > MAX_ENV_BYTES {
+            return Err(OutboundWithheld);
+        }
+        pairs.push((key, value));
+    }
+    let refs: Vec<_> = pairs
+        .iter()
+        .map(|(k, v)| (k.as_bytes(), v.as_bytes()))
+        .collect();
+    check_outbound_with_env(input, &refs)
+}
+
+fn slice_cleared_page(body: &str, selector: PageSelector) -> Result<ClearedPage<'_>, PageError> {
+    let offset = match selector {
+        PageSelector::Offset(offset) => {
+            if offset >= body.len() || !body.is_char_boundary(offset) {
+                return Err(PageError::InvalidRange);
+            }
+            offset
+        }
+        PageSelector::Number(page) => {
+            let mut offset = 0;
+            for _ in 1..page {
+                if offset == body.len() {
+                    return Err(PageError::InvalidRange);
+                }
+                offset = body.floor_char_boundary((offset + OUTBOUND_PAGE_BYTES).min(body.len()));
+            }
+            if offset >= body.len() {
+                return Err(PageError::InvalidRange);
+            }
+            offset
+        }
+    };
+    let end = body.floor_char_boundary((offset + OUTBOUND_PAGE_BYTES).min(body.len()));
+    if end <= offset {
+        return Err(PageError::InvalidRange);
+    }
+    Ok(ClearedPage {
+        text: &body[offset..end],
+        offset,
+        end,
+        total_bytes: body.len(),
+        has_more: end < body.len(),
+    })
+}
+
+fn valid_page_request(body: &str, max_bytes: usize, selector: PageSelector) -> bool {
+    !body.is_empty()
+        && body.len() <= max_bytes
+        && !matches!(selector, PageSelector::Number(page) if !(1..=10000).contains(&page))
+}
+
+/// Scans the whole bounded body once before cutting a UTF-8 byte page.
+pub fn outbound_page_with_env<'a>(
+    body: &'a str,
+    max_bytes: usize,
+    selector: PageSelector,
+    env: &[(&[u8], &[u8])],
+) -> Result<ClearedPage<'a>, PageError> {
+    if !valid_page_request(body, max_bytes, selector) {
+        return Err(PageError::InvalidRange);
+    }
+    check_outbound_with_env(body.as_bytes(), env).map_err(|_| PageError::OutboundWithheld)?;
+    slice_cleared_page(body, selector)
+}
+
+/// Scans the whole bounded body against the process environment once before cutting a page.
+pub fn outbound_page<'a>(
+    body: &'a str,
+    max_bytes: usize,
+    selector: PageSelector,
+) -> Result<ClearedPage<'a>, PageError> {
+    if !valid_page_request(body, max_bytes, selector) {
+        return Err(PageError::InvalidRange);
+    }
+    check_outbound(body.as_bytes()).map_err(|_| PageError::OutboundWithheld)?;
+    slice_cleared_page(body, selector)
 }
 /// Scans the secret tier for output-digest's displayed lines. Errors require withholding.
 /// Multiline environment matches have a separate one-million covered-line

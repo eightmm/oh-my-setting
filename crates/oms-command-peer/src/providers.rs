@@ -2478,7 +2478,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                     .map_err(|e| Error::new(2, e))?;
             exec_argv = std::iter::once(wrapped_prog).chain(wrapped_args).collect();
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + crate::process::NATIVE_ADMISSION_BUDGET;
         let team = crate::process::TeamLocator::from_extra(&extra_env)?;
         let physical_task = crate::usage::env(&extra_env, "OMS_TASK_ID");
         let attempt = crate::process::PhysicalAttempt {

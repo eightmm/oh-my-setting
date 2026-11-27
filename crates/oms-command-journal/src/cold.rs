@@ -515,21 +515,53 @@ pub fn journal_storage(repo_root: &Path) -> StorageHealth {
     storage_health(repo_root, false, None)
 }
 
+/// State also reports older cold rows. The storage measurement may fail before
+/// replay, so preserve its independent fallback without repeating a successful replay.
+pub fn journal_storage_with_cold_count(
+    repo_root: &Path,
+    before_month: &str,
+) -> (StorageHealth, usize) {
+    let (health, manifest) = measure_storage_health(repo_root, false, None);
+    let manifest = manifest.or_else(|| {
+        replay_snapshot(&repo_root.join(".oms/work-journal"))
+            .ok()
+            .map(|(manifest, _, _)| manifest)
+    });
+    let count = manifest.map_or(0, |manifest| {
+        // Replay verifies that each segment contains exactly this count and month.
+        manifest
+            .segments
+            .into_iter()
+            .filter(|entry| entry.month.as_str() < before_month)
+            .map(|entry| entry.count)
+            .sum()
+    });
+    (health, count)
+}
+
 pub(crate) fn storage_health(
     repo_root: &Path,
     allow_incomplete: bool,
     verified: Option<&ColdManifest>,
 ) -> StorageHealth {
+    measure_storage_health(repo_root, allow_incomplete, verified).0
+}
+
+fn measure_storage_health(
+    repo_root: &Path,
+    allow_incomplete: bool,
+    verified: Option<&ColdManifest>,
+) -> (StorageHealth, Option<ColdManifest>) {
     let root = repo_root.join(".oms/work-journal");
     let mut health=StorageHealth{healthy:true,threshold_note:"Review prior-month sealing with `oms journal seal` (dry-run); run `oms journal seal --apply` to seal.".into(),..Default::default()};
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<Option<ColdManifest>, String> {
         health.present = match fs::symlink_metadata(&root) {
             Ok(_) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(e) => return Err(e.to_string()),
         };
         if !health.present {
-            return Ok(());
+            return Ok(None);
         }
         if !ensure_regular_dir_no_symlink(&root)?
             || !ensure_regular_dir_no_symlink(root.parent().ok_or("invalid journal root")?)?
@@ -620,12 +652,16 @@ pub(crate) fn storage_health(
         health.cold_segments = manifest.segments.len();
         health.cold_events = manifest.segments.iter().map(|s| s.count).sum();
         health.has_cold_segments = !manifest.segments.is_empty();
-        Ok(())
+        Ok(Some(manifest))
     })();
-    if let Err(error) = result {
-        health.healthy = false;
-        health.error = Some(error);
-    }
+    let observed = match result {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            health.healthy = false;
+            health.error = Some(error);
+            None
+        }
+    };
     for (name, exceeded) in [
         ("event_lines", health.event_lines >= LIVE_EVENT_LINE_LIMIT),
         ("events_bytes", health.events_bytes >= LIVE_FILE_BYTE_LIMIT),
@@ -635,7 +671,7 @@ pub(crate) fn storage_health(
             health.threshold_exceeded.push(name.into());
         }
     }
-    health
+    (health, observed)
 }
 
 pub fn seal_report_text(dry_run: bool, count: usize) -> String {

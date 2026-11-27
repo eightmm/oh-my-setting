@@ -75,7 +75,7 @@ fn options(command: &str) -> Vec<(&'static str, Option<&'static str>)> {
             ("max-total-tokens", Some("")),
             ("max-total-cost-microusd", Some("")),
         ],
-        "status" => vec![("attempt", Some("")), ("json", None)],
+        "status" | "cancel" => vec![("attempt", Some("")), ("json", None)],
         "wait" => vec![
             ("attempt", Some("")),
             ("timeout", Some("3600")),
@@ -83,7 +83,7 @@ fn options(command: &str) -> Vec<(&'static str, Option<&'static str>)> {
             ("json", None),
         ],
         "attach" => vec![("attempt", Some("")), ("tail", Some("80"))],
-        "cancel" | "resume" | "_run-one" => vec![("attempt", Some(""))],
+        "resume" | "_run-one" => vec![("attempt", Some(""))],
         "reconcile" => vec![("apply", None), ("json", None)],
         "gc" => vec![
             ("older-than-days", Some("30")),

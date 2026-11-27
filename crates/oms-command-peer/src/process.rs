@@ -389,6 +389,8 @@ impl LaunchFence {
         Ok(())
     }
 }
+/// Wall-clock budget for native physical and Team admission and requalification.
+pub const NATIVE_ADMISSION_BUDGET: Duration = Duration::from_secs(10);
 /// Called at most once under the native parent's contract guards. A successful
 /// callback acknowledges one physical registration; guards end before execution.
 pub type RegisterPhysical<'a> =

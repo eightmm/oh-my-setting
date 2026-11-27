@@ -103,7 +103,7 @@ pub fn begin_interactive_with_executor(
         account_pinned: false,
         public_research: false,
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::process::NATIVE_ADMISSION_BUDGET;
     let physical = crate::process::PhysicalAttempt {
         state_root: &state,
         contract_repo: context.contract_repo,

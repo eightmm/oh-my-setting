@@ -780,13 +780,28 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut plan = crate::plan_delegate::BoundDelegate::prepare(&mut resolved, &repo, context)?;
     let args = &resolved;
     let interactive = args.has("interactive");
+    if args.has("expected-context-pack-sha256") && !args.has("context-pack") {
+        return fail("--expected-context-pack-sha256 requires --context-pack");
+    }
     let orientation = if args.has("context-pack") {
         Some(crate::context_pack::orientation(
             &args.path("context-pack", context.cwd),
+            args.has("expected-context-pack-sha256")
+                .then(|| args.get("expected-context-pack-sha256")),
         )?)
     } else {
         None
     };
+    if let Some(excerpt) = orientation.as_ref().and_then(|pack| pack.reviewed.as_ref()) {
+        plan.as_ref()
+            .ok_or_else(|| {
+                Error::new(
+                    2,
+                    "reviewed Lead context requires an issued canonical Plan binding",
+                )
+            })?
+            .check_context(excerpt)?;
+    }
     let mut target = Target::parse(args.required("to")?)?;
     peer::apply_account(args, std::slice::from_mut(&mut target))?;
     let question = peer::question(args, context)?;
