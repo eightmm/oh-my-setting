@@ -54,6 +54,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Agent harness work packets](AGENT-HARNESS-WORK-PACKETS.md) | Design-only AH-01–13: capability tiers, session adapter contract, conformance tests, guard and sandbox coverage, council seats and collaboration surfaces for arbitrary agents |
 | [Control and session contract](CONTROL-SESSION-CONTRACT.md) | Source-mapped identity, authority and per-operation capability contract for the four Main harnesses (issue #432) |
 | [Resident project implementation](RESIDENT-PROJECT-IMPLEMENTATION.md) | Design-only single-project resident flow: headless Main, typed contracts, recovery, adapter boundaries and PR-sized acceptance mapped to #619 |
+| [Host portfolio implementation](HOST-PORTFOLIO-IMPLEMENTATION.md) | Design handoff for one computer's independent project Mains: existing catalog reuse, aggregate reads, importance, shared UI, typed controls and staged admission tracked in #668 |
 | [Memory consolidation](MEMORY-CONSOLIDATION.md) | Proposed incremental Dreaming, evidence-linked recovery lessons, memory validity and existing-owner implementation packets |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
 | [Agreed GUI direction](CONTROL-SURFACE-UX.md) | Task/results-first screens, separate relationship views, interactive example and implementation acceptance |
