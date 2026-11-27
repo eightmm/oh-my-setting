@@ -1407,27 +1407,22 @@ fn mcp_servers_at(paths: &Paths, proc_root: Option<&Path>) -> Vec<Value> {
     let installed = row
         .as_ref()
         .and_then(|row| receipt::native_revision(row).map(str::to_owned));
-    // Servers dispatched from another install root belong to that install, not this one.
-    let servers = match row.as_ref().and_then(|row| receipt::owner(row).ok()) {
-        Some(owner) => servers
-            .into_iter()
-            .filter(|server| r::physical(&server.home).is_ok_and(|home| home == owner))
-            .collect(),
-        None => servers,
-    };
-    let Some(installed) = installed else {
-        if servers.is_empty() {
-            return vec![finding(SECTION, "ok", "0 running OMS MCP servers")];
-        }
+    // Servers dispatched from another install root belong to that install, not this one;
+    // without an owner and revision there is nothing host-independent to compare.
+    let (Some(owner), Some(installed)) = (
+        row.as_ref().and_then(|row| receipt::owner(row).ok()),
+        installed,
+    ) else {
         return vec![finding(
             SECTION,
             "info",
-            format!(
-                "{} running OMS MCP server(s); installed native revision unavailable",
-                servers.len()
-            ),
+            "running OMS MCP servers not compared; install receipt unavailable",
         )];
     };
+    let servers = servers
+        .into_iter()
+        .filter(|server| r::physical(&server.home).is_ok_and(|home| home == owner))
+        .collect::<Vec<_>>();
     let stale = servers
         .iter()
         .filter(|server| server.revision != installed)
