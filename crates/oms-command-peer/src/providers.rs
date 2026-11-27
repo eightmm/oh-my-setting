@@ -2342,18 +2342,39 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
     {
         return fail("provider does not support read access through this transport");
     }
+    let stall = streams_output(&route.provider)
+        .then_some(timeouts.stall)
+        .flatten()
+        .filter(|secs| *secs > 0)
+        .map(Duration::from_secs);
     let mut transport = transport(route, prompt.bytes(), cwd, write, timeouts.wall)?;
-    let stream = match output_mode {
-        OutputMode::Observed(_, Some(tap)) if route.provider == "claude" && !write => {
-            // Partial events precede `-p`; completion still comes from `result`.
-            transport.argv.iter().rposition(|a| a == "-p").map(|at| {
-                transport
-                    .argv
-                    .insert(at, "--include-partial-messages".into());
-                tap.clone()
-            })
+    let stream = if route.provider == "claude" {
+        match output_mode {
+            OutputMode::Observed(_, Some(tap)) if !write => {
+                // Partial events precede `-p`; completion still comes from `result`.
+                transport.argv.iter().rposition(|a| a == "-p").map(|at| {
+                    transport
+                        .argv
+                        .insert(at, "--include-partial-messages".into());
+                    tap.clone()
+                })
+            }
+            _ => {
+                if write
+                    && stall.is_some()
+                    && let Some(at) = transport.argv.iter().rposition(|a| a == "-p")
+                {
+                    // Write turns emit nothing during generation without partial events,
+                    // which would trip the stall check; result decoding ignores `stream_event`.
+                    transport
+                        .argv
+                        .insert(at, "--include-partial-messages".into());
+                }
+                None
+            }
         }
-        _ => None,
+    } else {
+        None
     };
     let team_protocol = if extra_env
         .iter()
@@ -2593,10 +2614,6 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
         let started = std::time::Instant::now();
         let direct = matches!(route.provider.as_str(), "codex" | "claude" | "antigravity")
             && exec_argv == transport.argv;
-        let stall = streams_output(&route.provider)
-            .then_some(timeouts.stall)
-            .flatten()
-            .map(Duration::from_secs);
         let mut invocation = Invocation {
             argv: exec_argv,
             cwd: cwd.to_owned(),
@@ -3274,6 +3291,51 @@ mod bridge_route_tests {
         );
         assert!(decode_bound_output("codex", codex_footer.as_bytes()).1);
         assert!(decode_bound_output("claude", claude_footer.as_bytes()).1);
+        let claude_partial_truncated = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"draft chunk\"}}}\n",
+        );
+        assert_eq!(
+            decode_output("claude", claude_partial_truncated.as_bytes()),
+            (String::new(), false)
+        );
+        assert_eq!(
+            decode_bound_output("claude", claude_partial_truncated.as_bytes()),
+            (String::new(), false)
+        );
+        let claude_partial_complete = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Inspecting \"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"a\\\":1}\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Inspecting files.\"},{\"type\":\"tool_use\",\"name\":\"Edit\",\"input\":{\"a\":1}}],\"stop_reason\":\"tool_use\"}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"ok\"}]}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"final \"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"final answer\"}],\"stop_reason\":\"end_turn\"}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"final answer\"}\n",
+        );
+        let claude_without_partials = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Inspecting files.\"},{\"type\":\"tool_use\",\"name\":\"Edit\",\"input\":{\"a\":1}}],\"stop_reason\":\"tool_use\"}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"ok\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"final answer\"}],\"stop_reason\":\"end_turn\"}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"final answer\"}\n",
+        );
+        assert_eq!(
+            decode_output("claude", claude_partial_complete.as_bytes()),
+            ("Inspecting files.\n\nfinal answer".into(), true)
+        );
+        assert_eq!(
+            decode_output("claude", claude_partial_complete.as_bytes()),
+            decode_output("claude", claude_without_partials.as_bytes())
+        );
+        assert_eq!(
+            decode_bound_output("claude", claude_partial_complete.as_bytes()),
+            decode_bound_output("claude", claude_without_partials.as_bytes())
+        );
         assert!(
             !decode_bound_output(
                 "codex",
@@ -4370,6 +4432,46 @@ mod bridge_route_tests {
                                 request.environment.contains(&(key.into(), value.into())),
                                 "{provider}"
                             );
+                        }
+                        if provider == "claude" {
+                            let stop = AtomicBool::new(false);
+                            let stall_capture = Capture::default();
+                            let stall_ctx = Context {
+                                cwd,
+                                source: repo,
+                                interrupted: &stop,
+                                executor: &stall_capture,
+                                heartbeat: None,
+                            };
+                            let mut stall_route = route.clone();
+                            execute_env_with_output(
+                                &mut stall_route,
+                                b"complete fixture".as_slice(),
+                                cwd,
+                                true,
+                                crate::peer::Timeouts {
+                                    wall: 86_400,
+                                    stall: Some(1_200),
+                                },
+                                repo,
+                                &[],
+                                OutputMode::Legacy,
+                                &stall_ctx,
+                            )
+                            .unwrap();
+                            let stall_calls = stall_capture.0.lock().unwrap();
+                            let mut expected_with_partial = expected.clone();
+                            let pos = expected_with_partial
+                                .iter()
+                                .rposition(|a| a == "-p")
+                                .unwrap();
+                            expected_with_partial.insert(pos, "--include-partial-messages".into());
+                            assert_eq!(
+                                stall_calls[0].argv[1..],
+                                expected_with_partial,
+                                "claude write with stall active exact={exact}"
+                            );
+                            assert_eq!(stall_calls[0].stall, Some(Duration::from_secs(1_200)));
                         }
                     }
                 }
