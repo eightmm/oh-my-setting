@@ -1,7 +1,7 @@
 //! Bounded descriptor-relative state access, layered on the shared byte writer.
 use crate::json::{self, Value, number, object};
 use crate::{Result, error, require};
-use oms_safe_fs::{ByteReadOptions, MutationError, MutationOptions, Root};
+use oms_safe_fs::{ByteError, ByteReadOptions, MutationError, MutationOptions, Root};
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -82,6 +82,11 @@ pub struct FileSnapshot {
 }
 fn io(e: impl std::fmt::Display) -> crate::Error {
     error(format!("plan storage: {e}"))
+}
+impl From<ByteError> for crate::Error {
+    fn from(e: ByteError) -> Self {
+        error(format!("plan read: {e:?}"))
+    }
 }
 fn flags() -> OFlags {
     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
@@ -329,27 +334,18 @@ impl Store {
             };
         };
         self.trusted(&before, false, false)?;
-        let fd = fs::openat(
-            a.parent(),
-            &a.leaf,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io)?;
-        let opened = fs::fstat(&fd).map_err(io)?;
-        self.trusted(&opened, false, false)?;
-        require(stable(&before, &opened), "plan object changed during open")?;
-        let raw = self
-            .root
-            .read_no_follow(
-                path,
-                ByteReadOptions {
-                    missing_ok: false,
-                    max_bytes: limit,
-                },
-            )
-            .map_err(|e| error(format!("plan read: {e:?}")))?;
-        let after = fs::fstat(&fd).map_err(io)?;
+        let (raw, after) = self.root.read_no_follow_checked(
+            path,
+            ByteReadOptions {
+                missing_ok: false,
+                max_bytes: limit,
+            },
+            |opened| {
+                self.trusted(opened, false, false)?;
+                require(stable(&before, opened), "plan object changed during open")
+            },
+        )?;
+        let after = after.ok_or_else(|| error("plan object disappeared"))?;
         let named = a.stat()?.ok_or_else(|| error("plan object disappeared"))?;
         require(
             stable(&before, &after) && stable(&after, &named),
