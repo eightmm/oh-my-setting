@@ -1203,6 +1203,63 @@ impl PeerProcessExecutor for CollabServices<'_> {
     }
 }
 
+fn peer_activity_heartbeat(
+    heartbeat: Option<&oms_command_peer::process::AttemptHeartbeat>,
+) -> Option<ActivityHeartbeat> {
+    heartbeat.map(|beat| ActivityHeartbeat {
+        repo: beat.repo.clone(),
+        attempt: beat.attempt.clone(),
+        actor: "peer".into(),
+    })
+}
+
+fn peer_job<'a>(
+    argv: Vec<OsString>,
+    input: &'a mut Invocation,
+    heartbeat: Option<&'a ActivityHeartbeat>,
+    plan_services: Option<&'a dyn oms_command_plan::Services>,
+    #[cfg(target_os = "linux")] dispatch_observer: Option<protected_dispatch::Observer<'a>>,
+) -> Job<'a> {
+    Job {
+        stdin: input.input.take(),
+        environment: std::mem::take(&mut input.environment),
+        remove_environment: std::mem::take(&mut input.remove_environment),
+        merged: input.merge,
+        heartbeat,
+        physical_call: input.physical_call.take(),
+        launch_fence: input.launch_fence.as_ref(),
+        plan_services,
+        #[cfg(target_os = "linux")]
+        dispatch_observer,
+        ..Job::new(argv, &input.cwd, input.timeout, input.max_bytes)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn peer_supervised_job<'a>(
+    worker: Vec<OsString>,
+    cwd: &'a Path,
+    input: &'a mut Invocation,
+    payload: Vec<u8>,
+    heartbeat: Option<&'a ActivityHeartbeat>,
+    plan_services: Option<&'a dyn oms_command_plan::Services>,
+) -> Job<'a> {
+    Job {
+        stdin: Some(payload),
+        heartbeat,
+        physical_call: input.physical_call.take(),
+        launch_fence: input.launch_fence.as_ref(),
+        plan_services,
+        acknowledge_start: true,
+        ..Job::new(
+            worker,
+            cwd,
+            input.timeout + Duration::from_secs(30),
+            input.max_bytes.saturating_mul(4).saturating_add(256 * 1024),
+        )
+    }
+}
+
 impl CollabServices<'_> {
     fn execute_peer(
         &self,
@@ -1242,21 +1299,18 @@ impl CollabServices<'_> {
             }
             return self.execute_peer_supervised(input, argv, interrupted);
         }
+        let heartbeat = peer_activity_heartbeat(input.heartbeat.as_ref());
         let (done, _) = supervise(
-            Job {
-                stdin: input.input,
-                environment: input.environment,
-                remove_environment: input.remove_environment,
-                merged: input.merge,
-                physical_call: input.physical_call,
-                launch_fence: input.launch_fence.as_ref(),
-                plan_services: Some(&self.control),
+            peer_job(
+                argv,
+                &mut input,
+                heartbeat.as_ref(),
+                Some(&self.control),
                 #[cfg(target_os = "linux")]
-                dispatch_observer: observer
+                observer
                     .as_mut()
                     .map(protected_dispatch::Observer::Provider),
-                ..Job::new(argv, &input.cwd, input.timeout, input.max_bytes)
-            },
+            ),
             interrupted,
         )
         .map_err(|e| fail(if e == "interrupted" { 130 } else { 125 }, e))?;
@@ -1288,7 +1342,7 @@ impl CollabServices<'_> {
     #[cfg(target_os = "linux")]
     fn execute_peer_supervised(
         &self,
-        input: Invocation,
+        mut input: Invocation,
         argv: Vec<OsString>,
         interrupted: &AtomicBool,
     ) -> oms_command_peer::Result<Completed> {
@@ -1316,27 +1370,23 @@ impl CollabServices<'_> {
             return Err(fail("invalid isolated provider request".into()));
         }
         let cwd = std::fs::canonicalize(&input.cwd).map_err(|e| fail(e.to_string()))?;
+        let heartbeat = peer_activity_heartbeat(input.heartbeat.as_ref());
         let mut inner = Spawn::new(Scope::WholeTree, argv, input.timeout, input.max_bytes);
         inner.cwd = Some(&cwd);
-        inner.stdin = input.input.unwrap_or_default();
-        inner.environment = input.environment;
-        inner.remove_environment = input.remove_environment;
+        inner.stdin = input.input.take().unwrap_or_default();
+        inner.environment = std::mem::take(&mut input.environment);
+        inner.remove_environment = std::mem::take(&mut input.remove_environment);
         inner.merged = input.merge;
         let payload = supervise_worker_request(&inner, true).map_err(fail)?;
         let (done, _) = supervise(
-            Job {
-                stdin: Some(payload),
-                physical_call: input.physical_call,
-                launch_fence: input.launch_fence.as_ref(),
-                plan_services: Some(&self.control),
-                acknowledge_start: true,
-                ..Job::new(
-                    self.control.supervise_worker().to_vec(),
-                    &cwd,
-                    input.timeout + Duration::from_secs(30),
-                    input.max_bytes.saturating_mul(4).saturating_add(256 * 1024),
-                )
-            },
+            peer_supervised_job(
+                self.control.supervise_worker().to_vec(),
+                &cwd,
+                &mut input,
+                payload,
+                heartbeat.as_ref(),
+                Some(&self.control),
+            ),
             interrupted,
         )
         .map_err(fail)?;
@@ -3974,9 +4024,84 @@ mod tests {
 
     #[test]
     fn peer_process_executor_maps_stops_like_the_native_executor() {
+        use oms_command_peer::process::AttemptHeartbeat;
         let stop = Arc::new(AtomicBool::new(false));
         let host = CollabServices::new(&stop, source()).expect("source is available");
         let dir = Fixture::new();
+
+        let make_invocation = |heartbeat: Option<AttemptHeartbeat>| Invocation {
+            argv: sh("true"),
+            cwd: dir.path().to_owned(),
+            input: None,
+            environment: Vec::new(),
+            remove_environment: Vec::new(),
+            timeout: Duration::from_secs(5),
+            max_bytes: 1024,
+            merge: false,
+            launch_fence: None,
+            physical_call: None,
+            heartbeat,
+        };
+        let mut unguarded = make_invocation(None);
+        assert!(peer_activity_heartbeat(unguarded.heartbeat.as_ref()).is_none());
+        let unguarded_job = peer_job(
+            sh("true"),
+            &mut unguarded,
+            None,
+            None,
+            #[cfg(target_os = "linux")]
+            None,
+        );
+        assert!(unguarded_job.heartbeat.is_none());
+
+        let expected = AttemptHeartbeat {
+            repo: dir.path().to_owned(),
+            attempt: "att_peer_fixture".into(),
+        };
+        let mut guarded = make_invocation(Some(expected.clone()));
+        let activity = peer_activity_heartbeat(guarded.heartbeat.as_ref());
+        let mapped = activity
+            .as_ref()
+            .expect("attempt heartbeat maps to activity");
+        assert_eq!(mapped.repo, dir.path());
+        assert_eq!(mapped.attempt, "att_peer_fixture");
+        assert_eq!(mapped.actor, "peer");
+        let guarded_job = peer_job(
+            sh("true"),
+            &mut guarded,
+            activity.as_ref(),
+            None,
+            #[cfg(target_os = "linux")]
+            None,
+        );
+        assert_eq!(
+            guarded_job
+                .heartbeat
+                .map(|b| (&b.repo, b.attempt.as_str(), b.actor.as_str())),
+            Some((&dir.path().to_owned(), "att_peer_fixture", "peer"))
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let mut supervised = make_invocation(Some(expected.clone()));
+            let supervised_job = peer_supervised_job(
+                sh("true"),
+                dir.path(),
+                &mut supervised,
+                Vec::new(),
+                activity.as_ref(),
+                None,
+            );
+            assert_eq!(
+                supervised_job
+                    .heartbeat
+                    .map(|b| (&b.repo, b.attempt.as_str(), b.actor.as_str())),
+                Some((&dir.path().to_owned(), "att_peer_fixture", "peer"))
+            );
+        }
+        let beat_done = PeerProcessExecutor::execute(&host, make_invocation(Some(expected)), &stop)
+            .expect("runs with heartbeat");
+        assert_eq!((beat_done.code, beat_done.complete), (0, true));
+
         let invoke = |script: &str, timeout: Duration| {
             PeerProcessExecutor::execute(
                 &host,
@@ -3997,6 +4122,7 @@ mod tests {
                         ))
                         .unwrap(),
                     ),
+                    heartbeat: None,
                 },
                 &stop,
             )

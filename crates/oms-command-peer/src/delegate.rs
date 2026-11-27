@@ -481,73 +481,6 @@ impl Worktree {
     }
 }
 
-pub(crate) const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-
-pub(crate) struct HeartbeatGuard {
-    stop: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-    interrupted: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    worker: Option<std::thread::JoinHandle<()>>,
-}
-impl HeartbeatGuard {
-    pub(crate) fn start(repo: &Path, attempt: &str, interval: std::time::Duration) -> Self {
-        let repo = repo.to_path_buf();
-        let attempt = attempt.to_owned();
-        let stop = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let signal = std::sync::Arc::clone(&stop);
-        let cancel = std::sync::Arc::clone(&interrupted);
-        let worker = std::thread::Builder::new()
-            .name("oms-peer-heartbeat".into())
-            .spawn(move || {
-                let (lock, cvar) = &*signal;
-                let args: [OsString; 5] = [
-                    "heartbeat".into(),
-                    "--attempt".into(),
-                    attempt.into(),
-                    "--actor".into(),
-                    "peer".into(),
-                ];
-                loop {
-                    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    let (guard, _) = cvar
-                        .wait_timeout_while(guard, interval, |stopped| !*stopped)
-                        .unwrap_or_else(|e| e.into_inner());
-                    if *guard {
-                        break;
-                    }
-                    drop(guard);
-                    let _ = oms_command_operations::run(
-                        oms_command_operations::App::Events,
-                        &args,
-                        &repo,
-                        &cancel,
-                    );
-                }
-            })
-            .ok();
-        Self {
-            stop,
-            interrupted,
-            worker,
-        }
-    }
-}
-impl Drop for HeartbeatGuard {
-    fn drop(&mut self) {
-        self.interrupted
-            .store(true, std::sync::atomic::Ordering::Release);
-        let (lock, cvar) = &*self.stop;
-        {
-            let mut stopped = lock.lock().unwrap_or_else(|e| e.into_inner());
-            *stopped = true;
-        }
-        cvar.notify_all();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
 pub(crate) fn transition(
     repo: &Path,
     attempt: &str,
@@ -1163,7 +1096,11 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     )?;
     transition(&repo, &attempt, "starting", obj([]), context)?;
     transition(&repo, &attempt, "working", obj([]), context)?;
-    let heartbeat = HeartbeatGuard::start(&repo, &attempt, HEARTBEAT_INTERVAL);
+    let heartbeat = process::AttemptHeartbeat {
+        repo: repo.clone(),
+        attempt: attempt.clone(),
+    };
+    let live_context = context.with_heartbeat(Some(&heartbeat));
     let mut code = 1;
     let mut body = header.into_bytes();
     let mut captured = Vec::new();
@@ -1229,7 +1166,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                     timeout,
                     &repo,
                     &extra_env,
-                    context,
+                    &live_context,
                 );
                 let res = match res {
                     Ok(r) => r,
@@ -1302,7 +1239,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                         peer::timeout(args, "peer-delegate")?,
                         &repo,
                         &extra_env,
-                        context,
+                        &live_context,
                     )
                 });
             let result = match result {
@@ -1403,7 +1340,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             && let Some(command) = &command
         {
             transition(&repo, &attempt, "verifying", obj([]), context)?;
-            let checked = verify_env(command, &worktree.path, &extra_env, context)?;
+            let checked = verify_env(command, &worktree.path, &extra_env, &live_context)?;
             code = checked.code;
             if !checked.complete && code == 0 {
                 code = 1;
@@ -1490,7 +1427,6 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         // An overflow may have moved the run off the account bound at start.
         refs.set("panel_account", V::from(providers::panel_account(&route)));
     }
-    drop(heartbeat);
     transition(&repo, &attempt, state, refs, context)?;
     body.extend_from_slice(format!("\n## Exit\n\n{code}\n\n- outcome: {}\n- verification: {verified}\n- admission: pending\n",if no_change{"no_change"}else if code==0{"review"}else{"failed"}).as_bytes());
     let artifact_sha256 = storage::hash(&body);
@@ -1732,6 +1668,7 @@ mod tests {
             source: &repo,
             interrupted: &stop,
             executor: &native,
+            heartbeat: None,
         };
         let tree = Worktree::create(&repo, "HEAD", &context).unwrap();
         let wrapper = tree.path.parent().unwrap().to_owned();
@@ -1757,9 +1694,55 @@ mod tests {
 
     #[test]
     fn remove_leaves_wrapper_with_unexpected_entries_untouched() {
+        const INNER: &str = "OMS_TEST_DELEGATE_EXECUTOR_INNER";
+        if std::env::var_os(INNER).is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let sandbox =
+                std::env::temp_dir().join(format!("oms-peer-fake-env-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&sandbox);
+            let bin = sandbox.join("bin");
+            let home = sandbox.join("home");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(&home).unwrap();
+            let fake_codex = bin.join("codex");
+            std::fs::write(&fake_codex, b"#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            )))
+            .unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "delegate::tests::remove_leaves_wrapper_with_unexpected_entries_untouched",
+                    "--nocapture",
+                ])
+                .env(INNER, "1")
+                .env("PATH", path)
+                .env("HOME", &home)
+                .env_remove("XDG_CONFIG_HOME")
+                .env_remove("OMS_HARNESS_CHILD")
+                .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
+                .env_remove("OMS_ATTEMPT_ID")
+                .env_remove("OMS_STATE_REPO")
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&sandbox);
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(out.status.success(), "{combined}");
+            assert!(combined.contains("1 passed;"), "{combined}");
+            return;
+        }
+
         struct LockProbingExecutor {
             repo: PathBuf,
             saw_busy_during_worktree_add: AtomicBool,
+            mutate_tracked: AtomicBool,
+            invocations: std::sync::Mutex<Vec<(String, Option<process::AttemptHeartbeat>)>>,
         }
         impl process::Executor for LockProbingExecutor {
             fn execute(
@@ -1767,6 +1750,17 @@ mod tests {
                 request: process::Invocation,
                 interrupted: &AtomicBool,
             ) -> Result<process::Completed> {
+                let prog = request
+                    .argv
+                    .first()
+                    .and_then(|a| Path::new(a).file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_owned();
+                self.invocations
+                    .lock()
+                    .unwrap()
+                    .push((prog.clone(), request.heartbeat.clone()));
                 let words: Vec<String> = request
                     .argv
                     .iter()
@@ -1787,6 +1781,23 @@ mod tests {
                     self.saw_busy_during_worktree_add
                         .store(true, std::sync::atomic::Ordering::Release);
                 }
+                if prog == "codex" {
+                    if self
+                        .mutate_tracked
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        std::fs::write(request.cwd.join("victim.txt"), b"updated\n").unwrap();
+                    }
+                    return Ok(process::Completed {
+                        code: 0,
+                        stdout: b"Answer:\nok\nTradeoffs:\nnone\nEvidence:\nvictim.txt\nRisks:\nnone\nRecommendation:\nship\nVerification:\ntrue\n".to_vec(),
+                        stderr: Vec::new(),
+                        complete: true,
+                        cleanup_complete: Some(true),
+                        owned_cleanup: None,
+                        elapsed: std::time::Duration::from_millis(1),
+                    });
+                }
                 process::Native.execute(request, interrupted)
             }
         }
@@ -1796,12 +1807,15 @@ mod tests {
         let probing = LockProbingExecutor {
             repo: repo.clone(),
             saw_busy_during_worktree_add: AtomicBool::new(false),
+            mutate_tracked: AtomicBool::new(false),
+            invocations: std::sync::Mutex::new(Vec::new()),
         };
         let context = Context {
             cwd: &repo,
             source: &repo,
             interrupted: &stop,
             executor: &probing,
+            heartbeat: None,
         };
         let tree = Worktree::create(&repo, "HEAD", &context).unwrap();
         assert!(
@@ -1825,6 +1839,117 @@ mod tests {
         sym_tree.remove(&context).unwrap();
         assert_eq!(std::fs::read(&victim).unwrap(), b"preserve");
         assert!(sym_wrapper.join("owner.json").is_symlink());
+
+        // Live attempts carry AttemptHeartbeat on provider and verify invocations, never on git.
+        git(&repo, &["add", "victim.txt"]);
+        git(&repo, &["commit", "-qm", "track victim"]);
+        probing.invocations.lock().unwrap().clear();
+        probing
+            .mutate_tracked
+            .store(true, std::sync::atomic::Ordering::Release);
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let run_context = Context {
+            cwd: &repo,
+            source,
+            interrupted: &stop,
+            executor: &probing,
+            heartbeat: None,
+        };
+        let delegate_args = peer::parse(&[
+            "--repo".into(),
+            repo.as_os_str().to_owned(),
+            "--to".into(),
+            "codex".into(),
+            "--model".into(),
+            "fixture".into(),
+            "--no-task".into(),
+            "--no-memory".into(),
+            "--no-ml-context".into(),
+            "--no-graph-context".into(),
+            "--verify".into(),
+            "true".into(),
+            "Update victim.txt".into(),
+        ])
+        .unwrap();
+        let (code, _, err) = run(&delegate_args, &run_context).unwrap();
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let (_, attempts) = oms_command_operations::load_projection(&repo).unwrap();
+        let delegate_attempt = attempts
+            .iter()
+            .find(|row| row.get("tool").text() == Some("peer-delegate"))
+            .and_then(|row| row.get("attempt_id").text())
+            .unwrap()
+            .to_owned();
+        let expected_delegate = process::AttemptHeartbeat {
+            repo: repo.clone(),
+            attempt: delegate_attempt,
+        };
+        {
+            let calls = probing.invocations.lock().unwrap();
+            let git_count = calls.iter().filter(|(prog, _)| prog == "git").count();
+            assert!(git_count > 0);
+            assert!(
+                calls
+                    .iter()
+                    .filter(|(prog, _)| prog == "git")
+                    .all(|(_, beat)| beat.is_none())
+            );
+            let non_git: Vec<_> = calls.iter().filter(|(prog, _)| prog != "git").collect();
+            assert_eq!(
+                non_git,
+                vec![
+                    &("codex".to_owned(), Some(expected_delegate.clone())),
+                    &("bash".to_owned(), Some(expected_delegate)),
+                ]
+            );
+        }
+
+        probing.invocations.lock().unwrap().clear();
+        probing
+            .mutate_tracked
+            .store(false, std::sync::atomic::Ordering::Release);
+        let (ask_code, _, ask_err) = peer::run(
+            "peer-ask",
+            &[
+                "--repo".into(),
+                repo.as_os_str().to_owned(),
+                "--providers".into(),
+                "codex".into(),
+                "--model".into(),
+                "fixture".into(),
+                "--no-task".into(),
+                "--no-memory".into(),
+                "--no-ml-context".into(),
+                "--no-graph-context".into(),
+                "Summarize status".into(),
+            ],
+            &run_context,
+        )
+        .unwrap();
+        assert_eq!(ask_code, 0, "{}", String::from_utf8_lossy(&ask_err));
+        let (_, attempts) = oms_command_operations::load_projection(&repo).unwrap();
+        let ask_attempt = attempts
+            .iter()
+            .find(|row| row.get("tool").text() == Some("peer-ask"))
+            .and_then(|row| row.get("attempt_id").text())
+            .unwrap()
+            .to_owned();
+        let expected_ask = process::AttemptHeartbeat {
+            repo: repo.clone(),
+            attempt: ask_attempt,
+        };
+        {
+            let calls = probing.invocations.lock().unwrap();
+            assert!(
+                calls
+                    .iter()
+                    .filter(|(prog, _)| prog == "git")
+                    .all(|(_, beat)| beat.is_none())
+            );
+            let non_git: Vec<_> = calls.iter().filter(|(prog, _)| prog != "git").collect();
+            assert_eq!(non_git, vec![&("codex".to_owned(), Some(expected_ask))]);
+        }
+
         let _ = std::fs::remove_dir_all(&repo);
     }
 
@@ -2012,119 +2137,5 @@ mod tests {
                 "help mentions unknown option --{name}"
             );
         }
-    }
-
-    #[test]
-    fn heartbeat_guard_keeps_attempt_working_and_stops_on_drop() {
-        if crate::safety::child() {
-            let out = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "delegate::tests::heartbeat_guard_keeps_attempt_working_and_stops_on_drop",
-                    "--nocapture",
-                ])
-                .env_remove("OMS_HARNESS_CHILD")
-                .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
-                .output()
-                .unwrap();
-            let combined = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            assert!(out.status.success(), "{combined}");
-            assert!(combined.contains("1 passed;"), "{combined}");
-            return;
-        }
-        let repo = repo("heartbeat-guard");
-        let stop = AtomicBool::new(false);
-        let native = process::Native;
-        let context = Context {
-            cwd: &repo,
-            source: &repo,
-            interrupted: &stop,
-            executor: &native,
-        };
-        let start_working = || {
-            let id = oms_command_operations::create_attempt(
-                &repo,
-                &oms_command_operations::StartRequest {
-                    provider: "codex".into(),
-                    tool: "peer-delegate".into(),
-                    ..Default::default()
-                },
-                &stop,
-            )
-            .unwrap();
-            transition(&repo, &id, "starting", obj([]), &context).unwrap();
-            transition(&repo, &id, "working", obj([]), &context).unwrap();
-            id
-        };
-        let attempt = start_working();
-        let unguarded = start_working();
-
-        let guard = HeartbeatGuard::start(&repo, &attempt, std::time::Duration::from_millis(100));
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        // Avoid whole-second truncation edges in last_heartbeat_at when stale-seconds is 1.
-        for _ in 0..5 {
-            let subsec_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_millis();
-            if (350..=750).contains(&subsec_ms) {
-                break;
-            }
-            let wait = if subsec_ms < 350 {
-                350 - subsec_ms
-            } else {
-                1350 - subsec_ms
-            };
-            std::thread::sleep(std::time::Duration::from_millis(u64::from(wait)));
-        }
-        let reconcile = |repo: &Path| {
-            let (code, _, err) = oms_command_operations::run(
-                oms_command_operations::App::Events,
-                &[
-                    "reconcile".into(),
-                    "--stale-seconds".into(),
-                    "1".into(),
-                    "--apply".into(),
-                ],
-                repo,
-                &stop,
-            );
-            assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
-        };
-        let projected = |repo: &Path, id: &str| {
-            let (_, attempts) = oms_command_operations::load_projection(repo).unwrap();
-            attempts
-                .into_iter()
-                .find(|row| row.get("attempt_id").text() == Some(id))
-                .unwrap()
-        };
-        reconcile(&repo);
-        assert_eq!(
-            projected(&repo, &attempt).get("state").text(),
-            Some("working")
-        );
-        let stale = projected(&repo, &unguarded);
-        assert_eq!(stale.get("state").text(), Some("blocked"));
-        assert_eq!(stale.get("reason_code").text(), Some("heartbeat_expired"));
-
-        drop(guard);
-        let dropped_at = std::time::Instant::now();
-        drop(HeartbeatGuard::start(
-            &repo,
-            &attempt,
-            std::time::Duration::from_secs(60),
-        ));
-        assert!(dropped_at.elapsed() < std::time::Duration::from_secs(1));
-
-        std::thread::sleep(std::time::Duration::from_millis(1200));
-        reconcile(&repo);
-        let after = projected(&repo, &attempt);
-        assert_eq!(after.get("state").text(), Some("blocked"));
-        assert_eq!(after.get("reason_code").text(), Some("heartbeat_expired"));
-        let _ = std::fs::remove_dir_all(&repo);
     }
 }

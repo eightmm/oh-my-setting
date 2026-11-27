@@ -1053,9 +1053,11 @@ fn call_routed(
     if args.has("team-requests") && live_attempt.is_none() {
         return fail("Team request lead lifecycle enrollment unavailable");
     }
-    let heartbeat = live_attempt.as_deref().map(|id| {
-        crate::delegate::HeartbeatGuard::start(repo, id, crate::delegate::HEARTBEAT_INTERVAL)
+    let heartbeat = live_attempt.as_ref().map(|id| process::AttemptHeartbeat {
+        repo: repo.to_owned(),
+        attempt: id.clone(),
     });
+    let live_context = context.with_heartbeat(heartbeat.as_ref());
     let mut usage_env = crate::usage::operation_env(&[])?;
     let cargo_guard = private
         .as_ref()
@@ -1120,7 +1122,7 @@ fn call_routed(
         } else {
             output_mode(args)
         },
-        context,
+        &live_context,
     );
     drop(cargo_guard);
     let mut result = match result {
@@ -1136,7 +1138,6 @@ fn call_routed(
         },
     };
     if let Some(id) = live_attempt {
-        drop(heartbeat);
         // Re-recorded because a capacity overflow can move the call to another account.
         let account = providers::panel_account(&route);
         let retry_transition = |state: &str| {
@@ -1164,6 +1165,7 @@ fn call_routed(
                             source: context.source,
                             interrupted: &settling,
                             executor: context.executor,
+                            heartbeat: None,
                         };
                         let result = crate::delegate::transition(repo, &id, state, refs, &bounded);
                         finished.store(true, Ordering::Release);
