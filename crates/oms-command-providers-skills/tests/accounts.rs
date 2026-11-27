@@ -2352,6 +2352,46 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
             fs::write(&reg_path, serde_json::to_vec(&inrepo_doc).unwrap()).unwrap();
             refused(root, &["--login", "codex:inrepo"], "inside a repository");
             fs::write(&reg_path, &reg_orig).unwrap();
+
+            // Re-homed accounts keep historical receipt rows for the same id and stay sign-in eligible.
+            let work_codex_v2 = root.join("homes/codex-work-v2");
+            ok(
+                root,
+                &[
+                    "--account",
+                    "codex:work",
+                    "--home",
+                    work_codex_v2.to_str().unwrap(),
+                ],
+            );
+            let links_after_rehome = rj(&links_path);
+            let rehomed_rows: Vec<&Value> = links_after_rehome
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["id"] == "work")
+                .collect();
+            assert_eq!(rehomed_rows.len(), 2, "{links_after_rehome}");
+            fs::remove_file(root.join("home/login-trace.log")).unwrap();
+            let v2_canon = fs::canonicalize(&work_codex_v2).unwrap();
+            let rehomed_login = ok(root, &["--login", "codex:work"]);
+            assert!(
+                rehomed_login.contains("codex:work: signed in"),
+                "{rehomed_login}"
+            );
+            let rehomed_trace = fs::read_to_string(root.join("home/login-trace.log")).unwrap();
+            let rehomed_lines: Vec<&str> = rehomed_trace.lines().collect();
+            assert!(
+                rehomed_lines
+                    .contains(&format!("codex-login|login|{}||{cwd}", v2_canon.display()).as_str()),
+                "{rehomed_trace}"
+            );
+            assert!(
+                rehomed_lines.contains(
+                    &format!("codex-status|login status|{}||{cwd}", v2_canon.display()).as_str()
+                ),
+                "{rehomed_trace}"
+            );
         },
     );
 }

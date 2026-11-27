@@ -589,6 +589,157 @@ fn find_registered_account(
         })
 }
 
+fn validate_account_placement_and_uniqueness(
+    registries: &ValidatedRegistries,
+    spec: &ProviderAccountSpec,
+    id: &str,
+    raw_path: &Path,
+    main: &Path,
+    check_existing_private: bool,
+    seed_main_check: bool,
+) -> Result<PathBuf> {
+    if check_existing_private {
+        private_home(raw_path)?;
+    }
+    let path = physical(raw_path)?;
+    home_placement(&path, Some(main))?;
+    for (owner, settings) in registries.value["providers"]
+        .as_object()
+        .ok_or_else(|| error("invalid providers"))?
+    {
+        for row in settings["accounts"]
+            .as_array()
+            .ok_or_else(|| error("invalid provider accounts"))?
+        {
+            if !(owner == spec.provider && row["id"] == id)
+                && row["home"]
+                    .as_str()
+                    .is_some_and(|s| physical(Path::new(s)).is_ok_and(|p| p == path))
+            {
+                return Err(error("duplicate provider account id or canonical home"));
+            }
+        }
+    }
+    let claude_accounts = registries.claude_doc["accounts"]
+        .as_array()
+        .ok_or_else(|| error("invalid Claude registry"))?;
+    for row in claude_accounts {
+        if !(spec.claude && row["id"] == id)
+            && row["home"]
+                .as_str()
+                .is_some_and(|s| physical(Path::new(s)).is_ok_and(|p| p == path))
+        {
+            return Err(error(
+                "canonical home is already registered by another provider",
+            ));
+        }
+    }
+    for (owner_prov, file, nested) in [
+        ("codex", "codex-account-links.json", false),
+        ("pi", "pi-account-links.json", false),
+        ("claude", "provider-account-effects.json", true),
+    ] {
+        let raw_receipt = optional(&registries.config.join(file))?;
+        if raw_receipt.is_empty() {
+            continue;
+        }
+        let parsed = json(&raw_receipt)?;
+        let list = if nested {
+            parsed["accounts"].as_array()
+        } else {
+            parsed.as_array()
+        }
+        .ok_or_else(|| error("invalid provider account receipt"))?;
+        for row in list {
+            if !(owner_prov == spec.provider && row["id"] == id)
+                && let Some(canon) = row["home"]
+                    .as_str()
+                    .and_then(|s| physical(Path::new(s)).ok())
+            {
+                if seed_main_check && owner_prov == spec.provider && canon == *main {
+                    return Err(error("duplicate provider account id or canonical home"));
+                }
+                if canon == path || (seed_main_check && canon == *main) {
+                    return Err(error(
+                        "canonical home is already registered by another provider",
+                    ));
+                }
+            }
+        }
+    }
+    for canon in &registries.agy_homes {
+        if *canon == path || (seed_main_check && *canon == *main) {
+            return Err(error(
+                "canonical home is already registered by another provider",
+            ));
+        }
+    }
+    Ok(path)
+}
+
+fn validate_and_open_account_home(
+    spec: &ProviderAccountSpec,
+    id: &str,
+    raw_path: &Path,
+    canon: &Path,
+    rows: &[Value],
+    create_if_missing: bool,
+) -> Result<(std::os::fd::OwnedFd, Option<Value>)> {
+    for row in rows {
+        if row["id"] == id
+            || row["home"]
+                .as_str()
+                .and_then(|s| physical(Path::new(s)).ok())
+                .as_deref()
+                == Some(canon)
+        {
+            validate_receipt_links(row, spec.link_names, spec.claude)?;
+        }
+    }
+    let owner = rows
+        .iter()
+        .find(|r| {
+            r["id"] == id
+                && (r["home"] == canon.to_string_lossy().as_ref()
+                    || r["home"]
+                        .as_str()
+                        .and_then(|s| physical(Path::new(s)).ok())
+                        .as_deref()
+                        == Some(canon))
+        })
+        .cloned();
+    if create_if_missing {
+        let parent = canon
+            .parent()
+            .ok_or_else(|| error("invalid account parent"))?;
+        private_parents(parent)?;
+        if !canon.exists() {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(canon)?;
+        }
+        private_home(canon)?;
+        let directory = open_home(
+            canon,
+            owner
+                .as_ref()
+                .map(|r| if spec.claude { &r["identity"] } else { r }),
+        )?;
+        Ok((directory, owner))
+    } else {
+        private_home(canon)?;
+        let directory = open_home(
+            raw_path,
+            owner
+                .as_ref()
+                .map(|r| if spec.claude { &r["identity"] } else { r }),
+        )?;
+        Ok((directory, owner))
+    }
+}
+
 fn validate_registered_account_home(
     registries: &ValidatedRegistries,
     spec: &ProviderAccountSpec,
@@ -601,33 +752,11 @@ fn validate_registered_account_home(
         .as_str()
         .ok_or_else(|| error("invalid account home"))?;
     let raw_path = Path::new(raw_home);
-    private_home(raw_path)?;
-    let canon = physical(raw_path)?;
-    private_home(&canon)?;
     let main_home = physical(&env_path(spec.env, home()?.join(spec.default_dir)))?;
-    home_placement(&canon, Some(&main_home))?;
-    if registries.agy_homes.contains(&canon) {
-        return Err(error(
-            "canonical home is already registered by another provider",
-        ));
-    }
-    let mut matched_receipt: Option<&Value> = None;
-    for row in rows {
-        if row["id"] == id {
-            let rec_home = row["home"]
-                .as_str()
-                .ok_or_else(|| error("invalid receipt home"))?;
-            if physical(Path::new(rec_home))? != canon {
-                return Err(error("account receipt home does not match registry home"));
-            }
-            validate_receipt_links(row, spec.link_names, spec.claude)?;
-            matched_receipt = Some(row);
-        }
-    }
-    let _directory = open_home(
-        raw_path,
-        matched_receipt.map(|r| if spec.claude { &r["identity"] } else { r }),
+    let canon = validate_account_placement_and_uniqueness(
+        registries, spec, id, raw_path, &main_home, true, false,
     )?;
+    let _ = validate_and_open_account_home(spec, id, raw_path, &canon, rows, false)?;
     Ok(canon)
 }
 
@@ -647,16 +776,12 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
     let receipt_name = spec.receipt_name;
     let claude = spec.claude;
     account_flags(args, id)?;
-    let loaded = load_validated_registries(
+    let mut loaded = load_validated_registries(
         claude || (!args.has("--verify") && !args.has("--remove")),
-        false,
+        !args.has("--verify") && !args.has("--remove"),
     )?;
-    let config = &loaded.config;
-    let registry = &loaded.registry;
-    let old = &loaded.old;
-    let mut value = loaded.value;
-    let receipt = config.join(receipt_name);
-    let mut rows = load_receipt_rows(config, &spec)?;
+    let receipt = loaded.config.join(receipt_name);
+    let mut rows = load_receipt_rows(&loaded.config, &spec)?;
     let rows = &mut rows;
     let save = |rows: &Vec<Value>| -> Result<()> {
         let doc = if claude {
@@ -666,31 +791,18 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
         };
         write_locked(&receipt, &json_bytes(&doc)?, false, None)
     };
-    let default_claude = &loaded.default_claude;
-    let claude_registry = &loaded.claude_registry;
-    let claude_raw = &loaded.claude_raw;
-    let mut claude_doc = loaded.claude_doc;
     let main = physical(&env_path(env, home()?.join(default)))?;
-    let existing = value["providers"][provider]["accounts"]
-        .as_array()
-        .and_then(|v| v.iter().find(|v| v["id"] == id))
-        .cloned()
-        .or_else(|| {
-            claude
-                .then(|| {
-                    claude_doc["accounts"]
-                        .as_array()
-                        .and_then(|v| v.iter().find(|v| v["id"] == id))
-                        .cloned()
-                })
-                .flatten()
-        });
+    let existing = find_registered_account(&loaded, provider, id);
     if args.has("--verify") {
-        let all = value["providers"][provider]["accounts"]
+        let all = loaded.value["providers"][provider]["accounts"]
             .as_array()
             .or_else(|| {
                 claude
-                    .then(|| claude_doc["accounts"].as_array().filter(|v| !v.is_empty()))
+                    .then(|| {
+                        loaded.claude_doc["accounts"]
+                            .as_array()
+                            .filter(|v| !v.is_empty())
+                    })
                     .flatten()
             })
             .ok_or_else(|| error(format!("{label} account is not registered")))?;
@@ -888,38 +1000,43 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
                 save(rows)?;
             }
         }
-        if let Some(entries) = value["providers"]
+        if let Some(entries) = loaded.value["providers"]
             .get_mut(provider)
             .and_then(|section| section["accounts"].as_array_mut())
         {
             entries.retain(|r| r["id"] != id);
             if entries.is_empty() {
-                value["providers"]
+                loaded.value["providers"]
                     .as_object_mut()
                     .ok_or_else(|| error("invalid providers"))?
                     .remove(provider);
             }
         }
-        if claude && !claude_raw.is_empty() {
-            claude_doc["accounts"]
+        if claude && !loaded.claude_raw.is_empty() {
+            loaded.claude_doc["accounts"]
                 .as_array_mut()
                 .ok_or_else(|| error("invalid Claude registry"))?
                 .retain(|r| r["id"] != id);
             write_locked(
-                claude_registry,
-                &json_bytes(&claude_doc)?,
+                &loaded.claude_registry,
+                &json_bytes(&loaded.claude_doc)?,
                 false,
-                Some(claude_raw),
+                Some(&loaded.claude_raw),
             )?;
         }
-        write_locked(registry, &json_bytes(&value)?, false, Some(old))?;
+        write_locked(
+            &loaded.registry,
+            &json_bytes(&loaded.value)?,
+            false,
+            Some(&loaded.old),
+        )?;
         rows.retain(|r| r["id"] != id);
         save(rows)?;
         return Ok(Output::text(format!(
             "{label} account removed: {id}; home, login and sessions kept\n"
         )));
     }
-    let path = args
+    let raw_path = args
         .get("--home")
         .map(|s| ctx.path(s))
         .or_else(|| {
@@ -929,84 +1046,17 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
                 .map(PathBuf::from)
         })
         .unwrap_or_else(|| main.join("accounts").join(id));
-    let path = physical(&path)?;
-    home_placement(&path, Some(&main))?;
-    for (owner, settings) in value["providers"]
-        .as_object()
-        .ok_or_else(|| error("invalid providers"))?
-    {
-        for row in settings["accounts"]
-            .as_array()
-            .ok_or_else(|| error("invalid provider accounts"))?
-        {
-            if !(owner == provider && row["id"] == id)
-                && row["home"]
-                    .as_str()
-                    .is_some_and(|s| physical(Path::new(s)).is_ok_and(|p| p == path))
-            {
-                return Err(error("duplicate provider account id or canonical home"));
-            }
-        }
-    }
-    let claude_accounts = claude_doc["accounts"]
-        .as_array()
-        .ok_or_else(|| error("invalid Claude registry"))?;
-    for row in claude_accounts {
-        if !(claude && row["id"] == id)
-            && row["home"]
-                .as_str()
-                .is_some_and(|s| physical(Path::new(s)).is_ok_and(|p| p == path))
-        {
-            return Err(error(
-                "canonical home is already registered by another provider",
-            ));
-        }
-    }
-    for (owner_prov, file, nested) in [
-        ("codex", "codex-account-links.json", false),
-        ("pi", "pi-account-links.json", false),
-        ("claude", "provider-account-effects.json", true),
-    ] {
-        let raw_receipt = optional(&config.join(file))?;
-        if raw_receipt.is_empty() {
-            continue;
-        }
-        let parsed = json(&raw_receipt)?;
-        let list = if nested {
-            parsed["accounts"].as_array()
-        } else {
-            parsed.as_array()
-        }
-        .ok_or_else(|| error("invalid provider account receipt"))?;
-        for row in list {
-            if !(owner_prov == provider && row["id"] == id)
-                && let Some(canon) = row["home"]
-                    .as_str()
-                    .and_then(|s| physical(Path::new(s)).ok())
-            {
-                if value["providers"].get(provider).is_none()
-                    && owner_prov == provider
-                    && canon == main
-                {
-                    return Err(error("duplicate provider account id or canonical home"));
-                }
-                if canon == path || (value["providers"].get(provider).is_none() && canon == main) {
-                    return Err(error(
-                        "canonical home is already registered by another provider",
-                    ));
-                }
-            }
-        }
-    }
-    for canon in agy_homes(config)? {
-        if canon == path || (value["providers"].get(provider).is_none() && canon == main) {
-            return Err(error(
-                "canonical home is already registered by another provider",
-            ));
-        }
-    }
-    let mut next_value = value.clone();
-    let mut next_claude_doc = claude_doc.clone();
+    let path = validate_account_placement_and_uniqueness(
+        &loaded,
+        &spec,
+        id,
+        &raw_path,
+        &main,
+        false,
+        loaded.value["providers"].get(provider).is_none(),
+    )?;
+    let mut next_value = loaded.value.clone();
+    let mut next_claude_doc = loaded.claude_doc.clone();
     if next_value["providers"].get(provider).is_none() {
         let mut seeded = vec![json!({"id":"default","home":main})];
         if claude && let Some(prior) = next_claude_doc["accounts"].as_array() {
@@ -1044,46 +1094,17 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
     if claude {
         validate_claude_registry(
             &next_claude_doc,
-            default_claude,
+            &loaded.default_claude,
             &next_value,
             &next_shared_homes,
         )?;
     }
-    for row in rows.iter() {
-        if row["id"] == id
-            || row["home"]
-                .as_str()
-                .and_then(|s| physical(Path::new(s)).ok())
-                .as_ref()
-                == Some(&path)
-        {
-            validate_receipt_links(row, names, claude)?;
-        }
-    }
-    let owner = rows
-        .iter()
-        .find(|r| r["id"] == id && r["home"] == path.to_string_lossy().as_ref())
-        .cloned();
+    let (directory, owner) = validate_and_open_account_home(&spec, id, &path, &path, rows, true)?;
+    let info =
+        rustix::fs::fstat(&directory).map_err(|_| error("cannot inspect account directory"))?;
     let parent = path
         .parent()
         .ok_or_else(|| error("invalid account parent"))?;
-    private_parents(parent)?;
-    if !path.exists() {
-        use std::os::unix::fs::DirBuilderExt;
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&path)?;
-    }
-    private_home(&path)?;
-    let directory = open_home(
-        &path,
-        owner
-            .as_ref()
-            .map(|r| if claude { &r["identity"] } else { r }),
-    )?;
-    let info =
-        rustix::fs::fstat(&directory).map_err(|_| error("cannot inspect account directory"))?;
     // Preflight every subdirectory and (--repair) symlink before mutating receipts or links.
     for name in names {
         let target = main.join(name);
@@ -1216,13 +1237,18 @@ fn account(args: &Args, ctx: &Context<'_>) -> Result<Output> {
     }
     if claude {
         write_locked(
-            claude_registry,
+            &loaded.claude_registry,
             &json_bytes(&next_claude_doc)?,
             false,
-            Some(claude_raw),
+            Some(&loaded.claude_raw),
         )?;
     }
-    write_locked(registry, &json_bytes(&next_value)?, false, Some(old))?;
+    write_locked(
+        &loaded.registry,
+        &json_bytes(&next_value)?,
+        false,
+        Some(&loaded.old),
+    )?;
     Ok(Output::text(format!(
         "{label} account {id}: registered, login pending\n"
     )))
