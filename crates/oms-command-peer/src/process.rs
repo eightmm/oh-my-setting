@@ -105,6 +105,9 @@ impl StallTracker {
     }
 
     pub fn poll(&mut self, snapshot: &oms_supervisor::process::Snapshot, now: Instant) -> bool {
+        if self.stalled.is_some() || snapshot.stop.is_some() {
+            return false;
+        }
         let total = snapshot
             .stdout
             .observed_bytes
@@ -117,24 +120,9 @@ impl StallTracker {
                     .last_touch
                     .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_millis(100))
             {
-                use rustix::fs::{Mode, OFlags, openat};
                 self.last_touch = Some(now);
-                if let Ok(fd) = openat(
-                    dir,
-                    "last-output",
-                    OFlags::WRONLY
-                        | OFlags::CREATE
-                        | OFlags::TRUNC
-                        | OFlags::NOFOLLOW
-                        | OFlags::CLOEXEC,
-                    Mode::from_raw_mode(0o600),
-                ) {
-                    let _ = std::io::Write::write(&mut std::fs::File::from(fd), b"\n");
-                }
+                touch_last_output(dir);
             }
-            return false;
-        }
-        if self.stalled.is_some() || snapshot.stop.is_some() {
             return false;
         }
         let Some(limit) = self.limit else {
@@ -152,6 +140,26 @@ impl StallTracker {
             .then_some(self.stalled)
             .flatten()
     }
+}
+
+fn touch_last_output(dir: &std::fs::File) {
+    use rustix::fs::{FileType, Mode, OFlags, fstat, openat};
+    let uid = rustix::process::geteuid().as_raw();
+    let Ok(fd) = openat(
+        dir,
+        "last-output",
+        OFlags::WRONLY | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::from_raw_mode(0o600),
+    ) else {
+        return;
+    };
+    let Ok(stat) = fstat(&fd) else {
+        return;
+    };
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile || stat.st_uid != uid {
+        return;
+    }
+    let _ = rustix::io::write(&fd, b"\n");
 }
 
 /// Fixed native reads for an explicitly requested next-session prompt. These
@@ -999,5 +1007,62 @@ mod tests {
         let mut deadline = request;
         deadline.launch_fence = Some(LaunchFence::new(Instant::now(), None));
         assert_eq!(Native.execute(deadline, &stop).unwrap_err().code, 75);
+    }
+
+    #[test]
+    fn touch_last_output_requires_nonblocking_owned_regular_file() {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        let root = std::env::temp_dir().join(format!(
+            "oms-peer-last-output-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let dir_fd = std::fs::File::open(&root).unwrap();
+
+        // Creates an owned regular file and writes a newline.
+        super::touch_last_output(&dir_fd);
+        let path = root.join("last-output");
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(meta.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(std::fs::read(&path).unwrap(), b"\n");
+        std::fs::remove_file(&path).unwrap();
+
+        // Refuses symlinks without creating the target.
+        let target = root.join("symlink-target");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        super::touch_last_output(&dir_fd);
+        assert!(!target.exists());
+        std::fs::remove_file(&path).unwrap();
+
+        // Never blocks on a FIFO without a reader, and refuses a FIFO even with an open reader.
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let started = Instant::now();
+        super::touch_last_output(&dir_fd);
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let reader = rustix::fs::open(
+            &path,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        super::touch_last_output(&dir_fd);
+        let mut buf = [0u8; 8];
+        // Opening and immediately closing the write end after `fstat` rejects the FIFO
+        // yields EOF (0 bytes) with nothing written.
+        assert_eq!(rustix::io::read(&reader, &mut buf), Ok(0));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

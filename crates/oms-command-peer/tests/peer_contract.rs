@@ -5040,7 +5040,8 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
 
     // 1. No OMS_PEER_TIMEOUT + OMS_PEER_STALL=1s: a streaming stub printing every 200ms
     // runs for ~3s (3x the stall threshold) and completes cleanly; non-streaming
-    // transports (antigravity) receive stall=None and only the 24h safety cap.
+    // transports (antigravity) receive stall=None and keep their finite default wall
+    // (900s for peer-ask, 1200s otherwise, also passed as `--print-timeout`).
     provider_isolated_with_env(
         name,
         "streaming-completes",
@@ -5050,8 +5051,15 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
             let repo = provider_repo();
             let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
 
+            #[derive(Debug, PartialEq, Eq)]
+            struct SeenTimeout {
+                prog: String,
+                wall: Duration,
+                stall: Option<Duration>,
+                print_timeout: Option<String>,
+            }
             struct StreamingStub {
-                seen_timeout: Mutex<Vec<(String, Duration, Option<Duration>)>>,
+                seen_timeout: Mutex<Vec<SeenTimeout>>,
             }
             impl Executor for StreamingStub {
                 fn execute(
@@ -5067,11 +5075,14 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
                         .unwrap()
                         .to_string_lossy()
                         .into_owned();
-                    self.seen_timeout.lock().unwrap().push((
-                        prog.clone(),
-                        request.timeout,
-                        request.stall,
-                    ));
+                    let print_timeout = option_value(&request.argv, "--print-timeout")
+                        .map(|v| v.to_string_lossy().into_owned());
+                    self.seen_timeout.lock().unwrap().push(SeenTimeout {
+                        prog: prog.clone(),
+                        wall: request.timeout,
+                        stall: request.stall,
+                        print_timeout,
+                    });
                     if prog == "agy" {
                         // End-only JSON envelope after 1.6s of silence (> 1s stall): must NOT stall.
                         request.argv = vec![
@@ -5141,19 +5152,63 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
                 "{stdout}"
             );
 
-            let recorded = probe.seen_timeout.lock().unwrap();
-            assert_eq!(recorded.len(), 2);
-            for (prog, wall, stall) in recorded.iter() {
-                assert_eq!(*wall, Duration::from_secs(86_400), "{prog}");
-                if prog == "codex" {
-                    assert_eq!(*stall, Some(Duration::from_secs(1)), "codex streams");
-                } else {
-                    assert_eq!(*stall, None, "agy writes one JSON envelope at completion");
+            {
+                let recorded = probe.seen_timeout.lock().unwrap();
+                assert_eq!(recorded.len(), 2);
+                for item in recorded.iter() {
+                    if item.prog == "codex" {
+                        assert_eq!(item.wall, Duration::from_secs(86_400), "codex gets 24h cap");
+                        assert_eq!(item.stall, Some(Duration::from_secs(1)), "codex streams");
+                        assert_eq!(item.print_timeout, None);
+                    } else {
+                        assert_eq!(
+                            item.wall,
+                            Duration::from_secs(900),
+                            "agy peer-ask keeps 900s wall"
+                        );
+                        assert_eq!(
+                            item.stall, None,
+                            "agy writes one JSON envelope at completion"
+                        );
+                        assert_eq!(item.print_timeout.as_deref(), Some("900s"));
+                    }
                 }
             }
             let rows = storage::load(&repo.0, Path::new(".oms/artifacts/index.jsonl")).unwrap();
             assert_eq!(rows.len(), 2);
             assert!(rows.iter().all(|r| r.get("exit").py() == "0"));
+
+            // Non-ask verbs give non-streaming providers the 1200s default wall (and agy --print-timeout 1200s).
+            probe.seen_timeout.lock().unwrap().clear();
+            let call_out = oms_command_peer::run_with_executor(
+                "agent-call",
+                &args(&[
+                    "--to",
+                    "antigravity",
+                    "--prompt",
+                    "verify non-ask non-streaming wall",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "--artifact-dir",
+                    ".oms/call-agy-wall",
+                ]),
+                &repo.0,
+                source,
+                &STOP,
+                &probe,
+            );
+            assert_eq!(call_out.0, 0, "{:?}", message(&call_out));
+            let recorded = probe.seen_timeout.lock().unwrap();
+            assert_eq!(
+                recorded.as_slice(),
+                &[SeenTimeout {
+                    prog: "agy".to_owned(),
+                    wall: Duration::from_secs(1_200),
+                    stall: None,
+                    print_timeout: Some("1200s".to_owned()),
+                }]
+            );
         },
     );
 
@@ -5266,12 +5321,13 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
         }
     });
 
-    // 3. OMS_PEER_STALL=0 disables stall detection; a silent stub runs until the safety cap
-    // (injected via OMS_PEER_TEST_MAX_WALL=1s) and records `timed_out` ("timed out after 1s").
+    // 3. OMS_PEER_STALL=0 disables stall detection; a silent stub receives the 24h safety cap
+    // (`stall=None`, `timeout=86400s`) and, when stopped by a wall deadline (`stalled=None`),
+    // records `timed_out` ("timed out after 24h") rather than `stalled`.
     provider_isolated_with_env(
         name,
         "stall-disabled-hits-cap",
-        &[("OMS_PEER_STALL", "0"), ("OMS_PEER_TEST_MAX_WALL", "1s")],
+        &[("OMS_PEER_STALL", "0")],
         || {
             use oms_command_peer::storage;
             let repo = provider_repo();
@@ -5286,7 +5342,12 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
                 ) -> oms_command_peer::Result<Completed> {
                     if request.argv[0] != "git" {
                         assert_eq!(request.stall, None, "OMS_PEER_STALL=0 must disable stall");
-                        assert_eq!(request.timeout, Duration::from_secs(1));
+                        assert_eq!(
+                            request.timeout,
+                            Duration::from_secs(86_400),
+                            "streaming provider keeps 24h safety cap"
+                        );
+                        request.timeout = Duration::from_millis(400);
                         request.argv = vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()];
                     }
                     Native.execute(request, stop)
@@ -5324,7 +5385,10 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
                 storage::read(&repo.0, &Path::new(dir).join(seat_name), false).unwrap(),
             )
             .unwrap();
-            assert!(artifact.contains("error: timed out after 1s"), "{artifact}");
+            assert!(
+                artifact.contains("error: timed out after 24h"),
+                "{artifact}"
+            );
             assert!(!artifact.contains("no output for"), "{artifact}");
             let rows = storage::load(&repo.0, Path::new(".oms/artifacts/index.jsonl")).unwrap();
             assert_eq!(rows[0].get("exit").py(), "124");

@@ -1146,7 +1146,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         worktree.identity(context)?;
         if interactive && round == 0 {
             let mut turn_history = String::new();
-            let timeouts = peer::timeout(args, "peer-delegate")?;
+            let timeouts = peer::route_timeouts(args, "peer-delegate", &route)?;
             code = 0;
             let max_turns = args
                 .get("max-turns")
@@ -1261,7 +1261,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 idx += 1;
             }
         } else {
-            let timeouts = peer::timeout(args, "peer-delegate")?;
+            let timeouts = peer::route_timeouts(args, "peer-delegate", &route)?;
             let result = plan
                 .as_ref()
                 .map_or(Ok(()), |bound| bound.check(context))

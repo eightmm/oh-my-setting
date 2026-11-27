@@ -220,7 +220,7 @@ pub(super) use oms_command_operations::peer_operations::{age, status, updated_st
 
 fn quiet_seconds(dir: &Path, elapsed: Option<i64>) -> Option<i64> {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags, fstat, open, statat};
-    let uid = rustix::process::getuid().as_raw();
+    let uid = rustix::process::geteuid().as_raw();
     let flags =
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
     let dir_fd: std::fs::File = open(dir, flags, Mode::empty()).ok()?.into();

@@ -41,6 +41,11 @@ Options:
 Environment:
   OMS_CONSULT_PROVIDER   Preferred peer (overridden by --to).
   OMS_PEER_TIMEOUT       Pin a fixed provider wall-clock timeout. Unset by
-                         default (no fixed wall; 20m stall check, 24h cap).
-  OMS_PEER_STALL         Stop a streaming provider after DUR with no output on
-                         stdout/stderr (default: 20m; 0 disables stall check).
+                         default: streaming providers (codex, claude, pi) use
+                         OMS_PEER_STALL + a 24h cap; non-streaming providers
+                         (agy print mode, aider, others) use a 20m wall.
+  OMS_PEER_STALL         Stop a streaming provider (codex, claude, pi) after DUR
+                         with no stdout/stderr output (default: 20m; 0 disables).
+                         Also covers one silent turn or long silent tool call;
+                         raise OMS_PEER_STALL for quiet steps or set
+                         OMS_PEER_TIMEOUT to pin a fixed wall instead.

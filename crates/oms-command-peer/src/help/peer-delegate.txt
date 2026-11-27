@@ -70,7 +70,7 @@ Options:
                        original brief, its rejected patch, and the failing
                        verify output tail. Missing-CLI and outbound-gate
                        failures are never retried. Each round gets its own
-                       stall/safety-cap (or OMS_PEER_TIMEOUT) budget.
+                       stall/cap or default wall (or OMS_PEER_TIMEOUT) budget.
                        No additional advisor unless OMS_ADVISE_ON_REPEAT=1.
                        Default: 0 (one-shot).
                        With --repair 2|3, historical replay may stop repeated
@@ -111,7 +111,9 @@ Options:
                        owner terminalizes a known failure; unknown stays held.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/delegate.
   --print-timeout DUR  Pin a fixed wall-clock timeout (also passed to agy print
-                       mode). Default: no fixed wall (20m stall, 24h cap).
+                       mode). Unset default: streaming workers (codex, claude,
+                       pi) use a 20m stall check + 24h cap; non-streaming
+                       workers (agy print mode, aider, others) use a 20m wall.
   --context-manifest   Compile a bounded context bundle from the detached HEAD
                        snapshot, attach it to the worker prompt, and record its
                        manifest and bundle digests on the delegation row.
@@ -189,6 +191,11 @@ write that is undone before the worker exits, anything the worker reads
 (inherited tokens, ssh agents), or anything it does outside the repository
 (HOME, /tmp, a surviving background process). Those need process isolation.
   OMS_PEER_TIMEOUT           Pin a fixed worker wall-clock timeout. Unset by
-                             default (no fixed wall; 20m stall check, 24h cap).
-  OMS_PEER_STALL             Stop a streaming worker after DUR with no output on
-                             stdout/stderr (default: 20m; 0 disables stall check).
+                             default: streaming workers (codex, claude, pi) use
+                             OMS_PEER_STALL + a 24h cap; non-streaming workers
+                             (agy print mode, aider, others) use a 20m wall.
+  OMS_PEER_STALL             Stop a streaming worker (codex, claude, pi) after
+                             DUR with no stdout/stderr output (default: 20m; 0
+                             disables). Also covers one silent turn or long
+                             silent tool call; raise OMS_PEER_STALL for quiet
+                             steps or set OMS_PEER_TIMEOUT to pin a fixed wall.

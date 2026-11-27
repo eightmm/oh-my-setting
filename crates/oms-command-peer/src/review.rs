@@ -144,7 +144,7 @@ fn adaptive(args: &mut Args, repo: &Path, context: &Context<'_>) -> Result<Optio
         );
     }
     args.set_value("writer", &writer);
-    peer::timeout(args, "peer-review")?;
+    peer::validate_timeouts(args)?;
     if args.has("model") {
         providers::model_name(args.required("model")?)?;
     }

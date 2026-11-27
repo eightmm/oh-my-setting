@@ -8046,6 +8046,20 @@ fn peer_status_tasks() {
         "{active_snap}"
     );
     std::fs::remove_file(dir.join("last-output")).unwrap();
+    // Non-regular entries at `last-output` are ignored by the effective-uid/regular-file check.
+    std::os::unix::fs::symlink(dir.join("prompt.txt"), dir.join("last-output")).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(dir.join("prompt.txt"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now())
+        .unwrap();
+    let symlink_snap = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+    assert!(
+        symlink_snap["quiet_seconds"].as_i64().unwrap() >= 9,
+        "{symlink_snap}"
+    );
+    std::fs::remove_file(dir.join("last-output")).unwrap();
     assert_eq!(
         c.call(
             "tasks/get",

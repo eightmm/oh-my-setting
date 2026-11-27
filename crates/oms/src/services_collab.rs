@@ -370,6 +370,12 @@ impl<'a> CollabServices<'a> {
     }
 
     #[cfg(test)]
+    fn with_supervise_worker(mut self, worker: Vec<OsString>) -> Self {
+        self.control.set_supervise_worker(worker);
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_after_team_room_join(self, hook: impl FnOnce(&str) + Send + 'a) -> Self {
         *self
             .after_team_room_join
@@ -1419,6 +1425,8 @@ impl CollabServices<'_> {
         inner.environment = std::mem::take(&mut input.environment);
         inner.remove_environment = std::mem::take(&mut input.remove_environment);
         inner.merged = input.merge;
+        inner.stall = input.stall;
+        inner.track_mcp_output = true;
         let payload = supervise_worker_request(&inner, true).map_err(fail)?;
         let (done, heartbeat_failed) = supervise(
             peer_supervised_job(
@@ -1466,7 +1474,11 @@ impl CollabServices<'_> {
             stdout: child.stdout,
             stderr,
             complete,
-            stalled: None,
+            stalled: if done.stop.is_some() {
+                None
+            } else {
+                child.stalled
+            },
             cleanup_complete: Some(true),
             owned_cleanup: done.owned_cleanup().cloned(),
             elapsed: child.elapsed,
@@ -4463,6 +4475,145 @@ mod tests {
         if std::env::var_os(DETACH_TEST_CHILD_ENV).is_some() {
             std::process::exit(detach_worker_main());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    const SUPERVISE_TEST_CHILD_ENV: &str = "OMS_SUPERVISE_TEST_CHILD";
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervise_worker_child_entry() {
+        if std::env::var_os(SUPERVISE_TEST_CHILD_ENV).is_some() {
+            let stop = AtomicBool::new(false);
+            let code = match std::fs::OpenOptions::new()
+                .write(true)
+                .open("/proc/self/fd/3")
+            {
+                Ok(mut out) => crate::services_control::supervise_worker_test_main(
+                    &mut out,
+                    &stop,
+                    &[SUPERVISE_TEST_CHILD_ENV],
+                ),
+                Err(_) => 1,
+            };
+            std::process::exit(code);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn peer_process_executor_supervised_enforces_stall_and_writes_mcp_activity() {
+        const INNER: &str = "OMS_TEST_PEER_SUPERVISED_STALL_INNER";
+        if std::env::var_os(INNER).is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let fixture = Fixture::new();
+            let cancel_dir = fixture.path().join("mcp-op");
+            std::fs::create_dir(&cancel_dir).unwrap();
+            std::fs::set_permissions(&cancel_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::write(cancel_dir.join("prompt.txt"), b"question\n").unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "services_collab::tests::peer_process_executor_supervised_enforces_stall_and_writes_mcp_activity",
+                    "--nocapture",
+                ])
+                .env(INNER, "1")
+                .env("OMS_PEER_CANCEL_DIR", &cancel_dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                cancel_dir.join("last-output").is_file(),
+                "MCP-started supervised run must write last-output activity file"
+            );
+            return;
+        }
+        let cancel_dir = PathBuf::from(std::env::var_os("OMS_PEER_CANCEL_DIR").unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let test_exe = std::env::current_exe().unwrap();
+        let worker: Vec<OsString> = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!("export {SUPERVISE_TEST_CHILD_ENV}=1; exec 3>&1 1>/dev/null; exec \"$@\"")
+                .into(),
+            "sh".into(),
+            test_exe.into(),
+            "services_collab::tests::supervise_worker_child_entry".into(),
+            "--exact".into(),
+            "--nocapture".into(),
+            "--test-threads=1".into(),
+        ];
+        let host = CollabServices::new(&stop, source())
+            .expect("source is available")
+            .with_supervise_worker(worker);
+        assert_eq!(PeerProcessExecutor::council_parallelism(&host), 4);
+        let dir = Fixture::new();
+        let invoke = |script: &str, timeout: Duration, stall: Duration| {
+            PeerProcessExecutor::execute(
+                &host,
+                Invocation {
+                    argv: sh(script),
+                    cwd: dir.path().to_owned(),
+                    input: None,
+                    environment: Vec::new(),
+                    remove_environment: Vec::new(),
+                    timeout,
+                    stall: Some(stall),
+                    max_bytes: 1024,
+                    merge: false,
+                    launch_fence: None,
+                    physical_call: None,
+                    heartbeat: None,
+                    stream: None,
+                },
+                &stop,
+            )
+        };
+        let (chatty, stalled) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                invoke(
+                    "i=0; while [ \"$i\" -lt 6 ]; do sleep 0.12; printf '.'; i=$((i + 1)); done",
+                    Duration::from_secs(10),
+                    Duration::from_millis(450),
+                )
+            });
+            let b = scope.spawn(|| {
+                let started = Instant::now();
+                let res = invoke(
+                    "printf 'once'; sleep 30",
+                    Duration::from_secs(10),
+                    Duration::from_millis(250),
+                );
+                (res, started.elapsed())
+            });
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        let (stalled, elapsed) = stalled;
+        let stalled = stalled.expect("silent supervised seat stalls");
+        assert_eq!(
+            (stalled.code, stalled.complete, stalled.stalled),
+            (124, false, Some(Duration::from_millis(250)))
+        );
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "stall must stop silent child well before the 10s wall, took {elapsed:?}"
+        );
+        let chatty = chatty.expect("chatty supervised seat completes");
+        assert_eq!(
+            (
+                chatty.code,
+                chatty.complete,
+                chatty.stalled,
+                chatty.stdout.as_slice()
+            ),
+            (0, true, None, &b"......"[..])
+        );
+        assert!(cancel_dir.join("last-output").is_file());
     }
 
     #[test]

@@ -191,13 +191,21 @@ Options:
   --synthesize [P]     After provider reviews, run a synthesis pass with a
                        registered provider P. Default: claude.
   --print-timeout DUR  Pin a fixed wall-clock timeout (also passed to agy print
-                       mode). Default: no fixed wall (20m stall, 24h cap).
+                       mode). Unset default: streaming providers (codex, claude,
+                       pi) use a 20m stall check + 24h cap; non-streaming
+                       providers (agy print mode, aider, others) use a 20m wall.
   --dry-run            Write prompts as artifacts without CLI calls.
   -h, --help           Show this help.
 
 Environment:
   OH_MY_SETTING_REVIEW_DRY_RUN=1   Same as --dry-run.
   OMS_PEER_TIMEOUT          Pin a fixed per-provider wall-clock timeout. Unset
-                            by default (no fixed wall; 20m stall, 24h cap).
-  OMS_PEER_STALL            Stop a streaming provider after DUR with no output
-                            on stdout/stderr (default: 20m; 0 disables stall).
+                            by default: streaming providers (codex, claude, pi)
+                            use OMS_PEER_STALL + a 24h cap; non-streaming
+                            providers (agy print mode, aider, others) use a 20m
+                            wall.
+  OMS_PEER_STALL            Stop a streaming provider (codex, claude, pi) after
+                            DUR with no stdout/stderr output (default: 20m; 0
+                            disables). Also covers one silent turn or long
+                            silent tool call; raise OMS_PEER_STALL for quiet
+                            steps or set OMS_PEER_TIMEOUT to pin a fixed wall.

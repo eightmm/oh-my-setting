@@ -379,6 +379,8 @@ pub(crate) fn directory(args: &Args, repo: &Path, kind: &str) -> Result<PathBuf>
     Ok(path)
 }
 pub(crate) const MAX_WALL_SECS: u64 = 86_400;
+pub(crate) const DEFAULT_ASK_WALL_SECS: u64 = 900;
+pub(crate) const DEFAULT_WALL_SECS: u64 = 1_200;
 pub(crate) const DEFAULT_STALL_SECS: u64 = 1_200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,31 +423,86 @@ fn parse_duration(raw: &str, allow_zero: bool, label: &str) -> Result<u64> {
     Ok((value * scale).ceil() as u64)
 }
 
-pub(crate) fn timeout(args: &Args, _tool: &str) -> Result<Timeouts> {
+fn explicit_wall(args: &Args) -> Result<Option<u64>> {
     let raw = std::env::var("OMS_PEER_TIMEOUT").ok();
     let raw = if args.has("print-timeout") {
         Some(args.get("print-timeout").to_owned())
     } else {
         raw
     };
-    if let Some(raw) = raw {
+    raw.map(|raw| parse_duration(&raw, false, "timeout"))
+        .transpose()
+}
+
+fn configured_stall() -> Result<Option<u64>> {
+    match std::env::var("OMS_PEER_STALL") {
+        Ok(raw) => {
+            let secs = parse_duration(&raw, true, "stall timeout")?;
+            Ok((secs > 0).then_some(secs))
+        }
+        Err(_) => Ok(Some(DEFAULT_STALL_SECS)),
+    }
+}
+
+pub(crate) fn validate_timeouts(args: &Args) -> Result<()> {
+    if explicit_wall(args)?.is_none() {
+        configured_stall()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn route_timeouts(
+    args: &Args,
+    tool: &str,
+    route: &providers::Route,
+) -> Result<Timeouts> {
+    route_timeouts_with(
+        args,
+        tool,
+        &route.provider,
+        std::env::var("OMS_PEER_TIMEOUT").ok().as_deref(),
+        std::env::var("OMS_PEER_STALL").ok().as_deref(),
+    )
+}
+
+fn route_timeouts_with(
+    args: &Args,
+    tool: &str,
+    provider: &str,
+    env_timeout: Option<&str>,
+    env_stall: Option<&str>,
+) -> Result<Timeouts> {
+    let raw_wall = if args.has("print-timeout") {
+        Some(args.get("print-timeout"))
+    } else {
+        env_timeout
+    };
+    if let Some(raw) = raw_wall {
         return Ok(Timeouts {
-            wall: parse_duration(&raw, false, "timeout")?,
+            wall: parse_duration(raw, false, "timeout")?,
             stall: None,
         });
     }
-    let wall = match std::env::var("OMS_PEER_TEST_MAX_WALL") {
-        Ok(raw) => parse_duration(&raw, false, "timeout")?.min(MAX_WALL_SECS),
-        Err(_) => MAX_WALL_SECS,
-    };
-    let stall = match std::env::var("OMS_PEER_STALL") {
-        Ok(raw) => {
-            let secs = parse_duration(&raw, true, "stall timeout")?;
+    let stall = match env_stall {
+        Some(raw) => {
+            let secs = parse_duration(raw, true, "stall timeout")?;
             (secs > 0).then_some(secs)
         }
-        Err(_) => Some(DEFAULT_STALL_SECS),
+        None => Some(DEFAULT_STALL_SECS),
     };
-    Ok(Timeouts { wall, stall })
+    if providers::streams_output(provider) {
+        Ok(Timeouts {
+            wall: MAX_WALL_SECS,
+            stall,
+        })
+    } else {
+        let wall = if tool == "peer-ask" {
+            DEFAULT_ASK_WALL_SECS
+        } else {
+            DEFAULT_WALL_SECS
+        };
+        Ok(Timeouts { wall, stall: None })
+    }
 }
 pub(crate) const LARGE_DIFF_BYTES: usize = 16 * 1024;
 pub(crate) fn diff_budget() -> usize {
@@ -1049,6 +1106,7 @@ fn call_routed(
     .map_err(publication_error("artifact write"))?;
     let diff_bytes = args.get("_review-diff-bytes").parse::<usize>().unwrap_or(0);
     if dry(args, tool) || args.has("export-only") {
+        let timeout_secs = route_timeouts(args, tool, &route).map_or(0, |t| t.wall);
         return Ok(Seat {
             target: target.clone(),
             route,
@@ -1067,7 +1125,7 @@ fn call_routed(
             output_start: 0,
             requested_model,
             elapsed: std::time::Duration::ZERO,
-            timeout_secs: timeout(args, tool).map_or(0, |t| t.wall),
+            timeout_secs,
             stalled_secs: None,
             diff_bytes,
         });
@@ -1170,7 +1228,7 @@ fn call_routed(
         .1
         .to_string_lossy()
         .into_owned();
-    let timeouts = timeout(args, tool)?;
+    let timeouts = route_timeouts(args, tool, &route)?;
     let timeout_secs = timeouts.wall;
     let call_started = std::time::Instant::now();
     let scope = (tool == "peer-ask"
@@ -2164,8 +2222,86 @@ fn agree(seats: &[Seat]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::mcp_operation_id;
+    use super::{
+        DEFAULT_ASK_WALL_SECS, DEFAULT_STALL_SECS, DEFAULT_WALL_SECS, MAX_WALL_SECS, Timeouts,
+        mcp_operation_id, parse, route_timeouts_with,
+    };
+    use std::ffi::OsString;
     use std::path::Path;
+
+    #[test]
+    fn route_timeouts_distinguish_streaming_and_non_streaming_providers() {
+        let empty = parse(&[]).unwrap();
+        for streaming in ["codex", "claude", "pi"] {
+            assert_eq!(
+                route_timeouts_with(&empty, "peer-ask", streaming, None, None).unwrap(),
+                Timeouts {
+                    wall: MAX_WALL_SECS,
+                    stall: Some(DEFAULT_STALL_SECS),
+                }
+            );
+            assert_eq!(
+                route_timeouts_with(&empty, "peer-review", streaming, None, Some("45s")).unwrap(),
+                Timeouts {
+                    wall: MAX_WALL_SECS,
+                    stall: Some(45),
+                }
+            );
+            assert_eq!(
+                route_timeouts_with(&empty, "peer-delegate", streaming, None, Some("0")).unwrap(),
+                Timeouts {
+                    wall: MAX_WALL_SECS,
+                    stall: None,
+                }
+            );
+        }
+        for non_streaming in ["antigravity", "aider", "cursor", "fixture"] {
+            assert_eq!(
+                route_timeouts_with(&empty, "peer-ask", non_streaming, None, Some("30s")).unwrap(),
+                Timeouts {
+                    wall: DEFAULT_ASK_WALL_SECS,
+                    stall: None,
+                }
+            );
+            for tool in [
+                "peer-review",
+                "peer-delegate",
+                "agent-call",
+                "advise",
+                "consult",
+            ] {
+                assert_eq!(
+                    route_timeouts_with(&empty, tool, non_streaming, None, Some("30s")).unwrap(),
+                    Timeouts {
+                        wall: DEFAULT_WALL_SECS,
+                        stall: None,
+                    }
+                );
+            }
+            assert!(
+                route_timeouts_with(&empty, "peer-ask", non_streaming, None, Some("bad")).is_err()
+            );
+        }
+        let with_flag = parse(&[OsString::from("--print-timeout"), OsString::from("5m")]).unwrap();
+        for provider in ["codex", "antigravity"] {
+            assert_eq!(
+                route_timeouts_with(&empty, "peer-ask", provider, Some("10m"), Some("30s"))
+                    .unwrap(),
+                Timeouts {
+                    wall: 600,
+                    stall: None,
+                }
+            );
+            assert_eq!(
+                route_timeouts_with(&with_flag, "peer-ask", provider, Some("10m"), Some("30s"))
+                    .unwrap(),
+                Timeouts {
+                    wall: 300,
+                    stall: None,
+                }
+            );
+        }
+    }
 
     #[test]
     fn mcp_operation_id_links_downstream_consultation_artifact_dirs() {
