@@ -1495,6 +1495,8 @@ static FAKE_REPLY_KINDS: &[&str] = &["comment", "status"];
 #[derive(Default)]
 struct FakeTrackerBackend {
     acks: Vec<OutboundAck>,
+    ack_attempts: usize,
+    ack_script: std::collections::VecDeque<(Duration, Result<(), TransportError>)>,
     existing_deliveries: BTreeMap<String, OutboundReply>,
     query_calls: usize,
     create_calls: usize,
@@ -1657,6 +1659,20 @@ impl Source for FakeTrackerSource {
         }
         if interrupted.load(Ordering::Acquire) {
             return Err(TransportError::OutcomeUnknown("interrupted".into()));
+        }
+        let scripted = {
+            let mut guard = self.backend.lock().unwrap();
+            guard.ack_attempts += 1;
+            guard.ack_script.pop_front()
+        };
+        if let Some((delay, outcome)) = scripted {
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            if outcome.is_ok() {
+                self.backend.lock().unwrap().acks.push(ack.clone());
+            }
+            return outcome;
         }
         self.backend.lock().unwrap().acks.push(ack.clone());
         Ok(())
@@ -1943,6 +1959,354 @@ fn second_fake_adapter_reuses_listener_idempotency_and_receipt_without_linear_co
             assert_eq!((guard.query_calls, guard.create_calls), (2, 1));
             drop(guard);
             assert_eq!(ws.room_messages("r-fake").len(), count_after_confirm);
+        },
+    );
+}
+
+#[test]
+fn stub_ack_retry_inside_window_and_no_retry_when_window_expired() {
+    isolated(
+        "stub_ack_retry_inside_window_and_no_retry_when_window_expired",
+        |ws| {
+            ws.setup_room("r-ack", "main", "fake-bridge");
+            let sign_val = ["fake", "whs", "ack", "1122334455667788"].join("_");
+            let reply_val = ["fake", "api", "ack", "8877665544332211"].join("_");
+
+            let mut secrets = SecretStore::new();
+            secrets.insert(
+                FAKE_SIGN_ENV,
+                SecretValue::parse_checked("fake_sign", sign_val.clone()).unwrap(),
+            );
+            secrets.insert(
+                FAKE_REPLY_ENV,
+                SecretValue::parse_checked("fake_reply", reply_val.clone()).unwrap(),
+            );
+            let binding_flags = BTreeMap::from([("--project".to_owned(), "ACME".to_owned())]);
+            let route = intake_path(FAKE_SOURCE_NAME);
+
+            let post_fake_to = |addr: SocketAddr, ticket: &str, ev_id: &str| -> u16 {
+                let ts_ms = now_ms();
+                let payload = json!({
+                    "project": "ACME",
+                    "ticket": ticket,
+                    "event_id": ev_id,
+                    "kind": "created",
+                    "body": "REQUEST_BODY_MARKER check retry window",
+                });
+                let raw = serde_json::to_vec(&payload).unwrap();
+                let ts_s = ts_ms.to_string();
+                let mut signed = format!("v1:{ts_s}:").into_bytes();
+                signed.extend_from_slice(&raw);
+                let sig = hmac_sha256_hex(sign_val.as_bytes(), &signed);
+                let len_s = raw.len().to_string();
+                post_raw_http(
+                    addr,
+                    "POST",
+                    &route,
+                    &[
+                        ("Content-Type", "application/json"),
+                        ("Content-Length", &len_s),
+                        ("X-Fake-Timestamp", &ts_s),
+                        ("X-Fake-Signature", &sig),
+                    ],
+                    &raw,
+                )
+            };
+
+            // 1. Ack failure then success inside the 10 s window: one retry, one stderr line,
+            //    no secrets and no response/request bodies in stderr.
+            let fake_ok = FakeTrackerSource::default();
+            {
+                let mut guard = fake_ok.backend.lock().unwrap();
+                guard.ack_script.push_back((
+                    Duration::ZERO,
+                    Err(TransportError::OutcomeUnknown(format!(
+                        "upstream 502 UPSTREAM_RESPONSE_BODY_MARKER {reply_val}"
+                    ))),
+                ));
+                guard.ack_script.push_back((Duration::ZERO, Ok(())));
+            }
+            let server_ok = ServerHandle::spawn(ServeConfig {
+                source: Arc::new(fake_ok.clone()),
+                repo: ws.repo.clone(),
+                room: "r-ack".into(),
+                participant: "fake-bridge".into(),
+                to: "main".into(),
+                binding_flags: binding_flags.clone(),
+                listen: "127.0.0.1:0".parse().unwrap(),
+                secrets: secrets.clone(),
+            })
+            .expect("spawn server for retry-inside-window test");
+
+            assert_eq!(
+                post_fake_to(server_ok.local_addr(), "T-retry-ok", "ev-retry-ok"),
+                200
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while fake_ok.backend.lock().unwrap().acks.is_empty() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            let logs_ok = String::from_utf8(server_ok.shutdown()).expect("UTF-8 server logs");
+            {
+                let guard = fake_ok.backend.lock().unwrap();
+                assert_eq!(
+                    guard.ack_attempts, 2,
+                    "expected initial attempt + one retry"
+                );
+                assert_eq!(guard.acks.len(), 1, "retry inside window must deliver ack");
+                assert_eq!(guard.acks[0].session_ref, "T-retry-ok");
+            }
+            let ack_err_lines: Vec<&str> = logs_ok
+                .lines()
+                .filter(|l| l.contains("outbound ack"))
+                .collect();
+            assert_eq!(
+                ack_err_lines.len(),
+                1,
+                "expected exactly one stderr line on single transient failure:\n{logs_ok}"
+            );
+            assert!(
+                ack_err_lines[0].contains("source=fake")
+                    && ack_err_lines[0].contains("session=T-retry-ok")
+                    && ack_err_lines[0].contains("retry=once"),
+                "unexpected ack failure log line: {}",
+                ack_err_lines[0]
+            );
+            for forbidden in [
+                "UPSTREAM_RESPONSE_BODY_MARKER",
+                "REQUEST_BODY_MARKER",
+                "Queued in OMS Room",
+                sign_val.as_str(),
+                reply_val.as_str(),
+            ] {
+                assert!(
+                    !logs_ok.contains(forbidden),
+                    "stderr leaked forbidden content:\n{logs_ok}"
+                );
+            }
+
+            // 2. Ack failure with no time left inside the window: no retry, one stderr line.
+            //    Send a follow-up probe event so FIFO completion proves the worker finished
+            //    handling T-expired before shutdown without sleeping longer than needed.
+            let fake_exp = FakeTrackerSource::default();
+            {
+                let mut guard = fake_exp.backend.lock().unwrap();
+                guard.ack_script.push_back((
+                    Duration::from_millis(25),
+                    Err(TransportError::OutcomeUnknown(
+                        "UPSTREAM_EXPIRED_BODY_MARKER".into(),
+                    )),
+                ));
+                guard.ack_script.push_back((Duration::ZERO, Ok(())));
+            }
+            let server_exp = ServerHandle::spawn_with_ack_window(
+                ServeConfig {
+                    source: Arc::new(fake_exp.clone()),
+                    repo: ws.repo.clone(),
+                    room: "r-ack".into(),
+                    participant: "fake-bridge".into(),
+                    to: "main".into(),
+                    binding_flags,
+                    listen: "127.0.0.1:0".parse().unwrap(),
+                    secrets,
+                },
+                Duration::from_millis(15),
+            )
+            .expect("spawn server with short ack window");
+
+            assert_eq!(
+                post_fake_to(server_exp.local_addr(), "T-expired", "ev-expired"),
+                200
+            );
+            let wait_first = Instant::now() + Duration::from_secs(2);
+            while fake_exp.backend.lock().unwrap().ack_attempts < 1 && Instant::now() < wait_first {
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(
+                post_fake_to(server_exp.local_addr(), "T-probe", "ev-probe"),
+                200
+            );
+            let wait_probe = Instant::now() + Duration::from_secs(2);
+            while !fake_exp
+                .backend
+                .lock()
+                .unwrap()
+                .acks
+                .iter()
+                .any(|a| a.session_ref == "T-probe")
+                && Instant::now() < wait_probe
+            {
+                thread::sleep(Duration::from_millis(5));
+            }
+            let logs_exp = String::from_utf8(server_exp.shutdown()).expect("UTF-8 server logs");
+            {
+                let guard = fake_exp.backend.lock().unwrap();
+                assert_eq!(
+                    guard.ack_attempts, 2,
+                    "expired ack must not retry (1 attempt for T-expired + 1 for T-probe)"
+                );
+                assert_eq!(guard.acks.len(), 1);
+                assert_eq!(guard.acks[0].session_ref, "T-probe");
+            }
+            let exp_err_lines: Vec<&str> = logs_exp
+                .lines()
+                .filter(|l| l.contains("outbound ack"))
+                .collect();
+            assert_eq!(
+                exp_err_lines.len(),
+                1,
+                "expected one stderr line for expired ack failure:\n{logs_exp}"
+            );
+            assert!(
+                exp_err_lines[0].contains("session=T-expired")
+                    && exp_err_lines[0].contains("retry=none"),
+                "unexpected expired ack failure log line: {}",
+                exp_err_lines[0]
+            );
+            assert!(!logs_exp.contains("UPSTREAM_EXPIRED_BODY_MARKER"));
+        },
+    );
+}
+
+#[test]
+fn accept_backoff_doubles_to_cap_deduplicates_bursts_and_resets_on_success() {
+    use oms_command_intake::serve::{ACCEPT_BACKOFF_INITIAL, ACCEPT_BACKOFF_MAX, AcceptBackoff};
+
+    let mut backoff = AcceptBackoff::new();
+    let emfile = std::io::Error::from_raw_os_error(24);
+    let enfile = std::io::Error::from_raw_os_error(23);
+
+    assert_eq!(backoff.on_error(&emfile), (ACCEPT_BACKOFF_INITIAL, true));
+    assert_eq!(
+        backoff.on_error(&emfile),
+        (Duration::from_millis(200), false)
+    );
+    assert_eq!(
+        backoff.on_error(&emfile),
+        (Duration::from_millis(400), false)
+    );
+    assert_eq!(
+        backoff.on_error(&emfile),
+        (Duration::from_millis(800), false)
+    );
+    assert_eq!(backoff.on_error(&emfile), (ACCEPT_BACKOFF_MAX, false));
+    assert_eq!(backoff.on_error(&emfile), (ACCEPT_BACKOFF_MAX, false));
+
+    // Distinct error during an outage logs once while keeping bounded cap.
+    assert_eq!(backoff.on_error(&enfile), (ACCEPT_BACKOFF_MAX, true));
+    assert_eq!(backoff.on_error(&enfile), (ACCEPT_BACKOFF_MAX, false));
+
+    // Success resets both delay and burst deduplication.
+    backoff.on_success();
+    assert_eq!(backoff.on_error(&emfile), (ACCEPT_BACKOFF_INITIAL, true));
+}
+
+#[test]
+fn room_content_refusal_strings_stay_pinned_to_oms_command_room() {
+    use oms_command_intake::serve::{
+        ROOM_CONTENT_REFUSAL_MESSAGES, ROOM_DUPLICATE_CONFLICT_MESSAGE, is_room_content_refusal,
+    };
+
+    const ROOM_VALIDATE_SRC: &str = include_str!("../../oms-command-room/src/validate.rs");
+    const ROOM_CORE_SRC: &str = include_str!("../../oms-command-room/src/core.rs");
+
+    assert_eq!(ROOM_CONTENT_REFUSAL_MESSAGES.len(), 6);
+    for &msg in ROOM_CONTENT_REFUSAL_MESSAGES {
+        assert!(
+            is_room_content_refusal(msg),
+            "is_room_content_refusal must match {msg:?}"
+        );
+        let quoted = format!("\"{msg}\"");
+        assert!(
+            ROOM_VALIDATE_SRC.contains(&quoted) || ROOM_CORE_SRC.contains(&quoted),
+            "oms-command-room no longer contains literal refusal message {quoted}"
+        );
+    }
+    let quoted_dup = format!("\"{ROOM_DUPLICATE_CONFLICT_MESSAGE}\"");
+    assert!(
+        ROOM_VALIDATE_SRC.contains(&quoted_dup),
+        "oms-command-room no longer contains duplicate conflict message {quoted_dup}"
+    );
+    assert!(!is_room_content_refusal(ROOM_DUPLICATE_CONFLICT_MESSAGE));
+    assert!(!is_room_content_refusal("room unavailable"));
+
+    // Also exercise the live oms-command-room error paths reachable from Room::send / Room::create.
+    isolated(
+        "room_content_refusal_strings_stay_pinned_to_oms_command_room",
+        |ws| {
+            ws.setup_room("r-pin", "main", "linear");
+            let stop = AtomicBool::new(false);
+            let room = Room::open(
+                &ws.repo,
+                Session::default(),
+                &LocalServices,
+                &stop,
+                true,
+                false,
+            )
+            .expect("open room");
+
+            let send_probe = |mid: &str, text: &str| {
+                room.send(
+                    "r-pin",
+                    RoomSend {
+                        sender: "linear",
+                        recipient: "main",
+                        text,
+                        kind: "question",
+                        reply_to: None,
+                        message_id: Some(mid),
+                        linked: false,
+                        quiet: false,
+                    },
+                )
+                .expect_err("expected room refusal")
+                .message
+            };
+
+            let sensitive_turn = ["gh", "p_0123456789abcdefghij0123456789ab"].concat();
+            let err_turn = send_probe("pin-turn", &format!("contains {sensitive_turn}"));
+            assert_eq!(
+                err_turn,
+                "turn looks sensitive; it would be replayed into other agents' prompts"
+            );
+            assert!(is_room_content_refusal(&err_turn));
+
+            let err_meta = send_probe(&format!("id-{sensitive_turn}"), "clean body");
+            assert_eq!(
+                err_meta,
+                "room metadata contains sensitive-looking content or could not be checked"
+            );
+            assert!(is_room_content_refusal(&err_meta));
+
+            let err_len = send_probe("pin-empty", "   ");
+            assert_eq!(err_len, "message needs 1..4000 UTF-8 bytes");
+            assert!(is_room_content_refusal(&err_len));
+
+            let err_oversized_meta = send_probe(
+                &"m".repeat(oms_command_room::MAX_METADATA_BYTES + 128),
+                "clean body",
+            );
+            assert_eq!(err_oversized_meta, "room metadata is oversized");
+            assert!(is_room_content_refusal(&err_oversized_meta));
+
+            room.send(
+                "r-pin",
+                RoomSend {
+                    sender: "linear",
+                    recipient: "main",
+                    text: "original message body",
+                    kind: "question",
+                    reply_to: None,
+                    message_id: Some("pin-dup"),
+                    linked: false,
+                    quiet: false,
+                },
+            )
+            .expect("send original message");
+            let err_conflict = send_probe("pin-dup", "conflicting message body");
+            assert_eq!(err_conflict, ROOM_DUPLICATE_CONFLICT_MESSAGE);
+            assert!(!is_room_content_refusal(&err_conflict));
         },
     );
 }

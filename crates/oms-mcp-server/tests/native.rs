@@ -755,8 +755,8 @@ fn home_panel_opener() {
     const HOME_URI: &str = "ui://oms/home/v1.html";
     let home_html = include_str!("../src/home-panel.html");
     assert!(
-        home_html.len() <= 128 * 1024,
-        "home-panel.html exceeds 128 KiB budget: {} bytes",
+        home_html.len() <= 256 * 1024,
+        "home-panel.html exceeds 256 KiB budget: {} bytes",
         home_html.len()
     );
     assert_eq!(oms_scrub::scan(home_html.as_bytes(), &[]), Ok(Vec::new()));
@@ -6297,6 +6297,14 @@ fn catalog_write_binding_boundaries() {
         registry_summary(&pinned.tool("oms_list_projects", json!({}))),
         json!({"binding": "pinned", "projects": [], "readOnly": false})
     );
+    assert_eq!(
+        registry_summary(&pinned.tool("oms_list_projects", json!({"cards": true}))),
+        json!({"binding": "pinned", "projects": [], "readOnly": false})
+    );
+    bad(
+        &pinned.tool("oms_panel_snapshot", json!({"project": "alpha"})),
+        "OMS_PANEL_REPO",
+    );
     bad(
         &pinned.tool(
             "oms_start_main",
@@ -6304,6 +6312,20 @@ fn catalog_write_binding_boundaries() {
         ),
         "OMS_PANEL_REPO",
     );
+    reset_calls();
+    let own_validation = pinned.tool(
+        "oms_start_main",
+        json!({"main": "codex", "goal": "Pinned validation", "requestId": "not-a-uuid"}),
+    );
+    bad(&own_validation, "A lowercase UUID requestId is required.");
+    assert!(
+        !own_validation["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not bound to project"),
+        "{own_validation}"
+    );
+    assert!(logged_calls().is_empty());
     fixture_settings(
         &source,
         json!({

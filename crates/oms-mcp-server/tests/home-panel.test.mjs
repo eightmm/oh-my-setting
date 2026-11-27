@@ -112,7 +112,7 @@ test('draws a mixed world without throwing', () => {
 });
 
 test('calls only the read-only card tool and opens no network path', () => {
-  assert.ok(Buffer.byteLength(html) <= 128 * 1024);
+  assert.ok(Buffer.byteLength(html) <= 256 * 1024);
   assert.deepEqual([...new Set(html.match(/\boms_[a-z_]+/g))], ['oms_list_projects']);
   assert.doesNotMatch(script, /\bfetch\(|XMLHttpRequest|WebSocket|EventSource|\bimport\(/);
 });

@@ -142,6 +142,9 @@ const VALUES: &[&str] = &[
     "generation",
     "id",
     "unregister-project",
+    "install-panel",
+    "uninstall-panel",
+    "project",
 ];
 const REPEATED: &[&str] = &["scope", "attempt", "evidence", "from-task"];
 
@@ -297,6 +300,12 @@ impl Options {
                     let values = out.values.entry(key.into()).or_default();
                     if matches!(key, "launch" | "spawn-main") {
                         require(values.is_empty(), "choose one Main provider")?;
+                    }
+                    if matches!(key, "install-panel" | "uninstall-panel") {
+                        require(values.is_empty(), "choose one panel operation")?;
+                    }
+                    if key == "project" {
+                        require(values.is_empty(), "--project accepts one alias")?;
                     }
                     if key == "lead" {
                         require(values.is_empty(), "choose one provider lead")?;
@@ -574,6 +583,8 @@ impl Options {
             "settle-review",
             "register-project",
             "unregister-project",
+            "install-panel",
+            "uninstall-panel",
             "projects",
         ];
         require(
@@ -591,10 +602,16 @@ impl Options {
                 || active_modes.iter().all(|key| {
                     matches!(
                         *key,
-                        "launch" | "dispatch" | "continue" | "council" | "open-chat"
+                        "launch"
+                            | "dispatch"
+                            | "continue"
+                            | "council"
+                            | "open-chat"
+                            | "install-panel"
+                            | "uninstall-panel"
                     )
                 }),
-            "--dry-run only plans a launch, role dispatch, council or chat navigation",
+            "--dry-run only plans a launch, role dispatch, council, chat navigation or project panel change",
         )?;
         require(
             !self.has("swap-main")
@@ -681,6 +698,22 @@ impl Options {
                 "--projects accepts only --json",
             )?;
         }
+        for mode in ["install-panel", "uninstall-panel"] {
+            if let Some(app) = self.get(mode) {
+                crate::desktop_projects::PanelApp::parse(app)?;
+                self.required("project")?;
+                require(
+                    !self.count_rows
+                        && self
+                            .flags
+                            .iter()
+                            .all(|s| matches!(s.as_str(), "dry-run" | "json"))
+                        && self.values.keys().all(|s| s == mode || s == "project"),
+                    &format!("--{mode} accepts only APP, --project ALIAS, --dry-run and --json"),
+                )?;
+            }
+        }
+        self.needs(&["project"], &["install-panel", "uninstall-panel"])?;
         self.needs(&["alias"], &["dispatch", "continue", "register-project"])?;
         self.needs(&["area"], &["register-project"])?;
         self.needs(
@@ -1024,6 +1057,8 @@ impl Options {
         require(
             !(self.has("json") && self.has("dry-run"))
                 || self.has("open-chat")
+                || self.has("install-panel")
+                || self.has("uninstall-panel")
                 || self.managed_plan_task(),
             "choose --json or --dry-run",
         )?;
@@ -1164,7 +1199,7 @@ pub fn usage() -> String {
     text.push_str("Fresh Claude account spread: --orchestrator claude --spread-accounts\n\n");
     text.push_str("After a canonical Main swap: --native-adopt ATTEMPT --assignment-sha256 SHA [--result-sha256 SHA]\nResults supplies the exact adoption command. Omit result SHA only when no current result exists.\nAdoption preserves the frozen claim, attempt, account and round; it never resends input or grants acceptance.\nSettled tasks permit retirement-only adoption even after the checkout advances.\n\n");
     text.push_str("Managed native Main: --launch codex|claude [--account ID] [--task TEXT]\n\n");
-    text.push_str("Desktop projects: --register-project [PATH] [--alias NAME] [--area NAME] | --unregister-project ALIAS | --projects [--json]\n\n");
+    text.push_str("Desktop projects: --register-project [PATH] [--alias NAME] [--area NAME] | --unregister-project ALIAS | --projects [--json]\nProject panels: --install-panel claude --project ALIAS [--dry-run] [--json] | --uninstall-panel claude --project ALIAS [--dry-run] [--json]\n\n");
     text.push_str("Read: --teams [--json] | --results [--task-id ID] [--page N] [--json] [--export FILE]\nWatch: --watch [--view auto|summary|compact|detail|graph|tree] [--count N]\nWork: --dispatch ROLE --prompt TEXT | --brief-file FILE [--dry-run]\nContinue: --continue TASK --brief-file FILE [--dispatch ROLE]\nCouncil: --council --prompt TEXT [--lenses NAMES | --rounds N] [--dry-run]\nAccept: --accept TASK --repo PATH --message TEXT --verify COMMAND\nFinalize: --finalize --owner OWNER --task-id ID --summary-file FILE --outcome OUTCOME\nRecovery: --salvage TASK [--attempt ID]; --retry-delivery --task-id ID\n\nOptions:\n");
     for key in FLAGS {
         text.push_str(&format!("  --{key}\n"));
@@ -1844,6 +1879,54 @@ mod tests {
         assert!(help.contains("--register-project [PATH]"));
         assert!(help.contains("--area VALUE"));
         assert!(help.contains("--unregister-project VALUE"));
+        assert!(help.contains("--install-panel claude --project ALIAS"));
+        assert!(help.contains("--uninstall-panel claude --project ALIAS"));
         assert!(help.contains("--projects"));
+
+        for mode in ["--install-panel", "--uninstall-panel"] {
+            for flags in [
+                &[][..],
+                &["--dry-run"],
+                &["--json"],
+                &["--dry-run", "--json"],
+            ] {
+                let mut argv = vec![mode, "claude", "--project", "engine"];
+                argv.extend_from_slice(flags);
+                let parsed = parse(&argv).unwrap();
+                assert!(!parsed.selects_main());
+                assert_eq!(parsed.get("project"), Some("engine"));
+            }
+            for unsupported in ["codex", "antigravity", "agy", ""] {
+                let err = parse(&[mode, unsupported, "--project", "engine"]).unwrap_err();
+                assert!(
+                    err.message.contains("supported: claude"),
+                    "unexpected error for {unsupported:?}: {}",
+                    err.message
+                );
+            }
+            for bad in [
+                vec![mode],
+                vec![mode, "claude"],
+                vec![mode, "claude", "--project", ""],
+                vec![mode, "claude", "--project", "a", "--project", "b"],
+                vec![mode, "claude", mode, "claude", "--project", "engine"],
+                vec![mode, "claude", "--project", "engine", "--alias", "other"],
+                vec![mode, "claude", "--project", "engine", "--repo", "."],
+            ] {
+                assert!(parse(&bad).is_err(), "accepted {bad:?}");
+            }
+        }
+        assert!(parse(&["--project", "engine"]).is_err());
+        assert!(
+            parse(&[
+                "--install-panel",
+                "claude",
+                "--uninstall-panel",
+                "claude",
+                "--project",
+                "engine"
+            ])
+            .is_err()
+        );
     }
 }

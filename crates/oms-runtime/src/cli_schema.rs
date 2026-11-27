@@ -288,7 +288,8 @@ pub(super) const SCOPES: &str = r###"[
     {"names":["--workdir"],"help":"optional ~/REL; must equal the resolved local repository path under HOME"},
     {"names":["--capability"],"action":"append","default":[]},
     {"names":["--scheduler"],"choices":["none","slurm"],"default":"none"},
-    {"names":["--scratch-root"]}
+    {"names":["--scratch-root"]},
+    {"names":["--control-persist"],"type":"int","help":"SSH ControlPersist duration in seconds, 60..14400; default: 1800"}
    ],"children":[],"groups":[]},
   {"path":["backend", "target", "list"],"description":"",
    "arguments":[
