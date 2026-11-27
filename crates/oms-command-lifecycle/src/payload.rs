@@ -479,7 +479,7 @@ pub(crate) fn prepare_incoming_with_bundle(
     }
 }
 
-fn valid_revision(revision: &str) -> Result<()> {
+pub(crate) fn valid_revision(revision: &str) -> Result<()> {
     if revision.len() != 40
         || !revision
             .bytes()
