@@ -195,7 +195,7 @@ pub fn bwrap_args(program: &OsStr, args: &[OsString], spec: &SandboxSpec) -> Vec
             .into_iter()
             .filter_map(nonempty_env)
             .map(PathBuf::from)
-            .any(|dir| same_dir(&dir, agent_dir))
+            .any(|dir| same_dir(&dir, agent_dir) || in_worktree(&dir, agent_dir))
             || binds
                 .iter()
                 .any(|dir| in_worktree(agent_dir, dir) || in_worktree(dir, agent_dir));
