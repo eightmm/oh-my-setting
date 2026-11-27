@@ -227,10 +227,29 @@ fn atomic_bounds_empty_zero_equal_and_overflow() {
         Err(refused(ByteError::OutputTooLarge))
     );
     assert!(!f.0.join(path).exists());
+    let (bytes, stat) = root
+        .read_no_follow_checked::<ByteError>(path, opts.read, |_| panic!("absent leaf opened"))
+        .unwrap();
+    assert!(bytes.is_empty() && stat.is_none());
     change(&root, path, opts, b"").unwrap();
     assert_eq!(root.read_no_follow(path, opts.read).unwrap(), []);
+    let mut opened = None;
+    let (bytes, stat) = root
+        .read_no_follow_checked::<ByteError>(path, opts.read, |stat| {
+            opened = Some(*stat);
+            Ok(())
+        })
+        .unwrap();
+    let stat = stat.unwrap();
+    assert!(bytes.is_empty());
+    assert_eq!(stat.st_size, 0);
+    assert!(unchanged(&opened.unwrap(), &stat));
     opts.max_output = 3;
     change(&root, path, opts, b"abc").unwrap();
+    assert!(matches!(
+        root.read_no_follow_checked(path, opts.read, |_| Err(ByteError::Unsafe)),
+        Err(ByteError::Unsafe)
+    ));
     assert_eq!(
         root.read_no_follow(path, opts.read),
         Err(ByteError::InputTooLarge)
