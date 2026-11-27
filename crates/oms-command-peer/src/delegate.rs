@@ -1717,14 +1717,13 @@ mod tests {
                     "delegate::tests::remove_leaves_wrapper_with_unexpected_entries_untouched",
                     "--nocapture",
                 ])
+                // A parent run under an OMS dispatch exports task, Room and attempt variables
+                // that would change the attempt refs this test asserts.
+                .env_clear()
+                .envs(std::env::var_os("TMPDIR").map(|dir| ("TMPDIR", dir)))
                 .env(INNER, "1")
                 .env("PATH", path)
                 .env("HOME", &home)
-                .env_remove("XDG_CONFIG_HOME")
-                .env_remove("OMS_HARNESS_CHILD")
-                .env_remove("OMS_HARNESS_DELEGATE_DEPTH")
-                .env_remove("OMS_ATTEMPT_ID")
-                .env_remove("OMS_STATE_REPO")
                 .output()
                 .unwrap();
             let _ = std::fs::remove_dir_all(&sandbox);

@@ -1308,7 +1308,7 @@ impl CollabServices<'_> {
             return self.execute_peer_supervised(input, argv, interrupted);
         }
         let heartbeat = peer_activity_heartbeat(input.heartbeat.as_ref());
-        let (done, _) = supervise(
+        let (done, heartbeat_failed) = supervise(
             peer_job(
                 argv,
                 &mut input,
@@ -1336,10 +1336,15 @@ impl CollabServices<'_> {
             && done.supervision_error.is_none();
         let cleanup_complete = Some(done.cleanup_complete());
         let owned_cleanup = done.owned_cleanup().cloned();
+        let code = stop_code(&done);
+        let mut stderr = done.stderr.map_or_else(Vec::new, |s| s.bytes);
+        if heartbeat_failed {
+            stderr.extend_from_slice(b"\nOMS activity update unavailable\n");
+        }
         Ok(Completed {
-            code: stop_code(&done),
+            code,
             stdout: done.stdout.bytes,
-            stderr: done.stderr.map_or_else(Vec::new, |s| s.bytes),
+            stderr,
             complete,
             cleanup_complete,
             owned_cleanup,
@@ -1386,7 +1391,7 @@ impl CollabServices<'_> {
         inner.remove_environment = std::mem::take(&mut input.remove_environment);
         inner.merged = input.merge;
         let payload = supervise_worker_request(&inner, true).map_err(fail)?;
-        let (done, _) = supervise(
+        let (done, heartbeat_failed) = supervise(
             peer_supervised_job(
                 self.control.supervise_worker().to_vec(),
                 &cwd,
@@ -1419,6 +1424,10 @@ impl CollabServices<'_> {
             && !child.output_limited
             && !child.cancelled
             && child.code != 125;
+        let mut stderr = child.stderr;
+        if heartbeat_failed {
+            stderr.extend_from_slice(b"\nOMS activity update unavailable\n");
+        }
         Ok(Completed {
             code: if done.stop.is_some() {
                 stop_code(&done)
@@ -1426,7 +1435,7 @@ impl CollabServices<'_> {
                 child.code
             },
             stdout: child.stdout,
-            stderr: child.stderr,
+            stderr,
             complete,
             cleanup_complete: Some(true),
             owned_cleanup: done.owned_cleanup().cloned(),
