@@ -130,6 +130,39 @@ fn owns_only_agent_plan() {
 }
 
 #[test]
+fn status_checks_completion_refs_in_stable_creation_order() {
+    if isolated("status_checks_completion_refs_in_stable_creation_order") {
+        return;
+    }
+    let tmp = Tmp::new();
+    let repo = repo(&tmp);
+    let plan = repo.join(".oms/plan/tasks.json");
+    fs::create_dir_all(plan.parent().unwrap()).unwrap();
+    for (kind_created, expected) in [
+        ("2026-01-03T00:00:00Z", "unknown completion fields"),
+        (
+            "2026-01-02T00:00:00Z",
+            "completion reference on nonterminal task",
+        ),
+    ] {
+        fs::write(
+            &plan,
+            format!(
+                r#"{{"schema":3,"tasks":{{
+                    "z-kind":{{"id":"z-kind","created":"{kind_created}","state":"ready","completion_kind":"satisfied-by"}},
+                    "m-ordinary":{{"id":"m-ordinary","created":"2026-01-01T00:00:00Z","state":"ready"}},
+                    "a-receipt":{{"id":"a-receipt","created":"2026-01-02T00:00:00Z","state":"done","completion_receipt":{{}}}}
+                }}}}"#,
+            ),
+        )
+        .unwrap();
+        let (code, _, stderr) = go(&repo, &["status", "--json"]);
+        assert_eq!(code, 2, "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
+#[test]
 fn status_snapshot_for_rechecks_after_projecting_expected_plan() {
     use oms_command_plan::{Action, Context, Plan, Request, json};
     use std::cell::Cell;
