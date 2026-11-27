@@ -3772,6 +3772,7 @@ impl Server<'_> {
         }
         let cache_dir = self.card_cache_dir();
         let now = std::time::SystemTime::now();
+        let observed = std::time::Instant::now();
         let base_bytes = out.to_string().len();
         let count = projects.len().max(1);
         let available_for_cards = crate::OUTPUT_LIMIT
@@ -3822,7 +3823,7 @@ impl Server<'_> {
             }
         }
         if !to_refresh.is_empty() {
-            self.project_cards.enqueue_batch(to_refresh);
+            self.project_cards.enqueue_batch(to_refresh, observed);
         }
         out["cards"] = Value::Array(cards);
         Ok(out)
@@ -4824,6 +4825,7 @@ struct CardRefresherState {
     pending: std::collections::VecDeque<(String, PathBuf, Option<PathBuf>)>,
     in_flight: std::collections::BTreeSet<String>,
     failed: BTreeMap<String, std::time::Instant>,
+    refreshed: BTreeMap<String, std::time::Instant>,
     slot_busy: [bool; MAX_CONCURRENT_CARD_REFRESHES],
     slots: [Option<std::thread::JoinHandle<()>>; MAX_CONCURRENT_CARD_REFRESHES],
 }
@@ -4887,7 +4889,13 @@ impl ProjectCardRefresher {
             && state.slot_busy.iter().all(|busy| !*busy)
     }
 
-    fn enqueue_batch(&self, items: Vec<(String, PathBuf, Option<PathBuf>)>) {
+    /// `observed` is when the caller read the caches: an alias refreshed after it was seen stale
+    /// is already current and is not queued again.
+    fn enqueue_batch(
+        &self,
+        items: Vec<(String, PathBuf, Option<PathBuf>)>,
+        observed: std::time::Instant,
+    ) {
         use std::sync::atomic::Ordering;
 
         if self.0.inner.stopped.load(Ordering::Acquire) {
@@ -4901,6 +4909,10 @@ impl ProjectCardRefresher {
             }
             for (alias_name, repo, cache_dir) in items {
                 if state.in_flight.contains(&alias_name)
+                    || state
+                        .refreshed
+                        .get(&alias_name)
+                        .is_some_and(|at| *at > observed)
                     || state
                         .failed
                         .get(&alias_name)
@@ -4975,6 +4987,9 @@ fn run_card_refresh_worker(
         // A failing project waits out a backoff instead of rerunning on every poll.
         if refreshed {
             state.failed.remove(&alias_name);
+            state
+                .refreshed
+                .insert(alias_name.clone(), std::time::Instant::now());
         } else {
             state
                 .failed
@@ -5619,6 +5634,7 @@ mod work_items_tests {
         assert_eq!(exec.max_active.load(Ordering::Acquire), 2);
 
         // Release workers and wait for all 4 valid aliases to become fresh.
+        let seen_before_refresh = std::time::Instant::now();
         *exec.hold.lock().unwrap() = false;
         exec.cv.notify_all();
         let wait_until = std::time::Instant::now() + Duration::from_secs(5);
@@ -5665,6 +5681,13 @@ mod work_items_tests {
             fresh_reply["result"]["structuredContent"]["cards"][1]["goal"],
             "Refreshed in background"
         );
+        assert_eq!(exec.calls.load(Ordering::Acquire), calls_before);
+        // A caller that read the cache before a refresh finished does not queue it again.
+        server.project_cards.enqueue_batch(
+            vec![("p0".into(), projects["p0"].clone(), Some(cache_dir.clone()))],
+            seen_before_refresh,
+        );
+        assert!(server.project_cards.is_idle());
         assert_eq!(exec.calls.load(Ordering::Acquire), calls_before);
 
         // Stat-only staleness: 10-minute age, .git/HEAD, .git/index, and .oms/plan.
