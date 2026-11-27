@@ -346,8 +346,12 @@ marks entries whose checkout path no longer exists. `--install-panel claude --pr
 resolves `ALIAS` from the host project map and runs `claude` (`OMS_CLAUDE_BIN`, else on `PATH`)
 in the physical checkout to register a local-scope `oms-panel` MCP entry pinned via
 `OMS_PANEL_REPO` with `OMS_MCP_TOOL_PROFILE=chatgpt-panel` and `~/.local/bin/oms mcp-server`,
-refusing unmanaged local `oms-panel` entries, recording ownership in the sibling mode `0600`
-`desktop-project-panels.json` sidecar (rolling back on record-write failure), and treating
-identical reinstalls as no-ops; `--uninstall-panel claude --project ALIAS` removes only
-recorded local entries and drops the ownership row, and `--unregister-project` refuses aliases
-that still have an installed panel.
+adopting an exact-match unrecorded local entry (`action: "adopted"`), refusing differing local
+`oms-panel` entries, recording ownership in the sibling mode `0600`
+`desktop-project-panels.json` sidecar (rolling back once on `add-json` timeout/interrupt or
+record-write failure and reporting `uncertain: true` when rollback fails), and treating
+identical reinstalls as no-ops; `--uninstall-panel claude --project ALIAS` forgets the ownership
+row without running `claude` when the recorded checkout is gone (`action: "forgotten"`), probes
+`claude mcp get` first to leave user-modified local entries in place while dropping the row, and
+removes only matching entries, while `--unregister-project` refuses aliases that still have a
+recorded panel.

@@ -1,11 +1,13 @@
 use crate::{Error, Output, Result, cli::Options, json, parent_only, render, require};
-use rustix::fs::{AtFlags, Stat};
-use rustix::process::{Pid, Signal, kill_process_group};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::fs::{AtFlags, OFlags, Stat, fcntl_getfl, fcntl_setfl};
+use rustix::io::Errno;
+use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process_group, waitid};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::Read;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
@@ -25,6 +27,7 @@ const PANEL_ENTRY_NAME: &str = "oms-panel";
 const LIFECYCLE_OWNED_KEY: &str = "oh-my-setting";
 const VENDOR_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CAPTURE_BYTES: usize = 64 * 1024;
+const MCP_MISSING_STATUS: i32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PanelApp {
@@ -345,13 +348,126 @@ struct CmdOutput {
     stderr: String,
 }
 
-fn read_bounded_pipe(mut pipe: impl Read) -> String {
-    let mut buf = Vec::new();
-    let _ = (&mut pipe)
-        .take(MAX_CAPTURE_BYTES as u64)
-        .read_to_end(&mut buf);
-    let _ = std::io::copy(&mut pipe, &mut std::io::sink());
-    String::from_utf8_lossy(&buf).into_owned()
+enum VendorExecError {
+    Spawn(Error),
+    TimedOut(Error),
+    Interrupted(Error),
+    Wait(Error),
+}
+
+impl VendorExecError {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Spawn(e) | Self::TimedOut(e) | Self::Interrupted(e) | Self::Wait(e) => e,
+        }
+    }
+}
+
+fn vendor_timeout() -> Duration {
+    if let Some(raw) = std::env::var_os("OMS_CLAUDE_TIMEOUT_MS")
+        && let Some(s) = raw.to_str()
+        && let Ok(ms) = s.trim().parse::<u64>()
+        && (20..=300_000).contains(&ms)
+    {
+        return Duration::from_millis(ms);
+    }
+    VENDOR_TIMEOUT
+}
+
+fn format_timeout(timeout: Duration) -> String {
+    if timeout.subsec_nanos() == 0 {
+        format!("{}s", timeout.as_secs())
+    } else {
+        format!("{}ms", timeout.as_millis())
+    }
+}
+
+struct ChildGroup {
+    child: std::process::Child,
+    pgid: Option<Pid>,
+    reaped: bool,
+}
+
+impl ChildGroup {
+    fn check_exited(&mut self) -> std::result::Result<Option<std::process::ExitStatus>, Error> {
+        if let Some(pgid) = self.pgid {
+            loop {
+                match waitid(
+                    WaitId::Pid(pgid),
+                    WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+                ) {
+                    Ok(Some(info)) if info.exited() || info.killed() || info.dumped() => {
+                        let _ = kill_process_group(pgid, Signal::KILL);
+                        self.reaped = true;
+                        return self.child.wait().map(Some).map_err(|e| {
+                            Error::new(format!("failed waiting for Claude CLI: {e}"))
+                        });
+                    }
+                    Ok(_) => return Ok(None),
+                    Err(Errno::INTR) => continue,
+                    Err(Errno::INVAL | Errno::NOSYS) => break,
+                    Err(e) => {
+                        return Err(Error::new(format!("failed waiting for Claude CLI: {e}")));
+                    }
+                }
+            }
+        }
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                if let Some(pgid) = self.pgid {
+                    let _ = kill_process_group(pgid, Signal::KILL);
+                }
+                self.reaped = true;
+                Ok(Some(status))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(Error::new(format!("failed waiting for Claude CLI: {e}"))),
+        }
+    }
+
+    fn kill_and_reap(&mut self) {
+        if self.reaped {
+            return;
+        }
+        if let Some(pgid) = self.pgid {
+            let _ = kill_process_group(pgid, Signal::KILL);
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.reaped = true;
+    }
+}
+
+impl Drop for ChildGroup {
+    fn drop(&mut self) {
+        self.kill_and_reap();
+    }
+}
+
+fn set_nonblocking(fd: impl AsFd) -> Result<()> {
+    let flags =
+        fcntl_getfl(&fd).map_err(|e| Error::new(format!("cannot inspect Claude CLI pipe: {e}")))?;
+    fcntl_setfl(&fd, flags | OFlags::NONBLOCK)
+        .map_err(|e| Error::new(format!("cannot configure Claude CLI pipe: {e}")))
+}
+
+fn drain_pipe(pipe: &mut impl Read, buf: &mut Vec<u8>) -> Result<bool> {
+    let mut chunk = [0u8; 8192];
+    for _ in 0..64 {
+        match pipe.read(&mut chunk) {
+            Ok(0) => return Ok(true),
+            Ok(n) => {
+                let remaining = MAX_CAPTURE_BYTES.saturating_sub(buf.len());
+                if remaining > 0 {
+                    buf.extend_from_slice(&chunk[..n.min(remaining)]);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(Error::new(format!("failed reading Claude CLI pipe: {e}"))),
+        }
+    }
+    Ok(false)
 }
 
 fn run_bounded_command(
@@ -359,7 +475,7 @@ fn run_bounded_command(
     args: &[&str],
     workdir: &Path,
     stop: &AtomicBool,
-) -> Result<CmdOutput> {
+) -> std::result::Result<CmdOutput, VendorExecError> {
     let mut child = Command::new(program)
         .args(args)
         .current_dir(workdir)
@@ -368,70 +484,113 @@ fn run_bounded_command(
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
-        .map_err(|e| Error::new(format!("cannot execute Claude CLI: {e}")))?;
+        .map_err(|e| {
+            VendorExecError::Spawn(Error::new(format!("cannot execute Claude CLI: {e}")))
+        })?;
 
-    let stdout_pipe = child
+    let mut stdout_pipe = child
         .stdout
         .take()
-        .ok_or_else(|| Error::new("missing child stdout pipe"))?;
-    let stderr_pipe = child
+        .ok_or_else(|| VendorExecError::Wait(Error::new("missing child stdout pipe")))?;
+    let mut stderr_pipe = child
         .stderr
         .take()
-        .ok_or_else(|| Error::new("missing child stderr pipe"))?;
+        .ok_or_else(|| VendorExecError::Wait(Error::new("missing child stderr pipe")))?;
 
-    let pid = i32::try_from(child.id())
+    let pgid = i32::try_from(child.id())
         .ok()
         .filter(|p| *p > 0)
         .and_then(Pid::from_raw);
+    let mut group = ChildGroup {
+        child,
+        pgid,
+        reaped: false,
+    };
 
-    std::thread::scope(|scope| {
-        let out_reader = scope.spawn(|| read_bounded_pipe(stdout_pipe));
-        let err_reader = scope.spawn(|| read_bounded_pipe(stderr_pipe));
-        let deadline = Instant::now() + VENDOR_TIMEOUT;
-        let status = loop {
-            if stop.load(Ordering::Acquire) {
-                if let Some(pgid) = pid {
-                    let _ = kill_process_group(pgid, Signal::KILL);
+    set_nonblocking(&stdout_pipe).map_err(VendorExecError::Wait)?;
+    set_nonblocking(&stderr_pipe).map_err(VendorExecError::Wait)?;
+
+    let timeout = vendor_timeout();
+    let deadline = Instant::now() + timeout;
+    let mut out_buf = Vec::new();
+    let mut err_buf = Vec::new();
+    let mut out_eof = false;
+    let mut err_eof = false;
+    let mut exit_status = None;
+
+    loop {
+        if stop.load(Ordering::Acquire) {
+            group.kill_and_reap();
+            return Err(VendorExecError::Interrupted(Error {
+                code: 130,
+                message: "interrupted while running Claude CLI".into(),
+                publication_uncertain: false,
+            }));
+        }
+
+        if !out_eof {
+            out_eof = drain_pipe(&mut stdout_pipe, &mut out_buf).map_err(VendorExecError::Wait)?;
+        }
+        if !err_eof {
+            err_eof = drain_pipe(&mut stderr_pipe, &mut err_buf).map_err(VendorExecError::Wait)?;
+        }
+
+        if exit_status.is_none() {
+            match group.check_exited() {
+                Ok(Some(status)) => {
+                    exit_status = Some(status);
+                    if !out_eof {
+                        out_eof = drain_pipe(&mut stdout_pipe, &mut out_buf)
+                            .map_err(VendorExecError::Wait)?;
+                    }
+                    if !err_eof {
+                        err_eof = drain_pipe(&mut stderr_pipe, &mut err_buf)
+                            .map_err(VendorExecError::Wait)?;
+                    }
                 }
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Error {
-                    code: 130,
-                    message: "interrupted while running Claude CLI".into(),
-                    publication_uncertain: false,
+                Ok(None) => {}
+                Err(e) => {
+                    group.kill_and_reap();
+                    return Err(VendorExecError::Wait(e));
+                }
+            }
+        }
+
+        if let Some(status) = exit_status {
+            if (out_eof && err_eof) || Instant::now() >= deadline {
+                return Ok(CmdOutput {
+                    code: status.code(),
+                    stdout: String::from_utf8_lossy(&out_buf).into_owned(),
+                    stderr: String::from_utf8_lossy(&err_buf).into_owned(),
                 });
             }
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {
-                    if Instant::now() >= deadline {
-                        if let Some(pgid) = pid {
-                            let _ = kill_process_group(pgid, Signal::KILL);
-                        }
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(Error::new("Claude CLI timed out after 30s"));
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) => {
-                    if let Some(pgid) = pid {
-                        let _ = kill_process_group(pgid, Signal::KILL);
-                    }
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(Error::new(format!("failed waiting for Claude CLI: {e}")));
-                }
-            }
+        } else if Instant::now() >= deadline {
+            group.kill_and_reap();
+            return Err(VendorExecError::TimedOut(Error::new(format!(
+                "Claude CLI timed out after {}",
+                format_timeout(timeout)
+            ))));
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let slice = remaining.min(Duration::from_millis(10));
+        let ts = Timespec {
+            tv_sec: i64::try_from(slice.as_secs()).unwrap_or(0),
+            tv_nsec: slice.subsec_nanos() as _,
         };
-        let stdout = out_reader.join().unwrap_or_default();
-        let stderr = err_reader.join().unwrap_or_default();
-        Ok(CmdOutput {
-            code: status.code(),
-            stdout,
-            stderr,
-        })
-    })
+        let mut poll_fds = Vec::with_capacity(2);
+        if !out_eof {
+            poll_fds.push(PollFd::new(&stdout_pipe, PollFlags::IN));
+        }
+        if !err_eof {
+            poll_fds.push(PollFd::new(&stderr_pipe, PollFlags::IN));
+        }
+        if poll_fds.is_empty() {
+            std::thread::sleep(slice);
+        } else {
+            let _ = poll(&mut poll_fds, Some(&ts));
+        }
+    }
 }
 
 fn sanitized_vendor_reason(out: &CmdOutput) -> Option<String> {
@@ -477,21 +636,35 @@ fn vendor_failure(subcommand: &str, out: &CmdOutput) -> Error {
     }
 }
 
-fn is_mcp_entry_missing(stdout: &str, stderr: &str) -> bool {
-    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
-    [
-        "not found",
+fn is_mcp_entry_missing(out: &CmdOutput) -> bool {
+    if out.code != Some(MCP_MISSING_STATUS) {
+        return false;
+    }
+    let combined = format!("{}\n{}", out.stderr, out.stdout).to_ascii_lowercase();
+    let entry_lower = PANEL_ENTRY_NAME.to_ascii_lowercase();
+    if !combined.contains(&entry_lower) || combined.contains("command not found") {
+        return false;
+    }
+    let direct = [
         "no mcp server",
         "no local mcp server",
+        "no local-scoped mcp server",
         "no project-scoped mcp server",
-        "does not exist",
-        "already gone",
-        "already removed",
+        "no user-scoped mcp server",
         "no server named",
         "unknown server",
-    ]
-    .iter()
-    .any(|needle| combined.contains(needle))
+        "oms-panel not found",
+        "\"oms-panel\" not found",
+        "'oms-panel' not found",
+        "oms-panel does not exist",
+        "\"oms-panel\" does not exist",
+        "'oms-panel' does not exist",
+    ];
+    if direct.iter().any(|needle| combined.contains(needle)) {
+        return true;
+    }
+    (combined.contains("server") || combined.contains("entry"))
+        && (combined.contains("not found") || combined.contains("does not exist"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -508,6 +681,7 @@ struct ClaudeMcpEntry {
     command: Option<String>,
     args: Vec<String>,
     env: BTreeMap<String, String>,
+    has_extra_fields: bool,
 }
 
 impl ClaudeMcpEntry {
@@ -518,7 +692,8 @@ impl ClaudeMcpEntry {
         let Some(repo_str) = physical_repo.to_str() else {
             return false;
         };
-        self.scope == Some(ClaudeScope::Local)
+        !self.has_extra_fields
+            && self.scope == Some(ClaudeScope::Local)
             && self.transport_type.as_deref().is_none_or(|t| t == "stdio")
             && self.command.as_deref() == Some(launcher_str)
             && self.args == ["mcp-server"]
@@ -543,34 +718,59 @@ fn classify_scope_token(raw: &str) -> Option<ClaudeScope> {
 
 fn parse_claude_mcp_get(stdout: &str) -> Option<ClaudeMcpEntry> {
     let trimmed = stdout.trim();
-    if trimmed.starts_with('{')
-        && let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
-    {
-        let cfg = val.get("config").unwrap_or(&val);
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('{') {
+        let val = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
+        let root_obj = val.as_object()?;
+        let cfg_val = val.get("config").unwrap_or(&val);
+        let cfg = cfg_val.as_object()?;
         let scope = val
             .get("scope")
-            .or_else(|| cfg.get("scope"))
+            .or_else(|| cfg_val.get("scope"))
             .and_then(|v| v.as_str())
             .and_then(classify_scope_token)?;
-        let transport_type = cfg.get("type").and_then(|v| v.as_str()).map(str::to_owned);
-        let command = cfg
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned);
-        let args = cfg
-            .get("args")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|item| item.as_str().map(str::to_owned))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let mut has_extra_fields = false;
+        if val.get("config").is_some()
+            && root_obj
+                .keys()
+                .any(|k| !matches!(k.as_str(), "scope" | "config" | "name" | "status"))
+        {
+            has_extra_fields = true;
+        }
+        if cfg.keys().any(|k| {
+            !matches!(
+                k.as_str(),
+                "scope" | "type" | "command" | "args" | "env" | "status"
+            )
+        }) {
+            has_extra_fields = true;
+        }
+        let transport_type = match cfg.get("type") {
+            Some(v) => Some(v.as_str()?.to_owned()),
+            None => None,
+        };
+        let command = match cfg.get("command") {
+            Some(v) => Some(v.as_str()?.to_owned()),
+            None => None,
+        };
+        let args = match cfg.get("args") {
+            Some(v) => v
+                .as_array()?
+                .iter()
+                .map(|item| item.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()?,
+            None => Vec::new(),
+        };
         let mut env = BTreeMap::new();
-        if let Some(obj) = cfg.get("env").and_then(|v| v.as_object()) {
-            for (k, v) in obj {
+        if let Some(env_val) = cfg.get("env") {
+            for (k, v) in env_val.as_object()? {
                 env.insert(k.clone(), v.as_str()?.to_owned());
             }
+        }
+        if command.is_none() && transport_type.is_none() && !has_extra_fields {
+            return None;
         }
         return Some(ClaudeMcpEntry {
             scope: Some(scope),
@@ -578,12 +778,14 @@ fn parse_claude_mcp_get(stdout: &str) -> Option<ClaudeMcpEntry> {
             command,
             args,
             env,
+            has_extra_fields,
         });
     }
 
     let mut entry = ClaudeMcpEntry::default();
     let mut in_env = false;
     let mut env_indent = 0usize;
+    let mut has_detail = false;
     for line in stdout.lines() {
         let indent = line
             .bytes()
@@ -595,22 +797,33 @@ fn parse_claude_mcp_get(stdout: &str) -> Option<ClaudeMcpEntry> {
             continue;
         }
         if in_env && indent > env_indent {
-            if let Some((k, v)) = body.split_once('=') {
-                entry.env.insert(k.trim().to_owned(), v.to_owned());
-                continue;
+            let (k, v) = body.split_once('=')?;
+            let key = k.trim();
+            if key.is_empty() {
+                return None;
             }
-            in_env = false;
-        } else {
-            in_env = false;
+            if entry.env.insert(key.to_owned(), v.to_owned()).is_some() {
+                entry.has_extra_fields = true;
+            }
+            continue;
         }
+        in_env = false;
 
         if let Some((label, rest)) = body.split_once(':') {
             let key = label.trim().to_ascii_lowercase();
             let value = rest.trim();
             match key.as_str() {
-                "scope" => entry.scope = classify_scope_token(value),
-                "type" => entry.transport_type = Some(value.to_owned()),
-                "command" => entry.command = Some(value.to_owned()),
+                "scope" => {
+                    entry.scope = Some(classify_scope_token(value)?);
+                }
+                "type" => {
+                    entry.transport_type = Some(value.to_owned());
+                    has_detail = true;
+                }
+                "command" => {
+                    entry.command = Some(value.to_owned());
+                    has_detail = true;
+                }
                 "args" => {
                     entry.args = if value.is_empty() || value == "(none)" || value == "none" {
                         Vec::new()
@@ -621,6 +834,12 @@ fn parse_claude_mcp_get(stdout: &str) -> Option<ClaudeMcpEntry> {
                 "environment" if value.is_empty() => {
                     in_env = true;
                     env_indent = indent;
+                }
+                "status" | "to remove this server, run" => {}
+                _ if indent == 0 && value.is_empty() => {}
+                _ if indent > 0 => {
+                    entry.has_extra_fields = true;
+                    has_detail = true;
                 }
                 _ => {}
             }
@@ -638,7 +857,7 @@ fn parse_claude_mcp_get(stdout: &str) -> Option<ClaudeMcpEntry> {
             }
         }
     }
-    entry.scope.is_some().then_some(entry)
+    (entry.scope.is_some() && has_detail).then_some(entry)
 }
 
 fn probe_claude_entry(
@@ -646,19 +865,14 @@ fn probe_claude_entry(
     workdir: &Path,
     stop: &AtomicBool,
 ) -> Result<Option<ClaudeMcpEntry>> {
-    let out = run_bounded_command(claude_bin, &["mcp", "get", PANEL_ENTRY_NAME], workdir, stop)?;
+    let out = run_bounded_command(claude_bin, &["mcp", "get", PANEL_ENTRY_NAME], workdir, stop)
+        .map_err(VendorExecError::into_error)?;
     if out.code == Some(0) {
-        if let Some(parsed) = parse_claude_mcp_get(&out.stdout) {
-            return Ok(Some(parsed));
-        }
-        if is_mcp_entry_missing(&out.stdout, &out.stderr) {
-            return Ok(None);
-        }
-        return Err(Error::new(
-            "cannot determine scope from `claude mcp get oms-panel` output",
-        ));
+        return parse_claude_mcp_get(&out.stdout)
+            .map(Some)
+            .ok_or_else(|| Error::new("cannot parse `claude mcp get oms-panel` output"));
     }
-    if is_mcp_entry_missing(&out.stdout, &out.stderr) {
+    if is_mcp_entry_missing(&out) {
         return Ok(None);
     }
     Err(vendor_failure("get", &out))
@@ -679,6 +893,78 @@ fn panel_action_json(
         "action": action,
         "changed": changed,
     })
+}
+
+fn upsert_panel_row(panels: &mut PanelMap, alias: &str, app: PanelApp, physical: &Path) {
+    let rows = panels.entry(alias.to_owned()).or_default();
+    if let Some(slot) = rows.iter_mut().find(|r| r.app == app.as_str()) {
+        slot.path = physical.to_path_buf();
+    } else {
+        rows.push(PanelRecord {
+            app: app.as_str().to_owned(),
+            scope: app.expected_scope().to_owned(),
+            name: PANEL_ENTRY_NAME.to_owned(),
+            path: physical.to_path_buf(),
+        });
+    }
+}
+
+fn drop_panel_row(panels: &mut PanelMap, alias: &str, app: PanelApp) {
+    if let Some(rows) = panels.get_mut(alias) {
+        rows.retain(|r| r.app != app.as_str());
+        if rows.is_empty() {
+            panels.remove(alias);
+        }
+    }
+}
+
+fn rollback_after_add(
+    want_json: bool,
+    app: PanelApp,
+    alias: &str,
+    physical: &Path,
+    claude_bin: &Path,
+    primary: Error,
+) -> Result<Output> {
+    let rollback_stop = AtomicBool::new(false);
+    let rollback = run_bounded_command(
+        claude_bin,
+        &["mcp", "remove", "--scope", "local", PANEL_ENTRY_NAME],
+        physical,
+        &rollback_stop,
+    );
+    let rollback_err_msg = match rollback {
+        Ok(rb) if rb.code == Some(0) || is_mcp_entry_missing(&rb) => {
+            return Err(Error {
+                code: primary.code,
+                message: format!(
+                    "{}; rolled back local {PANEL_ENTRY_NAME} entry",
+                    primary.message
+                ),
+                publication_uncertain: primary.publication_uncertain,
+            });
+        }
+        Ok(rb) => vendor_failure("remove", &rb).message,
+        Err(e) => e.into_error().message,
+    };
+    let code = if primary.code != 0 { primary.code } else { 1 };
+    let message = format!(
+        "{}; rollback via `claude mcp remove --scope local {PANEL_ENTRY_NAME}` failed ({rollback_err_msg}): local {PANEL_ENTRY_NAME} state is uncertain",
+        primary.message
+    );
+    let err = Error {
+        code,
+        message: message.clone(),
+        publication_uncertain: true,
+    };
+    if want_json {
+        let (_, _, stderr) = crate::failure(err);
+        let mut report = panel_action_json(app, alias, physical, "install", false);
+        report["uncertain"] = json!(true);
+        report["error"] = json!(message);
+        return Ok((code, json(&report)?, stderr));
+    }
+    Err(err)
 }
 
 pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) -> Result<Output> {
@@ -796,7 +1082,12 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
             if let Some(found) = probe_claude_entry(&claude_bin, &physical, stop)?
                 && found.scope == Some(ClaudeScope::Local)
             {
-                if recorded_row.is_some() && found.matches_expected(&launcher, &physical) {
+                if !found.matches_expected(&launcher, &physical) {
+                    return Err(Error::new(
+                        "an unmanaged local oms-panel entry exists; remove it first",
+                    ));
+                }
+                if recorded_row.is_some() {
                     if want_json {
                         let report = panel_action_json(app, &alias, &physical, "install", false);
                         return Ok((0, json(&report)?, vec![]));
@@ -812,12 +1103,33 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                         vec![],
                     ));
                 }
-                return Err(Error::new(
-                    "an unmanaged local oms-panel entry exists; remove it first",
+                upsert_panel_row(&mut panels, &alias, app, &physical);
+                write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)?;
+                if want_json {
+                    let report = panel_action_json(app, &alias, &physical, "adopted", true);
+                    return Ok((0, json(&report)?, vec![]));
+                }
+                return Ok((
+                    0,
+                    format!(
+                        "adopted existing {} panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+                        app.as_str(),
+                        physical.display()
+                    )
+                    .into_bytes(),
+                    vec![],
                 ));
             }
 
-            let add_out = run_bounded_command(
+            if stop.load(Ordering::Acquire) {
+                return Err(Error {
+                    code: 130,
+                    message: "interrupted before running Claude CLI".into(),
+                    publication_uncertain: false,
+                });
+            }
+
+            let add_res = run_bounded_command(
                 &claude_bin,
                 &[
                     "mcp",
@@ -829,59 +1141,51 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 ],
                 &physical,
                 stop,
-            )?;
-            if add_out.code != Some(0) {
-                return Err(vendor_failure("add-json", &add_out));
+            );
+            match add_res {
+                Ok(add_out) if add_out.code == Some(0) => {}
+                Ok(add_out) if add_out.code.is_some() => {
+                    return Err(vendor_failure("add-json", &add_out));
+                }
+                Ok(sig_out) => {
+                    return rollback_after_add(
+                        want_json,
+                        app,
+                        &alias,
+                        &physical,
+                        &claude_bin,
+                        vendor_failure("add-json", &sig_out),
+                    );
+                }
+                Err(VendorExecError::Spawn(e)) => return Err(e),
+                Err(
+                    VendorExecError::TimedOut(primary)
+                    | VendorExecError::Interrupted(primary)
+                    | VendorExecError::Wait(primary),
+                ) => {
+                    return rollback_after_add(
+                        want_json,
+                        app,
+                        &alias,
+                        &physical,
+                        &claude_bin,
+                        primary,
+                    );
+                }
             }
 
-            let rows = panels.entry(alias.clone()).or_default();
-            if let Some(slot) = rows.iter_mut().find(|r| r.app == app.as_str()) {
-                slot.path = physical.clone();
-            } else {
-                rows.push(PanelRecord {
-                    app: app.as_str().to_owned(),
-                    scope: app.expected_scope().to_owned(),
-                    name: PANEL_ENTRY_NAME.to_owned(),
-                    path: physical.clone(),
-                });
-            }
-
+            upsert_panel_row(&mut panels, &alias, app, &physical);
             if let Err(record_err) =
                 write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)
             {
-                let rollback = run_bounded_command(
-                    &claude_bin,
-                    &["mcp", "remove", "--scope", "local", PANEL_ENTRY_NAME],
+                return rollback_after_add(
+                    want_json,
+                    app,
+                    &alias,
                     &physical,
-                    stop,
+                    &claude_bin,
+                    record_err,
                 );
-                return match rollback {
-                    Ok(rb)
-                        if rb.code == Some(0) || is_mcp_entry_missing(&rb.stdout, &rb.stderr) =>
-                    {
-                        Err(Error::new(format!(
-                            "{}; rolled back local {PANEL_ENTRY_NAME} entry",
-                            record_err.message
-                        )))
-                    }
-                    Ok(rb) => Err(Error {
-                        code: 1,
-                        message: format!(
-                            "{}; rollback via `claude mcp remove --scope local {PANEL_ENTRY_NAME}` also failed ({})",
-                            record_err.message,
-                            vendor_failure("remove", &rb).message
-                        ),
-                        publication_uncertain: true,
-                    }),
-                    Err(rb_err) => Err(Error {
-                        code: 1,
-                        message: format!(
-                            "{}; rollback via `claude mcp remove --scope local {PANEL_ENTRY_NAME}` also failed ({})",
-                            record_err.message, rb_err.message
-                        ),
-                        publication_uncertain: true,
-                    }),
-                };
             }
 
             if want_json {
@@ -957,6 +1261,22 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                 vec![],
             ));
         };
+        if !std::fs::metadata(&row.path).is_ok_and(|m| m.is_dir()) {
+            if want_json {
+                let report = panel_action_json(app, &alias, &row.path, "forgotten", false);
+                return Ok((0, json(&report)?, vec![]));
+            }
+            return Ok((
+                0,
+                format!(
+                    "{} panel {PANEL_ENTRY_NAME} for {alias} ({}): checkout is gone; would drop the record (the Claude entry stored for that path is inert)\n",
+                    app.as_str(),
+                    row.path.display()
+                )
+                .into_bytes(),
+                vec![],
+            ));
+        }
         match app {
             PanelApp::Claude => {
                 let claude_bin = resolve_claude_program(cwd, true)?;
@@ -964,11 +1284,16 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                     let report = panel_action_json(app, &alias, &row.path, "uninstall", false);
                     return Ok((0, json(&report)?, vec![]));
                 }
-                let text = format_vendor_command(
+                let mut text = format_vendor_command(
+                    &row.path,
+                    &claude_bin,
+                    &["mcp", "get", PANEL_ENTRY_NAME],
+                )?;
+                text.push_str(&format_vendor_command(
                     &row.path,
                     &claude_bin,
                     &["mcp", "remove", "--scope", "local", PANEL_ENTRY_NAME],
-                )?;
+                )?);
                 return Ok((0, text.into_bytes(), vec![]));
             }
         }
@@ -1010,57 +1335,83 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
         row.scope == app.expected_scope() && row.name == PANEL_ENTRY_NAME,
         "Invalid OMS project panel map: unexpected scope or entry name",
     )?;
-    require(
-        std::fs::metadata(&row.path).is_ok_and(|m| m.is_dir()),
-        &format!(
-            "recorded checkout path does not exist: {}",
-            row.path.display()
-        ),
-    )?;
+    if !std::fs::metadata(&row.path).is_ok_and(|m| m.is_dir()) {
+        drop_panel_row(&mut panels, &alias, app);
+        write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)?;
+        if want_json {
+            let report = panel_action_json(app, &alias, &row.path, "forgotten", true);
+            return Ok((0, json(&report)?, vec![]));
+        }
+        return Ok((
+            0,
+            format!(
+                "{} panel {PANEL_ENTRY_NAME} for {alias} ({}): checkout is gone; dropped the record (the Claude entry stored for that path is inert)\n",
+                app.as_str(),
+                row.path.display()
+            )
+            .into_bytes(),
+            vec![],
+        ));
+    }
 
-    let already_gone = match app {
+    enum UninstallDisposition {
+        Removed,
+        AlreadyGone,
+        LeftModified,
+    }
+
+    let disposition = match app {
         PanelApp::Claude => {
+            let launcher = resolve_oms_launcher_path()?;
             let claude_bin = resolve_claude_program(cwd, false)?;
-            let out = run_bounded_command(
-                &claude_bin,
-                &["mcp", "remove", "--scope", "local", PANEL_ENTRY_NAME],
-                &row.path,
-                stop,
-            )?;
-            if out.code == Some(0) {
-                false
-            } else if is_mcp_entry_missing(&out.stdout, &out.stderr) {
-                true
-            } else {
-                return Err(vendor_failure("remove", &out));
+            match probe_claude_entry(&claude_bin, &row.path, stop)? {
+                Some(found) if found.scope == Some(ClaudeScope::Local) => {
+                    if found.matches_expected(&launcher, &row.path) {
+                        let out = run_bounded_command(
+                            &claude_bin,
+                            &["mcp", "remove", "--scope", "local", PANEL_ENTRY_NAME],
+                            &row.path,
+                            stop,
+                        )
+                        .map_err(VendorExecError::into_error)?;
+                        if out.code == Some(0) {
+                            UninstallDisposition::Removed
+                        } else if is_mcp_entry_missing(&out) {
+                            UninstallDisposition::AlreadyGone
+                        } else {
+                            return Err(vendor_failure("remove", &out));
+                        }
+                    } else {
+                        UninstallDisposition::LeftModified
+                    }
+                }
+                Some(_) | None => UninstallDisposition::AlreadyGone,
             }
         }
     };
 
-    if let Some(rows) = panels.get_mut(&alias) {
-        rows.retain(|r| r.app != app.as_str());
-        if rows.is_empty() {
-            panels.remove(&alias);
-        }
-    }
+    drop_panel_row(&mut panels, &alias, app);
     write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)?;
 
     if want_json {
         let report = panel_action_json(app, &alias, &row.path, "uninstall", true);
         return Ok((0, json(&report)?, vec![]));
     }
-    let msg = if already_gone {
-        format!(
-            "{} panel {PANEL_ENTRY_NAME} for {alias} was already gone; dropped ownership record ({})\n",
-            app.as_str(),
-            row.path.display()
-        )
-    } else {
-        format!(
+    let msg = match disposition {
+        UninstallDisposition::Removed => format!(
             "uninstalled {} panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
             app.as_str(),
             row.path.display()
-        )
+        ),
+        UninstallDisposition::AlreadyGone => format!(
+            "{} panel {PANEL_ENTRY_NAME} for {alias} was already gone; dropped ownership record ({})\n",
+            app.as_str(),
+            row.path.display()
+        ),
+        UninstallDisposition::LeftModified => format!(
+            "the local {PANEL_ENTRY_NAME} entry was changed outside OMS; left it in place and dropped ownership record for {alias} ({})\n",
+            row.path.display()
+        ),
     };
     Ok((0, msg.into_bytes(), vec![]))
 }
@@ -1068,8 +1419,8 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeScope, PanelApp, claude_panel_entry_json, is_mcp_entry_missing, parse_claude_mcp_get,
-        parse_panels_json,
+        ClaudeScope, CmdOutput, PanelApp, claude_panel_entry_json, is_mcp_entry_missing,
+        parse_claude_mcp_get, parse_panels_json,
     };
     use std::path::Path;
 
@@ -1100,10 +1451,50 @@ mod tests {
         let from_json = parse_claude_mcp_get(&wrapped).unwrap();
         assert!(from_json.matches_expected(launcher, repo));
 
-        assert!(is_mcp_entry_missing(
+        for unparseable in [
             "",
-            "No local MCP server found with name: oms-panel"
-        ));
+            "oms-panel: unexpected output without scope",
+            "Scope: Local config",
+            "{broken json",
+            r#"{"scope":"local"}"#,
+            "No MCP server found with name: oms-panel",
+        ] {
+            assert!(
+                parse_claude_mcp_get(unparseable).is_none(),
+                "unexpectedly parsed {unparseable:?}"
+            );
+        }
+
+        assert!(is_mcp_entry_missing(&CmdOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "No local MCP server found with name: oms-panel".into(),
+        }));
+        assert!(!is_mcp_entry_missing(&CmdOutput {
+            code: Some(127),
+            stdout: String::new(),
+            stderr: "claude: oms-panel: not found".into(),
+        }));
+        assert!(!is_mcp_entry_missing(&CmdOutput {
+            code: Some(126),
+            stdout: String::new(),
+            stderr: "No local MCP server found with name: oms-panel".into(),
+        }));
+        assert!(!is_mcp_entry_missing(&CmdOutput {
+            code: None,
+            stdout: String::new(),
+            stderr: "No local MCP server found with name: oms-panel".into(),
+        }));
+        assert!(!is_mcp_entry_missing(&CmdOutput {
+            code: Some(0),
+            stdout: "No MCP server found with name: oms-panel".into(),
+            stderr: String::new(),
+        }));
+        assert!(!is_mcp_entry_missing(&CmdOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "No MCP server found with name: other-entry".into(),
+        }));
     }
 
     #[test]
