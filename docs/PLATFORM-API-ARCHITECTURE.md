@@ -27,7 +27,7 @@ OMS는 사용자가 선택한 agent와 실행 환경에서 허용된 작업을 �
 [Control Surface Roadmap](CONTROL-SURFACE-ROADMAP.md)와
 [epic #431](https://github.com/eightmm/oh-my-setting/issues/431)이 기존 작업 연결을 소유한다.
 [Control Session Contract](CONTROL-SESSION-CONTRACT.md)를 재사용하며 별도 runtime queue를 만들지 않는다.
-OMS-01~16은 역사적인 제안 식별자이고 PIPE-00~11은 구현 계획의 전달 단위다.
+OMS-01~16은 본 문서와 구현 계획에서 교차 참조용으로 정리한 추적 ID이고 PIPE-00~11은 구현 계획의 전달 단위다.
 구현 진행은 [delivery tracker #619](https://github.com/eightmm/oh-my-setting/issues/619)에
 연결하며, 기존 epic #431과 각 issue owner의 범위·채택 권한을 유지한다.
 
@@ -88,14 +88,14 @@ flowchart TD
 
 이것은 논리적 책임 경계이며 crate·database·프로세스 배치 결정이 아니다.
 [로드맵 §3](CONTROL-SURFACE-ROADMAP.md#3-이미-있는-기반과-현재-한계)의 기존 모듈 후보를
-그대로 재사용하며, 아래 표는 본 문서의 논리 경계와 로드맵 §3 이름의 일대일 매핑이다.
+그대로 재사용하며, 아래 표는 본 문서의 논리 경계와 로드맵 §3 후보 사이의 역할 대응표다.
 Core service는 입력 바인딩, action별 권한·사전조건, 기존 owner 호출 순서,
 receipt 연결과 복구를 조정한다. 각 owner는 기존 guard·claim·CAS·receipt·side effect를 소유한다.
 다중 owner와 외부 플랫폼의 변경을 하나의 원자적 transaction이라고 주장하지 않는다.
 
 | 경계 | 로드맵 §3 대응 | 맡을 일 | 기존 재사용점 |
 | --- | --- | --- | --- |
-| 업무 플랫폼 adapter | `oms-gateway` · host plugins (#434/#435/#438/#445) | 설치·사용자·이슈·대화 문맥, 입출력 변환, 결과 전달 | 기존 GitHub intake/landing; Jira·Linear 계약은 별도 adapter |
+| 업무 플랫폼 adapter | platform adapters · `oms-gateway` (#434/#435) | 설치·사용자·이슈·대화 문맥, 입출력 변환, 결과 전달 | 기존 GitHub intake/landing; Jira·Linear 계약은 별도 adapter |
 | Provider adapter | `provider adapters` · `oms-provider-codex` (#432/#436) | native session·호출 방식·지원 기능·결과 관측 | 기존 Codex·Claude·AGY·Pi 및 custom adapter 경로 |
 | 실행 환경 adapter | `oms-host` (#444) | execution root·process·자원·custody·cleanup | runtime, supervisor와 검증된 multi-host owner |
 | Application service | `oms-control-api` action writer (#432/#433/#437) | 작업의 입력부터 결과까지 기존 owner 연결 | `CollabServices`, `RuntimeServices`, 기존 Plan/Panel service ports [S1] |
@@ -118,7 +118,7 @@ receipt 연결과 복구를 조정한다. 각 owner는 기존 guard·claim·CAS�
 | `RunnerBinding` | 등록된 실행 주체와 registration generation, 허용된 execution/state root 연결 |
 | `TargetRef` | action별 tagged native reference; Plan task·Peer operation·attempt·실험 run을 합치지 않음 |
 | `ActionPreconditions` | 해당 owner가 실제 검사하는 task/plan digest, 상태·lease·generation 또는 동등한 불투명한 증명 |
-| `operation_receipt` | [로드맵 §9.3](CONTROL-SURFACE-ROADMAP.md#93-요청거절receiptevent-예시)의 단일 v1 wire 계약(`accepted` / `delivered` / `completed`, 불명 상태 `delivery_unknown`); 내부 전달 단계, 실제 owner receipt, 관측된 효과를 연결하며 실행 task의 대체 원장이 아님 |
+| `operation_receipt` | [로드맵 §9.3](CONTROL-SURFACE-ROADMAP.md#93-요청거절receiptevent-예시)의 단일 v1 wire 계약(`outcome`: `accepted` / `delivered` / `completed`는 각각 owner 수용·전달 확인·완료의 별도 증거 필요; 응답 유실·미확정은 `delivery_unknown` 복구 조건으로 다루며 별도 `outcome` 값으로 추가하지 않음); 실행 task의 대체 원장이 아님 |
 | `RunView` | 확인된 native reference들을 모은 read projection; 미확인 연결은 누락/unknown |
 | `EvidenceRef` | producer, immutable digest, 접근 범위, 읽기·보존 정책 |
 | `ResultContract` | 요구 산출물, verifier, 수용과 전달의 완료 조건 |
@@ -197,18 +197,21 @@ Patch가 없는 action에 가짜 patch 필드를 요구하지 않고, owner별 �
   이 저장은 전달 상태를 다루며 Plan task·실행 custody·권한 원장을 복제하지 않는다.
 
 #437 공개 wire 어휘는 [로드맵 §9.3](CONTROL-SURFACE-ROADMAP.md#93-요청거절receiptevent-예시)의
-`operation_receipt`(`accepted` / `delivered` / `completed`)와 `delivery_unknown`을 단일 기준으로
-사용한다. 아래 표의 내부 전달 단계는 별도 wire 타입이 아니라 그 v1 어휘에 대응한다.
+`operation_receipt`(`outcome`: `accepted` / `delivered` / `completed`)와 `delivery_unknown` 복구
+조건을 단일 기준으로 사용한다. `accepted`, `delivered`, `completed`는 각각 별도 증거가 필요하므로
+단순 전달 시도나 응답 유실 상태를 `delivered`로 기록하지 않고 `delivery_unknown` 조건으로 복구한다.
+아래 표의 내부 전달 단계는 별도 wire 타입이 아니라 그 v1 규칙과의 연결 관계다.
 
-| wire `operation_receipt` 어휘 | 내부 전달 단계 | 의미 | 후속 처리 |
+| 내부 전달 단계 | wire `operation_receipt` / 복구 조건 | 의미 | 후속 처리 |
 | --- | --- | --- | --- |
-| `outcome: "accepted"` | `not_dispatched` | 접수 기록은 있지만 실행 owner에게 아직 전달하지 않음 | 기존 intent와 현재 권한·expiry로 전달 적격성 재검사 |
-| `outcome: "delivered"` | `dispatched` | owner 호출/전달을 시도한 기록이 있고 결과 확인 중 | 원래 owner와 native reference로 추적 |
-| `outcome: "completed"` | `confirmed` | 해당 동작의 효과가 owner 증거로 확인됨 | 의미가 맞는 receipt와 projection 반환 |
-| `delivery_unknown` | `outcome_unknown` | 효과가 발생했을 수 있으나 확정할 근거가 부족함 | 재관측·reconciliation; 새 ID로 무조건 재실행하지 않음 |
+| `not_dispatched` | 보류(native `operation_receipt` 미발행; 별도 비동기 접수 시에만 내부 queue 기록) | 실행 owner에게 아직 전달·수락되지 않음 | 기존 intent와 현재 권한·expiry로 전달 적격성 재검사 |
+| `dispatched` | 시도·응답 대기(`delivery_unknown` 복구 조건; `delivered`로 간주하지 않음) | owner 호출/전달을 시도했으나 수신·전달 증거가 아직 미확정 | 원래 owner와 native reference로 재관측 후 `accepted`/`delivered` 확정 |
+| owner 수신·전달 확인 | `outcome: "accepted"` 또는 `"delivered"` | 대상 owner(예: `owner: "room"`)가 요청을 수락했거나 전달 확인 증거가 확보됨 | 각 단계의 `receipt_ref`와 owner 상태로 추적 |
+| `confirmed` | `outcome: "completed"` | 해당 동작의 효과가 owner 증거로 확인됨 | 의미가 맞는 receipt와 projection 반환 |
+| `outcome_unknown` | `delivery_unknown` 복구 조건(`outcome` 미승격) | 효과가 발생했을 수 있으나 확정할 근거가 부족함 | 재관측·reconciliation; 새 ID로 무조건 재실행하지 않음 |
 
 이는 구현할 전달 계약이며 현재 공통 state machine이 존재한다는 뜻이 아니다.
-접수·실행·검증·외부 전달은 별도 축이고, `accepted`(`not_dispatched`)를 `delivery_unknown`으로 표시하지 않는다.
+접수·실행·검증·외부 전달은 별도 축이고, `not_dispatched`를 `delivery_unknown`으로 표시하지 않는다.
 Owner의 명시적 거절과 실제로 끝난 실패도 결과 불명과 구분한다.
 
 Idempotency는 검증된 안정적인 installation/주체, workspace, action, key와 정규화 payload digest에 묶는다.

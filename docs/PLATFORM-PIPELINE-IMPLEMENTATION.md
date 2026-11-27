@@ -104,16 +104,18 @@ flowchart TD
 만들 필요는 없지만, producer·consumer를 따로 내면 중간 revision도 호환 가능해야 한다.
 아래 테스트 경로는 재사용 지점이다. 이름을 확인하지 않은 새 테스트나 전체 suite 통과를 주장하지 않는다.
 
-아래 5계층 표는 기존 owner([로드맵 §3](CONTROL-SURFACE-ROADMAP.md#3-이미-있는-기반과-현재-한계))
-위에 `PIPE-00..11`을 매핑한 책임 지도다. 새 crate를 도입하지 않는다.
+아래 책임 지도는 [로드맵 §3](CONTROL-SURFACE-ROADMAP.md#3-이미-있는-기반과-현재-한계)의 기존 owner
+위에 `PIPE-00..11`을 매핑한 표다. Provider 호출(`provider adapters`)과 호스트·프로세스
+감독(`oms-host`)을 구분하며 새 crate를 도입하지 않는다.
 
 | 계층 | 기존 owner | 관련 패킷 |
 | --- | --- | --- |
-| L5 플랫폼 | GitHub / Jira / Linear | PIPE-02, PIPE-09, PIPE-10, PIPE-11 |
-| L4 플랫폼 연동 | `oms-gateway` | PIPE-01, PIPE-02, PIPE-08, PIPE-09 |
-| L3 제어 표면 | CLI, MCP, Panel (`oms-control-api` + `oms-gateway`) | PIPE-00, PIPE-01, PIPE-04, PIPE-07, PIPE-08 |
+| L5 플랫폼 | GitHub / Jira / Linear | PIPE-02, PIPE-06, PIPE-09, PIPE-10, PIPE-11 |
+| L4 플랫폼 연동 | platform adapters · `oms-gateway` (#434/#435) | PIPE-01, PIPE-02, PIPE-06, PIPE-08, PIPE-09 |
+| L3 제어 표면 | CLI, MCP, Panel (`oms-control-api` · host plugins) | PIPE-00, PIPE-01, PIPE-04, PIPE-07, PIPE-08 |
 | L2 도메인 owner | plan, autonomy, panel-core, memory, runtime | PIPE-00, PIPE-02, PIPE-03, PIPE-04, PIPE-05, PIPE-06, PIPE-07 |
-| L1 실행 | peer, supervisor (`oms-host`) | PIPE-01, PIPE-03, PIPE-04, PIPE-05 |
+| L1-P Provider 실행 | `provider adapters` · `oms-provider-codex` · `peer` (#436) | PIPE-00, PIPE-01, PIPE-03, PIPE-04 |
+| L1-H 실행 환경 | `oms-host` · `supervisor` (#444) | PIPE-01, PIPE-03, PIPE-04, PIPE-05, PIPE-09 |
 
 ### PIPE-00 — 현재 기준과 동작별 계약 고정
 
@@ -203,9 +205,10 @@ flowchart TD
   존재하지 않는 `/commands/...` URL이나 `202`만으로 durable queue를 약속하지 않는다.
   이 패킷 역시 첫 동작의 필요한 보장부터 추가하며, 전체 명령을 새 저장 체계로 옮기는 과제가 아니다.
 - **구현:** #437 wire 계약은 [로드맵 §9.3](CONTROL-SURFACE-ROADMAP.md#93-요청거절receiptevent-예시)의
-  `operation_receipt`(`accepted` / `delivered` / `completed`)와 `delivery_unknown`을 사용하며,
-  내부 추적 상태(`not_dispatched` / `dispatched` / `confirmed` / `outcome_unknown`)는
-  [아키텍처 §6](PLATFORM-API-ARCHITECTURE.md#6-접수전달복구-계약)의 매핑에 따라 위 v1 어휘로 노출한다.
+  `operation_receipt`(`outcome`: `accepted` / `delivered` / `completed`)와 `delivery_unknown` 복구 조건을
+  사용한다. 각 `outcome`은 owner의 별도 증거가 확인될 때만 기록하며, 단순 시도나 응답 유실
+  (`dispatched` / `outcome_unknown`)은 `delivered`로 승격하지 않고 `delivery_unknown` 조건으로
+  재관측·복구한다([아키텍처 §6](PLATFORM-API-ARCHITECTURE.md#6-접수전달복구-계약) 매핑 참조).
   저장 직전/직후, dispatch 직전/직후, effect 이후 응답 유실을 각각 복구한다.
   한 process 메모리의 key cache를 영속적 중복 방지로 취급하지 않는다.
 - **구현:** 멱등성 조회 키는 stable installation/workspace/principal/action과 요청 key로 구성하고,
