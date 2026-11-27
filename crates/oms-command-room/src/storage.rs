@@ -13,6 +13,43 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_TAIL_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_READ_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+pub(crate) fn reset_test_io_counters() {
+    TEST_OPENS.with(|c| c.set(0));
+    TEST_TAIL_READS.with(|c| c.set(0));
+    TEST_READ_BYTES.with(|c| c.set(0));
+}
+#[cfg(test)]
+pub(crate) fn test_open_count() -> usize {
+    TEST_OPENS.with(std::cell::Cell::get)
+}
+#[cfg(test)]
+pub(crate) fn test_tail_read_count() -> usize {
+    TEST_TAIL_READS.with(std::cell::Cell::get)
+}
+#[cfg(test)]
+pub(crate) fn test_read_bytes() -> usize {
+    TEST_READ_BYTES.with(std::cell::Cell::get)
+}
+#[cfg(test)]
+fn record_test_read_bytes(len: usize) {
+    TEST_READ_BYTES.with(|c| c.set(c.get() + len));
+}
+#[cfg(test)]
+fn record_test_open() {
+    TEST_OPENS.with(|c| c.set(c.get() + 1));
+}
+#[cfg(test)]
+fn record_test_tail_read() {
+    TEST_TAIL_READS.with(|c| c.set(c.get() + 1));
+}
+
 pub const MAX_FILE: usize = 16 * 1024 * 1024;
 pub const MAX_ROW: usize = 65536;
 fn io(e: impl std::fmt::Display) -> Error {
@@ -161,6 +198,8 @@ impl Directory {
             Mode::empty(),
         )
         .map_err(io)?;
+        #[cfg(test)]
+        record_test_open();
         let opened = fs::fstat(&fd).map_err(io)?;
         if !stable(&before, &opened) {
             return Err(Error::new("room input changed during open"));
@@ -187,52 +226,20 @@ impl Directory {
         prefix: usize,
         tail: usize,
     ) -> Result<(Vec<u8>, Vec<u8>, Stat)> {
-        let before = fs::statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
-        if !regular(&before) || before.st_size < 0 || before.st_size as u64 > MAX_FILE as u64 {
-            return Err(Error::new("unsafe or oversized room log"));
-        }
-        let fd = fs::openat(
-            &self.fd,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io)?;
-        let opened = fs::fstat(&fd).map_err(io)?;
-        if !stable(&before, &opened) {
-            return Err(Error::new("room log changed"));
-        }
-        let mut f = File::from(fd);
-        let mut first = Vec::new();
-        if prefix > 0 {
-            let mut reader = BufReader::new(&mut f);
-            for _ in 0..2 {
-                let start = first.len();
-                (&mut reader)
-                    .take((MAX_ROW + 1).min(prefix.saturating_sub(start) + 1) as u64)
-                    .read_until(b'\n', &mut first)
-                    .map_err(io)?;
-                let line = &first[start..];
-                if first.len() > prefix {
-                    return Err(Error::new("room discovery byte limit"));
-                }
-                if line.len() > MAX_ROW || !line.is_empty() && !line.ends_with(b"\n") {
-                    return Err(Error::new("room header is oversized or incomplete"));
-                }
+        let (mut reader, opened) = LogReader::open_pinned(self, name.to_os_string())?;
+        let first = if prefix > 0 {
+            reader.read_prefix(&opened, prefix)?
+        } else {
+            Vec::new()
+        };
+        let last = if tail > 0 {
+            reader.read_tail(&opened, tail)?
+        } else {
+            if prefix == 0 {
+                reader.verify_stable(&opened)?;
             }
-        }
-        let off = (opened.st_size as usize).saturating_sub(tail);
-        f.seek(SeekFrom::Start(off as u64)).map_err(io)?;
-        let mut last = vec![0; (opened.st_size as usize) - off];
-        f.read_exact(&mut last).map_err(io)?;
-        if !stable(&opened, &fs::fstat(&f).map_err(io)?)
-            || !stable(
-                &opened,
-                &fs::statat(&self.fd, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io)?,
-            )
-        {
-            return Err(Error::new("room log changed"));
-        }
+            Vec::new()
+        };
         Ok((first, last, opened))
     }
     pub fn exists(&self, name: &OsStr) -> Result<bool> {
@@ -366,8 +373,6 @@ pub(crate) struct LogReader<'a> {
     directory: &'a Directory,
     name: OsString,
     file: File,
-    #[cfg(test)]
-    bytes_read: usize,
 }
 impl<'a> LogReader<'a> {
     pub(crate) fn open(directory: &'a Directory, name: OsString) -> Result<Self> {
@@ -378,15 +383,103 @@ impl<'a> LogReader<'a> {
             Mode::empty(),
         )
         .map_err(io)?;
+        #[cfg(test)]
+        record_test_open();
         let reader = Self {
             directory,
             name,
             file: File::from(fd),
-            #[cfg(test)]
-            bytes_read: 0,
         };
         reader.stat()?;
         Ok(reader)
+    }
+    pub(crate) fn open_pinned(directory: &'a Directory, name: OsString) -> Result<(Self, Stat)> {
+        let before = fs::statat(&directory.fd, &name, AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
+        if !regular(&before) || before.st_size < 0 || before.st_size as u64 > MAX_FILE as u64 {
+            return Err(Error::new("unsafe or oversized room log"));
+        }
+        let fd = fs::openat(
+            &directory.fd,
+            &name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io)?;
+        #[cfg(test)]
+        record_test_open();
+        let opened = fs::fstat(&fd).map_err(io)?;
+        if !stable(&before, &opened) {
+            return Err(Error::new("room log changed"));
+        }
+        Ok((
+            Self {
+                directory,
+                name,
+                file: File::from(fd),
+            },
+            opened,
+        ))
+    }
+    pub(crate) fn verify_stable(&self, expected: &Stat) -> Result<()> {
+        let after = fs::fstat(&self.file).map_err(io)?;
+        let named =
+            fs::statat(&self.directory.fd, &self.name, AtFlags::SYMLINK_NOFOLLOW).map_err(io)?;
+        if !regular(&after) || !stable(expected, &after) || !stable(expected, &named) {
+            return Err(Error::new("room log changed"));
+        }
+        Ok(())
+    }
+    pub(crate) fn read_prefix(&mut self, expected: &Stat, prefix: usize) -> Result<Vec<u8>> {
+        let mut first = Vec::new();
+        if prefix > 0 {
+            self.file.seek(SeekFrom::Start(0)).map_err(io)?;
+            let mut reader = BufReader::new(&mut self.file);
+            for _ in 0..2 {
+                let start = first.len();
+                (&mut reader)
+                    .take((MAX_ROW + 1).min(prefix.saturating_sub(start) + 1) as u64)
+                    .read_until(b'\n', &mut first)
+                    .map_err(io)?;
+                let line = &first[start..];
+                if first.len() > prefix {
+                    return Err(Error::new("room discovery byte limit"));
+                }
+                if line.len() > MAX_ROW || !line.is_empty() && !line.ends_with(b"\n") {
+                    return Err(Error::new("room header is oversized or incomplete"));
+                }
+            }
+            #[cfg(test)]
+            record_test_read_bytes(first.len());
+        }
+        self.verify_stable(expected)?;
+        Ok(first)
+    }
+    pub(crate) fn read_tail(&mut self, expected: &Stat, tail: usize) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        record_test_tail_read();
+        let size = expected.st_size as usize;
+        let off = size.saturating_sub(tail);
+        self.file.seek(SeekFrom::Start(off as u64)).map_err(io)?;
+        let mut last = vec![0; size - off];
+        self.file.read_exact(&mut last).map_err(io)?;
+        #[cfg(test)]
+        record_test_read_bytes(last.len());
+        self.verify_stable(expected)?;
+        Ok(last)
+    }
+    pub(crate) fn read_all(&mut self, expected: &Stat) -> Result<Vec<u8>> {
+        self.file.seek(SeekFrom::Start(0)).map_err(io)?;
+        let mut bytes = Vec::with_capacity(expected.st_size as usize);
+        (&mut self.file)
+            .take(MAX_FILE as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(io)?;
+        #[cfg(test)]
+        record_test_read_bytes(bytes.len());
+        if self.verify_stable(expected).is_err() || bytes.len() != expected.st_size as usize {
+            return Err(Error::new("room input changed during read"));
+        }
+        Ok(bytes)
     }
     fn stat(&self) -> Result<Stat> {
         self.directory.check()?;
@@ -420,16 +513,24 @@ impl<'a> LogReader<'a> {
         if !same(&opened, &stat) {
             *self = Self::open(self.directory, self.name.clone())?;
         }
-        let mut incremental = same(&old.stat, &stat) && stat.st_size as usize >= old.bytes.len();
+        self.read_refresh(old, &stat).map(Some)
+    }
+
+    /// Refresh only the generation already used to classify the log.
+    pub(crate) fn refresh_pinned(&mut self, old: &Snapshot, expected: &Stat) -> Result<Snapshot> {
+        self.verify_stable(expected)?;
+        self.read_refresh(old, expected)
+    }
+
+    fn read_refresh(&mut self, old: &Snapshot, stat: &Stat) -> Result<Snapshot> {
+        let mut incremental = same(&old.stat, stat) && stat.st_size as usize >= old.bytes.len();
         if incremental {
             let length = old.bytes.len().min(256);
             let mut prefix = vec![0; length];
             self.file.seek(SeekFrom::Start(0)).map_err(io)?;
             self.file.read_exact(&mut prefix).map_err(io)?;
             #[cfg(test)]
-            {
-                self.bytes_read += prefix.len();
-            }
+            record_test_read_bytes(prefix.len());
             incremental = crate::digest(&prefix) == crate::digest(&old.bytes[..length]);
             // Preserve cursor boundary checks when an in-place edit accompanies growth.
             let start = old.bytes.len().saturating_sub(256);
@@ -437,9 +538,7 @@ impl<'a> LogReader<'a> {
             self.file.seek(SeekFrom::Start(start as u64)).map_err(io)?;
             self.file.read_exact(&mut boundary).map_err(io)?;
             #[cfg(test)]
-            {
-                self.bytes_read += boundary.len();
-            }
+            record_test_read_bytes(boundary.len());
             incremental &= boundary == old.bytes[start..];
         }
         let offset = if incremental { old.bytes.len() } else { 0 };
@@ -447,13 +546,11 @@ impl<'a> LogReader<'a> {
         let mut bytes = vec![0; stat.st_size as usize - offset];
         self.file.read_exact(&mut bytes).map_err(io)?;
         #[cfg(test)]
-        {
-            self.bytes_read += bytes.len();
-        }
-        if !stable(&stat, &self.stat()?) || !stable(&stat, &fs::fstat(&self.file).map_err(io)?) {
+        record_test_read_bytes(bytes.len());
+        if !stable(stat, &self.stat()?) || !stable(stat, &fs::fstat(&self.file).map_err(io)?) {
             return Err(Error::new("room input changed during read"));
         }
-        let mut snapshot = Snapshot::decode(&old.id, bytes, stat)?;
+        let mut snapshot = Snapshot::decode(&old.id, bytes, *stat)?;
         if incremental {
             for range in &mut snapshot.ranges {
                 range.start += offset;
@@ -469,7 +566,7 @@ impl<'a> LogReader<'a> {
             ranges.append(&mut snapshot.ranges);
             snapshot.ranges = ranges;
         }
-        Ok(Some(snapshot))
+        Ok(snapshot)
     }
 }
 
@@ -671,15 +768,16 @@ mod optimization_tests {
             let (bytes, stat) = directory.read(name, MAX_FILE).unwrap();
             let snapshot = Snapshot::decode("room", bytes, stat).unwrap();
             let mut reader = LogReader::open(&directory, name.to_owned()).unwrap();
+            reset_test_io_counters();
             assert!(reader.poll(&snapshot).unwrap().is_none());
-            assert_eq!(reader.bytes_read, 0);
+            assert_eq!(test_read_bytes(), 0);
             directory.append(name, &snapshot.stat, line).unwrap();
             let updated = reader.poll(&snapshot).unwrap().unwrap();
-            assert_eq!(reader.bytes_read, 512 + line.len());
+            assert_eq!(test_read_bytes(), 512 + line.len());
             assert_eq!(updated.rows.len(), 101);
             assert_eq!(updated.ranges.last().unwrap().start, snapshot.bytes.len());
             assert!(reader.poll(&updated).unwrap().is_none());
-            assert_eq!(reader.bytes_read, 512 + line.len());
+            assert_eq!(test_read_bytes(), 512 + line.len());
             std::fs::write(path.join(name), b"{}\n").unwrap();
             assert!(reader.refresh(&updated).is_err());
             let replacement = OsStr::new("next");
@@ -703,6 +801,157 @@ mod optimization_tests {
             let invalid = b"{\"thread\":\"room\",\"seq\":2}";
             directory.append(name, &replaced.stat, invalid).unwrap();
             assert!(reader.refresh(&replaced).is_err());
+        });
+        std::fs::remove_dir_all(path).unwrap();
+        result.unwrap();
+    }
+
+    #[test]
+    fn pinned_reader_rejects_mutation_rename_and_unsafe_links() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let path =
+            std::env::temp_dir().join(format!("oms-room-pinned-{}", crate::unique().unwrap()));
+        std::fs::create_dir(&path).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let directory = Directory::open(&path).unwrap();
+            let name = OsStr::new("good.jsonl");
+            let line1 = b"{\"schema\":1,\"thread\":\"good\",\"seq\":1,\"role\":\"topic\",\"text\":\"Good\"}\n";
+            let line2 = b"{\"schema\":1,\"thread\":\"good\",\"seq\":2,\"role\":\"note\",\"room_event\":{\"kind\":\"created\"}}\n";
+            let line3 = b"{\"schema\":1,\"thread\":\"good\",\"seq\":3,\"role\":\"note\",\"text\":\"body\"}\n";
+            let mut body = Vec::new();
+            body.extend_from_slice(line1);
+            body.extend_from_slice(line2);
+            body.extend_from_slice(line3);
+            directory.create(name, &body).unwrap();
+
+            reset_test_io_counters();
+            let (mut reader, opened) = LogReader::open_pinned(&directory, name.to_owned()).unwrap();
+            let prefix = reader.read_prefix(&opened, 2 * MAX_ROW).unwrap();
+            assert_eq!(prefix.len(), line1.len() + line2.len());
+            let tail = reader.read_tail(&opened, crate::model::TAIL_BYTES).unwrap();
+            assert_eq!(tail, body);
+            let all = reader.read_all(&opened).unwrap();
+            assert_eq!(all, body);
+            assert_eq!(test_open_count(), 1);
+            assert_eq!(test_tail_read_count(), 1);
+            drop(reader);
+
+            // Symlink, hardlink, group-writable, and oversized files are rejected before open.
+            let sym = OsStr::new("sym.jsonl");
+            symlink(path.join(name), path.join(sym)).unwrap();
+            reset_test_io_counters();
+            assert!(LogReader::open_pinned(&directory, sym.to_owned()).is_err());
+            assert_eq!(test_open_count(), 0);
+
+            let hard = OsStr::new("hard.jsonl");
+            std::fs::hard_link(path.join(name), path.join(hard)).unwrap();
+            reset_test_io_counters();
+            assert!(LogReader::open_pinned(&directory, hard.to_owned()).is_err());
+            assert_eq!(test_open_count(), 0);
+            std::fs::remove_file(path.join(hard)).unwrap();
+
+            let writable = OsStr::new("writable.jsonl");
+            directory.create(writable, &body).unwrap();
+            std::fs::set_permissions(path.join(writable), std::fs::Permissions::from_mode(0o620))
+                .unwrap();
+            reset_test_io_counters();
+            assert!(LogReader::open_pinned(&directory, writable.to_owned()).is_err());
+            assert_eq!(test_open_count(), 0);
+
+            let oversized = OsStr::new("oversized.jsonl");
+            directory.create(oversized, b"").unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path.join(oversized))
+                .unwrap()
+                .set_len(MAX_FILE as u64 + 1)
+                .unwrap();
+            reset_test_io_counters();
+            assert!(LogReader::open_pinned(&directory, oversized.to_owned()).is_err());
+            assert_eq!(test_open_count(), 0);
+
+            // Mutating after prefix read makes tail read fail.
+            let (mut reader, opened) = LogReader::open_pinned(&directory, name.to_owned()).unwrap();
+            let old = Snapshot::decode("good", body.clone(), opened).unwrap();
+            reader.read_prefix(&opened, 2 * MAX_ROW).unwrap();
+            directory.append(name, &opened, line3).unwrap();
+            assert!(reader.read_tail(&opened, crate::model::TAIL_BYTES).is_err());
+            drop(reader);
+
+            let (mut reader, opened) = LogReader::open_pinned(&directory, name.to_owned()).unwrap();
+            reader.read_prefix(&opened, 2 * MAX_ROW).unwrap();
+            reader.read_tail(&opened, crate::model::TAIL_BYTES).unwrap();
+            directory.append(name, &opened, line3).unwrap();
+            assert!(reader.refresh_pinned(&old, &opened).is_err());
+            drop(reader);
+
+            // Adding a hardlink or widening mode after prefix read makes tail read fail.
+            let (mut reader, opened) = LogReader::open_pinned(&directory, name.to_owned()).unwrap();
+            reader.read_prefix(&opened, 2 * MAX_ROW).unwrap();
+            std::fs::hard_link(path.join(name), path.join(hard)).unwrap();
+            assert!(reader.read_tail(&opened, crate::model::TAIL_BYTES).is_err());
+            std::fs::remove_file(path.join(hard)).unwrap();
+            drop(reader);
+
+            let (mut reader, opened) = LogReader::open_pinned(&directory, name.to_owned()).unwrap();
+            reader.read_prefix(&opened, 2 * MAX_ROW).unwrap();
+            std::fs::set_permissions(path.join(name), std::fs::Permissions::from_mode(0o620))
+                .unwrap();
+            assert!(reader.read_tail(&opened, crate::model::TAIL_BYTES).is_err());
+            std::fs::set_permissions(path.join(name), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            drop(reader);
+
+            // Replacing/renaming after tail read makes read_all fail.
+            let (mut reader, opened) = LogReader::open_pinned(&directory, name.to_owned()).unwrap();
+            reader.read_prefix(&opened, 2 * MAX_ROW).unwrap();
+            reader.read_tail(&opened, crate::model::TAIL_BYTES).unwrap();
+            let replacement = OsStr::new("next.jsonl");
+            directory.create(replacement, &body).unwrap();
+            std::fs::rename(path.join(replacement), path.join(name)).unwrap();
+            assert!(reader.read_all(&opened).is_err());
+            drop(reader);
+
+            // Prefix errors: budget exceeded, oversized header row, and incomplete header row.
+            let (mut reader, opened) = LogReader::open_pinned(&directory, name.to_owned()).unwrap();
+            assert_eq!(
+                reader
+                    .read_prefix(&opened, line1.len() - 1)
+                    .unwrap_err()
+                    .message,
+                "room discovery byte limit"
+            );
+            drop(reader);
+
+            let long_header = OsStr::new("long.jsonl");
+            let mut oversized_line = vec![b' '; MAX_ROW];
+            oversized_line.push(b'\n');
+            directory.create(long_header, &oversized_line).unwrap();
+            let (mut reader, opened) =
+                LogReader::open_pinned(&directory, long_header.to_owned()).unwrap();
+            assert_eq!(
+                reader
+                    .read_prefix(&opened, 2 * MAX_ROW)
+                    .unwrap_err()
+                    .message,
+                "room header is oversized or incomplete"
+            );
+            drop(reader);
+
+            let partial_header = OsStr::new("partial.jsonl");
+            directory
+                .create(partial_header, b"{\"thread\":\"partial\",\"seq\":1}")
+                .unwrap();
+            let (mut reader, opened) =
+                LogReader::open_pinned(&directory, partial_header.to_owned()).unwrap();
+            assert_eq!(
+                reader
+                    .read_prefix(&opened, 2 * MAX_ROW)
+                    .unwrap_err()
+                    .message,
+                "room header is oversized or incomplete"
+            );
         });
         std::fs::remove_dir_all(path).unwrap();
         result.unwrap();
