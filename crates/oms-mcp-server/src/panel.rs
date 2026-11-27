@@ -3796,6 +3796,7 @@ const CARD_CACHE_MAX_BYTES: usize = 4096;
 const CARD_FRESH_WINDOW: Duration = Duration::from_secs(10 * 60);
 const CARD_REFRESH_DEADLINE: Duration = Duration::from_secs(15);
 const MAX_CONCURRENT_CARD_REFRESHES: usize = 2;
+const CARD_REFRESH_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
 fn execute_panel_output(
     executor: &dyn crate::CommandExecutor,
@@ -4298,10 +4299,15 @@ impl StoredProjectCard {
             };
             created_cmp.then_with(|| id_a.cmp(id_b))
         });
+        // The snapshot keeps only a window of active rows; count the omitted ones as workers too.
+        let omitted = dashboard["active"]
+            .as_u64()
+            .map_or(0, |all| all.saturating_sub(active_attempts.len() as u64))
+            .max(dashboard["activeAttemptsTrimmed"].as_u64().unwrap_or(0));
         let crew_total = if source_withheld {
             0
         } else {
-            worker_rows.len() as u64
+            (worker_rows.len() as u64).saturating_add(omitted)
         };
         let crew = if source_withheld {
             Vec::new()
@@ -4742,11 +4748,14 @@ fn render_project_card(
             return candidate;
         }
     }
-    let fallback = assemble(&observed_at, &branch, &goal, plan, &next, &crew);
-    if crate::output::outbound(fallback.to_string().as_bytes(), &Value::Null).is_err() {
-        return withheld();
+    // Long aliases can leave no room even for an empty card; keep the response valid instead.
+    let minimal = json!({"alias": alias_name, "state": state, "trimmed": true});
+    if minimal.to_string().len() <= cap
+        && crate::output::outbound(minimal.to_string().as_bytes(), &Value::Null).is_ok()
+    {
+        return minimal;
     }
-    fallback
+    withheld()
 }
 
 #[derive(Clone)]
@@ -4771,6 +4780,7 @@ struct CardRefresherInner {
 struct CardRefresherState {
     pending: std::collections::VecDeque<(String, PathBuf, Option<PathBuf>)>,
     in_flight: std::collections::BTreeSet<String>,
+    failed: BTreeMap<String, std::time::Instant>,
     slot_busy: [bool; MAX_CONCURRENT_CARD_REFRESHES],
     slots: [Option<std::thread::JoinHandle<()>>; MAX_CONCURRENT_CARD_REFRESHES],
 }
@@ -4847,7 +4857,12 @@ impl ProjectCardRefresher {
                 return;
             }
             for (alias_name, repo, cache_dir) in items {
-                if state.in_flight.contains(&alias_name) {
+                if state.in_flight.contains(&alias_name)
+                    || state
+                        .failed
+                        .get(&alias_name)
+                        .is_some_and(|at| at.elapsed() < CARD_REFRESH_BACKOFF)
+                {
                     continue;
                 }
                 if let Some(existing) = state
@@ -4894,6 +4909,7 @@ fn run_card_refresh_worker(
 
     loop {
         let (alias_name, repo, cache_dir) = current;
+        let mut refreshed = false;
         if !inner.stopped.load(Ordering::Acquire)
             && let Some(cache_dir) = cache_dir.as_deref()
             && stat_only_checkout_ok(&repo)
@@ -4909,10 +4925,18 @@ fn run_card_refresh_worker(
             && stat_only_checkout_ok(&repo)
         {
             let card = StoredProjectCard::from_dashboard(&dashboard);
-            let _ = write_cached_card(cache_dir, &repo, &card);
+            refreshed = write_cached_card(cache_dir, &repo, &card).is_ok();
         }
         let mut state = inner.state.lock().expect("card refresher lock");
         state.in_flight.remove(&alias_name);
+        // A failing project waits out a backoff instead of rerunning on every poll.
+        if refreshed {
+            state.failed.remove(&alias_name);
+        } else {
+            state
+                .failed
+                .insert(alias_name.clone(), std::time::Instant::now());
+        }
         if inner.stopped.load(Ordering::Acquire) {
             state.pending.clear();
             state.slot_busy[slot] = false;
@@ -5103,6 +5127,25 @@ mod work_items_tests {
             rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn project_card_counts_omitted_workers_and_fits_long_aliases() {
+        let rows: Vec<Value> = (0..8)
+            .map(|i| json!({"id": format!("att-{i}"), "tool": "peer-delegate", "provider": "codex", "created": format!("2026-11-27T05:5{i}:00Z")}))
+            .collect();
+        let dashboard = json!({"active": 12, "activeAttempts": rows});
+        let card = StoredProjectCard::from_dashboard(&dashboard);
+        assert_eq!(card.crew.len(), CARD_CREW_MAX_ITEMS);
+        assert_eq!(card.crew_total, 12);
+        let trimmed = json!({"activeAttempts": [], "activeAttemptsTrimmed": 4});
+        assert_eq!(StoredProjectCard::from_dashboard(&trimmed).crew_total, 4);
+
+        let long_alias = format!("a{}", "b".repeat(79));
+        let rendered = render_project_card(&long_alias, "fresh", Some(&card), 150);
+        assert!(rendered.to_string().len() <= 150, "{rendered}");
+        assert_eq!(rendered["alias"], long_alias.as_str());
+        assert_eq!(rendered["trimmed"], true);
     }
 
     #[test]
