@@ -166,6 +166,7 @@ fn repair_feedback(
     expected: &oms_command_plan::ReviewFence,
     route: &Value,
     wall: Duration,
+    intent: Option<&Value>,
 ) -> Result<Option<Output>> {
     if !args.flag("land") || !args.flag("auto-repair") {
         return Ok(None);
@@ -273,7 +274,7 @@ fn repair_feedback(
         "feedback repair response lacks exact reviewed lease evidence",
     )?;
     feedback_record(ctx, &claim, "acknowledged")?;
-    let land_head = current_landing_base(ctx, head, None)?;
+    let land_head = current_landing_base(ctx, head, intent)?;
     let expected = review_fence(ctx, &repaired, &land_head)?;
     let landed = land(ctx, args, &repaired, &expected, wall)?;
     let code = landed.code;
@@ -981,7 +982,8 @@ pub(crate) fn run_task(
             None
         };
         if let Some(expected) = expected.as_ref()
-            && let Some(repaired) = repair_feedback(ctx, args, &task, expected, &route, wall)?
+            && let Some(repaired) =
+                repair_feedback(ctx, args, &task, expected, &route, wall, intent)?
         {
             output.append(repaired);
             return Ok(output);
