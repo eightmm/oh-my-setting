@@ -21,7 +21,8 @@ fn session(value: String) -> Option<String> {
 }
 
 pub(crate) fn observe(provider: &str, raw: &[u8]) -> Option<Observation> {
-    if raw.len() > 8 * 1024 * 1024 {
+    // The provider capture's own cap; partial-message rows add ~450 bytes per delta.
+    if raw.len() > 64 * 1024 * 1024 {
         return None;
     }
     if provider == "antigravity" {
