@@ -291,7 +291,9 @@ pub(super) fn collect(
                         .stderr
                         .as_ref()
                         .map_or(&[][..], |capture| capture.bytes.as_slice());
-                    if total == 0 && is_control_socket_fallback_failure(exit, b"", stderr) {
+                    if total == 0
+                        && is_control_socket_fallback_failure(exit, b"", stderr, req.control)
+                    {
                         if attempt == 0 {
                             continue 'attempt;
                         }

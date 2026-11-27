@@ -2788,6 +2788,7 @@ impl RuntimeServices<'_> {
                     remote.code,
                     &remote.stdout,
                     &remote.stderr,
+                    &control,
                 ) {
                     if attempt == 0 {
                         continue;

@@ -1330,19 +1330,26 @@ pub fn is_key_auth_failure(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> bool
     })
 }
 
-pub fn is_control_socket_fallback_failure(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> bool {
+/// True only when the command never reached the shared connection: exit 255, no
+/// stdout, nothing but OpenSSH's own mux/proxy lines on stderr, and the control
+/// socket no longer accepts connections. A live socket means the command ran over
+/// the master, so its failure belongs to the remote side and must not be retried.
+pub fn is_control_socket_fallback_failure(
+    exit_code: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+    control_path: &str,
+) -> bool {
     if exit_code != 255 || !stdout.is_empty() || stderr.trim_ascii().is_empty() {
+        return false;
+    }
+    if control_connection_open(control_path) {
         return false;
     }
     let is_mux_or_proxy_line = |line: &str| -> bool {
         line.starts_with("control socket connect(")
             || line == "connection closed by unknown port 65535"
             || line == "connection reset by unknown port 65535"
-            || line.starts_with("kex_exchange_identification:")
-            || line.starts_with("ssh_exchange_identification:")
-            || line.contains("proxycommand")
-            || line.contains("proxy command")
-            || line.contains("ssh_proxy_connect")
     };
     let text = String::from_utf8_lossy(stderr);
     let mut matched = false;
@@ -1986,7 +1993,12 @@ fn run_command_over_master(
             SshMasterOutcome::Ready { .. } => {
                 let mut out = run_once(master_req.ssh_program)?;
                 let code = exit_code(out.status);
-                if is_control_socket_fallback_failure(code, &out.stdout, &out.stderr) {
+                if is_control_socket_fallback_failure(
+                    code,
+                    &out.stdout,
+                    &out.stderr,
+                    master_req.control_path,
+                ) {
                     if attempt == 0 {
                         continue;
                     }
@@ -3144,6 +3156,7 @@ fi
                         exit_code(out.status),
                         &out.stdout,
                         &out.stderr,
+                        req.control,
                     ) {
                         if attempt == 0 {
                             continue;
@@ -3539,6 +3552,7 @@ emit_part "$tok" meta "$op_dir/meta.json"
                         exit_code(out.status),
                         &out.stdout,
                         &out.stderr,
+                        &control,
                     ) {
                         if attempt == 0 {
                             continue;
@@ -4030,6 +4044,7 @@ emit_part "$tok" stderr "$op_dir/stderr"
                         exit_code(out.status),
                         &out.stdout,
                         &out.stderr,
+                        &control,
                     ) {
                         if attempt == 0 {
                             continue;
@@ -9597,6 +9612,7 @@ exec sh -c "$last"
                 255,
                 b"",
                 b"remote step already ran\nkex_exchange_identification: Connection closed by remote host\n",
+                "",
             ));
 
             // 2. Read-only probe needs no target registry at all (even in an empty non-repo dir
@@ -9760,6 +9776,42 @@ exec sh -c "$last"
                 String::from_utf8_lossy(&col_retry.stderr)
             );
             assert_eq!(std::fs::read(&collected_path).unwrap(), b"collect-payload");
+
+            // 3c. Over a live master, a remote command that itself exits 255 with an
+            //     OpenSSH-looking line (a nested ssh) is the command's own result: no retry,
+            //     no second run, and no shared-connection-closed error.
+            std::fs::write(&mode_file, "nested_live").unwrap();
+            std::fs::write(&drop_budget, "").unwrap();
+            let runs_before_nested = count_lines(&remote_runs);
+            let starts_before_nested = rig.master_starts();
+            let nested = invoke_clock(
+                &[
+                    "exec",
+                    "--repo",
+                    rs,
+                    "--host",
+                    "nested-live-host",
+                    "--remote-dir",
+                    rd,
+                    "--",
+                    "true",
+                ],
+                &root,
+                &clock,
+            );
+            assert_eq!(
+                nested.code,
+                255,
+                "{}",
+                String::from_utf8_lossy(&nested.stderr)
+            );
+            assert!(
+                !String::from_utf8_lossy(&nested.stderr).contains(SHARED_SSH_CLOSED_BEFORE_COMMAND),
+                "{}",
+                String::from_utf8_lossy(&nested.stderr)
+            );
+            assert_eq!(count_lines(&remote_runs), runs_before_nested + 1);
+            assert_eq!(rig.master_starts(), starts_before_nested + 1);
 
             // 4. Two consecutive mux-closed failures -> exit 75, exact message
             //    "shared SSH connection closed before the command ran", no extra backoff,
@@ -10052,6 +10104,10 @@ exec sh -c "$last"
                 "  exit 1\n",
                 "fi\n",
                 "printf '1\\n' >> \"$OMS_TEST_REMOTE_RUNS\"\n",
+                "if [ \"$mode\" = 'nested_live' ]; then\n",
+                "  printf 'Connection closed by UNKNOWN port 65535\\r\\n' >&2\n",
+                "  exit 255\n",
+                "fi\n",
                 "for last do :; done\n",
                 "exec sh -c \"$last\"\n",
             ),
