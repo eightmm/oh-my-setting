@@ -8625,6 +8625,8 @@ fn native_lead_answer_fixture(provider: &str) {
             ("OMS_PEER_LEAD_OBSERVATION", &op),
             ("TEST_LEAD_PROVIDER", provider),
             ("OMS_PEER_CANCEL_DIR", path.to_str().unwrap()),
+            // Only a run whose own receipts name this session counts as resumed.
+            ("OMS_RESUME_SESSION", "12345678-1234-4234-8234-123456789abc"),
         ],
         || {
             let dir = PathBuf::from(std::env::var_os("OMS_PEER_CANCEL_DIR").unwrap());
@@ -8705,6 +8707,50 @@ fn native_lead_answer_fixture(provider: &str) {
                 fs::metadata(&receipt).unwrap().permissions().mode() & 0o077,
                 0
             );
+            let prompt_of = |artifact: &Path| {
+                let text = fs::read_to_string(artifact).unwrap();
+                text.split("\n## Output\n").next().unwrap().to_owned()
+            };
+            let replayed = prompt_of(&answers.join(row["artifact"].as_str().unwrap()));
+            assert!(
+                replayed.matches("Read this fixture").count() > 1,
+                "{replayed}"
+            );
+            // A verified resumed session gets only the new message, no thread replay.
+            let known: Vec<_> = fs::read_dir(&answers)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            for (name, mut value) in [("meta.json", meta), ("launch.json", launch)] {
+                value["lead_resume"] = serde_json::json!(id);
+                fs::write(dir.join(name), value.to_string()).unwrap();
+            }
+            success(run(
+                &repo,
+                source,
+                "peer-ask",
+                &[
+                    "--providers",
+                    provider,
+                    "--thread",
+                    op,
+                    "--no-current",
+                    "--prompt",
+                    "Continue the fixture",
+                    "--artifact-dir",
+                    answers.to_str().unwrap(),
+                    "--no-task",
+                    "--no-memory",
+                ],
+            ));
+            let resumed = fs::read_dir(&answers)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| !known.contains(p) && p.extension().is_some_and(|x| x == "md"))
+                .unwrap();
+            let resumed = prompt_of(&resumed);
+            assert!(resumed.contains("Continue the fixture"), "{resumed}");
+            assert!(!resumed.contains("Read this fixture"), "{resumed}");
         },
     )
 }

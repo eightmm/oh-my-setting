@@ -115,6 +115,31 @@ pub(crate) fn observe(provider: &str, raw: &[u8]) -> Option<Observation> {
     })
 }
 
+/// True only when this protected Lead owner exported the session its own
+/// launch and meta receipts name; an ambient selector never qualifies.
+pub(crate) fn resumed(
+    repo: &Path,
+    answers: &Path,
+    thread: &str,
+    provider: &str,
+    context: &Context<'_>,
+) -> bool {
+    let Some(session) = std::env::var("OMS_RESUME_SESSION")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    Scope::from_owner(repo, answers, thread, provider, context).is_some_and(|scope| {
+        [&scope.meta, &scope.launch].into_iter().all(|raw| {
+            oms_json::parse_strict(raw)
+                .ok()
+                .and_then(|row| string(&row, "lead_resume"))
+                .is_some_and(|id| id == session)
+        })
+    })
+}
+
 pub(crate) struct Scope {
     run: Root,
     operation: String,

@@ -520,7 +520,8 @@ pub(crate) fn prompt(
             )?;
         }
     }
-    if args.has("thread") {
+    // A resumed native Lead session already holds this thread; send only the new turn.
+    if args.has("thread") && !args.has("_lead-resumed") {
         body.push_layer(
             "history",
             &thread::context(repo, args.get("thread"), 6000, 12, false, true)?,
@@ -1641,6 +1642,20 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     } else {
         None
     };
+    if tool == "peer-ask"
+        && resolved.has("no-current")
+        && !resolved.has("debate")
+        && let [target] = targets.as_slice()
+        && crate::lead_observation::resumed(
+            &repo,
+            &dir,
+            resolved.get("thread"),
+            &target.provider,
+            context,
+        )
+    {
+        resolved.set_flag("_lead-resumed");
+    }
     let args = &resolved;
     let body = prompt(
         tool,
