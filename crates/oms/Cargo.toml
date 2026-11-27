@@ -12,6 +12,7 @@ oms-bootstrap = { path = "../oms-bootstrap" }
 oms-command-autonomy = { path = "../oms-command-autonomy" }
 oms-command-graph = { path = "../oms-command-graph" }
 oms-command-hooks = { path = "../oms-command-hooks" }
+oms-command-intake = { path = "../oms-command-intake" }
 oms-command-journal = { path = "../oms-command-journal" }
 oms-command-landing = { path = "../oms-command-landing" }
 oms-command-lifecycle = { path = "../oms-command-lifecycle" }

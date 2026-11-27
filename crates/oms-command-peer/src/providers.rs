@@ -2294,7 +2294,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
     context: &Context<'_>,
 ) -> Result<Completed> {
     prompt.validate()?;
-    crate::safety::outbound(prompt.bytes())?;
+    crate::safety::outbound_prompt(prompt.bytes())?;
     if matches!(output_mode, OutputMode::Native) {
         require_native_output(&route.provider)?;
     } else if !discovered(&route.provider) {

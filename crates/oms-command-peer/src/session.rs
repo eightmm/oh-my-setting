@@ -1092,12 +1092,12 @@ pub(crate) fn handoff(
                 &services,
                 context.interrupted,
                 &mut |raw| {
-                    safety::outbound(raw)
+                    safety::outbound_prompt(raw)
                         .map_err(|e| oms_command_autonomy::Error::new(e.code, e.message))
                 },
             )
             .map_err(|e| Error::new(e.code, e.message))?;
-            safety::outbound(body.as_bytes())?;
+            safety::outbound_prompt(body.as_bytes())?;
             if args.has("output") {
                 let path = Path::new(args.get("output"));
                 storage::write(&repo, path, body.into_bytes(), false, context.interrupted)?;

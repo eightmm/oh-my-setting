@@ -948,7 +948,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             &storage::file(&args.path("review-artifact", context.cwd))?,
         )?;
     }
-    safety::outbound(prompt.as_bytes())?;
+    safety::outbound_prompt(prompt.as_bytes())?;
     let mut header = format!(
         "# OMS peer-delegate\n\n- provider: {}\n- base_sha: {base}\n- access: {}\n\n## Prompt\n\n{prompt}\n",
         target.provider,
@@ -1037,7 +1037,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         let prepared = prepare().and_then(|compiled| {
             let prior = prompt.len();
             prompt.compiled_context(&compiled)?;
-            safety::outbound(prompt.as_bytes())?;
+            safety::outbound_prompt(prompt.as_bytes())?;
             header.push_str(&prompt[prior..]);
             Ok(compiled)
         });
@@ -1156,7 +1156,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                     full_prompt.push_layer("task", &turn_prompt);
                     full_prompt.push_layer("framing", "\n");
                 }
-                safety::outbound(full_prompt.as_bytes())?;
+                safety::outbound_prompt(full_prompt.as_bytes())?;
                 let res = providers::execute_with_fallback_env(
                     &mut route,
                     args.get("fallback-model"),

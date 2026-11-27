@@ -213,6 +213,34 @@ impl<'a> Room<'a> {
     pub fn records(&self, id: &str) -> Result<Vec<Value>> {
         Ok(self.snapshot(id)?.rows.clone())
     }
+    /// Return a request-scoped pinned snapshot when the log and its ancestry are
+    /// still identity-, ownership-, permission-, and stat-identical, with zero
+    /// additional file opens or byte reads.
+    pub fn reusable_snapshot(&self, id: &str) -> Option<Arc<Snapshot>> {
+        identifier(id, "room").ok()?;
+        self.checkpoint().ok()?;
+        let store = self.store.as_ref()?;
+        let snapshot = self.snapshots.borrow().get(id).cloned()?;
+        let size = usize::try_from(snapshot.stat.st_size).ok()?;
+        if snapshot.id != id
+            || snapshot.bytes.len() != size
+            || snapshot.bytes.len() > crate::MAX_FILE
+        {
+            return None;
+        }
+        store.check().ok()?;
+        let current = rustix::fs::statat(
+            &store.threads.fd,
+            Store::name(id),
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .ok()?;
+        if !crate::storage::regular(&current) || !stable(&snapshot.stat, &current) {
+            return None;
+        }
+        store.check().ok()?;
+        Some(snapshot)
+    }
     pub(crate) fn invalidate(&self, id: &str) {
         self.snapshots.borrow_mut().remove(id);
     }
@@ -2243,6 +2271,28 @@ mod optimization_tests {
             assert!(!first.flag("incomplete"));
             assert_eq!(first.list("rooms").len(), 4);
 
+            // Request-scoped reusable_snapshot hits only active cached Rooms with 0 I/O.
+            crate::storage::reset_test_io_counters();
+            for id in ["room-a", "room-b", "room-c"] {
+                let snap = reader.reusable_snapshot(id).unwrap();
+                assert_eq!(
+                    snap.bytes,
+                    std::fs::read(healthy.join(format!(".oms/threads/{id}.jsonl"))).unwrap()
+                );
+            }
+            for skipped in [
+                "room-sealed",
+                "thread-one",
+                "thread-two",
+                "missing",
+                "../bad",
+            ] {
+                assert!(reader.reusable_snapshot(skipped).is_none(), "{skipped}");
+            }
+            assert_eq!(crate::storage::test_open_count(), 0);
+            assert_eq!(crate::storage::test_tail_read_count(), 0);
+            assert_eq!(crate::storage::test_read_bytes(), 0);
+
             // Second list on the same Room reuses cached active snapshots with 0 opens.
             crate::storage::reset_test_io_counters();
             let second = reader.list().unwrap();
@@ -2264,6 +2314,14 @@ mod optimization_tests {
             std::fs::rename(&tmp_b, &room_b_path).unwrap();
 
             crate::storage::reset_test_io_counters();
+            assert!(reader.reusable_snapshot("room-a").is_none());
+            assert!(reader.reusable_snapshot("room-b").is_none());
+            assert!(reader.reusable_snapshot("room-c").is_some());
+            assert_eq!(crate::storage::test_open_count(), 0);
+            assert_eq!(crate::storage::test_tail_read_count(), 0);
+            assert_eq!(crate::storage::test_read_bytes(), 0);
+
+            crate::storage::reset_test_io_counters();
             let third = reader.list().unwrap();
             assert_eq!(crate::storage::test_open_count(), 5);
             assert_eq!(crate::storage::test_tail_read_count(), 3);
@@ -2276,6 +2334,22 @@ mod optimization_tests {
             };
             assert_eq!(msg_count(&third, "room-a"), 2);
             assert_eq!(msg_count(&third, "room-b"), 1);
+
+            // Hardlink or permission widening invalidates reusable_snapshot immediately with 0 opens.
+            let hard_c = healthy.join(".oms/threads/hard-c.jsonl");
+            std::fs::hard_link(healthy.join(".oms/threads/room-c.jsonl"), &hard_c).unwrap();
+            crate::storage::reset_test_io_counters();
+            assert!(reader.reusable_snapshot("room-c").is_none());
+            std::fs::remove_file(&hard_c).unwrap();
+            assert!(reader.reusable_snapshot("room-c").is_none());
+
+            let room_a_path = healthy.join(".oms/threads/room-a.jsonl");
+            std::fs::set_permissions(&room_a_path, std::fs::Permissions::from_mode(0o620)).unwrap();
+            assert!(reader.reusable_snapshot("room-a").is_none());
+            std::fs::set_permissions(&room_a_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(reader.reusable_snapshot("room-a").is_none());
+            assert_eq!(crate::storage::test_open_count(), 0);
+            assert_eq!(crate::storage::test_read_bytes(), 0);
 
             // 2. Malformed, oversize, symlink, and hardlink entries fail safely and signal incomplete.
             let bad = root.join("bad");
@@ -2320,6 +2394,15 @@ mod optimization_tests {
             assert_eq!(found[0].text("id"), "good-room");
             assert_eq!(crate::storage::test_open_count(), 3);
             assert_eq!(crate::storage::test_tail_read_count(), 2);
+
+            crate::storage::reset_test_io_counters();
+            assert!(bad_reader.reusable_snapshot("good-room").is_some());
+            for skipped in ["sym-room", "hard-room", "bad-head", "bad-body", "huge-room"] {
+                assert!(bad_reader.reusable_snapshot(skipped).is_none(), "{skipped}");
+            }
+            assert_eq!(crate::storage::test_open_count(), 0);
+            assert_eq!(crate::storage::test_tail_read_count(), 0);
+            assert_eq!(crate::storage::test_read_bytes(), 0);
 
             // 3. Budget boundaries and large sealed fallback.
             let budget_dir = root.join("budget");
