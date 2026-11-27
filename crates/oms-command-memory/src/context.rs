@@ -32,7 +32,10 @@ impl Source {
         if notes.len() + pins.len() > MAX_SOURCE_RECORDS {
             return crate::err("memory source exceeds the resume-view limit");
         }
-        let reviews = review::bounded_rows(&store, "reviews.jsonl")?;
+        let (reviews, skipped) = review::bounded_rows(&store, "reviews.jsonl")?;
+        if skipped > 0 {
+            return crate::err("memory review receipt is invalid");
+        }
         Ok(Self {
             store,
             notes,
@@ -97,12 +100,22 @@ fn resume(repo: &Path, query: &str, flag: &AtomicBool) -> Result<String> {
     };
     within_budget()?;
     let repo = std::fs::canonicalize(repo)?;
-    let project = Source::read(Store::new(repo.clone(), None, false))?;
-    let global = Source::read(Store::new(repo, None, true))?;
+    let mut sources = Vec::new();
+    let mut unavailable = Vec::new();
+    for global_scope in [false, true] {
+        within_budget()?;
+        let store = Store::new(repo.clone(), None, global_scope);
+        let scope = store.scope.clone();
+        match Source::read(store) {
+            Ok(source) => sources.push(source),
+            Err(Error(130, message)) => return Err(Error(130, message)),
+            Err(Error(_, message)) => unavailable.push((scope, message)),
+        }
+    }
     let query = flat(byte_clip(query, 300));
     let targets = std::env::var("OMS_MEMORY_TARGET_PATHS").unwrap_or_default();
     let mut pins = Vec::new();
-    for source in [&project, &global] {
+    for source in &sources {
         within_budget()?;
         if !source.pins_clean {
             continue;
@@ -113,40 +126,60 @@ fn resume(repo: &Path, query: &str, flag: &AtomicBool) -> Result<String> {
                 .cmp(&a.occurred_at)
                 .then(b.ordinal.cmp(&a.ordinal))
         });
-        pins.extend(
-            source
-                .select(newest, "", &targets, flag)?
-                .into_iter()
-                .map(|e| (source.store.scope.as_str(), e)),
-        );
+        match source.select(newest, "", &targets, flag) {
+            Ok(selected) => {
+                pins.extend(
+                    selected
+                        .into_iter()
+                        .map(|e| (source.store.scope.as_str(), e)),
+                );
+            }
+            Err(Error(130, message)) => return Err(Error(130, message)),
+            Err(Error(_, message)) => {
+                if !unavailable.iter().any(|(s, _)| s == &source.store.scope) {
+                    unavailable.push((source.store.scope.clone(), message));
+                }
+            }
+        }
     }
+    let mut recalled = Vec::new();
+    if !query.is_empty() {
+        for source in &sources {
+            within_budget()?;
+            if unavailable.iter().any(|(s, _)| s == &source.store.scope)
+                || !source.shared_clean
+                || crate::cli::child() && source.store.scope == "global"
+            {
+                continue;
+            }
+            let selected = db::transient_ranked(&source.notes, &query, flag)
+                .and_then(|ranked| source.select(ranked, &query, &targets, flag));
+            match selected {
+                Ok(selected) if !selected.is_empty() => {
+                    recalled.extend(
+                        selected
+                            .into_iter()
+                            .map(|e| (source.store.scope.as_str(), e)),
+                    );
+                    break;
+                }
+                Ok(_) => {}
+                Err(Error(130, message)) => return Err(Error(130, message)),
+                Err(Error(_, message)) => {
+                    unavailable.push((source.store.scope.clone(), message));
+                }
+            }
+        }
+    }
+    pins.retain(|(scope, _)| !unavailable.iter().any(|(s, _)| s == scope));
     pins.sort_by(|a, b| {
         b.1.occurred_at
             .cmp(&a.1.occurred_at)
             .then(b.1.ordinal.cmp(&a.1.ordinal))
     });
     pins.truncate(RESUME_RECORDS);
-    let mut recalled = Vec::new();
-    if !query.is_empty() {
-        for source in [&project, &global] {
-            within_budget()?;
-            if !source.shared_clean || crate::cli::child() && source.store.scope == "global" {
-                continue;
-            }
-            let ranked = db::transient_ranked(&source.notes, &query, flag)?;
-            let selected = source.select(ranked, &query, &targets, flag)?;
-            if !selected.is_empty() {
-                recalled.extend(
-                    selected
-                        .into_iter()
-                        .map(|e| (source.store.scope.as_str(), e)),
-                );
-                break;
-            }
-        }
-    }
     within_budget()?;
-    let count = pins.len() + recalled.len();
+    let count = pins.len() + recalled.len() + unavailable.len();
     if count == 0 {
         return Ok(String::new());
     }
@@ -163,6 +196,16 @@ fn resume(repo: &Path, query: &str, flag: &AtomicBool) -> Result<String> {
             ));
             body.push('\n');
         }
+    }
+    for (scope, reason) in unavailable {
+        let prefix = format!("- unavailable {scope}: ");
+        let text = flat(&reason);
+        body.push_str(&prefix);
+        body.push_str(byte_clip(
+            &text,
+            line_budget.saturating_sub(prefix.len() + 1),
+        ));
+        body.push('\n');
     }
     if !store::clean(&body, true) {
         return Ok(String::new());

@@ -2,8 +2,8 @@ use crate::{Error, Result, Value, decode, identifier, require};
 use oms_lock::{Guard, Lock, Mode, Settings};
 use oms_safe_fs::{ByteReadOptions, MutationError, MutationOptions, MutationPhase, Root};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 pub const MAX_STATE: usize = 8 * 1024 * 1024;
 /// Read caller-supplied scratch input through one descriptor, including external
@@ -63,6 +63,8 @@ pub struct Store {
 pub struct Transaction<'a> {
     store: &'a Store,
     guard: Guard,
+    hold_deadline: Option<Instant>,
+    interrupted: Option<&'a AtomicBool>,
 }
 pub(crate) fn reservation_error(error: oms_command_telemetry::store::dispatch::Error) -> Error {
     Error {
@@ -144,6 +146,38 @@ impl Store {
             ..Error::new(e)
         })
     }
+    pub fn lock_at_bounded<'a>(
+        &'a self,
+        relative: &Path,
+        interrupted: &'a AtomicBool,
+        deadline: Instant,
+        bounds: oms_command_plan::team::AdmissionBounds,
+    ) -> Result<Transaction<'a>> {
+        path(relative)?;
+        let mut settings = self.settings.clone();
+        settings.mode = Mode::Flock;
+        let wait_deadline = bounds.wait_deadline(deadline);
+        let guard = oms_command_plan::team::acquire_bounded_lock(
+            settings,
+            interrupted,
+            deadline,
+            wait_deadline,
+            "panel lock is busy",
+            |settings| Lock::in_root(self.repo().to_path_buf(), relative, settings),
+        )
+        .map_err(|e| Error {
+            code: e.code,
+            ..Error::new(e.message)
+        })?;
+        let tx = Transaction {
+            store: self,
+            guard,
+            hold_deadline: Some(bounds.hold_deadline(deadline)),
+            interrupted: Some(interrupted),
+        };
+        tx.check()?;
+        Ok(tx)
+    }
     pub(crate) fn lock_at_raw(
         &self,
         relative: &Path,
@@ -157,7 +191,12 @@ impl Store {
         settings.mode = Mode::Flock;
         settings.timeout = timeout;
         let guard = Lock::in_root(self.repo().to_path_buf(), relative, settings)?.acquire(None)?;
-        Ok(Transaction { store: self, guard })
+        Ok(Transaction {
+            store: self,
+            guard,
+            hold_deadline: None,
+            interrupted: None,
+        })
     }
 }
 pub(crate) fn path(relative: &Path) -> Result<()> {
@@ -172,6 +211,24 @@ pub(crate) fn path(relative: &Path) -> Result<()> {
 }
 impl Transaction<'_> {
     pub fn check(&self) -> Result<()> {
+        if self
+            .interrupted
+            .is_some_and(|stop| stop.load(Ordering::Acquire))
+        {
+            return Err(Error {
+                code: 130,
+                ..Error::new("team admission interrupted")
+            });
+        }
+        if self
+            .hold_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(Error {
+                code: 75,
+                ..Error::new("team admission deadline expired")
+            });
+        }
         self.check_raw().map_err(|e| Error {
             code: e.exit_code(),
             ..Error::new(e)
@@ -209,7 +266,11 @@ impl Transaction<'_> {
                     max_output: maximum,
                     ..MutationOptions::default()
                 },
-                transform,
+                |old| {
+                    let next = transform(old)?;
+                    self.check()?;
+                    Ok(next)
+                },
             )
             .map(|v| v.bytes)
             .map_err(|e| match e {
@@ -282,6 +343,66 @@ mod tests {
             (after.ino(), after.mtime(), after.mtime_nsec())
         );
         drop(tx);
+
+        let lock_path = Path::new("team-request-issuance.lock");
+        let held = store.lock_at(lock_path, Duration::from_secs(1)).unwrap();
+        let stop = AtomicBool::new(false);
+        let bounds = oms_command_plan::team::AdmissionBounds {
+            lock_wait: Duration::from_millis(120),
+            lock_hold: Duration::from_secs(2),
+        };
+        let busy = store
+            .lock_at_bounded(
+                lock_path,
+                &stop,
+                Instant::now() + Duration::from_secs(5),
+                bounds,
+            )
+            .err()
+            .unwrap();
+        assert_eq!(busy.code, 75);
+        assert!(busy.message.contains("busy"), "{}", busy.message);
+
+        let contender = Store::open(&root).unwrap();
+        let acquired_ms = std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let started = Instant::now();
+                let guard = contender
+                    .lock_at_bounded(
+                        lock_path,
+                        &stop,
+                        started + Duration::from_secs(5),
+                        oms_command_plan::team::AdmissionBounds {
+                            lock_wait: Duration::from_secs(2),
+                            lock_hold: Duration::from_secs(2),
+                        },
+                    )
+                    .unwrap();
+                guard.check().unwrap();
+                started.elapsed()
+            });
+            std::thread::sleep(Duration::from_millis(60));
+            drop(held);
+            waiter.join().unwrap()
+        });
+        assert!(
+            acquired_ms < Duration::from_millis(500),
+            "bounded panel lock should poll every 20 ms rather than 1 s: {acquired_ms:?}"
+        );
+        let expired_hold = store
+            .lock_at_bounded(
+                lock_path,
+                &stop,
+                Instant::now() + Duration::from_secs(5),
+                oms_command_plan::team::AdmissionBounds {
+                    lock_wait: Duration::from_secs(1),
+                    lock_hold: Duration::from_millis(10),
+                },
+            )
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(25));
+        assert_eq!(expired_hold.check().unwrap_err().code, 75);
+        drop(expired_hold);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

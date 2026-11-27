@@ -4,6 +4,10 @@
 기본 화면은 작업과 결과를 중심으로 구성하고, 관계도는 별도 메뉴에서 보여 준다.
 이 문서의 병합은 실제 plugin 설치, MCP 연결, native host 렌더링 또는 실행 제어의 완료를 뜻하지 않는다.
 
+2026-11-26 구현 범위: [목표에서 결과 확인으로 이어지는 패널](GOAL-RESULT-JOURNEY.md)은
+현재의 단일 목표/Main/Leads 화면에 기준·근거·후속 요청과 복구 동선을 연결한다.
+아래 다중 메뉴 로드맵 전체를 구현 완료로 바꾸는 변경은 아니다.
+
 [호스트별 control-surface 로드맵 PR #440](https://github.com/eightmm/oh-my-setting/pull/440)의
 공통 runtime·capability 방향을 화면 구성으로 구체화한다. 기존
 [패널 상호작용 계약](TEAM-ORCHESTRATION-PANEL.md), [Feature scope](FEATURE-SCOPE.md),
