@@ -855,6 +855,7 @@ pub fn invocation(
                 cwd: cwd.into(),
                 input,
                 timeout,
+                stall: None,
                 max_bytes: max,
                 environment: vec![],
                 remove_environment: vec![],

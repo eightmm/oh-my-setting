@@ -144,7 +144,7 @@ fn adaptive(args: &mut Args, repo: &Path, context: &Context<'_>) -> Result<Optio
         );
     }
     args.set_value("writer", &writer);
-    peer::timeout(args, "peer-review")?;
+    peer::validate_timeouts(args)?;
     if args.has("model") {
         providers::model_name(args.required("model")?)?;
     }
@@ -509,6 +509,7 @@ fn stored_verdict(raw: &str) -> Option<(&'static str, Option<f64>)> {
                 "fail",
                 "no-verdict",
                 "incomplete",
+                "stalled",
                 "timed_out",
                 "interrupted",
             ]
@@ -601,6 +602,9 @@ fn verdicts(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             if let Some(rest) = diag.strip_prefix("error: timed out after ") {
                 state = "timed_out";
                 detail = Some(format!("timed out after {rest}"));
+            } else if let Some(rest) = diag.strip_prefix("error: no output for ") {
+                state = "stalled";
+                detail = Some(format!("no output for {rest}"));
             } else if peer::is_interrupted_line(&diag) {
                 state = "interrupted";
                 detail = Some("interrupted".into());
@@ -1108,7 +1112,9 @@ pub(crate) fn finish(
         output.push_str(&format!("base: {}\n", text(&original, "base")));
         for seat in seats {
             let elapsed_secs = peer::rounded_secs(seat.elapsed);
-            let status_label = if !seat.complete && seat.code == 124 {
+            let status_label = if let Some(secs) = seat.stalled_secs {
+                peer::stall_message(secs)
+            } else if !seat.complete && seat.code == 124 {
                 peer::timeout_message(seat.timeout_secs, seat.diff_bytes)
             } else if seat.code == 130 {
                 "interrupted".to_owned()
@@ -1150,16 +1156,19 @@ pub(crate) fn finish(
     let mut seat_rows = Vec::new();
     let mut finding_rows = Vec::new();
     for seat in seats {
-        let (state, confidence) =
-            if !args.has("gate") && seat.complete && seat.code == 0 && seat.quality == "ok" {
-                ("ok", None)
-            } else {
-                seat.verdict
-                    .unwrap_or_else(|| verdict(&seat.answer, Some(seat.code), seat.complete))
-            };
+        let (state, confidence) = if seat.stalled_secs.is_some() {
+            ("stalled", None)
+        } else if !args.has("gate") && seat.complete && seat.code == 0 && seat.quality == "ok" {
+            ("ok", None)
+        } else {
+            seat.verdict
+                .unwrap_or_else(|| verdict(&seat.answer, Some(seat.code), seat.complete))
+        };
         states.push(state);
         let elapsed_secs = peer::rounded_secs(seat.elapsed);
-        let detail = if state == "timed_out" {
+        let detail = if let Some(secs) = seat.stalled_secs {
+            Some(peer::stall_message(secs))
+        } else if state == "timed_out" {
             Some(peer::timeout_message(seat.timeout_secs, seat.diff_bytes))
         } else if state == "interrupted" {
             Some("interrupted".to_owned())
@@ -1191,7 +1200,9 @@ pub(crate) fn finish(
                     .into(),
             ),
         ]);
-        if state == "timed_out" {
+        if let Some(secs) = seat.stalled_secs {
+            seat_row.set("stall_secs", V::Num(secs.to_string()));
+        } else if state == "timed_out" {
             seat_row.set("timeout_secs", V::Num(seat.timeout_secs.to_string()));
         }
         if let Some(detail) = detail {
