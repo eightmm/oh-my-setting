@@ -402,7 +402,12 @@ fn sandbox_ssh_probe(binary: &Path, paths: &Paths, flag: &AtomicBool) -> Result<
         openssh_dir.into_os_string(),
         runtime_ctl.into_os_string(),
         fallback_ctl.into_os_string(),
-        auth_sock.clone().unwrap_or_default().into_os_string(),
+        // Probe the resolved socket: a hidden symlink can still point at a reachable target.
+        auth_sock
+            .as_deref()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
+            .unwrap_or_default()
+            .into_os_string(),
         if check_sock_path { "1" } else { "0" }.into(),
     ];
     let wrapped = oms_supervisor::sandbox::bwrap_args(OsStr::new("/bin/sh"), &sh_args, &spec);

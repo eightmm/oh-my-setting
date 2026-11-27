@@ -186,23 +186,25 @@ pub fn bwrap_args(program: &OsStr, args: &[OsString], spec: &SandboxSpec) -> Vec
         .filter(|p| p.is_absolute())
         && let Some(agent_dir) = sock.parent()
     {
-        // A socket placed directly in a shared directory (home, the runtime dir, an ancestor of a
-        // writable bind) is masked on its own; an empty tmpfs there would hide unrelated state.
-        // A socket inside a writable bind is masked alone too, so the bind itself stays visible.
-        let shared = in_worktree(agent_dir, &spec.worktree)
-            || ["HOME", "XDG_RUNTIME_DIR"]
-                .into_iter()
-                .filter_map(nonempty_env)
-                .map(PathBuf::from)
-                .any(|dir| same_dir(&dir, agent_dir))
-            || std::iter::once(&spec.worktree)
-                .chain(spec.extra_rw_dirs.iter())
-                .any(|dir| in_worktree(dir, agent_dir));
+        // The agent's own directory gets an empty tmpfs only when nothing else lives there: not
+        // home, the runtime dir, inside a writable bind or an ancestor of one.
+        let binds: Vec<&PathBuf> = std::iter::once(&spec.worktree)
+            .chain(spec.extra_rw_dirs.iter())
+            .collect();
+        let shared = ["HOME", "XDG_RUNTIME_DIR"]
+            .into_iter()
+            .filter_map(nonempty_env)
+            .map(PathBuf::from)
+            .any(|dir| same_dir(&dir, agent_dir))
+            || binds
+                .iter()
+                .any(|dir| in_worktree(agent_dir, dir) || in_worktree(dir, agent_dir));
         if !shared {
             push_hidden_dir(&mut hidden, agent_dir.to_path_buf());
-        } else if !in_worktree(&sock, Path::new("/tmp")) && std::fs::metadata(&sock).is_ok() {
-            masked_socket = Some(sock);
         }
+        // The resolved socket is always masked too: a symlinked value or a bind back over a tmpfs
+        // (a worktree under /tmp) must not leave the real socket reachable.
+        masked_socket = sock.canonicalize().ok();
     }
     for dir in hidden {
         wrapped.push("--tmpfs".into());
@@ -458,18 +460,16 @@ mod tests {
                 "--tmpfs".into(),
                 control.as_os_str().into(),
             ]);
-            if case == "present" {
+            if case == "present" || case == "symlink" {
                 expected.extend([OsString::from("--tmpfs"), outside_agent.as_os_str().into()]);
             }
-            // A socket directly in the runtime dir is masked alone; /tmp is already an empty tmpfs.
-            let runtime_sock = runtime.join("agent.sock");
-            if case == "runtime" && !in_worktree(&runtime_sock, Path::new("/tmp")) {
-                expected.extend([
-                    OsString::from("--ro-bind"),
-                    "/dev/null".into(),
-                    runtime_sock.as_os_str().into(),
-                ]);
-            }
+            // The resolved socket is masked in every case, including a symlinked value.
+            let sock = PathBuf::from(std::env::var_os("SSH_AUTH_SOCK").unwrap());
+            expected.extend([
+                OsString::from("--ro-bind"),
+                "/dev/null".into(),
+                sock.canonicalize().unwrap().into_os_string(),
+            ]);
             expected.extend([
                 OsString::from("--unsetenv"),
                 "SSH_AUTH_SOCK".into(),
@@ -533,13 +533,23 @@ mod tests {
         std::fs::set_permissions(&capture_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let outside_sock = root.join("agent").join("agent.sock");
         let runtime_sock = root.join("runtime").join("agent.sock");
-        std::fs::write(&runtime_sock, b"").unwrap();
         let inside_root_sock = root.join("wt").join("agent.sock");
         let inside_sub_sock = root.join("wt").join("sub").join("agent.sock");
+        for sock in [
+            &outside_sock,
+            &runtime_sock,
+            &inside_root_sock,
+            &inside_sub_sock,
+        ] {
+            std::fs::write(sock, b"").unwrap();
+        }
+        let linked_sock = root.join("agent").join("link.sock");
+        std::os::unix::fs::symlink(&runtime_sock, &linked_sock).unwrap();
         let missing_bin = root.join("not-a-real-oms-bin");
         for (case, binary, sock) in [
             ("present", &capture_bin, &outside_sock),
             ("runtime", &capture_bin, &runtime_sock),
+            ("symlink", &capture_bin, &linked_sock),
             ("inside", &capture_bin, &inside_root_sock),
             ("inside-sub", &capture_bin, &inside_sub_sock),
             ("missing", &missing_bin, &outside_sock),
@@ -666,7 +676,7 @@ mod tests {
             OsStr::new("/bin/sh"),
             &[
                 "-c".into(),
-                "test ! -e \"$1\" && test ! -e \"$2\" && test ! -e \"$3\" && test -z \"${SSH_AUTH_SOCK:-}\" && test -f \"$4\"".into(),
+                "test ! -e \"$1\" && test ! -e \"$2\" && { test ! -e \"$3\" || test -c \"$3\"; } && test -z \"${SSH_AUTH_SOCK:-}\" && test -f \"$4\"".into(),
                 "sh".into(),
                 ssh_item.into_os_string(),
                 ctl_item.into_os_string(),
