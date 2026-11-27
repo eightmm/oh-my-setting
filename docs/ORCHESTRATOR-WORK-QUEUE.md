@@ -38,6 +38,17 @@ AH/CP/CC/RF owner를 GitHub Issue·Project와 연결하는 delivery view다. 같
 capability 계약과 읽기 전용 UI부터 진행하며, 이 큐와 기존 lifecycle 우선순위를 대체하지
 않는다. Project 상태는 실행·승인 권한이 아니고 CP-13 원격 mutation은 계약 검토 전 보류한다.
 
+2026-11-26 [Platform API 경계 제안](PLATFORM-API-ARCHITECTURE.md)과
+[전체 파이프라인 구현 인계서](PLATFORM-PIPELINE-IMPLEMENTATION.md)는 기존 producer를
+이슈→현재 Main→Plan→실행→검증·수용→결과 전달로 연결한다. PIPE-00~11과 두 문서에서
+추적 ID로 정리한 OMS-01~16은 이 큐·epic #431·각 기존 Issue에 연결하는 참조 ID이며 독립
+실행 큐가 아니다.
+[추적 Issue #619](https://github.com/eightmm/oh-my-setting/issues/619)가 구현 PR·검증·재개 지점을 모은다.
+로컬 완주를 먼저 확인하고, 원격 제어는 #437의 조건 또는 명시적으로 검토한 동등한 pilot
+증거를 따른다. Jira 선택 시 최소 A2A 계약은 첫 adapter에 포함한다. Broker·SDK·지속 event replay·
+multi-tenant 확장은 실제 수요에 따른 조건부이며 기존 #436의 세션 요구를 삭제하지 않는다.
+문서 등록과 runtime 구현·fixture·live 검증의 완료를 구분한다.
+
 2026-11-26 [단일 프로젝트 상주 구현 인계](RESIDENT-PROJECT-IMPLEMENTATION.md)는
 [#619](https://github.com/eightmm/oh-my-setting/issues/619)와 설계 PR #608의 PIPE 항목에
 headless Main, 기존 tick 재사용, 전달·재시작 복구 형식과 작은 PR의 수용 기준을 연결한다.
