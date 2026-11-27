@@ -5090,6 +5090,7 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
                 wall: Duration,
                 stall: Option<Duration>,
                 print_timeout: Option<String>,
+                partial_messages: bool,
             }
             struct StreamingStub {
                 seen_timeout: Mutex<Vec<SeenTimeout>>,
@@ -5110,11 +5111,16 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
                         .into_owned();
                     let print_timeout = option_value(&request.argv, "--print-timeout")
                         .map(|v| v.to_string_lossy().into_owned());
+                    let partial_messages = request
+                        .argv
+                        .windows(2)
+                        .any(|w| w[0] == "--include-partial-messages" && w[1] == "-p");
                     self.seen_timeout.lock().unwrap().push(SeenTimeout {
                         prog: prog.clone(),
                         wall: request.timeout,
                         stall: request.stall,
                         print_timeout,
+                        partial_messages,
                     });
                     if prog == "agy" {
                         // End-only JSON envelope after 1.6s of silence (> 1s stall): must NOT stall.
@@ -5124,6 +5130,29 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
                         concat!(
                             "sleep 1.6; ",
                             "printf '%s\\n' '{\"conversation_id\":\"12345678-1234-4234-8234-123456789abc\",\"status\":\"SUCCESS\",\"response\":\"Answer:\\nagy ok\\nTradeoffs:\\nnone\\nEvidence:\\ntracked.txt\\nRisks:\\nnone\\nRecommendation:\\nkeep\\nVerification:\\ncargo test\\n\"}'"
+                        )
+                        .into(),
+                    ];
+                    } else if prog == "claude" {
+                        // 8 iterations * 0.2s = ~1.6s total (> 1s stall), streaming `stream_event`
+                        // partial deltas before `assistant` + `result` in write mode.
+                        request.argv = vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        concat!(
+                            "printf 'updated\\n' > tracked.txt; ",
+                            "printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"12345678-1234-4234-8234-123456789abc\"}' ",
+                            "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"stop_reason\":null}}}'; ",
+                            "i=0; while [ \"$i\" -lt 8 ]; do ",
+                            "sleep 0.2; ",
+                            "printf '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial draft %s \"}}}\\n' \"$i\"; ",
+                            "i=$((i + 1)); ",
+                            "done; ",
+                            "printf '%s\\n' ",
+                            "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}' ",
+                            "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_stop\"}}' ",
+                            "'{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5-5\",\"content\":[{\"type\":\"text\",\"text\":\"Claude updated tracked.txt.\"}],\"stop_reason\":\"end_turn\"}}' ",
+                            "'{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Claude updated tracked.txt.\",\"usage\":{\"input_tokens\":120,\"output_tokens\":34,\"cache_read_input_tokens\":50,\"cache_creation_input_tokens\":10},\"total_cost_usd\":0.0042}'"
                         )
                         .into(),
                     ];
@@ -5193,6 +5222,7 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
                         assert_eq!(item.wall, Duration::from_secs(86_400), "codex gets 24h cap");
                         assert_eq!(item.stall, Some(Duration::from_secs(1)), "codex streams");
                         assert_eq!(item.print_timeout, None);
+                        assert!(!item.partial_messages);
                     } else {
                         assert_eq!(
                             item.wall,
@@ -5204,12 +5234,112 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
                             "agy writes one JSON envelope at completion"
                         );
                         assert_eq!(item.print_timeout.as_deref(), Some("900s"));
+                        assert!(!item.partial_messages);
                     }
                 }
             }
             let rows = storage::load(&repo.0, Path::new(".oms/artifacts/index.jsonl")).unwrap();
             assert_eq!(rows.len(), 2);
             assert!(rows.iter().all(|r| r.get("exit").py() == "0"));
+
+            // Write-mode Claude (`peer-delegate`) passes `--include-partial-messages` when
+            // stall is active, ignores `stream_event` deltas in the final result, and keeps
+            // usage and cost accounting intact.
+            probe.seen_timeout.lock().unwrap().clear();
+            let claude_dir = ".oms/delegate-claude-streaming";
+            let claude_started = std::time::Instant::now();
+            let claude_del = oms_command_peer::run_with_executor(
+                "peer-delegate",
+                &args(&[
+                    "--to",
+                    "claude",
+                    "--model",
+                    "claude-sonnet-5-5",
+                    "--no-verify",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "--artifact-dir",
+                    claude_dir,
+                    "--prompt",
+                    "verify claude write partial events",
+                ]),
+                &repo.0,
+                source,
+                &STOP,
+                &probe,
+            );
+            assert_eq!(claude_del.0, 0, "{:?}", message(&claude_del));
+            assert!(
+                claude_started.elapsed() >= Duration::from_millis(1400),
+                "expected ~1.6s streaming write turn past 1s stall, got {:?}",
+                claude_started.elapsed()
+            );
+            assert_eq!(
+                probe.seen_timeout.lock().unwrap().as_slice(),
+                &[SeenTimeout {
+                    prog: "claude".to_owned(),
+                    wall: Duration::from_secs(86_400),
+                    stall: Some(Duration::from_secs(1)),
+                    print_timeout: None,
+                    partial_messages: true,
+                }]
+            );
+            let claude_md = storage::names(&repo.0, Path::new(claude_dir), ".md")
+                .unwrap()
+                .into_iter()
+                .find(|n| n.starts_with("claude-delegate-"))
+                .expect("claude delegate artifact");
+            let claude_artifact = String::from_utf8(
+                storage::read(&repo.0, &Path::new(claude_dir).join(claude_md), false).unwrap(),
+            )
+            .unwrap();
+            let output_section = claude_artifact
+                .split_once("\n## Output\n")
+                .and_then(|(_, rest)| rest.split_once("\n## Exit\n"))
+                .map(|(out, _)| out.trim())
+                .expect("delegate output section");
+            assert_eq!(output_section, "Claude updated tracked.txt.");
+            assert!(!claude_artifact.contains("partial draft"));
+            assert!(!claude_artifact.contains("stream_event"));
+            let claude_patch_name = storage::names(&repo.0, Path::new(claude_dir), ".patch")
+                .unwrap()
+                .into_iter()
+                .find(|n| n.starts_with("claude-delegate-"))
+                .expect("claude delegate patch");
+            let claude_patch = String::from_utf8(
+                storage::read(
+                    &repo.0,
+                    &Path::new(claude_dir).join(claude_patch_name),
+                    false,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(claude_patch.contains("+updated"), "{claude_patch}");
+            let usage_ledger = oms_command_telemetry::store::usage::load(&repo.0).unwrap();
+            let claude_call = usage_ledger
+                .calls
+                .iter()
+                .find(|c| c.receipt.identity.provider == "claude")
+                .expect("claude usage call");
+            assert_eq!(
+                claude_call.receipt.phase,
+                oms_command_telemetry::store::usage::Phase::Final
+            );
+            assert_eq!(
+                claude_call.receipt.usage,
+                oms_command_telemetry::store::usage::Usage {
+                    input_tokens: Some(120),
+                    output_tokens: Some(34),
+                    cache_read_tokens: Some(50),
+                    cache_write_tokens: Some(10),
+                    cache_in_input: Some(false),
+                    total_tokens: None,
+                }
+            );
+            assert_eq!(claude_call.tokens, Some(214));
+            assert_eq!(claude_call.cost_microusd, Some(4_200));
 
             // Non-ask verbs give non-streaming providers the 1200s default wall (and agy --print-timeout 1200s).
             probe.seen_timeout.lock().unwrap().clear();
@@ -5240,6 +5370,7 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
                     wall: Duration::from_secs(1_200),
                     stall: None,
                     print_timeout: Some("1200s".to_owned()),
+                    partial_messages: false,
                 }]
             );
         },
@@ -5375,6 +5506,13 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
                 ) -> oms_command_peer::Result<Completed> {
                     if request.argv[0] != "git" {
                         assert_eq!(request.stall, None, "OMS_PEER_STALL=0 must disable stall");
+                        assert!(
+                            !request
+                                .argv
+                                .iter()
+                                .any(|a| a == "--include-partial-messages"),
+                            "write-mode claude omits --include-partial-messages when stall is disabled"
+                        );
                         assert_eq!(
                             request.timeout,
                             Duration::from_secs(86_400),
@@ -5426,6 +5564,29 @@ fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
             let rows = storage::load(&repo.0, Path::new(".oms/artifacts/index.jsonl")).unwrap();
             assert_eq!(rows[0].get("exit").py(), "124");
             assert_eq!(rows[0].get("state").text(), Some("timed_out"));
+
+            let claude_cap = oms_command_peer::run_with_executor(
+                "peer-delegate",
+                &args(&[
+                    "--to",
+                    "claude",
+                    "--model",
+                    "claude-sonnet-5-5",
+                    "--no-verify",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "--artifact-dir",
+                    ".oms/delegate-claude-cap",
+                    "--prompt",
+                    "check claude write with stall disabled",
+                ]),
+                &repo.0,
+                source,
+                &STOP,
+                &SilentUntilCap,
+            );
+            assert_eq!(claude_cap.0, 124, "{claude_cap:?}");
         },
     );
 }
