@@ -1827,6 +1827,11 @@ impl oms_command_landing::Services for ControlServices<'_> {
 }
 
 impl oms_command_state::HostServices for ControlServices<'_> {
+    fn begin_panel_snapshot(&self) -> Option<Box<dyn oms_command_state::PanelSnapshotScope + '_>> {
+        Some(Box::new(
+            crate::services_runtime::PanelSnapshotGroupScope::new(),
+        ))
+    }
     fn scratch_activity(&self, repo: &Path, stop: &AtomicBool) -> Option<oms_command_state::Value> {
         let display = oms_panel_core::scratch_activity::observe(repo, stop);
         oms_command_state::json::parse(&serde_json::to_vec(&display).ok()?).ok()

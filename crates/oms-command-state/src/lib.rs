@@ -89,7 +89,14 @@ pub enum GcHookResult {
     Deferred(String),
 }
 
+/// Host data scoped to one read-only panel snapshot and released on drop.
+pub trait PanelSnapshotScope {}
+
 pub trait HostServices {
+    /// Enter a scope for the dashboard collectors after command validation.
+    fn begin_panel_snapshot(&self) -> Option<Box<dyn PanelSnapshotScope + '_>> {
+        None
+    }
     /// Account-proof resolver for group-writable plan files; defaults to the plan services'.
     fn group_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
         self.plan_services().group_membership_resolver()
