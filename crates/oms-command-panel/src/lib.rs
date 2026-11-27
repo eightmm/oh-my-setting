@@ -14,6 +14,7 @@ mod desktop_board;
 mod desktop_detail;
 mod desktop_evidence;
 mod desktop_history;
+mod desktop_projects;
 mod executable;
 pub mod input;
 pub mod layout;
