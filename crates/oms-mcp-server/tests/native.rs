@@ -929,7 +929,13 @@ fn project_cards_catalog() {
             "planProgress": {"verified": 2, "total": 4},
             "attention": [{"summary": "Review PR"}],
             "nextStep": {"id": "review", "summary": "Review pending PR", "scope": "repository"},
-            "active": 1,
+            "active": 3,
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [
+                {"id": "main-1", "tool": "panel-main", "provider": "agy", "updated": "2026-11-27T06:00:00Z"},
+                {"id": "worker-b", "tool": "peer-delegate", "provider": "claude", "role": "reviewer", "created": "2026-11-27T05:56:00Z"},
+                {"id": "worker-a", "tool": "peer-delegate", "provider": "codex", "role": "impl", "created": "2026-11-27T05:55:00Z"}
+            ],
             "degraded": false
         }
     });
@@ -948,10 +954,16 @@ fn project_cards_catalog() {
     assert_eq!(initial_cards.len(), 3);
     assert_eq!(initial_cards[0]["alias"], "alpha");
     assert_eq!(initial_cards[0]["state"], "missing");
+    assert_eq!(initial_cards[0]["main"], Value::Null);
+    assert_eq!(initial_cards[0]["crew"], json!([]));
+    assert_eq!(initial_cards[0]["crewTotal"], 0);
     assert_eq!(initial_cards[1]["alias"], "beta");
     assert_eq!(initial_cards[1]["state"], "missing");
     assert_eq!(initial_cards[2]["alias"], "gone");
     assert_eq!(initial_cards[2]["state"], "unavailable");
+    assert_eq!(initial_cards[2]["main"], Value::Null);
+    assert_eq!(initial_cards[2]["crew"], json!([]));
+    assert_eq!(initial_cards[2]["crewTotal"], 0);
 
     // Verify cards absent remains byte-for-byte unchanged alongside cached cards once refreshed.
     std::fs::write(source.join("snapshot-release"), "").unwrap();
@@ -974,7 +986,26 @@ fn project_cards_catalog() {
     assert_eq!(fresh_cards[0]["plan"], json!({"done": 2, "total": 4}));
     assert_eq!(fresh_cards[0]["attention"], 1);
     assert_eq!(fresh_cards[0]["next"], "Review pending PR");
-    assert_eq!(fresh_cards[0]["active"], 1);
+    assert_eq!(fresh_cards[0]["active"], 3);
+    assert_eq!(fresh_cards[0]["main"], "antigravity");
+    assert_eq!(fresh_cards[0]["crewTotal"], 2);
+    let alpha_crew = fresh_cards[0]["crew"].as_array().unwrap();
+    assert_eq!(alpha_crew.len(), 2);
+    assert_eq!(alpha_crew[0]["provider"], "codex");
+    assert_eq!(alpha_crew[0]["role"], "impl");
+    assert_eq!(alpha_crew[1]["provider"], "claude");
+    assert_eq!(alpha_crew[1]["role"], "reviewer");
+    for (entry, raw_id) in alpha_crew.iter().zip(["worker-a", "worker-b"]) {
+        let cid = entry["id"].as_str().unwrap();
+        assert_eq!(cid.len(), 12);
+        assert!(
+            cid.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+        assert_ne!(cid, raw_id);
+    }
+    // Same attempt ids produce identical crew[].id across both projects and server processes.
+    assert_eq!(fresh_cards[0]["crew"], fresh_cards[1]["crew"]);
     assert_eq!(fresh_cards[0]["dirty"], false);
     assert_eq!(fresh_cards[0]["degraded"], false);
     assert_eq!(fresh_cards[2]["state"], "unavailable");
@@ -1103,7 +1134,112 @@ fn project_cards_catalog() {
             == "fresh"
     });
 
-    // Write-through + per-card outbound scan: tripping project becomes withheld while others render.
+    // Old cache record without main, crew, or crewTotal still loads cleanly.
+    let legacy_cache = json!({
+        "schema": 1,
+        "observedAt": "2026-11-27T06:00:00Z",
+        "branch": "main",
+        "dirty": false,
+        "goal": "Old format cached goal",
+        "plan": {"done": 1, "total": 2},
+        "attention": 0,
+        "next": "",
+        "active": 0,
+        "degraded": false
+    });
+    for file in &cached_files {
+        std::fs::write(file, legacy_cache.to_string()).unwrap();
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let legacy_reply = trapped.tool("oms_list_projects", json!({"cards": true}));
+    good(&legacy_reply);
+    let legacy_cards = payload(&legacy_reply)["cards"].as_array().unwrap().clone();
+    assert_eq!(legacy_cards[0]["state"], "fresh");
+    assert_eq!(legacy_cards[0]["goal"], "Old format cached goal");
+    assert_eq!(legacy_cards[0]["main"], Value::Null);
+    assert_eq!(legacy_cards[0]["crew"], json!([]));
+    assert_eq!(legacy_cards[0]["crewTotal"], 0);
+    assert!(!trap_marker.exists());
+
+    // Verify conversationMain fallback, unknown provider -> null, crew order, and cap of 3 with crewTotal.
+    let crew_cap_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:08:00Z",
+            "goal": "Short",
+            "conversationMain": {"provider": "claude"},
+            "activeAttempts": [
+                {"id": "worker-d", "tool": "peer-delegate", "provider": "codex", "role": "fourth", "created": "2026-11-27T06:04:00Z"},
+                {"id": "worker-b", "tool": "peer-delegate", "provider": "agy", "role": "rev", "created": "2026-11-27T06:02:00Z"},
+                {"id": "worker-a", "tool": "peer-delegate", "provider": "codex", "role": "dev", "created": "2026-11-27T06:01:00Z"},
+                {"id": "worker-c", "tool": "peer-delegate", "provider": "pi", "role": "", "created": "2026-11-27T06:02:00Z"}
+            ],
+            "degraded": false
+        }
+    });
+    fixture_settings(&source, json!({"stdout": crew_cap_snap.to_string()}));
+    good(&c.tool("oms_panel_snapshot", json!({"project": "alpha"})));
+    let unknown_main_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:08:00Z",
+            "goal": "Unknown main",
+            "conversationMain": {"provider": "pi"},
+            "degraded": false
+        }
+    });
+    fixture_settings(&source, json!({"stdout": unknown_main_snap.to_string()}));
+    good(&c.tool("oms_panel_snapshot", json!({"project": "beta"})));
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+    let cap_cards = payload(&trapped.tool("oms_list_projects", json!({"cards": true})))["cards"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(cap_cards[0]["main"], "claude");
+    assert_eq!(cap_cards[0]["crewTotal"], 4);
+    let capped_crew = cap_cards[0]["crew"].as_array().unwrap();
+    assert_eq!(capped_crew.len(), 3);
+    assert_eq!(capped_crew[0]["provider"], "codex");
+    assert_eq!(capped_crew[0]["role"], "dev");
+    assert_eq!(capped_crew[0]["id"], alpha_crew[0]["id"]);
+    assert_eq!(capped_crew[1]["provider"], "antigravity");
+    assert_eq!(capped_crew[1]["role"], "rev");
+    assert_eq!(capped_crew[1]["id"], alpha_crew[1]["id"]);
+    assert_eq!(capped_crew[2]["provider"], Value::Null);
+    assert_eq!(capped_crew[2]["role"], Value::Null);
+    assert_eq!(cap_cards[1]["main"], Value::Null);
+    assert_eq!(cap_cards[1]["crew"], json!([]));
+    assert_eq!(cap_cards[1]["crewTotal"], 0);
+    fixture_settings(
+        &source,
+        json!({"snapshotGate": true, "stdout": bg_snap.to_string()}),
+    );
+
+    // Restore bg_snap into beta via aged refresh before testing withheld cards.
+    for file in &cached_files {
+        set_mtime(
+            file,
+            std::time::SystemTime::now() - Duration::from_secs(605),
+        );
+    }
+    let _ = trapped.tool("oms_list_projects", json!({"cards": true}));
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        let cur = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        cur["cards"][0]["state"] == "fresh"
+            && cur["cards"][0]["main"] == "antigravity"
+            && cur["cards"][1]["state"] == "fresh"
+            && cur["cards"][1]["main"] == "antigravity"
+    });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    let _ = std::fs::remove_file(source.join("snapshot-ready"));
+
+    // Write-through + per-card outbound scan: tripping role or goal withholds only that project
+    // with no main, crew, or crewTotal.
     let runtime_tripped = ["gh", "p_", &"m".repeat(36)].concat();
     let bad_snap = json!({
         "schema": 1,
@@ -1113,7 +1249,11 @@ fn project_cards_catalog() {
             "updated": "2026-11-27T06:10:00Z",
             "branch": "main",
             "git": {"available": true, "branch": "main", "dirty": false},
-            "goal": format!("Hold {runtime_tripped}"),
+            "goal": "Clean goal with tripping worker role",
+            "conversationMain": {"provider": "claude"},
+            "activeAttempts": [
+                {"id": "w1", "tool": "peer-delegate", "provider": "codex", "role": format!("r-{runtime_tripped}")}
+            ],
             "degraded": false
         }
     });
@@ -1124,7 +1264,7 @@ fn project_cards_catalog() {
     );
     let mixed = trapped.tool("oms_list_projects", json!({"cards": true}));
     good(&mixed);
-    assert!(!mixed.to_string().contains(&runtime_tripped));
+    assert!(!mixed.to_string().contains(&runtime_tripped[..16]));
     let mixed_cards = payload(&mixed)["cards"].as_array().unwrap().clone();
     assert_eq!(
         mixed_cards[0],
@@ -1133,9 +1273,10 @@ fn project_cards_catalog() {
     assert_eq!(mixed_cards[1]["alias"], "beta");
     assert_eq!(mixed_cards[1]["state"], "fresh");
     assert_eq!(mixed_cards[1]["goal"], "Initial background goal");
+    assert_eq!(mixed_cards[1]["main"], "antigravity");
     assert_eq!(mixed_cards[2]["state"], "unavailable");
 
-    // 128-alias map fixture stays strictly below OUTPUT_LIMIT including frame reserve.
+    // 128-alias map fixture with 3 crew per card stays strictly below OUTPUT_LIMIT and per_card_cap.
     let rich_snap = json!({
         "schema": 1,
         "kind": "oms-panel-snapshot",
@@ -1149,6 +1290,13 @@ fn project_cards_catalog() {
             "attention": [{"summary": "a"}, {"summary": "b"}, {"summary": "c"}],
             "nextStep": {"id": "step", "summary": "N".repeat(400), "scope": "repository"},
             "active": 4,
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [
+                {"id": "main-rich", "tool": "panel-main", "provider": "agy", "updated": "2026-11-27T06:15:00Z"},
+                {"id": "crew-3", "tool": "peer-delegate", "provider": "agy", "role": "security-reviewer-worker", "created": "2026-11-27T06:13:00Z"},
+                {"id": "crew-1", "tool": "peer-delegate", "provider": "codex", "role": "backend-implementer-lead", "created": "2026-11-27T06:11:00Z"},
+                {"id": "crew-2", "tool": "peer-delegate", "provider": "claude", "role": "verification-specialist", "created": "2026-11-27T06:12:00Z"}
+            ],
             "degraded": true
         }
     });
@@ -1184,6 +1332,13 @@ fn project_cards_catalog() {
     );
     let parsed_128: Value = serde_json::from_str(&wire_128).unwrap();
     good(&parsed_128);
+    let mut base_128 = parsed_128["result"]["structuredContent"].clone();
+    base_128.as_object_mut().unwrap().remove("cards");
+    let available_128 = 60_000usize
+        .saturating_sub(1024 * 6 + 256)
+        .saturating_sub(base_128.to_string().len())
+        .saturating_sub(256);
+    let per_card_cap_128 = (available_128 / 128).saturating_sub(2).min(400);
     let cards_128 = parsed_128["result"]["structuredContent"]["cards"]
         .as_array()
         .unwrap();
@@ -1191,7 +1346,15 @@ fn project_cards_catalog() {
     for (i, card) in cards_128.iter().enumerate() {
         assert_eq!(card["alias"], format!("p{i:03}"));
         assert_eq!(card["state"], "fresh");
-        assert!(card.to_string().len() <= 400);
+        assert_eq!(card["main"], "antigravity");
+        assert_eq!(card["crewTotal"], 3);
+        assert!(card["crew"].is_array());
+        assert!(
+            card.to_string().len() <= per_card_cap_128,
+            "card len {} exceeded per_card_cap {}",
+            card.to_string().len(),
+            per_card_cap_128
+        );
     }
     assert!(!source.join("last-call.json").exists());
     assert!(!trap_marker.exists());

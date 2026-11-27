@@ -3790,6 +3790,8 @@ const CARD_MAX_BYTES: usize = 400;
 const CARD_GOAL_MAX_BYTES: usize = 120;
 const CARD_NEXT_MAX_BYTES: usize = 100;
 const CARD_BRANCH_MAX_BYTES: usize = 80;
+const CARD_ROLE_MAX_BYTES: usize = 24;
+const CARD_CREW_MAX_ITEMS: usize = 3;
 const CARD_CACHE_MAX_BYTES: usize = 4096;
 const CARD_FRESH_WINDOW: Duration = Duration::from_secs(10 * 60);
 const CARD_REFRESH_DEADLINE: Duration = Duration::from_secs(15);
@@ -4107,6 +4109,48 @@ fn valid_card_iso(value: &str) -> bool {
             .is_ok_and(|dt| dt.offset().local_minus_utc() == 0)
 }
 
+fn normalize_card_provider(raw: Option<&str>) -> Option<&'static str> {
+    match raw {
+        Some("codex") => Some("codex"),
+        Some("claude") => Some("claude"),
+        Some("antigravity" | "agy") => Some("antigravity"),
+        _ => None,
+    }
+}
+
+fn crew_id_from_attempt(attempt_id: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in attempt_id.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")[..12].to_owned()
+}
+
+fn valid_crew_id(value: &str) -> bool {
+    value.len() == 12
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn compare_rfc3339_or_str(a: &str, b: &str) -> std::cmp::Ordering {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(da), Ok(db)) => da.cmp(&db).then_with(|| a.cmp(b)),
+        _ => a.cmp(b),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredCrewMember {
+    provider: Option<String>,
+    role: Option<String>,
+    id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StoredProjectCard {
     observed_at: Option<String>,
@@ -4117,6 +4161,9 @@ struct StoredProjectCard {
     attention: u64,
     next: String,
     active: u64,
+    main: Option<String>,
+    crew: Vec<StoredCrewMember>,
+    crew_total: u64,
     degraded: bool,
     withheld: bool,
 }
@@ -4150,9 +4197,52 @@ impl StoredProjectCard {
         } else {
             dashboard["nextStep"].as_str().unwrap_or("")
         };
-        let source_withheld = [raw_branch.unwrap_or(""), raw_goal, raw_next]
-            .into_iter()
-            .any(|s| !s.is_empty() && crate::output::outbound(s.as_bytes(), &Value::Null).is_err());
+        let active_attempts = dashboard["activeAttempts"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut latest_panel_main: Option<&Value> = None;
+        let mut worker_rows: Vec<(&str, &Value)> = Vec::new();
+        let mut role_withheld = false;
+        for row in active_attempts {
+            if !row.is_object() {
+                continue;
+            }
+            if row["tool"].as_str() == Some("panel-main") {
+                latest_panel_main = Some(match latest_panel_main {
+                    None => row,
+                    Some(prev) => {
+                        let prev_ts = prev["updated"].as_str().filter(|s| !s.trim().is_empty());
+                        let cur_ts = row["updated"].as_str().filter(|s| !s.trim().is_empty());
+                        let newer = match (prev_ts, cur_ts) {
+                            (None, Some(_)) => true,
+                            (Some(p), Some(c)) => compare_rfc3339_or_str(c, p).is_gt(),
+                            _ => false,
+                        };
+                        if newer { row } else { prev }
+                    }
+                });
+                continue;
+            }
+            if let Some(raw_role) = row["role"].as_str()
+                && !raw_role.is_empty()
+                && crate::output::outbound(raw_role.as_bytes(), &Value::Null).is_err()
+            {
+                role_withheld = true;
+            }
+            if let Some(attempt_id) = row["id"].as_str().filter(|s| !s.trim().is_empty()) {
+                worker_rows.push((attempt_id, row));
+            }
+        }
+        let raw_main_provider = latest_panel_main
+            .map(|row| row["provider"].as_str())
+            .unwrap_or_else(|| dashboard["conversationMain"]["provider"].as_str());
+        let source_withheld = role_withheld
+            || [raw_branch.unwrap_or(""), raw_goal, raw_next]
+                .into_iter()
+                .any(|s| {
+                    !s.is_empty() && crate::output::outbound(s.as_bytes(), &Value::Null).is_err()
+                });
         let branch = if source_withheld {
             None
         } else {
@@ -4192,6 +4282,47 @@ impl StoredProjectCard {
                 .as_array()
                 .map_or(0, |items| items.len() as u64)
         });
+        let main = if source_withheld {
+            None
+        } else {
+            normalize_card_provider(raw_main_provider).map(str::to_owned)
+        };
+        worker_rows.sort_by(|(id_a, row_a), (id_b, row_b)| {
+            let ca = row_a["created"].as_str().filter(|s| !s.trim().is_empty());
+            let cb = row_b["created"].as_str().filter(|s| !s.trim().is_empty());
+            let created_cmp = match (ca, cb) {
+                (Some(a), Some(b)) => compare_rfc3339_or_str(a, b),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            };
+            created_cmp.then_with(|| id_a.cmp(id_b))
+        });
+        let crew_total = if source_withheld {
+            0
+        } else {
+            worker_rows.len() as u64
+        };
+        let crew = if source_withheld {
+            Vec::new()
+        } else {
+            worker_rows
+                .into_iter()
+                .take(CARD_CREW_MAX_ITEMS)
+                .map(|(attempt_id, row)| {
+                    let provider =
+                        normalize_card_provider(row["provider"].as_str()).map(str::to_owned);
+                    let cleaned_role =
+                        clean_card_line(row["role"].as_str().unwrap_or(""), CARD_ROLE_MAX_BYTES);
+                    let role = (!cleaned_role.is_empty()).then_some(cleaned_role);
+                    StoredCrewMember {
+                        provider,
+                        role,
+                        id: crew_id_from_attempt(attempt_id),
+                    }
+                })
+                .collect()
+        };
         let degraded = dashboard["degraded"] == true;
         Self {
             observed_at,
@@ -4202,6 +4333,9 @@ impl StoredProjectCard {
             attention,
             next,
             active,
+            main,
+            crew,
+            crew_total,
             degraded,
             withheld: source_withheld,
         }
@@ -4212,6 +4346,17 @@ impl StoredProjectCard {
             .plan
             .map(|(done, total)| json!({"done": done, "total": total}))
             .unwrap_or(Value::Null);
+        let crew = self
+            .crew
+            .iter()
+            .map(|member| {
+                json!({
+                    "provider": member.provider,
+                    "role": member.role,
+                    "id": member.id,
+                })
+            })
+            .collect::<Vec<_>>();
         let mut record = json!({
             "schema": 1,
             "observedAt": self.observed_at,
@@ -4222,6 +4367,9 @@ impl StoredProjectCard {
             "attention": self.attention,
             "next": self.next,
             "active": self.active,
+            "main": self.main,
+            "crew": crew,
+            "crewTotal": self.crew_total,
             "degraded": self.degraded,
         });
         if self.withheld {
@@ -4239,6 +4387,12 @@ impl StoredProjectCard {
         if !v.is_object() || v.get("schema").is_some_and(|s| *s != 1) {
             return None;
         }
+        let mut raw_withheld = false;
+        let check_outbound = |raw: &str, flag: &mut bool| {
+            if !raw.is_empty() && crate::output::outbound(raw.as_bytes(), &Value::Null).is_err() {
+                *flag = true;
+            }
+        };
         let observed_at = match v.get("observedAt") {
             None | Some(Value::Null) => None,
             Some(s) => Some(s.as_str().filter(|t| valid_card_iso(t))?.to_owned()),
@@ -4247,6 +4401,7 @@ impl StoredProjectCard {
             None | Some(Value::Null) => None,
             Some(s) => {
                 let raw = s.as_str().filter(|t| !t.chars().any(char::is_control))?;
+                check_outbound(raw, &mut raw_withheld);
                 let cleaned = clean_card_line(raw, CARD_BRANCH_MAX_BYTES);
                 (!cleaned.is_empty()).then_some(cleaned)
             }
@@ -4259,6 +4414,7 @@ impl StoredProjectCard {
             None | Some(Value::Null) => String::new(),
             Some(s) => {
                 let raw = s.as_str().filter(|t| !t.chars().any(char::is_control))?;
+                check_outbound(raw, &mut raw_withheld);
                 clean_card_line(raw, CARD_GOAL_MAX_BYTES)
             }
         };
@@ -4282,14 +4438,64 @@ impl StoredProjectCard {
             None | Some(Value::Null) => String::new(),
             Some(s) => {
                 let raw = s.as_str().filter(|t| !t.chars().any(char::is_control))?;
+                check_outbound(raw, &mut raw_withheld);
                 clean_card_line(raw, CARD_NEXT_MAX_BYTES)
             }
         };
         let active = v.get("active")?.as_u64()?;
+        let main = match v.get("main") {
+            None | Some(Value::Null) => None,
+            Some(s) => Some(normalize_card_provider(Some(s.as_str()?))?.to_owned()),
+        };
+        let crew = match v.get("crew") {
+            None => Vec::new(),
+            Some(arr) => {
+                let items = arr.as_array()?;
+                if items.len() > CARD_CREW_MAX_ITEMS {
+                    return None;
+                }
+                let mut parsed = Vec::with_capacity(items.len());
+                for item in items {
+                    if !item.is_object() {
+                        return None;
+                    }
+                    let provider = match item.get("provider") {
+                        None | Some(Value::Null) => None,
+                        Some(s) => Some(normalize_card_provider(Some(s.as_str()?))?.to_owned()),
+                    };
+                    let role = match item.get("role") {
+                        None | Some(Value::Null) => None,
+                        Some(s) => {
+                            let raw = s.as_str().filter(|t| !t.chars().any(char::is_control))?;
+                            check_outbound(raw, &mut raw_withheld);
+                            let cleaned = clean_card_line(raw, CARD_ROLE_MAX_BYTES);
+                            (!cleaned.is_empty()).then_some(cleaned)
+                        }
+                    };
+                    let id = item
+                        .get("id")?
+                        .as_str()
+                        .filter(|s| valid_crew_id(s))?
+                        .to_owned();
+                    parsed.push(StoredCrewMember { provider, role, id });
+                }
+                parsed
+            }
+        };
+        let crew_total = match v.get("crewTotal") {
+            None => crew.len() as u64,
+            Some(n) => {
+                let total = n.as_u64()?;
+                if total < crew.len() as u64 {
+                    return None;
+                }
+                total
+            }
+        };
         let degraded = v.get("degraded")?.as_bool()?;
         let withheld = match v.get("withheld") {
-            None => false,
-            Some(flag) => flag.as_bool()?,
+            None => raw_withheld,
+            Some(flag) => flag.as_bool()? || raw_withheld,
         };
         Some(Self {
             observed_at,
@@ -4300,6 +4506,9 @@ impl StoredProjectCard {
             attention,
             next,
             active,
+            main,
+            crew,
+            crew_total,
             degraded,
             withheld,
         })
@@ -4437,16 +4646,46 @@ fn render_project_card(
         .map(|c| clean_card_line(&c.next, CARD_NEXT_MAX_BYTES))
         .unwrap_or_default();
     let active = stored.map_or(0, |c| c.active);
+    let main = stored.and_then(|c| c.main.clone());
+    let mut crew: Vec<StoredCrewMember> = stored
+        .map(|c| {
+            c.crew
+                .iter()
+                .take(CARD_CREW_MAX_ITEMS)
+                .map(|m| StoredCrewMember {
+                    provider: m.provider.clone(),
+                    role: m
+                        .role
+                        .as_deref()
+                        .map(|r| clean_card_line(r, CARD_ROLE_MAX_BYTES))
+                        .filter(|r| !r.is_empty()),
+                    id: m.id.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let crew_total = stored.map_or(0, |c| c.crew_total);
     let degraded = stored.is_some_and(|c| c.degraded);
 
     let assemble = |observed_at: &Option<String>,
                     branch: &Option<String>,
                     goal: &str,
                     plan: Option<(u64, u64)>,
-                    next: &str| {
+                    next: &str,
+                    crew: &[StoredCrewMember]| {
         let plan_val = plan
             .map(|(done, total)| json!({"done": done, "total": total}))
             .unwrap_or(Value::Null);
+        let crew_val = crew
+            .iter()
+            .map(|member| {
+                json!({
+                    "provider": member.provider,
+                    "role": member.role,
+                    "id": member.id,
+                })
+            })
+            .collect::<Vec<_>>();
         json!({
             "alias": alias_name,
             "state": state,
@@ -4458,11 +4697,14 @@ fn render_project_card(
             "attention": attention,
             "next": next,
             "active": active,
+            "main": main,
+            "crew": crew_val,
+            "crewTotal": crew_total,
             "degraded": degraded,
         })
     };
 
-    let initial = assemble(&observed_at, &branch, &goal, plan, &next);
+    let initial = assemble(&observed_at, &branch, &goal, plan, &next, &crew);
     let initial_bytes = initial.to_string();
     if crate::output::outbound(initial_bytes.as_bytes(), &Value::Null).is_err() {
         return withheld();
@@ -4482,6 +4724,8 @@ fn render_project_card(
             if b.is_empty() {
                 branch = None;
             }
+        } else if !crew.is_empty() {
+            crew.pop();
         } else if plan.is_some() {
             plan = None;
         } else if observed_at.is_some() {
@@ -4489,7 +4733,7 @@ fn render_project_card(
         } else {
             break;
         }
-        let candidate = assemble(&observed_at, &branch, &goal, plan, &next);
+        let candidate = assemble(&observed_at, &branch, &goal, plan, &next, &crew);
         let encoded = candidate.to_string();
         if encoded.len() <= cap {
             if crate::output::outbound(encoded.as_bytes(), &Value::Null).is_err() {
@@ -4498,7 +4742,7 @@ fn render_project_card(
             return candidate;
         }
     }
-    let fallback = assemble(&observed_at, &branch, &goal, plan, &next);
+    let fallback = assemble(&observed_at, &branch, &goal, plan, &next, &crew);
     if crate::output::outbound(fallback.to_string().as_bytes(), &Value::Null).is_err() {
         return withheld();
     }
@@ -4872,6 +5116,7 @@ mod work_items_tests {
 
         let multibyte_goal = "패널홈요약".repeat(25);
         let multibyte_next = "검증단계확인".repeat(20);
+        let multibyte_role = "코드리뷰담당워커역할이름길게테스트";
         let dashboard = json!({
             "updated": "2026-11-27T06:00:00Z",
             "branch": "feat/project-home",
@@ -4881,10 +5126,22 @@ mod work_items_tests {
             "attention": [{"code": "a"}, {"code": "b"}],
             "attentionTrimmed": 1,
             "nextStep": {"id": "verify", "summary": multibyte_next, "scope": "repository"},
-            "active": 2,
+            "active": 5,
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [
+                {"id": "main-older", "tool": "panel-main", "provider": "codex", "updated": "2026-11-27T05:55:00Z"},
+                {"id": "main-newer", "tool": "panel-main", "provider": "agy", "updated": "2026-11-27T05:59:00Z"},
+                {"id": "", "tool": "peer-delegate", "provider": "claude", "role": "ignored", "created": "2026-11-27T05:50:00Z"},
+                {"id": "att-late", "tool": "peer-delegate", "provider": "claude", "role": "late-worker", "created": "2026-11-27T05:58:00Z"},
+                {"id": "att-tie-b", "tool": "peer-delegate", "provider": "agy", "role": multibyte_role, "created": "2026-11-27T05:56:00Z"},
+                {"id": "att-early", "tool": "peer-delegate", "provider": "codex", "role": "  architect\n\t ", "created": "2026-11-27T05:54:00Z"},
+                {"id": "att-tie-a", "tool": "agent-supervisor", "provider": "pi", "role": "   ", "created": "2026-11-27T05:56:00Z"},
+            ],
             "degraded": false,
         });
         let stored = StoredProjectCard::from_dashboard(&dashboard);
+        let stored_again = StoredProjectCard::from_dashboard(&dashboard);
+        assert_eq!(stored, stored_again);
         assert_eq!(stored.observed_at.as_deref(), Some("2026-11-27T06:00:00Z"));
         assert_eq!(stored.branch.as_deref(), Some("feat/project-home"));
         assert_eq!(stored.dirty, Some(true));
@@ -4892,8 +5149,106 @@ mod work_items_tests {
         assert!(stored.next.len() <= CARD_NEXT_MAX_BYTES);
         assert_eq!(stored.plan, Some((3, 7)));
         assert_eq!(stored.attention, 3);
-        assert_eq!(stored.active, 2);
+        assert_eq!(stored.active, 5);
+        assert_eq!(stored.main.as_deref(), Some("antigravity"));
+        assert_eq!(stored.crew_total, 4);
+        assert_eq!(stored.crew.len(), 3);
+        assert_eq!(stored.crew[0].provider.as_deref(), Some("codex"));
+        assert_eq!(stored.crew[0].role.as_deref(), Some("architect"));
+        assert_eq!(stored.crew[1].provider, None);
+        assert_eq!(stored.crew[1].role, None);
+        assert_eq!(stored.crew[2].provider.as_deref(), Some("antigravity"));
+        assert!(
+            stored.crew[2]
+                .role
+                .as_deref()
+                .is_some_and(|r| !r.is_empty() && r.len() <= CARD_ROLE_MAX_BYTES)
+        );
+        for (member, raw_id) in stored
+            .crew
+            .iter()
+            .zip(["att-early", "att-tie-a", "att-tie-b"])
+        {
+            assert!(valid_crew_id(&member.id), "invalid crew id {}", member.id);
+            assert_ne!(member.id, raw_id);
+            assert_eq!(member.id, crew_id_from_attempt(raw_id));
+        }
+        // Standard FNV-1a 64-bit check vector ("foobar" -> 0x85944171f73967e8).
+        assert_eq!(crew_id_from_attempt("foobar"), "85944171f739");
         assert!(!stored.degraded);
+
+        // Fallback to conversationMain when no panel-main row exists, plus agy and unknown providers.
+        let conv_fallback = StoredProjectCard::from_dashboard(&json!({
+            "conversationMain": {"provider": "claude"},
+            "activeAttempts": [{"id": "w1", "tool": "peer-delegate", "provider": "codex"}],
+            "degraded": false,
+        }));
+        assert_eq!(conv_fallback.main.as_deref(), Some("claude"));
+        let conv_agy = StoredProjectCard::from_dashboard(&json!({
+            "conversationMain": {"provider": "agy"},
+            "degraded": false,
+        }));
+        assert_eq!(conv_agy.main.as_deref(), Some("antigravity"));
+        let unknown_panel_main = StoredProjectCard::from_dashboard(&json!({
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [{"id": "m1", "tool": "panel-main", "provider": "pi", "updated": "2026-11-27T06:00:00Z"}],
+            "degraded": false,
+        }));
+        assert_eq!(unknown_panel_main.main, None);
+        let unknown_conv_main = StoredProjectCard::from_dashboard(&json!({
+            "conversationMain": {"provider": "cursor"},
+            "degraded": false,
+        }));
+        assert_eq!(unknown_conv_main.main, None);
+
+        // Missing/unavailable cards still carry main: null, crew: [], crewTotal: 0 within cap.
+        let missing_rendered = render_project_card("empty", "missing", None, CARD_MAX_BYTES);
+        assert_eq!(missing_rendered["main"], Value::Null);
+        assert_eq!(missing_rendered["crew"], json!([]));
+        assert_eq!(missing_rendered["crewTotal"], 0);
+
+        // Shortening order: goal/next/branch shrink before crew; crew drops from the end only when
+        // still over cap, while crewTotal retains full count and main is never dropped.
+        let ascii_crew_stored = StoredProjectCard::from_dashboard(&json!({
+            "updated": "2026-11-27T06:00:00Z",
+            "branch": "feature/very-long-branch-name-for-budget-test",
+            "git": {"available": true, "branch": "feature/very-long-branch-name-for-budget-test", "dirty": false},
+            "goal": "g".repeat(200),
+            "planProgress": {"verified": 1, "total": 3},
+            "nextStep": {"id": "n", "summary": "n".repeat(160), "scope": "repository"},
+            "active": 4,
+            "activeAttempts": [
+                {"id": "m1", "tool": "panel-main", "provider": "claude", "updated": "2026-11-27T06:00:00Z"},
+                {"id": "c1", "tool": "peer-delegate", "provider": "codex", "role": "impl", "created": "2026-11-27T05:50:00Z"},
+                {"id": "c2", "tool": "peer-delegate", "provider": "claude", "role": "review", "created": "2026-11-27T05:51:00Z"},
+                {"id": "c3", "tool": "peer-delegate", "provider": "agy", "role": "verify", "created": "2026-11-27T05:52:00Z"}
+            ],
+            "degraded": false,
+        }));
+        let fit_with_all_crew =
+            render_project_card("p0", "fresh", Some(&ascii_crew_stored), CARD_MAX_BYTES);
+        assert!(fit_with_all_crew.to_string().len() <= CARD_MAX_BYTES);
+        assert_eq!(fit_with_all_crew["crew"].as_array().unwrap().len(), 3);
+        assert_eq!(fit_with_all_crew["crewTotal"], 3);
+        assert_eq!(fit_with_all_crew["main"], "claude");
+
+        let drop_one_crew = render_project_card("p0", "fresh", Some(&ascii_crew_stored), 350);
+        assert!(drop_one_crew.to_string().len() <= 350);
+        assert_eq!(drop_one_crew["goal"], "");
+        assert_eq!(drop_one_crew["next"], "");
+        assert_eq!(drop_one_crew["branch"], Value::Null);
+        assert_eq!(drop_one_crew["crew"].as_array().unwrap().len(), 2);
+        assert_eq!(drop_one_crew["crew"][0]["id"], ascii_crew_stored.crew[0].id);
+        assert_eq!(drop_one_crew["crew"][1]["id"], ascii_crew_stored.crew[1].id);
+        assert_eq!(drop_one_crew["crewTotal"], 3);
+        assert_eq!(drop_one_crew["main"], "claude");
+
+        let short_alias_rendered =
+            render_project_card("p0", "fresh", Some(&stored), CARD_MAX_BYTES);
+        assert!(short_alias_rendered.to_string().len() <= CARD_MAX_BYTES);
+        assert_eq!(short_alias_rendered["crew"].as_array().unwrap().len(), 2);
+        assert_eq!(short_alias_rendered["crewTotal"], 4);
+        assert_eq!(short_alias_rendered["main"], "antigravity");
 
         let long_alias = "a".repeat(80);
         let rendered = render_project_card(&long_alias, "fresh", Some(&stored), CARD_MAX_BYTES);
@@ -4907,7 +5262,12 @@ mod work_items_tests {
         assert_eq!(rendered["state"], "fresh");
         assert_eq!(rendered["plan"], json!({"done": 3, "total": 7}));
         assert_eq!(rendered["attention"], 3);
-        assert_eq!(rendered["active"], 2);
+        assert_eq!(rendered["active"], 5);
+        assert_eq!(rendered["main"], "antigravity");
+        assert_eq!(rendered["crewTotal"], 4);
+        let trimmed_crew = rendered["crew"].as_array().unwrap();
+        assert!(!trimmed_crew.is_empty() && trimmed_crew.len() < 3);
+        assert_eq!(trimmed_crew[0]["id"], stored.crew[0].id);
         assert_eq!(rendered["dirty"], true);
         assert_eq!(rendered["degraded"], false);
         assert!(rendered["goal"].as_str().unwrap().len() <= CARD_GOAL_MAX_BYTES);
@@ -4940,6 +5300,30 @@ mod work_items_tests {
         let (loaded, _) = read_cached_card(&cache_dir, &alpha).unwrap();
         assert_eq!(loaded, stored);
 
+        // Old cache record without main, crew, or crewTotal loads with defaults.
+        let legacy_record = json!({
+            "schema": 1,
+            "observedAt": "2026-11-27T06:00:00Z",
+            "branch": "main",
+            "dirty": false,
+            "goal": "Legacy cached goal",
+            "plan": {"done": 1, "total": 2},
+            "attention": 0,
+            "next": "",
+            "active": 1,
+            "degraded": false,
+        });
+        let legacy_loaded =
+            StoredProjectCard::from_cache_bytes(legacy_record.to_string().as_bytes()).unwrap();
+        assert_eq!(legacy_loaded.main, None);
+        assert!(legacy_loaded.crew.is_empty());
+        assert_eq!(legacy_loaded.crew_total, 0);
+        let legacy_rendered =
+            render_project_card("legacy", "fresh", Some(&legacy_loaded), CARD_MAX_BYTES);
+        assert_eq!(legacy_rendered["main"], Value::Null);
+        assert_eq!(legacy_rendered["crew"], json!([]));
+        assert_eq!(legacy_rendered["crewTotal"], 0);
+
         // Symlinked or oversized cache files are rejected fail-closed.
         let beta_file = cache_dir.join(card_cache_file_name(&beta));
         std::os::unix::fs::symlink(&file_path, &beta_file).unwrap();
@@ -4950,11 +5334,14 @@ mod work_items_tests {
         assert!(read_cached_card(&cache_dir, &beta).is_none());
         std::fs::remove_file(&beta_file).unwrap();
 
-        // Outbound scan per card: tripping text withholds only that card.
+        // Outbound scan per card: tripping text in goal or worker role withholds only that card
+        // without main, crew, or crewTotal.
         let tripped = ["gh", "p_", &"z".repeat(36)].concat();
         let bad_dashboard = json!({
             "updated": "2026-11-27T06:00:00Z",
             "goal": format!("Inspect {tripped}"),
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [{"id": "w1", "tool": "peer-delegate", "provider": "claude", "role": "reviewer"}],
             "degraded": false,
         });
         let bad_stored = StoredProjectCard::from_dashboard(&bad_dashboard);
@@ -4964,6 +5351,24 @@ mod work_items_tests {
         );
         assert_eq!(
             render_project_card("bad", "fresh", Some(&bad_stored), CARD_MAX_BYTES),
+            json!({"alias": "bad", "state": "withheld"})
+        );
+        let bad_role_dashboard = json!({
+            "updated": "2026-11-27T06:00:00Z",
+            "goal": "Clean goal",
+            "conversationMain": {"provider": "claude"},
+            "activeAttempts": [
+                {"id": "w-secret", "tool": "peer-delegate", "provider": "codex", "role": format!("role-{tripped}")}
+            ],
+            "degraded": false,
+        });
+        let bad_role_stored = StoredProjectCard::from_dashboard(&bad_role_dashboard);
+        assert!(
+            !String::from_utf8_lossy(&bad_role_stored.to_cache_bytes()).contains(&tripped[..16]),
+            "cache bytes must not retain truncated secret role prefix"
+        );
+        assert_eq!(
+            render_project_card("bad", "fresh", Some(&bad_role_stored), CARD_MAX_BYTES),
             json!({"alias": "bad", "state": "withheld"})
         );
         // Also verify read-time per-card scan when raw cached JSON contains tripping text.
