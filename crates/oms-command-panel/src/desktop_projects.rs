@@ -150,6 +150,11 @@ fn resolve_map_source() -> Result<MapSource> {
         !(map_file.is_some() && inline.is_some()),
         "OMS_PANEL_PROJECTS and OMS_PANEL_PROJECTS_FILE cannot both be set",
     )?;
+    // The desktop panel ignores the map when pinned to one checkout, so neither change nor list it.
+    require(
+        std::env::var_os("OMS_PANEL_REPO").is_none(),
+        "OMS_PANEL_REPO pins this panel to one checkout and the desktop project map is not used; unset it",
+    )?;
     if let Some(raw) = inline {
         return Ok(MapSource::Inline(raw));
     }
@@ -157,7 +162,7 @@ fn resolve_map_source() -> Result<MapSource> {
         (PathBuf::from(path), true)
     } else if let Some(config) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
         (PathBuf::from(config).join(DEFAULT_MAP_REL), false)
-    } else if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+    } else if let Some(home) = std::env::var_os("HOME") {
         (
             PathBuf::from(home).join(".config").join(DEFAULT_MAP_REL),
             false,
@@ -711,6 +716,11 @@ fn unregister_project(options: &Options, cwd: &Path, stop: &AtomicBool) -> Resul
         )));
     };
 
+    // The reader rejects a missing explicitly named map, so keep its last entry instead of deleting it.
+    require(
+        !(map.is_empty() && explicit),
+        "refusing to remove the last alias from the OMS_PANEL_PROJECTS_FILE map: the desktop panel needs at least one entry there; unset OMS_PANEL_PROJECTS_FILE or delete the file",
+    )?;
     if map.is_empty() {
         check_destination_unchanged(&dir_fd, &leaf_name, Some(&before_stat))?;
         fs::unlinkat(&dir_fd, &leaf_name, AtFlags::empty()).map_err(|e| Error {
@@ -732,6 +742,7 @@ fn unregister_project(options: &Options, cwd: &Path, stop: &AtomicBool) -> Resul
 }
 
 fn list_projects(options: &Options) -> Result<Output> {
+    parent_only().map_err(|_| Error::new("a delegated worker cannot list desktop projects"))?;
     let (file_path, map) = match resolve_map_source()? {
         MapSource::Inline(raw) => {
             let text = raw.into_string().map_err(|_| {

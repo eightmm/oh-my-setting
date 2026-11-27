@@ -3421,7 +3421,46 @@ fn desktop_projects_registry_and_reader_parity() {
         );
         assert!(stderr.contains("owning parent"), "{stderr}");
         assert!(fallback_map.exists());
+
+        let (code, stdout, stderr) = run_cli(
+            &alpha,
+            &["--projects", "--json"],
+            &[("OMS_PANEL_PROJECTS_FILE", &fallback_map)],
+            &[child_env],
+        );
+        assert_ne!(code, 0, "child guard failed on list for {child_env:?}");
+        assert!(stderr.contains("delegated worker"), "{stderr}");
+        assert!(stdout.is_empty(), "{stdout}");
     }
+
+    // A pinned panel ignores the map, so the writer and lister refuse rather than drift from it.
+    for args in [&["--register-project"][..], &["--projects"]] {
+        let (code, _, stderr) = run_cli(
+            &alpha,
+            args,
+            &[
+                ("OMS_PANEL_PROJECTS_FILE", &fallback_map),
+                ("OMS_PANEL_REPO", &alpha),
+            ],
+            &[],
+        );
+        assert_ne!(code, 0, "OMS_PANEL_REPO must refuse {args:?}");
+        assert!(stderr.contains("OMS_PANEL_REPO"), "{stderr}");
+    }
+
+    // An explicitly named map keeps its last entry: the reader rejects a missing explicit file.
+    let (code, _, stderr) = run_cli(
+        &alpha,
+        &["--unregister-project", "alpha-service"],
+        &[("OMS_PANEL_PROJECTS_FILE", &fallback_map)],
+        &[],
+    );
+    assert_ne!(code, 0, "last explicit entry must stay");
+    assert!(stderr.contains("last alias"), "{stderr}");
+    assert_eq!(
+        verify_reader_accepts_map(&fallback_map).get("alpha-service"),
+        Some(&alpha_canon)
+    );
 
     // 5. 129th entry refusal via OMS_PANEL_PROJECTS_FILE (preserving all 128 entries).
     let full_file = base.join("full-projects.json");
