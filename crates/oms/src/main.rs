@@ -1246,6 +1246,7 @@ fn owns_invocation(argv: &[OsString]) -> bool {
         "slurm-submit" => oms_command_slurm_submit::owns(local),
         "agent-task" => oms_command_task::owns(local),
         "room" => oms_command_room::owns(local),
+        "intake" => oms_command_intake::owns(local),
         "journal" => oms_command_journal::owns(local),
         "graph" => oms_command_graph::owns(local),
         _ => {
@@ -1501,6 +1502,35 @@ fn dispatch_owned(
             None => oms_command_room::run(local, &cwd, interrupted),
         };
         dispatch_exit(tool, local, &cwd, result);
+    }
+    if tool == "intake" {
+        use std::io::Write as _;
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        let code = match source_root {
+            Some(source) => match services_collab::CollabServices::new(interrupted, source) {
+                Ok(services) => oms_command_intake::run_streaming_with_services(
+                    local,
+                    &cwd,
+                    interrupted,
+                    &services,
+                    &mut stdout,
+                    &mut stderr,
+                ),
+                Err(error) => {
+                    let _ = writeln!(stderr, "error: {error}");
+                    2
+                }
+            },
+            None => oms_command_intake::run_streaming(
+                local,
+                &cwd,
+                interrupted,
+                &mut stdout,
+                &mut stderr,
+            ),
+        };
+        dispatch_streaming_exit(tool, local, &cwd, code, &mut stdout, &mut stderr);
     }
     if tool == "input" {
         let result = match source_root {

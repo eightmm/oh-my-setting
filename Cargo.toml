@@ -10,6 +10,7 @@ members = [
     "crates/oms-command-graph",
     "crates/oms-command-hooks",
     "crates/oms-command-input",
+    "crates/oms-command-intake",
     "crates/oms-command-job-digest",
     "crates/oms-command-journal",
     "crates/oms-command-landing",
