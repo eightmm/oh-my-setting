@@ -1271,7 +1271,10 @@ fn incomplete_stop(reason: &str) -> bool {
 #[derive(Clone, Copy)]
 pub(crate) enum OutputMode<'a> {
     Legacy,
-    Observed(&'a std::cell::Cell<Option<crate::lead_observation::Observation>>),
+    Observed(
+        &'a std::cell::Cell<Option<crate::lead_observation::Observation>>,
+        Option<&'a crate::process::StreamTap>,
+    ),
     Native,
 }
 
@@ -1379,6 +1382,8 @@ pub(crate) fn native_result_footer(provider: &str, kind: &str, row: &V) -> bool 
             text(row, "subtype") == "hook_response"
                 && matches!(text(row, "hook_event"), "Stop" | "SessionEnd")
                 && text(row, "outcome") == "success"
+                // Emitted after `result` once a turn used tools.
+                || text(row, "subtype") == "task_summary"
         }
         _ => false,
     }
@@ -2332,7 +2337,19 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
     {
         return fail("provider does not support read access through this transport");
     }
-    let transport = transport(route, prompt.bytes(), cwd, write, timeout)?;
+    let mut transport = transport(route, prompt.bytes(), cwd, write, timeout)?;
+    let stream = match output_mode {
+        OutputMode::Observed(_, Some(tap)) if route.provider == "claude" && !write => {
+            // Partial events precede `-p`; completion still comes from `result`.
+            transport.argv.iter().rposition(|a| a == "-p").map(|at| {
+                transport
+                    .argv
+                    .insert(at, "--include-partial-messages".into());
+                tap.clone()
+            })
+        }
+        _ => None,
+    };
     let team_protocol = if extra_env
         .iter()
         .any(|(k, v)| k == "OMS_TEAM_REQUEST_PROTOCOL" && v == "oms-team-request-v1")
@@ -2565,6 +2582,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                     .map_err(|e| Error::new(2, e))?,
             ),
             heartbeat: context.heartbeat.cloned(),
+            stream: stream.clone(),
         };
         let result = crate::plan_delegate::check_launch(&extra_env, &route.provider, cwd, context)
             .and_then(|plan| {
@@ -2688,7 +2706,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
         if !account_observed {
             result.stderr.extend_from_slice(b"\nwarning: account-home continuity unavailable; usage attribution remains unknown\n");
         }
-        if let OutputMode::Observed(slot) = output_mode {
+        if let OutputMode::Observed(slot, _) = output_mode {
             let observation = (result.code == 0
                 && result.complete
                 && terminal

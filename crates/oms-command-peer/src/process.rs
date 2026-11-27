@@ -14,6 +14,16 @@ pub struct AttemptHeartbeat {
     pub attempt: String,
 }
 
+/// Display-only view of a running provider's growing stdout prefix. It never
+/// changes the completed result or its proof.
+#[derive(Clone)]
+pub struct StreamTap(pub std::sync::Arc<dyn Fn(&[u8]) + Send + Sync>);
+impl std::fmt::Debug for StreamTap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StreamTap")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Invocation {
     pub argv: Vec<OsString>,
@@ -27,6 +37,7 @@ pub struct Invocation {
     pub physical_call: Option<oms_supervisor::process::PhysicalCall>,
     pub launch_fence: Option<LaunchFence>,
     pub heartbeat: Option<AttemptHeartbeat>,
+    pub stream: Option<StreamTap>,
 }
 #[derive(Clone, Debug)]
 pub struct Completed {
@@ -80,6 +91,7 @@ impl HandoffProjection {
             physical_call: None,
             launch_fence: None,
             heartbeat: None,
+            stream: None,
         }
     }
 }
@@ -600,6 +612,7 @@ impl Native {
                 .and_then(|n| n.to_str()),
             Some("git" | "ssh")
         );
+        let stream = input.stream;
         let mut request = Request::new(input.argv);
         request.cwd = Some(input.cwd);
         request.stdin = input.input;
@@ -647,7 +660,13 @@ impl Native {
                 cancelled = true;
             }
             match reactor.poll(job, Duration::from_millis(50))? {
-                Progress::Pending(_) => {}
+                Progress::Pending(snapshot) => {
+                    if let Some(tap) = &stream
+                        && !snapshot.stdout.limited
+                    {
+                        (tap.0)(&snapshot.stdout.bytes);
+                    }
+                }
                 Progress::Complete(result) => {
                     let code = match result.stop {
                         Some(StopReason::Deadline) => 124,
@@ -708,6 +727,7 @@ pub(crate) fn invoke_env(
             physical_call: None,
             launch_fence: None,
             heartbeat: context.heartbeat.cloned(),
+            stream: None,
         },
         context.interrupted,
     )
@@ -765,6 +785,7 @@ pub(crate) fn git_input(
             physical_call: None,
             launch_fence: None,
             heartbeat: None,
+            stream: None,
         },
         context.interrupted,
     )?;
@@ -860,6 +881,7 @@ mod tests {
                 Some(1),
             )),
             heartbeat: None,
+            stream: None,
         };
         assert_eq!(Native.execute(request.clone(), &stop).unwrap_err().code, 75);
         let mut deadline = request;

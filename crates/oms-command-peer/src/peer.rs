@@ -1109,6 +1109,22 @@ fn call_routed(
     })
     .flatten();
     let observed = std::cell::Cell::new(None);
+    let stream = scope
+        .as_ref()
+        .and_then(|_| {
+            crate::lead_observation::Stream::from_owner(
+                repo,
+                dir,
+                args.get("thread"),
+                &target.provider,
+                workdir,
+                context,
+            )
+        })
+        .map(|stream| {
+            let stream = std::sync::Arc::new(stream);
+            process::StreamTap(std::sync::Arc::new(move |raw: &[u8]| stream.observe(raw)))
+        });
     let result = providers::execute_with_fallback_output(
         &mut route,
         args.get("fallback-model"),
@@ -1119,7 +1135,7 @@ fn call_routed(
         repo,
         &usage_env,
         if scope.is_some() {
-            providers::OutputMode::Observed(&observed)
+            providers::OutputMode::Observed(&observed, stream.as_ref())
         } else {
             output_mode(args)
         },
