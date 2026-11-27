@@ -299,7 +299,15 @@ fn sandbox(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Vec<Va
                 .unwrap_or("unknown");
             rows.push(finding("sandbox", "info", format!("{name}: {state}")));
         }
-        let available = r::find("bwrap", &paths.cwd);
+        // An explicit OMS_BWRAP_BIN is what workers use; never report a PATH bwrap in its place.
+        let available = oms_supervisor::sandbox::find_bwrap()
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("OMS_BWRAP_BIN")
+                    .is_none()
+                    .then(|| r::find("bwrap", &paths.cwd))
+                    .flatten()
+            });
         rows.push(finding(
             "sandbox",
             "info",
@@ -316,7 +324,7 @@ fn sandbox(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Vec<Va
             let binary =
                 available.ok_or_else(|| r::Error(2, "bwrap is unavailable for --probe".into()))?;
             let output = r::command(
-                binary,
+                &binary,
                 &[
                     "--ro-bind",
                     "/",
@@ -336,6 +344,7 @@ fn sandbox(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Vec<Va
                 if output.0 == 0 { "ok" } else { "warn" },
                 format!("bwrap smoke probe exit {}", output.0),
             ));
+            rows.extend(sandbox_ssh_probe(&binary, paths, flag)?);
         }
     } else if cfg!(target_os = "macos") {
         rows.push(finding(
@@ -352,6 +361,92 @@ fn sandbox(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Vec<Va
         ));
     }
     Ok(rows)
+}
+fn sandbox_ssh_probe(binary: &Path, paths: &Paths, flag: &AtomicBool) -> Result<Vec<Value>> {
+    use std::ffi::{OsStr, OsString};
+    let spec = oms_supervisor::sandbox::SandboxSpec {
+        worktree: paths.cwd.clone(),
+        extra_rw_dirs: Vec::new(),
+        allow_network: true,
+    };
+    let openssh_dir = paths.home.join(".ssh");
+    let runtime_ctl = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|v| !v.is_empty())
+        .map(|v| PathBuf::from(v).join("oms-ssh"))
+        .unwrap_or_default();
+    let fallback_ctl = PathBuf::from(format!(
+        "/tmp/oms-ssh-{}",
+        rustix::process::geteuid().as_raw()
+    ));
+    let auth_sock = std::env::var_os("SSH_AUTH_SOCK")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let check_sock_path = auth_sock.as_deref().is_some_and(Path::is_absolute);
+    let script = concat!(
+        "empty_or_absent() {\n",
+        "  [ ! -e \"$1\" ] && [ ! -L \"$1\" ] && return 0\n",
+        "  [ -d \"$1\" ] || return 1\n",
+        "  for x in \"$1\"/* \"$1\"/.[!.]* \"$1\"/..?*; do\n",
+        "    if [ -e \"$x\" ] || [ -L \"$x\" ]; then return 1; fi\n",
+        "  done\n",
+        "  return 0\n",
+        "}\n",
+        "if empty_or_absent \"$1\"; then printf 'openssh=ok\\n'; else printf 'openssh=exposed\\n'; fi\n",
+        "if ( [ -z \"$2\" ] || empty_or_absent \"$2\" ) && empty_or_absent \"$3\"; then printf 'control=ok\\n'; else printf 'control=exposed\\n'; fi\n",
+        "if [ -z \"${SSH_AUTH_SOCK+x}\" ] && ( [ \"$5\" != \"1\" ] || ( [ ! -e \"$4\" ] && [ ! -L \"$4\" ] ) || [ -c \"$4\" ] ); then printf 'agent=ok\\n'; else printf 'agent=exposed\\n'; fi\n",
+    );
+    let sh_args: Vec<OsString> = vec![
+        "-c".into(),
+        script.into(),
+        "oms-doctor-ssh-probe".into(),
+        openssh_dir.into_os_string(),
+        runtime_ctl.into_os_string(),
+        fallback_ctl.into_os_string(),
+        // Probe the resolved socket: a hidden symlink can still point at a reachable target.
+        auth_sock
+            .as_deref()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
+            .unwrap_or_default()
+            .into_os_string(),
+        if check_sock_path { "1" } else { "0" }.into(),
+    ];
+    let wrapped = oms_supervisor::sandbox::bwrap_args(OsStr::new("/bin/sh"), &sh_args, &spec);
+    let injected_env: &[(&str, &OsStr)] = if auth_sock.is_none() {
+        &[("SSH_AUTH_SOCK", OsStr::new("/tmp/oms-doctor-probe.sock"))]
+    } else {
+        &[]
+    };
+    let probe = r::command_env(
+        binary,
+        &wrapped,
+        &paths.cwd,
+        None,
+        flag,
+        Duration::from_secs(5),
+        injected_env,
+    )?;
+    let stdout = String::from_utf8_lossy(&probe.1);
+    let checks = [
+        ("openssh", "OpenSSH directory (.ssh)", "hidden"),
+        ("control", "OMS SSH control directory (oms-ssh)", "hidden"),
+        ("agent", "ssh-agent (SSH_AUTH_SOCK)", "isolated"),
+    ];
+    Ok(checks
+        .into_iter()
+        .map(|(tag, label, ok_word)| {
+            if probe.0 != 0 {
+                finding(
+                    "sandbox",
+                    "warn",
+                    format!("{label}: unverified (bwrap probe exit {})", probe.0),
+                )
+            } else if stdout.lines().any(|line| line == format!("{tag}=ok")) {
+                finding("sandbox", "ok", format!("{label}: {ok_word}"))
+            } else {
+                finding("sandbox", "warn", format!("{label}: exposed"))
+            }
+        })
+        .collect())
 }
 fn extension_configs(paths: &Paths) -> Vec<(&'static str, &'static str, PathBuf)> {
     vec![
@@ -2748,5 +2843,121 @@ mod tests {
                 .unwrap()
                 .contains("not inspected")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sandbox_probe_reports_three_ssh_isolation_checks() {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(mode) = std::env::var_os("OMS_DOCTOR_SANDBOX_PROBE_TEST") {
+            let root = PathBuf::from(std::env::var_os("OMS_DOCTOR_SANDBOX_PROBE_ROOT").unwrap());
+            let cwd = root.join("wt");
+            let paths = Paths::new(&cwd, &cwd).unwrap();
+            let options =
+                crate::cli::parse("doctor", &["--sandbox".into(), "--probe".into()]).unwrap();
+            let rows = sandbox(&paths, &options, &AtomicBool::new(false)).unwrap();
+            let expected_level = if mode == "ok" { "ok" } else { "warn" };
+            let expected_suffix = if mode == "ok" {
+                ["hidden", "hidden", "isolated"]
+            } else {
+                ["exposed", "exposed", "exposed"]
+            };
+            for (prefix, suffix) in [
+                "OpenSSH directory (.ssh)",
+                "OMS SSH control directory (oms-ssh)",
+                "ssh-agent (SSH_AUTH_SOCK)",
+            ]
+            .into_iter()
+            .zip(expected_suffix)
+            {
+                let expected_msg = format!("{prefix}: {suffix}");
+                assert!(
+                    rows.iter().any(|row| {
+                        row["section"] == "sandbox"
+                            && row["level"] == expected_level
+                            && row["message"] == expected_msg
+                    }),
+                    "missing {expected_level} '{expected_msg}' in {rows:?}"
+                );
+            }
+            return;
+        }
+        let scratch = r::Scratch::new().unwrap();
+        let root = scratch.0.join("doctor-sbx");
+        let home = root.join("home");
+        let openssh = home.join(".ssh");
+        let runtime = root.join("runtime");
+        let control = runtime.join("oms-ssh");
+        let agent = root.join("agent");
+        let wt = root.join("wt");
+        for dir in [&openssh, &control, &agent, &wt] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(openssh.join("id_probe"), b"probe\n").unwrap();
+        fs::write(control.join("s.sock"), b"probe\n").unwrap();
+        let sock = agent.join("agent.sock");
+        fs::write(&sock, b"probe\n").unwrap();
+        let ok_bwrap = root.join("bwrap-ok");
+        fs::write(
+            &ok_bwrap,
+            concat!(
+                "#!/bin/sh\n",
+                "for last; do :; done\n",
+                "if [ \"$last\" = \"true\" ]; then exit 0; fi\n",
+                "tmpfs_list=''\n",
+                "while [ \"$#\" -gt 0 ]; do\n",
+                "  case \"$1\" in\n",
+                "    --tmpfs) tmpfs_list=\"$tmpfs_list|$2|\"; shift 2 ;;\n",
+                "    --unsetenv) unset \"$2\"; shift 2 ;;\n",
+                "    --) shift; break ;;\n",
+                "    *) shift ;;\n",
+                "  esac\n",
+                "done\n",
+                "empty=\"$OMS_DOCTOR_SANDBOX_EMPTY\"\n",
+                "sock=\"$8\"\n",
+                "case \"$tmpfs_list\" in *\"|$5|\"*) s1=\"$empty\" ;; *) s1=\"$5\" ;; esac\n",
+                "case \"$tmpfs_list\" in *\"|$6|\"*) s2=\"$empty\" ;; *) s2=\"$6\" ;; esac\n",
+                "sock_dir=$(dirname \"$sock\")\n",
+                "case \"$tmpfs_list\" in *\"|$sock_dir|\"*) s4=\"$empty/none\" ;; *) s4=\"$sock\" ;; esac\n",
+                "exec \"$1\" \"$2\" \"$3\" \"$4\" \"$s1\" \"$s2\" \"$empty\" \"$s4\" \"$9\"\n",
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&ok_bwrap, fs::Permissions::from_mode(0o755)).unwrap();
+        let leaky_bwrap = root.join("bwrap-leaky");
+        fs::write(
+            &leaky_bwrap,
+            concat!(
+                "#!/bin/sh\n",
+                "for last; do :; done\n",
+                "if [ \"$last\" = \"true\" ]; then exit 0; fi\n",
+                "while [ \"$#\" -gt 0 ]; do\n",
+                "  if [ \"$1\" = \"--\" ]; then shift; break; fi\n",
+                "  shift\n",
+                "done\n",
+                "exec \"$@\"\n",
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&leaky_bwrap, fs::Permissions::from_mode(0o755)).unwrap();
+        let empty_dir = root.join("empty");
+        fs::create_dir_all(&empty_dir).unwrap();
+        for (mode, bin) in [("ok", &ok_bwrap), ("warn", &leaky_bwrap)] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "doctor::tests::sandbox_probe_reports_three_ssh_isolation_checks",
+                ])
+                .env("OMS_DOCTOR_SANDBOX_PROBE_TEST", mode)
+                .env("OMS_DOCTOR_SANDBOX_PROBE_ROOT", &root)
+                .env("OMS_DOCTOR_SANDBOX_EMPTY", &empty_dir)
+                .env("HOME", &home)
+                .env("XDG_RUNTIME_DIR", &runtime)
+                .env("SSH_AUTH_SOCK", &sock)
+                .env("OMS_BWRAP_BIN", bin)
+                .status()
+                .unwrap();
+            assert!(status.success(), "mode {mode} failed");
+        }
     }
 }
