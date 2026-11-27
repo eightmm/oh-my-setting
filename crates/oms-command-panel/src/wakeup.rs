@@ -474,6 +474,113 @@ mod tests {
         fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn claude_wake_handles_missing_session_directory_and_unsafe_targets() {
+        use crate::native_children::ClaudeSubagentsWatch;
+        use serde_json::json;
+
+        let dir = Dir::new("claude-lazy-session");
+        let repo = dir.0.join("repo");
+        let config = dir.0.join("claude");
+        let sessions = config.join("sessions");
+        let projects = config.join("projects");
+        let elsewhere = dir.0.join("elsewhere");
+        for path in [&repo, &config, &sessions, &projects, &elsewhere] {
+            DirBuilder::new().mode(0o700).create(path).unwrap();
+        }
+        let repo = fs::canonicalize(&repo).unwrap();
+        let key = crate::native_children::claude_project_key(&repo).unwrap();
+        let project = projects.join(&key);
+        DirBuilder::new().mode(0o700).create(&project).unwrap();
+
+        let pid = 4343u32;
+        let birth = "fixture-boot:112233";
+        let session = "22345678-1234-4234-8234-123456789abc";
+        let record = sessions.join(format!("{pid}.json"));
+        fs::write(
+            &record,
+            json!({
+                "pid": pid,
+                "procStart": "112233",
+                "sessionId": session,
+                "cwd": repo.to_str().unwrap(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Missing <session>/ arms a bounded watch on projects/<key>/ and ignores foreign entries.
+        let source = ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, None).unwrap();
+        let mut wake = FirstChildWake::<ClaudeSubagentsWatch>::default();
+        wake.replace(Some(Arc::clone(&source)));
+        let ready = |wake: &FirstChildWake<ClaudeSubagentsWatch>| {
+            wake.fd().is_some_and(|fd| {
+                let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+                poll(&mut fds, Some(&timespec(Duration::ZERO))).unwrap() > 0
+            })
+        };
+        let now = Instant::now();
+        let foreign = project.join("other-session");
+        DirBuilder::new().mode(0o700).create(&foreign).unwrap();
+        assert!(!wake.refresh(ready(&wake), true, now));
+
+        // Creating <session>/ -> subagents/ -> agent-*.jsonl transitions and wakes on the first child.
+        let session_dir = project.join(session);
+        DirBuilder::new().mode(0o700).create(&session_dir).unwrap();
+        assert!(!wake.refresh(ready(&wake), true, now));
+        assert!(ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, Some(&source)).is_some());
+
+        let subagents = session_dir.join("subagents");
+        DirBuilder::new().mode(0o700).create(&subagents).unwrap();
+        assert!(!wake.refresh(ready(&wake), true, now));
+
+        let child = subagents.join("agent-b1c2d3e4f5061728.jsonl");
+        fs::write(&child, b"{}\n").unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(ready(&wake));
+        assert!(wake.refresh(true, true, now));
+
+        // Reset to missing <session>/, create <session>/, drive Project->Session so session watch is retired,
+        // then create subagents/ + child together so Session->Subagents keeps the active watch alive.
+        fs::remove_dir_all(&session_dir).unwrap();
+        let burst = ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, None).unwrap();
+        wake.replace(Some(Arc::clone(&burst)));
+        DirBuilder::new().mode(0o700).create(&session_dir).unwrap();
+        assert!(!wake.refresh(ready(&wake), true, now + Duration::from_secs(1)));
+        assert!(burst.active());
+        DirBuilder::new().mode(0o700).create(&subagents).unwrap();
+        fs::write(&child, b"{}\n").unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(ready(&wake));
+        assert!(wake.refresh(true, true, now + Duration::from_secs(2)));
+        assert!(burst.active());
+        assert!(ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, Some(&burst)).is_some());
+
+        // Also test jumping straight Project->Subagents when <session>/subagents/agent-*.jsonl appear in one burst.
+        fs::remove_dir_all(&session_dir).unwrap();
+        let direct = ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, None).unwrap();
+        wake.replace(Some(Arc::clone(&direct)));
+        DirBuilder::new().mode(0o700).create(&session_dir).unwrap();
+        DirBuilder::new().mode(0o700).create(&subagents).unwrap();
+        fs::write(&child, b"{}\n").unwrap();
+        fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(ready(&wake));
+        assert!(wake.refresh(true, true, now + Duration::from_secs(3)));
+        assert!(direct.active());
+        assert!(ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, Some(&direct)).is_some());
+
+        // Symlinked or group-writable <session>/ fails closed.
+        fs::remove_dir_all(&session_dir).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &session_dir).unwrap();
+        assert!(ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, None).is_none());
+        fs::remove_file(&session_dir).unwrap();
+        DirBuilder::new().mode(0o750).create(&session_dir).unwrap();
+        fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, None).is_none());
+    }
+
     #[test]
     fn notify_wakes_a_waiting_watcher_quickly() {
         let dir = Dir::new("a");
