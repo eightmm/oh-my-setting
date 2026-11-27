@@ -3330,10 +3330,122 @@ fn desktop_projects_registry_and_reader_parity() {
     assert_eq!(
         listed["projects"],
         json!([
-            {"alias": "alpha-service", "path": alpha_canon, "exists": true},
-            {"alias": "alpha-service-2", "path": alpha_other_canon, "exists": false},
+            {"alias": "alpha-service", "area": null, "path": alpha_canon, "exists": true},
+            {"alias": "alpha-service-2", "area": null, "path": alpha_other_canon, "exists": false},
         ])
     );
+
+    // Sidecar area lifecycle: set (trimming spaces + Hangul), keep without --area, update, clear,
+    // and remove on unregister while keeping desktop-projects.json unchanged in format.
+    let default_areas = xdg.join("oh-my-setting/desktop-project-areas.json");
+    assert!(!default_areas.exists());
+    let overlong_area = "a".repeat(25);
+    let overlong_hangul = "가".repeat(9);
+    for bad_area in [
+        "   ",
+        "\t",
+        "bad/area",
+        "bad:area",
+        "area\n",
+        "emoji🚀",
+        &overlong_area,
+        &overlong_hangul,
+    ] {
+        let (code, _, stderr) = run_cli(
+            &alpha,
+            &["--register-project", "--area", bad_area],
+            &xdg_env,
+            &[],
+        );
+        assert_ne!(code, 0, "accepted invalid area {bad_area:?}");
+        assert!(stderr.contains("invalid project area"), "{stderr}");
+        assert!(!default_areas.exists());
+    }
+
+    let map_before_area = std::fs::read(&default_map).unwrap();
+    let map_ino_before = std::fs::symlink_metadata(&default_map).unwrap().ino();
+    let (code, _, stderr) = run_cli(
+        &alpha,
+        &["--register-project", "--area", "  코어 infra_1.0-a  "],
+        &xdg_env,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    // Updating area on an already-registered project leaves desktop-projects.json untouched.
+    assert_eq!(
+        std::fs::symlink_metadata(&default_map).unwrap().ino(),
+        map_ino_before
+    );
+    assert_eq!(std::fs::read(&default_map).unwrap(), map_before_area);
+    let areas_meta = std::fs::symlink_metadata(&default_areas).unwrap();
+    assert!(areas_meta.is_file());
+    assert_eq!(areas_meta.nlink(), 1);
+    assert_eq!(areas_meta.mode() & 0o7777, 0o600);
+    let parsed_areas: Value =
+        serde_json::from_slice(&std::fs::read(&default_areas).unwrap()).unwrap();
+    assert_eq!(parsed_areas, json!({"alpha-service": "코어 infra_1.0-a"}));
+
+    // Re-registering without --area keeps the existing area without rewriting either file.
+    let areas_ino_before = areas_meta.ino();
+    let (code, _, stderr) = run_cli(&alpha, &["--register-project"], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        std::fs::symlink_metadata(&default_areas).unwrap().ino(),
+        areas_ino_before
+    );
+
+    // --projects and --projects --json display the area next to the alias.
+    let (code, area_plain, stderr) = run_cli(base, &["--projects"], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        area_plain.contains("alpha-service\t코어 infra_1.0-a\t"),
+        "{area_plain}"
+    );
+    let (code, area_json, stderr) = run_cli(base, &["--projects", "--json"], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let listed_with_area: Value = serde_json::from_str(&area_json).unwrap();
+    assert_eq!(
+        listed_with_area["projects"],
+        json!([
+            {"alias": "alpha-service", "area": "코어 infra_1.0-a", "path": alpha_canon, "exists": true},
+            {"alias": "alpha-service-2", "area": null, "path": alpha_other_canon, "exists": false},
+        ])
+    );
+
+    // Inline OMS_PANEL_PROJECTS has no sidecar even when XDG_CONFIG_HOME contains one.
+    let inline_check = json!({"alpha-service": alpha_canon}).to_string();
+    let (code, inline_out, stderr) = run_cli(
+        base,
+        &["--projects", "--json"],
+        &xdg_env,
+        &[("OMS_PANEL_PROJECTS", &inline_check)],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let inline_listed: Value = serde_json::from_str(&inline_out).unwrap();
+    assert_eq!(inline_listed["projects"][0]["area"], Value::Null);
+
+    // Set area on second project, clear alpha-service with --area "", and verify unregister removes area.
+    std::fs::create_dir_all(alpha_other.join(".oms")).unwrap();
+    let (code, _, stderr) = run_cli(
+        base,
+        &[
+            "--register-project",
+            &alpha_other.to_string_lossy(),
+            "--alias",
+            "alpha-service-2",
+            "--area",
+            "platform",
+        ],
+        &xdg_env,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = run_cli(&alpha, &["--register-project", "--area", ""], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let after_clear: Value =
+        serde_json::from_slice(&std::fs::read(&default_areas).unwrap()).unwrap();
+    assert_eq!(after_clear, json!({"alpha-service-2": "platform"}));
+    std::fs::remove_dir_all(&alpha_other).unwrap();
 
     // 4. Unregister preserves remaining entries, refuses unknown aliases, and removes empty map cleanly.
     let (code, _, _) = run_cli(
@@ -3350,6 +3462,10 @@ fn desktop_projects_registry_and_reader_parity() {
         &[],
     );
     assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !default_areas.exists(),
+        "unregistering last alias with an area must unlink empty sidecar"
+    );
     let remaining = verify_reader_accepts_map(&default_map);
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining.get("alpha-service"), Some(&alpha_canon));
@@ -3565,11 +3681,1478 @@ fn desktop_projects_registry_and_reader_parity() {
     );
     assert_ne!(code, 0, "hard-linked map must be refused");
     assert_eq!(std::fs::read(&hard_src).unwrap(), target_body);
+
+    // Missing explicit OMS_PANEL_PROJECTS_FILE fails on --projects (plain and --json) like the panel reader.
+    for missing_explicit in [
+        base.join("missing-explicit-map.json"),
+        base.join("missing-parent-dir/explicit-map.json"),
+    ] {
+        for list_args in [&["--projects"][..], &["--projects", "--json"]] {
+            let (code, stdout, stderr) = run_cli(
+                base,
+                list_args,
+                &[("OMS_PANEL_PROJECTS_FILE", &missing_explicit)],
+                &[],
+            );
+            assert_ne!(code, 0, "missing explicit map must fail for {list_args:?}");
+            assert!(stdout.is_empty(), "{stdout}");
+            assert!(stderr.contains("Invalid OMS project map"), "{stderr}");
+        }
+    }
+
+    // Sidecar privacy (0600 required; 0644/0620, symlink, hard link refused) and strict parsing.
+    let strict_dir = base.join("strict-sidecar");
+    ensure_private_dir(&strict_dir);
+    let strict_map = strict_dir.join("desktop-projects.json");
+    let strict_areas = strict_dir.join("desktop-project-areas.json");
+    write_private_file(
+        &strict_map,
+        &serde_json::to_vec(&json!({"keep": alpha_canon})).unwrap(),
+    );
+
+    // Non-private (0644) sidecar refused.
+    write_private_file(&strict_areas, br#"{"keep":"rust"}"#);
+    std::fs::set_permissions(&strict_areas, std::fs::Permissions::from_mode(0o644)).unwrap();
+    for args in [
+        &["--projects"][..],
+        &["--register-project", "--area", "web"],
+        &["--unregister-project", "keep"],
+    ] {
+        let (code, _, stderr) = run_cli(
+            &alpha,
+            args,
+            &[("OMS_PANEL_PROJECTS_FILE", &strict_map)],
+            &[],
+        );
+        assert_ne!(code, 0, "0644 sidecar must be refused for {args:?}");
+        assert!(stderr.contains("area map"), "{stderr}");
+    }
+    std::fs::remove_file(&strict_areas).unwrap();
+
+    // Symlinked sidecar refused.
+    let outside_area = base.join("outside-areas.json");
+    write_private_file(&outside_area, br#"{"keep":"rust"}"#);
+    std::os::unix::fs::symlink(&outside_area, &strict_areas).unwrap();
+    let (code, _, stderr) = run_cli(
+        &alpha,
+        &["--projects"],
+        &[("OMS_PANEL_PROJECTS_FILE", &strict_map)],
+        &[],
+    );
+    assert_ne!(code, 0, "symlinked sidecar must be refused");
+    assert!(stderr.contains("symlink"), "{stderr}");
+    std::fs::remove_file(&strict_areas).unwrap();
+
+    // Strict JSON parse: duplicate keys, non-strings, invalid alias/area, and >16 KiB refused.
+    let oversize_areas = format!("{{\"keep\":\"{}\"}}", "a".repeat(16400));
+    for bad_sidecar in [
+        r#"{"keep":"rust","keep":"web"}"#,
+        r#"{"keep":123}"#,
+        r#"{"keep":null}"#,
+        r#"{"keep":""}"#,
+        r#"{"keep":"bad/slash"}"#,
+        r#"{"-bad":"rust"}"#,
+        r#"["rust"]"#,
+        oversize_areas.as_str(),
+    ] {
+        write_private_file(&strict_areas, bad_sidecar.as_bytes());
+        let (code, _, stderr) = run_cli(
+            &alpha,
+            &["--projects"],
+            &[("OMS_PANEL_PROJECTS_FILE", &strict_map)],
+            &[],
+        );
+        assert_ne!(code, 0, "accepted malformed sidecar: {bad_sidecar}");
+        assert!(stderr.contains("area map"), "{stderr}");
+    }
+    std::fs::remove_file(&strict_areas).unwrap();
+}
+
+fn snapshot_tree(root: &Path) -> std::collections::BTreeMap<PathBuf, (String, u32, Vec<u8>)> {
+    use std::os::unix::fs::MetadataExt;
+    fn walk(
+        base: &Path,
+        dir: &Path,
+        out: &mut std::collections::BTreeMap<PathBuf, (String, u32, Vec<u8>)>,
+    ) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let rel = path.strip_prefix(base).unwrap().to_path_buf();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            let mode = meta.mode() & 0o7777;
+            if meta.file_type().is_symlink() {
+                let target = std::fs::read_link(&path).unwrap();
+                out.insert(
+                    rel,
+                    (
+                        "symlink".into(),
+                        mode,
+                        target.to_string_lossy().into_owned().into_bytes(),
+                    ),
+                );
+            } else if meta.is_dir() {
+                out.insert(rel, ("dir".into(), mode, Vec::new()));
+                walk(base, &path, out);
+            } else {
+                out.insert(rel, ("file".into(), mode, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+fn stub_claude_main(state_dir: &Path) -> ! {
+    use std::io::Write;
+    let cwd = std::env::current_dir().unwrap();
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let calls_path = state_dir.join("calls.jsonl");
+    let mut log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&calls_path)
+        .unwrap();
+    writeln!(log_file, "{}", json!({"cwd": cwd, "argv": argv})).unwrap();
+
+    let control: Value = std::fs::read(state_dir.join("control.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| json!({}));
+    let entries_path = state_dir.join("entries.json");
+    let mut entries: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Value>> =
+        std::fs::read(&entries_path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+    let cwd_key = cwd.to_string_lossy().into_owned();
+
+    let args_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match args_ref.as_slice() {
+        ["mcp", "get", name] => {
+            if let Some(mode) = control["spawnGrandchildOnGet"].as_str() {
+                use std::os::unix::process::CommandExt;
+                let ready = state_dir.join("grandchild-ready.pid");
+                let _ = std::fs::remove_file(&ready);
+                let mut gc = Command::new(std::env::current_exe().unwrap());
+                gc.env("OMS_PANEL_PARITY_SLEEP_CHILD", &ready)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::inherit());
+                if mode == "new-group" {
+                    gc.process_group(0);
+                }
+                #[expect(
+                    clippy::zombie_processes,
+                    reason = "stub exits intentionally to leave a lingering grandchild holding stderr open"
+                )]
+                let _child = gc.spawn().unwrap();
+                let wait_until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while std::time::Instant::now() < wait_until {
+                    if std::fs::read_to_string(&ready).is_ok_and(|s| !s.trim().is_empty()) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            if control["signalOnGet"] == true {
+                let _ = rustix::process::kill_process(
+                    rustix::process::getpid(),
+                    rustix::process::Signal::TERM,
+                );
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            if let Some(code) = control["getExitCode"].as_i64() {
+                if let Some(out_text) = control["getStdout"].as_str() {
+                    println!("{out_text}");
+                }
+                if let Some(err_text) = control["getStderr"].as_str() {
+                    eprintln!("{err_text}");
+                }
+                std::process::exit(code as i32);
+            }
+            if control["failGet"] == true {
+                eprintln!("simulated get failure");
+                std::process::exit(2);
+            }
+            if let Some(cfg) = entries.get(&cwd_key).and_then(|m| m.get(*name)) {
+                println!("{name}:");
+                println!("  Scope: Local config (private to you in this project)");
+                println!("  Status: Connected");
+                if let Some(t) = cfg["type"].as_str() {
+                    println!("  Type: {t}");
+                }
+                if let Some(cmd) = cfg["command"].as_str() {
+                    println!("  Command: {cmd}");
+                }
+                let joined_args = cfg["args"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                println!("  Args: {joined_args}");
+                println!("  Environment:");
+                if let Some(env_obj) = cfg["env"].as_object() {
+                    for (k, v) in env_obj {
+                        if let Some(s) = v.as_str() {
+                            println!("    {k}={s}");
+                        }
+                    }
+                }
+                println!("\nTo remove this server, run: claude mcp remove \"{name}\" -s local");
+                if control["dropLocalAfterGet"] == true {
+                    if let Some(m) = entries.get_mut(&cwd_key) {
+                        m.remove(*name);
+                    }
+                    write_private_file(&entries_path, &serde_json::to_vec(&entries).unwrap());
+                }
+                std::process::exit(0);
+            }
+            if control["userEntry"] == true && *name == "oms-panel" {
+                println!("oms-panel:");
+                println!("  Scope: User config (available in all your projects)");
+                println!("  Type: stdio");
+                println!("  Command: /tmp/user-scope-oms/oms");
+                println!("  Args: mcp-server");
+                println!("  Environment:");
+                println!("    OMS_MCP_TOOL_PROFILE=mcp-app");
+                println!("\nTo remove this server, run: claude mcp remove \"oms-panel\" -s user");
+                std::process::exit(0);
+            }
+            eprintln!("No MCP server found with name: {name}");
+            std::process::exit(1);
+        }
+        ["mcp", "add-json", "--scope", "local", name, raw_json] => {
+            assert_ne!(*name, "oh-my-setting", "must never touch lifecycle key");
+            if control["failAdd"] == true {
+                eprintln!(
+                    "simulated vendor failure\n{{\"mcpServers\":{{\"leak\":\"forbidden\"}}}}\nCUSTOM_ENV_EXAMPLE=do-not-echo"
+                );
+                std::process::exit(1);
+            }
+            let parsed: Value = serde_json::from_str(raw_json).unwrap();
+            entries
+                .entry(cwd_key)
+                .or_default()
+                .insert((*name).to_owned(), parsed);
+            write_private_file(&entries_path, &serde_json::to_vec(&entries).unwrap());
+            if let Some(conflict) = control["touchOnAdd"].as_str() {
+                write_private_file(Path::new(conflict), b"{}\n");
+            }
+            if let Some(marker) = control["wroteMarker"].as_str() {
+                write_private_file(Path::new(marker), b"1\n");
+            }
+            if control["signalAfterWriteAdd"] == true {
+                let _ = rustix::process::kill_process(
+                    rustix::process::getpid(),
+                    rustix::process::Signal::TERM,
+                );
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            if control["writeThenHangAdd"] == true {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+            std::process::exit(0);
+        }
+        ["mcp", "remove", "--scope", "local", name] => {
+            if let Some(code) = control["removeExitCode"].as_i64() {
+                if let Some(err_text) = control["removeStderr"].as_str() {
+                    eprintln!("{err_text}");
+                }
+                std::process::exit(code as i32);
+            }
+            if control["hangRemove"] == true {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+            if control["failRemove"] == true {
+                eprintln!("simulated remove failure");
+                std::process::exit(1);
+            }
+            let existed = entries
+                .get_mut(&cwd_key)
+                .and_then(|m| m.remove(*name))
+                .is_some();
+            write_private_file(&entries_path, &serde_json::to_vec(&entries).unwrap());
+            if existed {
+                std::process::exit(0);
+            }
+            eprintln!("No local MCP server found with name: {name}");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("unexpected claude stub invocation: {argv:?}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn project_panels_claude_lifecycle_parity() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let root = TempDir::new("oms-panel-claude-install");
+    let base = root.path();
+    let xdg = base.join("temp-xdg");
+    let home_dir = base.join("temp-home");
+    let claude_cfg_dir = base.join("temp-claude-cfg");
+    let codex_home = base.join("temp-codex-home");
+    let locks = base.join("locks");
+    let stub_bin_dir = base.join("stub-bin");
+    let stub_state = base.join("stub-state");
+    for d in [
+        &xdg,
+        &home_dir,
+        &claude_cfg_dir,
+        &codex_home,
+        &locks,
+        &stub_bin_dir,
+        &stub_state,
+    ] {
+        ensure_private_dir(d);
+    }
+
+    // Sentinel vendor config files inside temp dirs: oms panel itself must never edit them directly;
+    // only our stub binary runs.
+    ensure_private_dir(&home_dir.join(".claude"));
+    ensure_private_dir(&home_dir.join(".codex"));
+    ensure_private_dir(&home_dir.join(".gemini/antigravity"));
+    ensure_private_dir(&xdg.join("antigravity"));
+    let sentinel_files = [
+        (
+            home_dir.join(".claude.json"),
+            br#"{"mcpServers":{}}"#.as_slice(),
+        ),
+        (
+            home_dir.join(".claude/settings.json"),
+            br#"{"permissions":{}}"#.as_slice(),
+        ),
+        (
+            claude_cfg_dir.join("settings.json"),
+            br#"{"model":"sonnet"}"#.as_slice(),
+        ),
+        (
+            codex_home.join("config.toml"),
+            b"[mcp_servers]\n".as_slice(),
+        ),
+        (
+            home_dir.join(".codex/config.toml"),
+            b"[mcp_servers]\n".as_slice(),
+        ),
+        (
+            home_dir.join(".gemini/antigravity/mcp_config.json"),
+            br#"{"mcpServers":{}}"#.as_slice(),
+        ),
+        (
+            xdg.join("antigravity/mcp_config.json"),
+            br#"{"mcpServers":{}}"#.as_slice(),
+        ),
+    ];
+    let mut sentinel_inodes = Vec::new();
+    for (path, bytes) in &sentinel_files {
+        write_private_file(path, bytes);
+        sentinel_inodes.push(std::fs::symlink_metadata(path).unwrap().ino());
+    }
+
+    let exe = std::env::current_exe().unwrap();
+    let path_claude = stub_bin_dir.join("claude");
+    let explicit_claude = base.join("custom-claude-bin");
+    std::os::unix::fs::symlink(&exe, &path_claude).unwrap();
+    std::os::unix::fs::symlink(&exe, &explicit_claude).unwrap();
+
+    let calls_log = stub_state.join("calls.jsonl");
+    let entries_file = stub_state.join("entries.json");
+    let control_file = stub_state.join("control.json");
+    let set_control = |val: Value| {
+        write_private_file(&control_file, &serde_json::to_vec(&val).unwrap());
+    };
+    let take_calls = || -> Vec<Value> {
+        let Ok(raw) = std::fs::read_to_string(&calls_log) else {
+            return Vec::new();
+        };
+        let _ = std::fs::remove_file(&calls_log);
+        raw.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    set_control(json!({"userEntry": true}));
+
+    // PATH points ONLY to stub_bin_dir so no host binary can ever execute.
+    let run_panel = |cwd: &Path, args: &[&str], use_explicit_bin: bool, extra: &[(&str, &str)]| {
+        let mut cmd = Command::new(&exe);
+        cmd.env_clear()
+            .env("OMS_PANEL_PARITY_CLI", "1")
+            .env("OMS_PANEL_PARITY_CLAUDE_STUB", &stub_state)
+            .env("PATH", &stub_bin_dir)
+            .env("HOME", &home_dir)
+            .env("XDG_CONFIG_HOME", &xdg)
+            .env("CLAUDE_CONFIG_DIR", &claude_cfg_dir)
+            .env("CODEX_HOME", &codex_home)
+            .env("TMPDIR", base)
+            .env("OMS_LOCK_DIR", &locks)
+            .current_dir(cwd)
+            .args(args);
+        if use_explicit_bin {
+            cmd.env("OMS_CLAUDE_BIN", &explicit_claude);
+        }
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        (
+            out.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let alpha = base.join("checkouts/alpha-service");
+    std::fs::create_dir_all(&alpha).unwrap();
+    init_git_repo(&alpha);
+    std::fs::write(alpha.join("README.md"), "alpha\n").unwrap();
+    let alpha_canon = alpha.canonicalize().unwrap();
+    let alpha_tree_before = snapshot_tree(&alpha_canon);
+
+    let beta = base.join("checkouts/beta-service");
+    std::fs::create_dir_all(beta.join(".oms")).unwrap();
+    let beta_canon = beta.canonicalize().unwrap();
+
+    let default_map = xdg.join("oh-my-setting/desktop-projects.json");
+    let panels_sidecar = xdg.join("oh-my-setting/desktop-project-panels.json");
+
+    // 1. Unknown alias refused before map exists, and unsupported app refused; stub never runs.
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "missing"],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("--register-project"), "{stderr}");
+    assert!(take_calls().is_empty());
+
+    for bad_app in ["codex", "antigravity"] {
+        let (code, _, stderr) = run_panel(
+            base,
+            &["--install-panel", bad_app, "--project", "alpha-service"],
+            true,
+            &[],
+        );
+        assert_ne!(code, 0);
+        assert!(stderr.contains("supported: claude"), "{stderr}");
+        assert!(take_calls().is_empty());
+    }
+
+    // 2. --register-project and --unregister-project alone never run the stub.
+    let (code, _, stderr) = run_panel(&alpha, &["--register-project"], true, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = run_panel(&beta, &["--register-project"], true, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = run_panel(base, &["--unregister-project", "beta-service"], true, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = run_panel(&beta, &["--register-project"], true, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        take_calls().is_empty(),
+        "register/unregister must never invoke vendor CLI"
+    );
+    assert!(!panels_sidecar.exists());
+
+    // Unknown alias when map exists is also refused on both install and uninstall.
+    for mode in ["--install-panel", "--uninstall-panel"] {
+        let (code, _, stderr) =
+            run_panel(base, &[mode, "claude", "--project", "unknown"], true, &[]);
+        assert_ne!(code, 0);
+        assert!(stderr.contains("--register-project"), "{stderr}");
+        assert!(take_calls().is_empty());
+    }
+
+    let expected_launcher = home_dir.join(".local/bin/oms");
+    let expected_entry_json = serde_json::to_string(&json!({
+        "type": "stdio",
+        "command": expected_launcher,
+        "args": ["mcp-server"],
+        "env": {
+            "OMS_MCP_TOOL_PROFILE": "chatgpt-panel",
+            "OMS_PANEL_REPO": alpha_canon,
+        }
+    }))
+    .unwrap();
+
+    // 3. --dry-run (plain and --json) prints exact vendor command(s), runs nothing and writes nothing.
+    let xdg_before_dry = snapshot_tree(&xdg);
+    let locks_before_dry = snapshot_tree(&locks);
+    let (code, dry_out, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "claude",
+            "--project",
+            "alpha-service",
+            "--dry-run",
+        ],
+        false,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        dry_out.contains(&format!(
+            "claude mcp add-json --scope local oms-panel '{expected_entry_json}'"
+        )),
+        "unexpected dry-run output: {dry_out}"
+    );
+    assert!(!dry_out.contains("oh-my-setting\n") && !dry_out.contains(" local oh-my-setting"));
+    assert!(take_calls().is_empty(), "dry-run must not run stub");
+    assert!(!panels_sidecar.exists());
+    assert_eq!(snapshot_tree(&xdg), xdg_before_dry);
+    assert_eq!(snapshot_tree(&locks), locks_before_dry);
+
+    let (code, dry_json_out, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "claude",
+            "--project",
+            "alpha-service",
+            "--dry-run",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let dry_json: Value = serde_json::from_str(&dry_json_out).unwrap();
+    assert_eq!(
+        dry_json,
+        json!({
+            "app": "claude",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-panel",
+            "action": "install",
+            "changed": false,
+        })
+    );
+    assert!(take_calls().is_empty());
+    assert!(!panels_sidecar.exists());
+
+    // 4. Install runs add-json once with expected cwd and exact args/json (shadowing user-scope
+    //    oms-panel), writes private 0600 ownership record, and writes nothing in the checkout.
+    let (code, install_out, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "claude",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let install_json: Value = serde_json::from_str(&install_out).unwrap();
+    assert_eq!(
+        install_json,
+        json!({
+            "app": "claude",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-panel",
+            "action": "install",
+            "changed": true,
+        })
+    );
+    let calls = take_calls();
+    assert_eq!(
+        calls,
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["mcp", "get", "oms-panel"]}),
+            json!({
+                "cwd": alpha_canon,
+                "argv": ["mcp", "add-json", "--scope", "local", "oms-panel", expected_entry_json]
+            }),
+        ]
+    );
+    let sidecar_meta = std::fs::symlink_metadata(&panels_sidecar).unwrap();
+    assert!(sidecar_meta.is_file());
+    assert_eq!(sidecar_meta.nlink(), 1);
+    assert_eq!(sidecar_meta.mode() & 0o7777, 0o600);
+    let sidecar_val: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert_eq!(
+        sidecar_val,
+        json!({
+            "alpha-service": [{
+                "app": "claude",
+                "scope": "local",
+                "name": "oms-panel",
+                "path": alpha_canon,
+            }]
+        })
+    );
+    assert_eq!(
+        snapshot_tree(&alpha_canon),
+        alpha_tree_before,
+        "install must write nothing inside the checkout"
+    );
+
+    // 5. Reinstalling an entry OMS recorded with the same content is a no-op (changed:false).
+    let sidecar_ino = sidecar_meta.ino();
+    let sidecar_bytes = std::fs::read(&panels_sidecar).unwrap();
+    let (code, reinstall_out, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "claude",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let reinstall_json: Value = serde_json::from_str(&reinstall_out).unwrap();
+    assert_eq!(reinstall_json["changed"], false);
+    assert_eq!(reinstall_json["action"], "install");
+    let reinstall_calls = take_calls();
+    assert_eq!(
+        reinstall_calls,
+        vec![json!({"cwd": alpha_canon, "argv": ["mcp", "get", "oms-panel"]})],
+        "reinstall must not call add-json again"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&panels_sidecar).unwrap().ino(),
+        sidecar_ino
+    );
+    assert_eq!(std::fs::read(&panels_sidecar).unwrap(), sidecar_bytes);
+
+    // 6. --unregister-project with an installed panel is refused naming --uninstall-panel.
+    let (code, _, stderr) = run_panel(base, &["--unregister-project", "alpha-service"], true, &[]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("--uninstall-panel"), "{stderr}");
+    assert!(take_calls().is_empty());
+    assert!(default_map.exists() && panels_sidecar.exists());
+
+    // 7. Unmanaged existing local entry refused (also testing claude resolved on PATH).
+    let mut pre_entries: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, Value>,
+    > = serde_json::from_slice(&std::fs::read(&entries_file).unwrap()).unwrap();
+    pre_entries.insert(
+        beta_canon.to_string_lossy().into_owned(),
+        std::collections::BTreeMap::from([(
+            "oms-panel".into(),
+            json!({"type": "stdio", "command": "custom-mcp", "args": [], "env": {}}),
+        )]),
+    );
+    write_private_file(&entries_file, &serde_json::to_vec(&pre_entries).unwrap());
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "beta-service"],
+        false,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("an unmanaged local oms-panel entry exists; remove it first"),
+        "{stderr}"
+    );
+    assert_eq!(
+        take_calls(),
+        vec![json!({"cwd": beta_canon, "argv": ["mcp", "get", "oms-panel"]})]
+    );
+    assert_eq!(std::fs::read(&panels_sidecar).unwrap(), sidecar_bytes);
+    pre_entries.remove(&beta_canon.to_string_lossy().into_owned());
+    write_private_file(&entries_file, &serde_json::to_vec(&pre_entries).unwrap());
+
+    // 8. Vendor failure leaves no record and never leaks config or env contents.
+    set_control(json!({"userEntry": true, "failAdd": true}));
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "beta-service"],
+        false,
+        &[("CUSTOM_ENV_EXAMPLE", "do-not-echo")],
+    );
+    assert_ne!(code, 0);
+    assert!(
+        !stderr.contains("mcpServers") && !stderr.contains("forbidden"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("CUSTOM_ENV_EXAMPLE") && !stderr.contains("do-not-echo"),
+        "{stderr}"
+    );
+    let _ = take_calls();
+    assert_eq!(std::fs::read(&panels_sidecar).unwrap(), sidecar_bytes);
+    set_control(json!({"userEntry": true}));
+
+    // 9. Uninstall dry-run runs nothing; real uninstall runs remove in recorded path and drops row;
+    //    uninstalling an unrecorded alias runs nothing.
+    let (code, un_dry, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "claude",
+            "--project",
+            "alpha-service",
+            "--dry-run",
+        ],
+        false,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        un_dry.contains("claude mcp remove --scope local oms-panel"),
+        "{un_dry}"
+    );
+    assert!(take_calls().is_empty());
+    assert!(panels_sidecar.exists());
+
+    let (code, un_out, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "claude",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let un_json: Value = serde_json::from_str(&un_out).unwrap();
+    assert_eq!(
+        un_json,
+        json!({
+            "app": "claude",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-panel",
+            "action": "uninstall",
+            "changed": true,
+        })
+    );
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["mcp", "get", "oms-panel"]}),
+            json!({
+                "cwd": alpha_canon,
+                "argv": ["mcp", "remove", "--scope", "local", "oms-panel"]
+            }),
+        ]
+    );
+    assert!(
+        !panels_sidecar.exists(),
+        "removing last panel row must unlink empty sidecar"
+    );
+
+    // Uninstall of an unrecorded alias runs nothing and returns changed:false.
+    let (code, un_noop_out, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "claude",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let un_noop_json: Value = serde_json::from_str(&un_noop_out).unwrap();
+    assert_eq!(un_noop_json["changed"], false);
+    assert_eq!(un_noop_json["action"], "uninstall");
+    assert!(
+        take_calls().is_empty(),
+        "uninstall of unrecorded alias must run nothing"
+    );
+
+    // 10. Record-write failure triggers `claude mcp remove --scope local oms-panel` so no
+    //     unrecorded entry remains.
+    set_control(json!({
+        "userEntry": true,
+        "touchOnAdd": panels_sidecar,
+    }));
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "beta-service"],
+        false,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("rolled back"), "{stderr}");
+    let rollback_calls = take_calls();
+    assert_eq!(rollback_calls.len(), 3, "{rollback_calls:?}");
+    assert_eq!(
+        rollback_calls[0]["argv"],
+        json!(["mcp", "get", "oms-panel"])
+    );
+    assert_eq!(rollback_calls[1]["argv"][1], "add-json");
+    assert_eq!(
+        rollback_calls[2],
+        json!({
+            "cwd": beta_canon,
+            "argv": ["mcp", "remove", "--scope", "local", "oms-panel"]
+        })
+    );
+    let after_rb_entries: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, Value>,
+    > = serde_json::from_slice(&std::fs::read(&entries_file).unwrap()).unwrap();
+    assert!(
+        after_rb_entries
+            .get(&beta_canon.to_string_lossy().into_owned())
+            .is_none_or(|m| m.is_empty()),
+        "rollback must remove unrecorded local entry"
+    );
+    std::fs::remove_file(&panels_sidecar).unwrap();
+    set_control(json!({"userEntry": true}));
+
+    // 11. If local entry is already gone (either at probe time or concurrently before remove),
+    //     uninstall still drops row and says so.
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "beta-service"],
+        false,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let _ = take_calls();
+    write_private_file(&entries_file, b"{}");
+    let (code, gone_out, stderr) = run_panel(
+        base,
+        &["--uninstall-panel", "claude", "--project", "beta-service"],
+        false,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(gone_out.contains("already gone"), "{gone_out}");
+    assert!(!panels_sidecar.exists());
+    assert_eq!(
+        take_calls(),
+        vec![json!({
+            "cwd": beta_canon,
+            "argv": ["mcp", "get", "oms-panel"]
+        })]
+    );
+
+    // Concurrent disappearance between `mcp get` and `mcp remove` also succeeds as already gone.
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "beta-service"],
+        false,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let _ = take_calls();
+    set_control(json!({"userEntry": false, "dropLocalAfterGet": true}));
+    let (code, race_gone_out, stderr) = run_panel(
+        base,
+        &["--uninstall-panel", "claude", "--project", "beta-service"],
+        false,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(race_gone_out.contains("already gone"), "{race_gone_out}");
+    assert!(!panels_sidecar.exists());
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": beta_canon, "argv": ["mcp", "get", "oms-panel"]}),
+            json!({"cwd": beta_canon, "argv": ["mcp", "remove", "--scope", "local", "oms-panel"]}),
+        ]
+    );
+    set_control(json!({"userEntry": true}));
+
+    // 12. Deleted checkout (and non-directory replacement): uninstall forgets the row and runs
+    //     nothing (text + JSON action:"forgotten"), --projects keeps reporting the missing path,
+    //     then --unregister-project succeeds.
+    let gamma = base.join("checkouts/gamma-service");
+    std::fs::create_dir_all(gamma.join(".oms")).unwrap();
+    let gamma_canon = gamma.canonicalize().unwrap();
+    let (code, _, stderr) = run_panel(&gamma, &["--register-project"], true, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "gamma-service"],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let _ = take_calls();
+    std::fs::remove_dir_all(&gamma).unwrap();
+
+    // While panel is still recorded, --unregister-project refuses.
+    let (code, _, stderr) = run_panel(base, &["--unregister-project", "gamma-service"], true, &[]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("--uninstall-panel"), "{stderr}");
+
+    // --projects keeps reporting the missing path.
+    let (code, proj_txt, stderr) = run_panel(base, &["--projects"], true, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        proj_txt.contains("gamma-service") && proj_txt.contains("(path no longer exists)"),
+        "{proj_txt}"
+    );
+
+    // Text uninstall forgets the row without running vendor CLI.
+    let (code, forget_txt, stderr) = run_panel(
+        base,
+        &["--uninstall-panel", "claude", "--project", "gamma-service"],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        forget_txt.contains(
+            "checkout is gone; dropped the record (the Claude entry stored for that path is inert)"
+        ),
+        "{forget_txt}"
+    );
+    assert!(
+        take_calls().is_empty(),
+        "deleted checkout uninstall must not invoke vendor CLI"
+    );
+    assert!(!panels_sidecar.exists());
+
+    // --projects still reports the missing path until unregistered, and --unregister-project succeeds.
+    let (code, proj_json_raw, stderr) = run_panel(base, &["--projects", "--json"], true, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let proj_json: Value = serde_json::from_str(&proj_json_raw).unwrap();
+    let gamma_row = proj_json["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["alias"] == "gamma-service")
+        .unwrap();
+    assert_eq!(gamma_row["exists"], false);
+    assert_eq!(gamma_row["path"], json!(gamma_canon));
+
+    let (code, _, stderr) = run_panel(base, &["--unregister-project", "gamma-service"], true, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(take_calls().is_empty());
+
+    // Also verify JSON action:"forgotten" when recorded checkout is replaced by a regular file.
+    let delta = base.join("checkouts/delta-service");
+    std::fs::create_dir_all(delta.join(".oms")).unwrap();
+    let delta_canon = delta.canonicalize().unwrap();
+    assert_eq!(run_panel(&delta, &["--register-project"], true, &[]).0, 0);
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "claude", "--project", "delta-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+    std::fs::remove_dir_all(&delta).unwrap();
+    std::fs::write(&delta, b"not a directory\n").unwrap();
+    let (code, forget_json_raw, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "claude",
+            "--project",
+            "delta-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let forget_json: Value = serde_json::from_str(&forget_json_raw).unwrap();
+    assert_eq!(
+        forget_json,
+        json!({
+            "app": "claude",
+            "alias": "delta-service",
+            "path": delta_canon,
+            "entry": "oms-panel",
+            "action": "forgotten",
+            "changed": true,
+        })
+    );
+    assert!(take_calls().is_empty());
+    std::fs::remove_file(&delta).unwrap();
+    assert_eq!(
+        run_panel(base, &["--unregister-project", "delta-service"], true, &[]).0,
+        0
+    );
+
+    // 13. add-json timeout (and signal/interrupt) with stub that writes then hangs -> rollback runs once.
+    write_private_file(&entries_file, b"{}");
+    set_control(json!({"userEntry": true, "writeThenHangAdd": true}));
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "beta-service"],
+        true,
+        &[("OMS_CLAUDE_TIMEOUT_MS", "200")],
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("rolled back"), "{stderr}");
+    assert!(!stderr.contains("uncertain"), "{stderr}");
+    let to_calls = take_calls();
+    assert_eq!(to_calls.len(), 3, "{to_calls:?}");
+    assert_eq!(to_calls[0]["argv"], json!(["mcp", "get", "oms-panel"]));
+    assert_eq!(to_calls[1]["argv"][1], "add-json");
+    assert_eq!(
+        to_calls[2],
+        json!({
+            "cwd": beta_canon,
+            "argv": ["mcp", "remove", "--scope", "local", "oms-panel"]
+        })
+    );
+    let post_to_entries: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, Value>,
+    > = serde_json::from_slice(&std::fs::read(&entries_file).unwrap()).unwrap();
+    assert!(
+        post_to_entries
+            .get(&beta_canon.to_string_lossy().into_owned())
+            .is_none_or(|m| m.is_empty()),
+        "timeout rollback must remove entry written before hang"
+    );
+    assert!(!panels_sidecar.exists());
+
+    // Signal-interrupted add-json after write also rolls back once.
+    set_control(json!({"userEntry": true, "signalAfterWriteAdd": true}));
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "beta-service"],
+        true,
+        &[("OMS_CLAUDE_TIMEOUT_MS", "200")],
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("rolled back"), "{stderr}");
+    let sig_calls = take_calls();
+    assert_eq!(sig_calls.len(), 3, "{sig_calls:?}");
+    assert_eq!(
+        sig_calls[2]["argv"],
+        json!(["mcp", "remove", "--scope", "local", "oms-panel"])
+    );
+    assert!(!panels_sidecar.exists());
+
+    // Cancellation (stop flag) during add-json after write also rolls back once (exit 130).
+    let wrote_marker = stub_state.join("add-wrote.marker");
+    let _ = std::fs::remove_file(&wrote_marker);
+    set_control(json!({
+        "userEntry": true,
+        "writeThenHangAdd": true,
+        "wroteMarker": wrote_marker,
+    }));
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "beta-service"],
+        true,
+        &[
+            ("OMS_CLAUDE_TIMEOUT_MS", "5000"),
+            (
+                "OMS_PANEL_PARITY_INTERRUPT_ON_FILE",
+                wrote_marker.to_str().unwrap(),
+            ),
+        ],
+    );
+    let _ = std::fs::remove_file(&wrote_marker);
+    assert_eq!(code, 130, "{stderr}");
+    assert!(stderr.contains("rolled back"), "{stderr}");
+    let intr_calls = take_calls();
+    assert_eq!(intr_calls.len(), 3, "{intr_calls:?}");
+    assert_eq!(
+        intr_calls[2]["argv"],
+        json!(["mcp", "remove", "--scope", "local", "oms-panel"])
+    );
+    assert!(!panels_sidecar.exists());
+
+    // 14. Rollback failure -> uncertain: true in JSON, clear line in text, exit nonzero.
+    set_control(json!({
+        "userEntry": true,
+        "writeThenHangAdd": true,
+        "failRemove": true,
+    }));
+    let (code, unc_json_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "claude",
+            "--project",
+            "beta-service",
+            "--json",
+        ],
+        true,
+        &[("OMS_CLAUDE_TIMEOUT_MS", "200")],
+    );
+    assert_ne!(code, 0);
+    let unc_json: Value = serde_json::from_str(&unc_json_raw).unwrap();
+    assert_eq!(unc_json["uncertain"], true, "{unc_json}");
+    assert_eq!(unc_json["changed"], false, "{unc_json}");
+    assert_eq!(unc_json["action"], "install", "{unc_json}");
+    assert!(stderr.contains("uncertain"), "{stderr}");
+    let unc_calls = take_calls();
+    assert_eq!(unc_calls.len(), 3, "{unc_calls:?}");
+
+    // Reset unrecorded entry left by failed rollback, then check text mode uncertain line.
+    write_private_file(&entries_file, b"{}");
+    let (code, unc_txt_out, unc_txt_err) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "beta-service"],
+        true,
+        &[("OMS_CLAUDE_TIMEOUT_MS", "200")],
+    );
+    assert_ne!(code, 0);
+    assert!(unc_txt_out.is_empty(), "{unc_txt_out}");
+    assert!(unc_txt_err.contains("uncertain"), "{unc_txt_err}");
+    assert_eq!(unc_txt_err.lines().count(), 1, "{unc_txt_err}");
+    let _ = take_calls();
+    set_control(json!({"userEntry": true}));
+
+    // 15. Exact-match unrecorded local entry (left behind after failed rollback!) is adopted;
+    //     local entries differing in any field are refused as unmanaged.
+    let beta_expected_entry = json!({
+        "type": "stdio",
+        "command": expected_launcher,
+        "args": ["mcp-server"],
+        "env": {
+            "OMS_MCP_TOOL_PROFILE": "chatgpt-panel",
+            "OMS_PANEL_REPO": beta_canon,
+        }
+    });
+    for differing in [
+        json!({
+            "type": "stdio",
+            "command": expected_launcher,
+            "args": ["mcp-server", "--extra"],
+            "env": {"OMS_MCP_TOOL_PROFILE": "chatgpt-panel", "OMS_PANEL_REPO": beta_canon}
+        }),
+        json!({
+            "type": "stdio",
+            "command": expected_launcher,
+            "args": ["mcp-server"],
+            "env": {"OMS_MCP_TOOL_PROFILE": "mcp-app", "OMS_PANEL_REPO": beta_canon}
+        }),
+        json!({
+            "type": "stdio",
+            "command": expected_launcher,
+            "args": ["mcp-server"],
+            "env": {"OMS_MCP_TOOL_PROFILE": "chatgpt-panel", "OMS_PANEL_REPO": alpha_canon}
+        }),
+        json!({
+            "type": "stdio",
+            "command": expected_launcher,
+            "args": ["mcp-server"],
+            "env": {
+                "OMS_MCP_TOOL_PROFILE": "chatgpt-panel",
+                "OMS_PANEL_REPO": beta_canon,
+                "EXTRA_ENV": "1"
+            }
+        }),
+    ] {
+        write_private_file(
+            &entries_file,
+            &serde_json::to_vec(&json!({
+                beta_canon.to_string_lossy().into_owned(): { "oms-panel": differing }
+            }))
+            .unwrap(),
+        );
+        let (code, _, stderr) = run_panel(
+            base,
+            &["--install-panel", "claude", "--project", "beta-service"],
+            true,
+            &[],
+        );
+        assert_ne!(code, 0, "differing local entry must be refused");
+        assert!(stderr.contains("unmanaged local oms-panel"), "{stderr}");
+        assert_eq!(
+            take_calls(),
+            vec![json!({"cwd": beta_canon, "argv": ["mcp", "get", "oms-panel"]})]
+        );
+        assert!(!panels_sidecar.exists());
+    }
+
+    // Exact match with no recorded row -> adopted (JSON and plain text).
+    write_private_file(
+        &entries_file,
+        &serde_json::to_vec(&json!({
+            beta_canon.to_string_lossy().into_owned(): { "oms-panel": beta_expected_entry }
+        }))
+        .unwrap(),
+    );
+    let (code, adopt_out, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "claude",
+            "--project",
+            "beta-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let adopt_json: Value = serde_json::from_str(&adopt_out).unwrap();
+    assert_eq!(
+        adopt_json,
+        json!({
+            "app": "claude",
+            "alias": "beta-service",
+            "path": beta_canon,
+            "entry": "oms-panel",
+            "action": "adopted",
+            "changed": true,
+        })
+    );
+    assert_eq!(
+        take_calls(),
+        vec![json!({"cwd": beta_canon, "argv": ["mcp", "get", "oms-panel"]})],
+        "adopting exact-match entry must not call add-json"
+    );
+    let adopted_sidecar: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert_eq!(
+        adopted_sidecar["beta-service"][0]["path"],
+        json!(beta_canon)
+    );
+
+    // 16. Exit 127/126/signal/non-matching exit 1 is never "absent", and unparseable exit-0
+    //     `mcp get` output fails closed without mutating anything.
+    let saved_sidecar = std::fs::read(&panels_sidecar).unwrap();
+    for bad_ctl in [
+        json!({"getExitCode": 127, "getStderr": "claude: oms-panel: not found"}),
+        json!({"getExitCode": 126, "getStderr": "No local MCP server found with name: oms-panel"}),
+        json!({"signalOnGet": true}),
+        json!({"getExitCode": 1, "getStderr": "No MCP server found with name: other-server"}),
+        json!({"getExitCode": 0, "getStdout": "oms-panel: unparseable output without scope"}),
+        json!({"getExitCode": 0, "getStdout": "{malformed json"}),
+        json!({"getExitCode": 0, "getStdout": "No MCP server found with name: oms-panel"}),
+    ] {
+        set_control(bad_ctl.clone());
+        let (code, _, _) = run_panel(
+            base,
+            &["--install-panel", "claude", "--project", "alpha-service"],
+            true,
+            &[],
+        );
+        assert_ne!(code, 0, "install must fail closed for {bad_ctl}");
+        let (code, _, _) = run_panel(
+            base,
+            &["--uninstall-panel", "claude", "--project", "beta-service"],
+            true,
+            &[],
+        );
+        assert_ne!(code, 0, "uninstall must fail closed for {bad_ctl}");
+        assert_eq!(std::fs::read(&panels_sidecar).unwrap(), saved_sidecar);
+    }
+    set_control(json!({
+        "userEntry": true,
+        "removeExitCode": 127,
+        "removeStderr": "claude: oms-panel: not found",
+    }));
+    let (code, _, _) = run_panel(
+        base,
+        &["--uninstall-panel", "claude", "--project", "beta-service"],
+        true,
+        &[],
+    );
+    assert_ne!(
+        code, 0,
+        "exit 127 on mcp remove must not be treated as absent"
+    );
+    assert_eq!(std::fs::read(&panels_sidecar).unwrap(), saved_sidecar);
+    let _ = take_calls();
+    set_control(json!({"userEntry": true}));
+
+    // 17. Uninstall of a user-changed local entry leaves it in place and drops the ownership row.
+    let user_modified = json!({
+        "type": "stdio",
+        "command": expected_launcher,
+        "args": ["mcp-server", "--custom-user-flag"],
+        "env": {
+            "OMS_MCP_TOOL_PROFILE": "chatgpt-panel",
+            "OMS_PANEL_REPO": beta_canon,
+        }
+    });
+    write_private_file(
+        &entries_file,
+        &serde_json::to_vec(&json!({
+            beta_canon.to_string_lossy().into_owned(): { "oms-panel": user_modified }
+        }))
+        .unwrap(),
+    );
+    let (code, un_mod_out, stderr) = run_panel(
+        base,
+        &["--uninstall-panel", "claude", "--project", "beta-service"],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        un_mod_out.contains("the local oms-panel entry was changed outside OMS; left it in place"),
+        "{un_mod_out}"
+    );
+    assert_eq!(
+        take_calls(),
+        vec![json!({"cwd": beta_canon, "argv": ["mcp", "get", "oms-panel"]})],
+        "uninstall of user-modified entry must not call mcp remove"
+    );
+    assert!(!panels_sidecar.exists());
+    let preserved_entries: Value =
+        serde_json::from_slice(&std::fs::read(&entries_file).unwrap()).unwrap();
+    assert_eq!(
+        preserved_entries[beta_canon.to_string_lossy().as_ref()]["oms-panel"],
+        user_modified,
+        "user-modified entry must remain untouched"
+    );
+    write_private_file(&entries_file, b"{}");
+
+    // 18. A stub whose grandchild keeps stderr open does not hang past the timeout
+    //     (both same-process-group killed immediately and escaped new-group bounded by deadline).
+    let gc_pid_file = stub_state.join("grandchild-ready.pid");
+    set_control(json!({"userEntry": true, "spawnGrandchildOnGet": "same-group"}));
+    let t0 = std::time::Instant::now();
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "beta-service"],
+        true,
+        &[("OMS_CLAUDE_TIMEOUT_MS", "3000")],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        t0.elapsed() < std::time::Duration::from_millis(2000),
+        "same-group grandchild keeping stderr open was not killed promptly: {:?}",
+        t0.elapsed()
+    );
+    let _ = take_calls();
+
+    set_control(json!({"userEntry": true, "spawnGrandchildOnGet": "new-group"}));
+    let t1 = std::time::Instant::now();
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--uninstall-panel", "claude", "--project", "beta-service"],
+        true,
+        &[("OMS_CLAUDE_TIMEOUT_MS", "250")],
+    );
+    let elapsed_detached = t1.elapsed();
+    if let Ok(raw_pid) = std::fs::read_to_string(&gc_pid_file)
+        && let Ok(pid_num) = raw_pid.trim().parse::<i32>()
+        && let Some(pid) = rustix::process::Pid::from_raw(pid_num)
+    {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+    }
+    let _ = std::fs::remove_file(&gc_pid_file);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        elapsed_detached < std::time::Duration::from_secs(5),
+        "detached grandchild keeping stderr open hung past timeout: {elapsed_detached:?}"
+    );
+    assert!(!panels_sidecar.exists());
+    let _ = take_calls();
+    set_control(json!({"userEntry": true}));
+
+    // 19. Sidecar privacy (0644, symlink) and strict parsing on desktop-project-panels.json.
+    write_private_file(
+        &panels_sidecar,
+        serde_json::to_string(&json!({
+            "alpha-service": [{"app":"claude","scope":"local","name":"oms-panel","path":alpha_canon}]
+        }))
+        .unwrap()
+        .as_bytes(),
+    );
+    std::fs::set_permissions(&panels_sidecar, std::fs::Permissions::from_mode(0o644)).unwrap();
+    for args in [
+        &["--install-panel", "claude", "--project", "alpha-service"][..],
+        &["--uninstall-panel", "claude", "--project", "alpha-service"],
+        &["--unregister-project", "alpha-service"],
+    ] {
+        let (code, _, stderr) = run_panel(base, args, true, &[]);
+        assert_ne!(code, 0, "0644 panel sidecar must fail for {args:?}");
+        assert!(stderr.contains("panel map"), "{stderr}");
+    }
+    std::fs::remove_file(&panels_sidecar).unwrap();
+
+    let outside_panels = base.join("outside-panels.json");
+    write_private_file(&outside_panels, b"{}");
+    std::os::unix::fs::symlink(&outside_panels, &panels_sidecar).unwrap();
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "claude", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("symlink"), "{stderr}");
+    std::fs::remove_file(&panels_sidecar).unwrap();
+    let _ = take_calls();
+
+    // 13. Checkout tree and all Claude/Codex/Antigravity config sentinels remain untouched.
+    assert_eq!(snapshot_tree(&alpha_canon), alpha_tree_before);
+    for ((path, expected_bytes), expected_ino) in sentinel_files.iter().zip(sentinel_inodes.iter())
+    {
+        let meta = std::fs::symlink_metadata(path).unwrap();
+        assert_eq!(
+            meta.ino(),
+            *expected_ino,
+            "sentinel replaced: {}",
+            path.display()
+        );
+        assert_eq!(
+            &std::fs::read(path).unwrap(),
+            expected_bytes,
+            "sentinel modified: {}",
+            path.display()
+        );
+    }
 }
 
 fn main() {
+    if let Some(ready_path) = std::env::var_os("OMS_PANEL_PARITY_SLEEP_CHILD") {
+        use std::io::Write;
+        let _ = std::fs::write(Path::new(&ready_path), std::process::id().to_string());
+        let _ = std::io::stderr().write_all(b"grandchild holding stderr open\n");
+        let _ = std::io::stderr().flush();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        std::process::exit(0);
+    }
+    if let Some(state_dir) = std::env::var_os("OMS_PANEL_PARITY_CLAUDE_STUB")
+        && std::env::args().next().is_some_and(|arg0| {
+            Path::new(&arg0)
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name.contains("claude"))
+        })
+    {
+        stub_claude_main(Path::new(&state_dir));
+    }
     if std::env::var_os("OMS_PANEL_PARITY_CLI").is_some() {
         use std::io::Write;
+        if let Some(trigger) = std::env::var_os("OMS_PANEL_PARITY_INTERRUPT_ON_FILE") {
+            let trigger_path = PathBuf::from(trigger);
+            std::thread::spawn(move || {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while std::time::Instant::now() < until {
+                    if trigger_path.exists() {
+                        STOP.store(true, Ordering::Release);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            });
+        }
         let cwd = std::env::current_dir().unwrap();
         let args: Vec<OsString> = std::env::args_os().skip(1).collect();
         let services = Fake::default();
@@ -3627,7 +5210,7 @@ fn main() {
         .skip(1)
         .filter(|arg| !arg.starts_with('-') && arg != "panel_parity")
         .collect();
-    let cases: [(&str, fn()); 13] = [
+    let cases: [(&str, fn()); 14] = [
         (
             "chats_native_identity_binding",
             chats_native_identity_binding,
@@ -3635,6 +5218,10 @@ fn main() {
         (
             "desktop_projects_registry_and_reader_parity",
             desktop_projects_registry_and_reader_parity,
+        ),
+        (
+            "project_panels_claude_lifecycle_parity",
+            project_panels_claude_lifecycle_parity,
         ),
         (
             "missing_entry_refuses_before_mutation",

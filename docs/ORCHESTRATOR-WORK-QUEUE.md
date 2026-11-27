@@ -9,6 +9,18 @@
 제품 범위와 개념의 구분은 [Feature scope](FEATURE-SCOPE.md), 실제 착수 상태는 이 큐가 소유한다.
 이전 CP/TM/MR/UX/NF 번호는 acceptance의 출처이며 별도 전체 구현 지시가 아니다.
 
+2026-11-27 [한 컴퓨터의 여러 프로젝트 통합 패널 인계](HOST-PORTFOLIO-IMPLEMENTATION.md)는
+main `0e9b93cabdaa6b7c8d4abbb18a424a701a285574`과 병합된 #666의 host 등록 map을 재사용한다.
+[#668](https://github.com/eightmm/oh-my-setting/issues/668)이 HP-01~07의 구현·검증을 추적하고,
+epic #431 및 #619의 PIPE-01/04/07과 기존 #433/#434/#441/#442/#443 owner에 연결한다.
+첫 slice는 catalog parser·caller 정책 대조 후 3-project aggregate read이며, metadata·전체 UI가 뒤따른다.
+등급은 먼저 표시·정렬에만 쓰고 실제 전역 한도는 후속 dispatch admission에서 적용한다.
+v38 프로젝트 상세와 Main의 소유권을 유지하며 새 task DB·별도 path registry를 만들지 않는다.
+병합된 #665의 state/services group proof를 재사용하고, open #667의 Claude wake/chat은 claim을 조율한다.
+#600/#613/#616은 이미 병합됐고 #608/#627은 문서다. 과거 open 표를 현재 상태로 재사용하지 않는다.
+외부 연동 확장·multi-host #444는 보류한다. 첫 읽기 UI는 상주 daemon과 독립적으로 완료한다.
+문서 등록은 runtime 구현·fixture 통과·사용자 환경의 live 검증 완료를 뜻하지 않는다.
+
 2026-11-25 [기능 통합 PR 지도](FUNCTIONAL-CONSOLIDATION-PR-MAP.md)는 main `4c7db603`에서
 27개 항목을 구현 Draft·명세·기존 PR에 연결한다. 아래 역사적 번호와 구현 경계를 유지하며,
 명세 게시와 runtime 구현·검증 완료를 구분한다.

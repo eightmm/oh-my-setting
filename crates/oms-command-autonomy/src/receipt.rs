@@ -1703,6 +1703,42 @@ fn commit_reenter(ctx: &Context<'_>, row: &Value, mut record: Value) -> Result<(
         }),
     )
 }
+fn adaptive_review_writer(row: &Value) -> Option<&str> {
+    let writer = value::text(&row["providers"], "worker");
+    if !matches!(writer, "codex" | "claude" | "antigravity") {
+        return None;
+    }
+    // The peer writer flag identifies a native default family, not an arbitrary
+    // routed model. Keep unknown or cross-family pins on the existing gate path.
+    let compatible = |field: &str| {
+        let requested = value::text(&row["routing"]["worker"], field);
+        if requested.is_empty() {
+            return true;
+        }
+        let model = requested.to_ascii_lowercase();
+        let model = model.rsplit('/').next().unwrap_or(&model);
+        match writer {
+            "codex" => {
+                model.starts_with("gpt-")
+                    || model.starts_with("gpt ")
+                    || model.starts_with("o3")
+                    || model.starts_with("o4")
+            }
+            "claude" => {
+                model.starts_with("claude-")
+                    || model.starts_with("claude ")
+                    || matches!(model, "opus" | "sonnet" | "fable" | "haiku")
+            }
+            "antigravity" => {
+                model.starts_with("gemini-")
+                    || model.starts_with("gemini ")
+                    || model.starts_with("orchestrator")
+            }
+            _ => false,
+        }
+    };
+    (compatible("model") && compatible("fallback_model")).then_some(writer)
+}
 fn review_once(
     ctx: &Context<'_>,
     row: &mut Value,
@@ -1779,6 +1815,9 @@ fn review_once(
             "--artifact-dir".into(),
             directory.clone().into(),
         ];
+        if let Some(writer) = adaptive_review_writer(row) {
+            args.extend(["--adaptive".into(), "--writer".into(), writer.into()]);
+        }
         for id in covers {
             args.extend(["--covers".into(), id.into()]);
         }
@@ -3741,6 +3780,9 @@ mod tests {
             .criteria
             .into_keys()
             .collect::<Vec<_>>();
+        row["routing"]["reviewer"]["model"] = "claude-sonnet-4-6".into();
+        row["routing"]["reviewer"]["fallback_model"] = "claude-haiku-4-5".into();
+        row["routing"]["reviewer"]["reasoning_effort"] = "high".into();
         row["stage"] = "reviewing".into();
         dir.write_receipt(&row);
         let mut raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
@@ -3766,6 +3808,39 @@ mod tests {
                 argument("--base"),
                 value::text(&row["contract"], "base_sha")
             );
+            assert_eq!(
+                argument("--providers"),
+                value::text(&row["providers"], "reviewer")
+            );
+            assert_eq!(
+                argument("--writer"),
+                value::text(&row["providers"], "worker")
+            );
+            for (option, field) in [
+                ("--model", "model"),
+                ("--fallback-model", "fallback_model"),
+                ("--reasoning-effort", "reasoning_effort"),
+            ] {
+                assert_eq!(
+                    argument(option),
+                    value::text(&row["routing"]["reviewer"], field)
+                );
+            }
+            for option in [
+                "--adaptive",
+                "--gate",
+                "--providers",
+                "--writer",
+                "--model",
+                "--fallback-model",
+                "--reasoning-effort",
+            ] {
+                assert_eq!(
+                    calls[0].iter().filter(|arg| *arg == option).count(),
+                    1,
+                    "the frozen review route includes {option} exactly once"
+                );
+            }
             assert_eq!(argument("--verify"), command);
             assert_eq!(
                 calls[0]
@@ -3807,11 +3882,21 @@ mod tests {
         let index = dir.0.join(".oms/artifacts/index.jsonl");
         private(&index, format!("{check}\n{outcome}\n").as_bytes());
         let reference = adaptive::review_evidence(&ctx, &row, directory, 1, command).unwrap();
-        let packet = adaptive::evidence(&ctx, &reference).unwrap();
+        let mut packet = adaptive::evidence(&ctx, &reference).unwrap();
         assert_eq!(packet["corrective"], true);
         adaptive::check_review_sources(&ctx, &packet).unwrap();
+        packet["purpose"] = "goal".into();
+        adaptive::state(&mut row)["review"] = adaptive::retain(&ctx, &packet).unwrap();
+        dir.write_receipt(&row);
+        raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+        let replay = review_once(&ctx, &mut row, &mut raw, command, &covers, "goal").unwrap();
+        assert_eq!(replay.code, 1);
+        assert!(
+            String::from_utf8_lossy(&replay.stdout)
+                .contains("reconciled the exact retained review")
+        );
+        assert_eq!(host.review_calls.lock().unwrap().len(), 1);
         row["stage"] = "parked".into();
-        adaptive::state(&mut row)["review"] = reference;
         dir.write_receipt(&row);
         let raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
         let decision = adaptive::decision(&ctx, &row, &raw).unwrap();
@@ -3836,6 +3921,50 @@ mod tests {
         assert!(!adaptive::failure_can_inform_revision(
             &json!({"phase":"semantic-review","failure":{"code":"provider_timeout"}})
         ));
+    }
+
+    #[test]
+    fn adaptive_review_preserves_routes_with_unidentified_writer_families() {
+        for (writer, model, fallback, adaptive) in [
+            ("antigravity", "", "", true),
+            ("antigravity", "gemini-3-pro", "", true),
+            ("codex", "claude-sonnet-4-6", "", false),
+            ("antigravity", "private-model-alias", "", false),
+            ("antigravity", "gemini-3-pro", "claude-sonnet-4-6", false),
+        ] {
+            let host = AdaptiveHost::default();
+            let stop = AtomicBool::new(false);
+            let (dir, mut row) = adaptive_fixture(&host, &stop);
+            row["providers"]["worker"] = writer.into();
+            row["routing"]["worker"]["model"] = model.into();
+            row["routing"]["worker"]["fallback_model"] = fallback.into();
+            row["routing"]["reviewer"]["model"] = "claude-sonnet-4-6".into();
+            row["stage"] = "reviewing".into();
+            dir.write_receipt(&row);
+            let ctx = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+            let mut raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+            assert!(
+                review_once(&ctx, &mut row, &mut raw, "bash tests/check.sh", &[], "goal").is_err()
+            );
+            let calls = host.review_calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            let args = &calls[0];
+            assert_eq!(args.iter().any(|arg| arg == "--adaptive"), adaptive);
+            assert_eq!(args.iter().any(|arg| arg == "--writer"), adaptive);
+            assert!(args.iter().any(|arg| arg == "--gate"));
+            for (option, expected) in [
+                ("--providers", "claude"),
+                ("--model", "claude-sonnet-4-6"),
+                ("--verify", "bash tests/check.sh"),
+            ] {
+                assert_eq!(
+                    args.windows(2)
+                        .find(|pair| pair[0] == option)
+                        .and_then(|pair| pair[1].to_str()),
+                    Some(expected)
+                );
+            }
+        }
     }
 
     #[test]

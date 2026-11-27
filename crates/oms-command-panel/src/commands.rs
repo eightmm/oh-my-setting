@@ -836,6 +836,8 @@ pub(crate) fn run_mode(
 ) -> Result<Output> {
     if options.has("register-project")
         || options.has("unregister-project")
+        || options.has("install-panel")
+        || options.has("uninstall-panel")
         || options.has("projects")
     {
         return crate::desktop_projects::run(options, cwd, stop);

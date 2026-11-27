@@ -135,6 +135,7 @@ impl Client {
             .env_remove("OMS_ROOM_PARTICIPANT")
             .env_remove("OMS_PANEL_PROJECTS_FILE")
             .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .env("XDG_CACHE_HOME", source.join("test-cache"))
             .arg(if tasks { "1" } else { "0" })
             .env("OMS_HARNESS_CHILD", if child { "1" } else { "0" })
             .env("OMS_HARNESS_DELEGATE_DEPTH", depth)
@@ -312,7 +313,7 @@ fn cross_host_project_reads() {
         );
         let listed = c.call("tools/list", json!({}));
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 10);
         assert!(tools.iter().any(
             |t| t["name"] == "oms_panel_work_items" && t["annotations"]["readOnlyHint"] == true
         ));
@@ -745,6 +746,1133 @@ fn cross_host_project_reads() {
         reply["result"]["content"][0]["text"],
         "Project graph available in structuredContent."
     );
+    project_cards_catalog();
+}
+
+fn home_panel_opener() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const HOME_URI: &str = "ui://oms/home/v1.html";
+    let home_html = include_str!("../src/home-panel.html");
+    assert!(
+        home_html.len() <= 256 * 1024,
+        "home-panel.html exceeds 256 KiB budget: {} bytes",
+        home_html.len()
+    );
+    assert_eq!(oms_scrub::scan(home_html.as_bytes(), &[]), Ok(Vec::new()));
+
+    let tmp = Temp::new();
+    let source = tmp.source();
+    let repo = tmp.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+
+    // Derive all tool names across mcp-app, chatgpt-panel and full profiles and assert the home
+    // page calls oms_list_projects and no other tool.
+    let mut app_client = Client::with_depth(&source, &repo, "mcp-app", false, false, "0".as_ref());
+    let mut panel_client =
+        Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    let mut full_client = Client::new(&source, &repo, true, false, false);
+    let mut all_tools = std::collections::BTreeSet::new();
+    for listed in [
+        app_client.call("tools/list", json!({})),
+        panel_client.call("tools/list", json!({})),
+        full_client.call("tools/list", json!({})),
+    ] {
+        for tool in listed["result"]["tools"].as_array().unwrap() {
+            all_tools.insert(tool["name"].as_str().unwrap().to_owned());
+        }
+    }
+    assert!(all_tools.contains("oms_list_projects"));
+    assert!(home_html.contains("oms_list_projects"));
+    for tool_name in &all_tools {
+        if tool_name != "oms_list_projects" {
+            assert!(
+                !home_html.contains(tool_name.as_str()),
+                "home-panel.html must not call or reference tool {tool_name}"
+            );
+        }
+    }
+    let mut scan_rest = home_html;
+    while let Some(pos) = scan_rest.find("oms_") {
+        let after = &scan_rest[pos..];
+        let ident_len = after
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            .count();
+        let ident = &after[..ident_len];
+        assert_eq!(
+            ident, "oms_list_projects",
+            "unexpected OMS tool identifier in home-panel.html: {ident}"
+        );
+        scan_rest = &after[ident_len..];
+    }
+
+    // Core and Full profiles do not list or serve oms_open_home.
+    for full in [false, true] {
+        let mut regular = Client::new(&source, &repo, full, false, false);
+        assert!(
+            !regular.call("tools/list", json!({}))["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "oms_open_home")
+        );
+        assert_eq!(
+            regular.tool("oms_open_home", json!({}))["error"]["code"],
+            -32602
+        );
+    }
+
+    // Check definitions, resources/list, resources/read, and non-catalog refusal on both panel profiles.
+    for (profile, expected_entrypoint) in [("mcp-app", "global"), ("chatgpt-panel", "thread")] {
+        let mut c = Client::with_depth(&source, &repo, profile, false, false, "0".as_ref());
+        let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
+        let home_tool = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "oms_open_home")
+            .unwrap();
+        assert_eq!(home_tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(home_tool["annotations"]["destructiveHint"], false);
+        assert_eq!(home_tool["annotations"]["idempotentHint"], true);
+        assert_eq!(home_tool["annotations"]["openWorldHint"], false);
+        assert_eq!(
+            home_tool["inputSchema"],
+            json!({"type":"object","properties":{},"required":[],"additionalProperties":false})
+        );
+        assert_eq!(home_tool["_meta"]["ui"]["resourceUri"], HOME_URI);
+        assert_eq!(home_tool["_meta"]["openai/outputTemplate"], HOME_URI);
+        assert_eq!(
+            home_tool["_meta"]["openai/ui"]["entrypoints"],
+            json!([{"type": expected_entrypoint}])
+        );
+        assert_eq!(
+            home_tool["_meta"]["com.google.antigravity/ui"]["entrypoints"],
+            json!([
+                {"type":"aux_pane","title":"OMS Home"},
+                {"type":"global","title":"OMS Home"}
+            ])
+        );
+
+        let resources = c.call("resources/list", json!({}))["result"]["resources"].clone();
+        assert!(
+            resources
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["uri"] == HOME_URI && r["mimeType"] == "text/html;profile=mcp-app"),
+            "{profile}: {resources}"
+        );
+        let read = c.call("resources/read", json!({"uri": HOME_URI}));
+        let content = &read["result"]["contents"][0];
+        assert_eq!(content["uri"], HOME_URI);
+        assert_eq!(content["mimeType"], "text/html;profile=mcp-app");
+        assert_eq!(content["text"].as_str().unwrap(), home_html);
+        assert_eq!(
+            content["_meta"]["ui"]["csp"],
+            json!({
+                "connectDomains": [],
+                "resourceDomains": [
+                    "https://fonts.googleapis.com",
+                    "https://fonts.gstatic.com"
+                ]
+            })
+        );
+
+        // No project map and no OMS_PANEL_REPO pin (unbound in mcp-app, cwd in chatgpt-panel):
+        // refused with the unconfigured-map message, never the "bound to one project" text.
+        let non_catalog = c.tool("oms_open_home", json!({}));
+        bad(
+            &non_catalog,
+            "no host project map is configured for this connection",
+        );
+        bad(&non_catalog, "not available");
+        assert!(
+            !non_catalog["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("bound to one project"),
+            "{profile}: {non_catalog}"
+        );
+        assert!(non_catalog["result"].get("structuredContent").is_none());
+        assert!(non_catalog["result"].get("_meta").is_none());
+
+        // Rejects unknown arguments on the opener path.
+        assert_eq!(
+            c.tool("oms_open_home", json!({"project": "fixture"}))["error"]["code"],
+            -32602
+        );
+    }
+
+    // Configure a project catalog and verify oms_open_home returns readOnly: true without a snapshot.
+    let dir = source.join("test-config/oh-my-setting");
+    std::fs::create_dir_all(&dir).unwrap();
+    let map = dir.join("desktop-projects.json");
+    std::fs::write(&map, json!({"fixture": &repo}).to_string()).unwrap();
+    std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    for profile in ["mcp-app", "chatgpt-panel"] {
+        let mut c = Client::with_depth(&source, &repo, profile, false, false, "0".as_ref());
+        let opened = c.tool("oms_open_home", json!({}));
+        good(&opened);
+        let expected = json!({"panel": "OMS home", "readOnly": true});
+        assert_eq!(opened["result"]["structuredContent"], expected, "{profile}");
+        assert_eq!(payload(&opened), expected, "{profile}");
+        assert!(opened["result"].get("_meta").is_none(), "{profile}");
+        assert!(
+            !source.join("last-call.json").exists(),
+            "{profile}: oms_open_home must never run a project snapshot"
+        );
+    }
+
+    // Delegated workers (both OMS_HARNESS_CHILD=1 and OMS_HARNESS_DELEGATE_DEPTH=1) are refused.
+    for (child, depth) in [(true, "0"), (false, "1")] {
+        let mut worker =
+            Client::with_depth(&source, &repo, "mcp-app", false, child, depth.as_ref());
+        let refused = worker.tool("oms_open_home", json!({}));
+        bad(&refused, "delegated");
+        assert!(refused["result"].get("structuredContent").is_none());
+        assert!(refused["result"].get("_meta").is_none());
+    }
+
+    // Under OMS_PANEL_REPO (pinned binding, even with desktop-projects.json absent or present on disk):
+    // returns an error and no page. Note: setting both OMS_PANEL_REPO and explicit map is invalid map,
+    // whereas OMS_PANEL_REPO with XDG_CONFIG_HOME desktop-projects.json pins the connection.
+    for profile in ["mcp-app", "chatgpt-panel"] {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .env_remove("PYTHONUTF8")
+            .env_remove("PYTHONIOENCODING")
+            .arg("--stdio")
+            .arg(&source)
+            .arg(&repo)
+            .arg(profile)
+            .arg("0")
+            .env("OMS_PANEL_REPO", &repo)
+            .env_remove("OMS_PANEL_PROJECTS")
+            .env_remove("OMS_PANEL_PROJECTS_FILE")
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .env("XDG_CACHE_HOME", source.join("test-cache"))
+            .env("OMS_HARNESS_CHILD", "0")
+            .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let mut pinned_client = Client::from_child(child);
+        assert_eq!(
+            registry_summary(&pinned_client.tool("oms_list_projects", json!({})))["binding"],
+            "pinned",
+            "{profile}"
+        );
+        let pinned_home = pinned_client.tool("oms_open_home", json!({}));
+        bad(&pinned_home, "bound to one project");
+        bad(&pinned_home, "not available");
+        assert!(
+            !pinned_home["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("no host project map is configured"),
+            "{profile}: {pinned_home}"
+        );
+        assert!(pinned_home["result"].get("structuredContent").is_none());
+        assert!(pinned_home["result"].get("_meta").is_none());
+    }
+
+    // Missing explicit OMS_PANEL_PROJECTS_FILE fails with the invalid map error.
+    let missing_file = source.join("missing-explicit-projects.json");
+    let mut missing_explicit_client = Client::from_child(
+        Command::new(std::env::current_exe().unwrap())
+            .env_remove("PYTHONUTF8")
+            .env_remove("PYTHONIOENCODING")
+            .arg("--stdio")
+            .arg(&source)
+            .arg(&repo)
+            .arg("mcp-app")
+            .arg("0")
+            .env_remove("OMS_PANEL_REPO")
+            .env_remove("OMS_PANEL_PROJECTS")
+            .env("OMS_PANEL_PROJECTS_FILE", &missing_file)
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .env("XDG_CACHE_HOME", source.join("test-cache"))
+            .env("OMS_HARNESS_CHILD", "0")
+            .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    bad(
+        &missing_explicit_client.tool("oms_open_home", json!({})),
+        "Invalid OMS project map",
+    );
+    bad(
+        &missing_explicit_client.tool("oms_list_projects", json!({"cards": true})),
+        "Invalid OMS project map",
+    );
+}
+
+fn project_cards_catalog() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let set_mtime = |path: &Path, when: std::time::SystemTime| {
+        let d = when.duration_since(std::time::UNIX_EPOCH).unwrap();
+        let ts = rustix::fs::Timespec {
+            tv_sec: d.as_secs() as i64,
+            tv_nsec: d.subsec_nanos() as _,
+        };
+        let stamps = rustix::fs::Timestamps {
+            last_access: ts,
+            last_modification: ts,
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            path,
+            &stamps,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+    };
+    let tree_entries = |root: &Path| -> Vec<String> {
+        let mut items = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                items.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                if entry.file_type().unwrap().is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+        items.sort();
+        items
+    };
+
+    let tmp = Temp::new();
+    let source = tmp.source();
+    let repo = tmp.repo();
+
+    // Prepend trap binaries for git, gh, and ssh to prove no subprocesses spawn on cards:true.
+    let trap_bin = tmp.0.join("trap-bin");
+    std::fs::create_dir_all(&trap_bin).unwrap();
+    let trap_marker = source.join("unexpected-subprocess");
+    for tool_name in ["git", "gh", "ssh"] {
+        let bin = trap_bin.join(tool_name);
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"{tool_name}:$*\" >> '{}'\nexit 99\n",
+            trap_marker.display()
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut joined_paths = vec![trap_bin];
+    joined_paths.extend(std::env::split_paths(&inherited_path));
+    let trapped_path = std::env::join_paths(joined_paths).unwrap();
+
+    let spawn_trapped = |profile: &str, child: bool| {
+        let proc = Command::new(std::env::current_exe().unwrap())
+            .env_remove("PYTHONUTF8")
+            .env_remove("PYTHONIOENCODING")
+            .arg("--stdio")
+            .arg(&source)
+            .arg(&repo)
+            .arg(profile)
+            .env_remove("OMS_PANEL_REPO")
+            .env_remove("OMS_PANEL_PROJECTS")
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env_remove("OMS_PANEL_PROJECTS_FILE")
+            .env("PATH", &trapped_path)
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .env("XDG_CACHE_HOME", source.join("test-cache"))
+            .arg("0")
+            .env("OMS_HARNESS_CHILD", if child { "1" } else { "0" })
+            .env("OMS_HARNESS_DELEGATE_DEPTH", if child { "1" } else { "0" })
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        Client::from_child(proc)
+    };
+
+    let mut c = Client::with_depth(&source, &repo, "mcp-app", false, false, "0".as_ref());
+    let listed = c.call("tools/list", json!({}));
+    let list_tool = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "oms_list_projects")
+        .unwrap();
+    assert_eq!(
+        list_tool["inputSchema"]["properties"]["cards"]["type"],
+        "boolean"
+    );
+
+    // Delegated workers still cannot enumerate projects, with or without cards.
+    let mut worker = spawn_trapped("chatgpt-panel", true);
+    bad(
+        &worker.tool("oms_list_projects", json!({"cards": true})),
+        "delegated",
+    );
+    for invalid in [json!("true"), json!(1), json!(null), json!([])] {
+        bad(
+            &c.tool("oms_list_projects", json!({"cards": invalid})),
+            "cards must be a boolean",
+        );
+    }
+
+    // Unbound and cwd bindings leave the response byte-for-byte unchanged even with cards: true.
+    let unbound_plain = c.tool("oms_list_projects", json!({}));
+    let unbound_cards = c.tool("oms_list_projects", json!({"cards": true}));
+    assert_eq!(
+        unbound_plain["result"]["content"][0]["text"],
+        unbound_cards["result"]["content"][0]["text"]
+    );
+    assert_eq!(
+        unbound_plain["result"]["structuredContent"],
+        unbound_cards["result"]["structuredContent"]
+    );
+
+    let make_checkout = |name: &str| {
+        let dir = tmp.0.join(name);
+        std::fs::create_dir_all(dir.join(".oms/plan")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(dir.join(".git/index"), "index\n").unwrap();
+        std::fs::write(dir.join(".oms/plan/tasks.json"), "{}\n").unwrap();
+        dir
+    };
+    let alpha = make_checkout("alpha");
+    let beta = make_checkout("beta");
+    let missing_checkout = tmp.0.join("missing-checkout");
+    let alpha_before = tree_entries(&alpha);
+    let beta_before = tree_entries(&beta);
+
+    let cfg_dir = source.join("test-config/oh-my-setting");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let map_path = cfg_dir.join("desktop-projects.json");
+    let write_map = |val: Value| {
+        std::fs::write(&map_path, val.to_string()).unwrap();
+        std::fs::set_permissions(&map_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    write_map(json!({"alpha": alpha, "beta": beta, "gone": missing_checkout}));
+
+    // cards absent and cards: false are byte-for-byte identical.
+    let plain = c.tool("oms_list_projects", json!({}));
+    let false_cards = c.tool("oms_list_projects", json!({"cards": false}));
+    assert_eq!(
+        plain["result"]["content"][0]["text"],
+        false_cards["result"]["content"][0]["text"]
+    );
+    assert_eq!(
+        plain["result"]["structuredContent"],
+        false_cards["result"]["structuredContent"]
+    );
+    assert!(plain["result"]["structuredContent"].get("cards").is_none());
+
+    // Trapped server: cards: true returns missing/unavailable immediately while background refresh is gated,
+    // without spawning git, gh, or ssh, and without running oms on the request path.
+    let bg_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:00:00Z",
+            "branch": "main",
+            "git": {"available": true, "branch": "main", "dirty": false},
+            "goal": "Initial background goal",
+            "planProgress": {"verified": 2, "total": 4},
+            "attention": [{"summary": "Review PR"}],
+            "nextStep": {"id": "review", "summary": "Review pending PR", "scope": "repository"},
+            "active": 3,
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [
+                {"id": "main-1", "tool": "panel-main", "provider": "agy", "updated": "2026-11-27T06:00:00Z"},
+                {"id": "worker-b", "tool": "peer-delegate", "provider": "claude", "role": "reviewer", "created": "2026-11-27T05:56:00Z"},
+                {"id": "worker-a", "tool": "peer-delegate", "provider": "codex", "role": "impl", "created": "2026-11-27T05:55:00Z"}
+            ],
+            "degraded": false
+        }
+    });
+    fixture_settings(
+        &source,
+        json!({"snapshotGate": true, "stdout": bg_snap.to_string()}),
+    );
+    let mut trapped = spawn_trapped("mcp-app", false);
+    let initial_cards_reply = trapped.tool("oms_list_projects", json!({"cards": true}));
+    good(&initial_cards_reply);
+    assert!(!trap_marker.exists(), "git/gh/ssh must never spawn");
+    let initial_cards = payload(&initial_cards_reply)["cards"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(initial_cards.len(), 3);
+    assert_eq!(initial_cards[0]["alias"], "alpha");
+    assert_eq!(initial_cards[0]["state"], "missing");
+    assert_eq!(initial_cards[0]["main"], Value::Null);
+    assert_eq!(initial_cards[0]["crew"], json!([]));
+    assert_eq!(initial_cards[0]["crewTotal"], 0);
+    assert_eq!(initial_cards[1]["alias"], "beta");
+    assert_eq!(initial_cards[1]["state"], "missing");
+    assert_eq!(initial_cards[2]["alias"], "gone");
+    assert_eq!(initial_cards[2]["state"], "unavailable");
+    assert_eq!(initial_cards[2]["main"], Value::Null);
+    assert_eq!(initial_cards[2]["crew"], json!([]));
+    assert_eq!(initial_cards[2]["crewTotal"], 0);
+
+    // Verify cards absent remains byte-for-byte unchanged alongside cached cards once refreshed.
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        let cur = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        cur["cards"][0]["state"] == "fresh" && cur["cards"][1]["state"] == "fresh"
+    });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    let _ = std::fs::remove_file(source.join("snapshot-ready"));
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+
+    // Fresh cards: zero subprocesses at all (neither oms nor git/gh/ssh).
+    let fresh_reply = trapped.tool("oms_list_projects", json!({"cards": true}));
+    good(&fresh_reply);
+    assert!(!source.join("last-call.json").exists());
+    assert!(!trap_marker.exists());
+    let fresh_cards = payload(&fresh_reply)["cards"].as_array().unwrap().clone();
+    assert_eq!(fresh_cards[0]["state"], "fresh");
+    assert_eq!(fresh_cards[0]["goal"], "Initial background goal");
+    assert_eq!(fresh_cards[0]["plan"], json!({"done": 2, "total": 4}));
+    assert_eq!(fresh_cards[0]["attention"], 1);
+    assert_eq!(fresh_cards[0]["next"], "Review pending PR");
+    assert_eq!(fresh_cards[0]["active"], 3);
+    assert_eq!(fresh_cards[0]["main"], "antigravity");
+    assert_eq!(fresh_cards[0]["crewTotal"], 2);
+    let alpha_crew = fresh_cards[0]["crew"].as_array().unwrap();
+    assert_eq!(alpha_crew.len(), 2);
+    assert_eq!(alpha_crew[0]["provider"], "codex");
+    assert_eq!(alpha_crew[0]["role"], "impl");
+    assert_eq!(alpha_crew[1]["provider"], "claude");
+    assert_eq!(alpha_crew[1]["role"], "reviewer");
+    for (entry, raw_id) in alpha_crew.iter().zip(["worker-a", "worker-b"]) {
+        let cid = entry["id"].as_str().unwrap();
+        assert_eq!(cid.len(), 12);
+        assert!(
+            cid.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+        assert_ne!(cid, raw_id);
+    }
+    // Same attempt ids produce identical crew[].id across both projects and server processes.
+    assert_eq!(fresh_cards[0]["crew"], fresh_cards[1]["crew"]);
+    assert_eq!(fresh_cards[0]["dirty"], false);
+    assert_eq!(fresh_cards[0]["degraded"], false);
+    assert_eq!(fresh_cards[2]["state"], "unavailable");
+
+    // Cache files are 0600 inside a 0700 directory, and nothing is written in any checkout.
+    let cache_dir = source.join("test-cache/oh-my-setting/project-cards");
+    assert_eq!(
+        std::fs::symlink_metadata(&cache_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let cached_files: Vec<_> = std::fs::read_dir(&cache_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(cached_files.len(), 2);
+    for file in &cached_files {
+        assert_eq!(
+            std::fs::symlink_metadata(file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(tree_entries(&alpha), alpha_before);
+    assert_eq!(tree_entries(&beta), beta_before);
+
+    // Immediately after a successful refresh, future/rewritten marker mtimes do not re-trigger a
+    // refresh within the 60 s success interval on the same server process.
+    let cooldown_now = std::time::SystemTime::now();
+    set_mtime(
+        &alpha.join(".git/index"),
+        cooldown_now + Duration::from_secs(3600),
+    );
+    let cooldown_check = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+    assert_eq!(cooldown_check["cards"][0]["state"], "stale");
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(!source.join("last-call.json").exists());
+    assert!(!source.join("snapshot-ready").exists());
+    assert!(!trap_marker.exists());
+    set_mtime(
+        &alpha.join(".git/index"),
+        cooldown_now - Duration::from_secs(60),
+    );
+    drop(trapped);
+
+    // Fallback to ~/.cache/oh-my-setting/project-cards when XDG_CACHE_HOME is unset.
+    let fake_home = tmp.0.join("fallback-home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+    fixture_settings(&source, json!({"stdout": bg_snap.to_string()}));
+    let mut home_fallback = Client::from_child(
+        Command::new(std::env::current_exe().unwrap())
+            .env_remove("PYTHONUTF8")
+            .env_remove("PYTHONIOENCODING")
+            .arg("--stdio")
+            .arg(&source)
+            .arg(&repo)
+            .arg("mcp-app")
+            .env_remove("OMS_PANEL_REPO")
+            .env_remove("OMS_PANEL_PROJECTS")
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env_remove("OMS_PANEL_PROJECTS_FILE")
+            .env_remove("XDG_CACHE_HOME")
+            .env("HOME", &fake_home)
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .arg("0")
+            .env("OMS_HARNESS_CHILD", "0")
+            .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    good(&home_fallback.tool("oms_panel_snapshot", json!({"project": "alpha"})));
+    good(&home_fallback.tool("oms_panel_snapshot", json!({"project": "beta"})));
+    let fallback_cache = fake_home.join(".cache/oh-my-setting/project-cards");
+    assert_eq!(
+        std::fs::symlink_metadata(&fallback_cache)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        payload(&home_fallback.tool("oms_list_projects", json!({"cards": true})))["cards"][0]["state"],
+        "fresh"
+    );
+    drop(home_fallback);
+    fixture_settings(
+        &source,
+        json!({"snapshotGate": true, "stdout": bg_snap.to_string()}),
+    );
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+
+    // Stat-only stale states from age (>10m), .git/HEAD, .git/index, and .oms/plan, with gated refresh.
+    let now = std::time::SystemTime::now();
+    let mut trapped = spawn_trapped("mcp-app", false);
+    for file in &cached_files {
+        set_mtime(file, now - Duration::from_secs(605));
+    }
+    let aged = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+    assert_eq!(aged["cards"][0]["state"], "stale");
+    assert_eq!(aged["cards"][1]["state"], "stale");
+    assert!(!trap_marker.exists());
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        let cur = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        cur["cards"][0]["state"] == "fresh" && cur["cards"][1]["state"] == "fresh"
+    });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    let _ = std::fs::remove_file(source.join("snapshot-ready"));
+    drop(trapped);
+
+    let mut trapped = spawn_trapped("mcp-app", false);
+    let marker_base = std::time::SystemTime::now();
+    for file in &cached_files {
+        set_mtime(file, marker_base - Duration::from_secs(30));
+    }
+    for (idx, marker) in [(0usize, ".git/HEAD"), (1, ".git/index")] {
+        let target = if idx == 0 { &alpha } else { &beta };
+        set_mtime(&target.join(marker), marker_base - Duration::from_secs(10));
+        let check = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        assert_eq!(check["cards"][idx]["state"], "stale", "{marker}");
+        assert!(!trap_marker.exists());
+    }
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        let cur = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        cur["cards"][0]["state"] == "fresh" && cur["cards"][1]["state"] == "fresh"
+    });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    drop(trapped);
+
+    let mut trapped = spawn_trapped("mcp-app", false);
+    let plan_base = std::time::SystemTime::now();
+    set_mtime(&cached_files[0], plan_base - Duration::from_secs(30));
+    set_mtime(&cached_files[1], plan_base - Duration::from_secs(30));
+    for p in [
+        alpha.join(".git/HEAD"),
+        alpha.join(".git/index"),
+        beta.join(".git/HEAD"),
+        beta.join(".git/index"),
+        beta.join(".oms/plan"),
+        beta.join(".oms/plan/tasks.json"),
+    ] {
+        set_mtime(&p, plan_base - Duration::from_secs(40));
+    }
+    set_mtime(
+        &alpha.join(".oms/plan"),
+        plan_base - Duration::from_secs(10),
+    );
+    let plan_stale = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+    assert_eq!(plan_stale["cards"][0]["state"], "stale");
+    assert_eq!(plan_stale["cards"][1]["state"], "fresh");
+    assert!(!trap_marker.exists());
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        payload(&trapped.tool("oms_list_projects", json!({"cards": true})))["cards"][0]["state"]
+            == "fresh"
+    });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    let _ = std::fs::remove_file(source.join("snapshot-ready"));
+
+    // Old cache record without main, crew, or crewTotal still loads cleanly.
+    let legacy_cache = json!({
+        "schema": 1,
+        "observedAt": "2026-11-27T06:00:00Z",
+        "branch": "main",
+        "dirty": false,
+        "goal": "Old format cached goal",
+        "plan": {"done": 1, "total": 2},
+        "attention": 0,
+        "next": "",
+        "active": 0,
+        "degraded": false
+    });
+    for file in &cached_files {
+        std::fs::write(file, legacy_cache.to_string()).unwrap();
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let legacy_reply = trapped.tool("oms_list_projects", json!({"cards": true}));
+    good(&legacy_reply);
+    let legacy_cards = payload(&legacy_reply)["cards"].as_array().unwrap().clone();
+    assert_eq!(legacy_cards[0]["state"], "fresh");
+    assert_eq!(legacy_cards[0]["goal"], "Old format cached goal");
+    assert_eq!(legacy_cards[0]["main"], Value::Null);
+    assert_eq!(legacy_cards[0]["crew"], json!([]));
+    assert_eq!(legacy_cards[0]["crewTotal"], 0);
+    assert!(!trap_marker.exists());
+
+    // Verify conversationMain fallback, unknown provider -> null, crew order, and cap of 3 with crewTotal.
+    let crew_cap_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:08:00Z",
+            "goal": "Short",
+            "conversationMain": {"provider": "claude"},
+            "activeAttempts": [
+                {"id": "worker-d", "tool": "peer-delegate", "provider": "codex", "role": "fourth", "created": "2026-11-27T06:04:00Z"},
+                {"id": "worker-b", "tool": "peer-delegate", "provider": "agy", "role": "rev", "created": "2026-11-27T06:02:00Z"},
+                {"id": "worker-a", "tool": "peer-delegate", "provider": "codex", "role": "dev", "created": "2026-11-27T06:01:00Z"},
+                {"id": "worker-c", "tool": "peer-delegate", "provider": "pi", "role": "", "created": "2026-11-27T06:02:00Z"}
+            ],
+            "degraded": false
+        }
+    });
+    fixture_settings(&source, json!({"stdout": crew_cap_snap.to_string()}));
+    good(&c.tool("oms_panel_snapshot", json!({"project": "alpha"})));
+    let unknown_main_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:08:00Z",
+            "goal": "Unknown main",
+            "conversationMain": {"provider": "pi"},
+            "degraded": false
+        }
+    });
+    fixture_settings(&source, json!({"stdout": unknown_main_snap.to_string()}));
+    good(&c.tool("oms_panel_snapshot", json!({"project": "beta"})));
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+    let cap_cards = payload(&trapped.tool("oms_list_projects", json!({"cards": true})))["cards"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(cap_cards[0]["main"], "claude");
+    assert_eq!(cap_cards[0]["crewTotal"], 4);
+    let capped_crew = cap_cards[0]["crew"].as_array().unwrap();
+    assert_eq!(capped_crew.len(), 3);
+    assert_eq!(capped_crew[0]["provider"], "codex");
+    assert_eq!(capped_crew[0]["role"], "dev");
+    assert_eq!(capped_crew[0]["id"], alpha_crew[0]["id"]);
+    assert_eq!(capped_crew[1]["provider"], "antigravity");
+    assert_eq!(capped_crew[1]["role"], "rev");
+    assert_eq!(capped_crew[1]["id"], alpha_crew[1]["id"]);
+    assert_eq!(capped_crew[2]["provider"], Value::Null);
+    assert_eq!(capped_crew[2]["role"], Value::Null);
+    assert_eq!(cap_cards[1]["main"], Value::Null);
+    assert_eq!(cap_cards[1]["crew"], json!([]));
+    assert_eq!(cap_cards[1]["crewTotal"], 0);
+    fixture_settings(
+        &source,
+        json!({"snapshotGate": true, "stdout": bg_snap.to_string()}),
+    );
+
+    // Restore bg_snap into beta via aged refresh before testing withheld cards.
+    drop(trapped);
+    let mut trapped = spawn_trapped("mcp-app", false);
+    for file in &cached_files {
+        set_mtime(
+            file,
+            std::time::SystemTime::now() - Duration::from_secs(605),
+        );
+    }
+    let _ = trapped.tool("oms_list_projects", json!({"cards": true}));
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        let cur = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        cur["cards"][0]["state"] == "fresh"
+            && cur["cards"][0]["main"] == "antigravity"
+            && cur["cards"][1]["state"] == "fresh"
+            && cur["cards"][1]["main"] == "antigravity"
+    });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    let _ = std::fs::remove_file(source.join("snapshot-ready"));
+
+    // Write-through + per-card outbound scan: tripping role or goal withholds only that project
+    // with no main, crew, or crewTotal.
+    let runtime_tripped = ["gh", "p_", &"m".repeat(36)].concat();
+    let bad_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:10:00Z",
+            "branch": "main",
+            "git": {"available": true, "branch": "main", "dirty": false},
+            "goal": "Clean goal with tripping worker role",
+            "conversationMain": {"provider": "claude"},
+            "activeAttempts": [
+                {"id": "w1", "tool": "peer-delegate", "provider": "codex", "role": format!("r-{runtime_tripped}")}
+            ],
+            "degraded": false
+        }
+    });
+    fixture_settings(&source, json!({"stdout": bad_snap.to_string()}));
+    bad(
+        &c.tool("oms_panel_snapshot", json!({"project": "alpha"})),
+        "outbound scan",
+    );
+    let mixed = trapped.tool("oms_list_projects", json!({"cards": true}));
+    good(&mixed);
+    assert!(!mixed.to_string().contains(&runtime_tripped[..16]));
+    let mixed_cards = payload(&mixed)["cards"].as_array().unwrap().clone();
+    assert_eq!(
+        mixed_cards[0],
+        json!({"alias": "alpha", "state": "withheld"})
+    );
+    assert_eq!(mixed_cards[1]["alias"], "beta");
+    assert_eq!(mixed_cards[1]["state"], "fresh");
+    assert_eq!(mixed_cards[1]["goal"], "Initial background goal");
+    assert_eq!(mixed_cards[1]["main"], "antigravity");
+    assert_eq!(mixed_cards[2]["state"], "unavailable");
+
+    // Card areas: explicit sidecar wins over origin & marker; origin owner (https, host:owner,
+    // linked worktree); marker fallback; null otherwise; symlinked .git/config outside checkout
+    // is not read; sidecar private & strict parse; inline OMS_PANEL_PROJECTS ignores sidecar.
+    let area_root = tmp.0.join("area-cases");
+    let explicit_repo = make_checkout("area-cases/explicit");
+    std::fs::write(
+        explicit_repo.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://github.com/ignored-owner/repo.git\n",
+    )
+    .unwrap();
+    std::fs::write(explicit_repo.join("Cargo.toml"), "[package]\n").unwrap();
+
+    let origin_https = make_checkout("area-cases/origin-https");
+    std::fs::write(
+        origin_https.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://github.com/octo-team/svc.git\n",
+    )
+    .unwrap();
+    std::fs::write(origin_https.join("package.json"), "{}\n").unwrap();
+
+    let origin_scp = make_checkout("area-cases/origin-scp");
+    std::fs::write(
+        origin_scp.join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@git.example.test:scp-owner/svc.git\n",
+    )
+    .unwrap();
+
+    let wt_parent = make_checkout("area-cases/wt-parent");
+    std::fs::write(
+        wt_parent.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://github.com/wt-org/svc.git\n",
+    )
+    .unwrap();
+    let wt_gitdir = wt_parent.join(".git/worktrees/linked");
+    std::fs::create_dir_all(&wt_gitdir).unwrap();
+    std::fs::write(wt_gitdir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(wt_gitdir.join("commondir"), "../..\n").unwrap();
+    let linked_repo = area_root.join("linked");
+    std::fs::create_dir_all(linked_repo.join(".oms")).unwrap();
+    std::fs::write(
+        linked_repo.join(".git"),
+        format!("gitdir: {}\n", wt_gitdir.display()),
+    )
+    .unwrap();
+
+    let rust_repo = make_checkout("area-cases/rust-marker");
+    std::fs::write(rust_repo.join("Cargo.toml"), "[package]\n").unwrap();
+    let py_repo = make_checkout("area-cases/py-marker");
+    std::fs::write(py_repo.join("pyproject.toml"), "[project]\n").unwrap();
+    let none_repo = make_checkout("area-cases/none-marker");
+
+    let outside_cfg = tmp.0.join("outside-gitconfig");
+    std::fs::write(
+        &outside_cfg,
+        "[remote \"origin\"]\n\turl = https://github.com/forbidden-outside/repo.git\n",
+    )
+    .unwrap();
+    let sym_repo = make_checkout("area-cases/sym-outside");
+    std::os::unix::fs::symlink(&outside_cfg, sym_repo.join(".git/config")).unwrap();
+
+    let areas_path = cfg_dir.join("desktop-project-areas.json");
+    let write_areas = |raw: &str, mode: u32| {
+        std::fs::write(&areas_path, raw).unwrap();
+        std::fs::set_permissions(&areas_path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    write_map(json!({
+        "a-explicit": explicit_repo,
+        "b-https": origin_https,
+        "c-scp": origin_scp,
+        "d-worktree": linked_repo,
+        "e-rust": rust_repo,
+        "f-python": py_repo,
+        "g-none": none_repo,
+        "h-symlink": sym_repo,
+    }));
+    write_areas(&json!({"a-explicit": "한글 코어"}).to_string(), 0o600);
+
+    let area_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {"scope": "repository", "updated": "2026-11-27T06:12:00Z", "goal": "Area check", "degraded": false}
+    });
+    fixture_settings(&source, json!({"stdout": area_snap.to_string()}));
+    for alias_name in [
+        "a-explicit",
+        "b-https",
+        "c-scp",
+        "d-worktree",
+        "e-rust",
+        "f-python",
+        "g-none",
+        "h-symlink",
+    ] {
+        good(&c.tool("oms_panel_snapshot", json!({"project": alias_name})));
+    }
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+    let area_reply = trapped.tool("oms_list_projects", json!({"cards": true}));
+    good(&area_reply);
+    assert!(!source.join("last-call.json").exists());
+    assert!(!trap_marker.exists());
+    let area_cards = payload(&area_reply)["cards"].as_array().unwrap().clone();
+    let by_alias: std::collections::BTreeMap<_, _> = area_cards
+        .iter()
+        .map(|card| (card["alias"].as_str().unwrap(), card["area"].clone()))
+        .collect();
+    assert_eq!(by_alias["a-explicit"], json!("한글 코어"));
+    assert_eq!(by_alias["b-https"], json!("octo-team"));
+    assert_eq!(by_alias["c-scp"], json!("scp-owner"));
+    assert_eq!(by_alias["d-worktree"], json!("wt-org"));
+    assert_eq!(by_alias["e-rust"], json!("rust"));
+    assert_eq!(by_alias["f-python"], json!("python"));
+    assert_eq!(by_alias["g-none"], Value::Null);
+    assert_eq!(by_alias["h-symlink"], Value::Null);
+
+    // Inline OMS_PANEL_PROJECTS ignores the sidecar file on disk and guesses areas instead.
+    let inline_map = json!({"a-explicit": explicit_repo}).to_string();
+    let mut inline_client = Client::from_child(
+        Command::new(std::env::current_exe().unwrap())
+            .env_remove("PYTHONUTF8")
+            .env_remove("PYTHONIOENCODING")
+            .arg("--stdio")
+            .arg(&source)
+            .arg(&repo)
+            .arg("mcp-app")
+            .arg("0")
+            .env_remove("OMS_PANEL_REPO")
+            .env("OMS_PANEL_PROJECTS", &inline_map)
+            .env_remove("OMS_PANEL_PROJECTS_FILE")
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env("PATH", &trapped_path)
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .env("XDG_CACHE_HOME", source.join("test-cache"))
+            .env("OMS_HARNESS_CHILD", "0")
+            .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    let inline_cards = payload(&inline_client.tool("oms_list_projects", json!({"cards": true})));
+    assert_eq!(inline_cards["cards"][0]["area"], "ignored-owner");
+
+    // Non-private (0644) and malformed sidecars are refused on cards:true.
+    write_areas(r#"{"a-explicit":"rust"}"#, 0o644);
+    bad(
+        &trapped.tool("oms_list_projects", json!({"cards": true})),
+        "area map",
+    );
+    for malformed in [
+        r#"{"a-explicit":"one","a-explicit":"two"}"#,
+        r#"{"a-explicit":1}"#,
+        r#"{"a-explicit":"bad/slash"}"#,
+    ] {
+        write_areas(malformed, 0o600);
+        bad(
+            &trapped.tool("oms_list_projects", json!({"cards": true})),
+            "area map",
+        );
+    }
+    let _ = std::fs::remove_file(&areas_path);
+
+    // 128-alias map fixture with 24-byte areas and 3 crew per card stays strictly below OUTPUT_LIMIT and per_card_cap.
+    let rich_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:15:00Z",
+            "branch": "feature/overview-cards-bounded-128",
+            "git": {"available": true, "branch": "feature/overview-cards-bounded-128", "dirty": true},
+            "goal": "G".repeat(500),
+            "planProgress": {"verified": 12, "total": 24},
+            "attention": [{"summary": "a"}, {"summary": "b"}, {"summary": "c"}],
+            "nextStep": {"id": "step", "summary": "N".repeat(400), "scope": "repository"},
+            "active": 4,
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [
+                {"id": "main-rich", "tool": "panel-main", "provider": "agy", "updated": "2026-11-27T06:15:00Z"},
+                {"id": "crew-3", "tool": "peer-delegate", "provider": "agy", "role": "security-reviewer-worker", "created": "2026-11-27T06:13:00Z"},
+                {"id": "crew-1", "tool": "peer-delegate", "provider": "codex", "role": "backend-implementer-lead", "created": "2026-11-27T06:11:00Z"},
+                {"id": "crew-2", "tool": "peer-delegate", "provider": "claude", "role": "verification-specialist", "created": "2026-11-27T06:12:00Z"}
+            ],
+            "degraded": true
+        }
+    });
+    let mut map_128 = serde_json::Map::new();
+    let mut areas_128 = serde_json::Map::new();
+    let area_24 = "area-twenty-four-bytes01";
+    assert_eq!(area_24.len(), 24);
+    let root_128 = tmp.0.join("c128");
+    for i in 0..128 {
+        let alias_name = format!("p{i:03}");
+        let dir = root_128.join(&alias_name);
+        std::fs::create_dir_all(dir.join(".oms")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        map_128.insert(alias_name.clone(), json!(dir));
+        areas_128.insert(alias_name, json!(area_24));
+    }
+    write_map(Value::Object(map_128));
+    write_areas(&Value::Object(areas_128).to_string(), 0o600);
+
+    // First check compact 128 cards where every card retains its 24-byte area within OUTPUT_LIMIT.
+    let compact_128_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:15:00Z",
+            "branch": "main",
+            "git": {"available": true, "branch": "main", "dirty": false},
+            "goal": "Short goal",
+            "conversationMain": {"provider": "codex"},
+            "degraded": false
+        }
+    });
+    fixture_settings(&source, json!({"stdout": compact_128_snap.to_string()}));
+    for i in 0..128 {
+        good(&c.tool("oms_panel_snapshot", json!({"project": format!("p{i:03}")})));
+    }
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+    let worst_id = json!("\u{1}".repeat(1024));
+    let req_128 = json!({
+        "jsonrpc": "2.0",
+        "id": worst_id,
+        "method": "tools/call",
+        "params": {"name": "oms_list_projects", "arguments": {"cards": true}}
+    });
+    trapped.raw(format!("{req_128}\n").as_bytes());
+    let compact_wire_128 = trapped.read_line();
+    assert!(
+        compact_wire_128.ends_with('\n') && compact_wire_128.len() < 60_000,
+        "compact 128-alias wire bytes {} exceeded OUTPUT_LIMIT",
+        compact_wire_128.len()
+    );
+    let compact_parsed_128: Value = serde_json::from_str(&compact_wire_128).unwrap();
+    good(&compact_parsed_128);
+    for card in compact_parsed_128["result"]["structuredContent"]["cards"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(card["area"], area_24);
+    }
+
+    // Then check maximal 128 cards (rich_snap) with 24-byte areas configured.
+    fixture_settings(&source, json!({"stdout": rich_snap.to_string()}));
+    for i in 0..128 {
+        good(&c.tool("oms_panel_snapshot", json!({"project": format!("p{i:03}")})));
+    }
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+    trapped.raw(format!("{req_128}\n").as_bytes());
+    let wire_128 = trapped.read_line();
+    assert!(
+        wire_128.ends_with('\n') && wire_128.len() < 60_000,
+        "128-alias wire bytes {} exceeded OUTPUT_LIMIT",
+        wire_128.len()
+    );
+    let parsed_128: Value = serde_json::from_str(&wire_128).unwrap();
+    good(&parsed_128);
+    let mut base_128 = parsed_128["result"]["structuredContent"].clone();
+    base_128.as_object_mut().unwrap().remove("cards");
+    let available_128 = 60_000usize
+        .saturating_sub(1024 * 6 + 256)
+        .saturating_sub(base_128.to_string().len())
+        .saturating_sub(256);
+    let per_card_cap_128 = (available_128 / 128).saturating_sub(2).min(400);
+    let cards_128 = parsed_128["result"]["structuredContent"]["cards"]
+        .as_array()
+        .unwrap();
+    assert_eq!(cards_128.len(), 128);
+    for (i, card) in cards_128.iter().enumerate() {
+        assert_eq!(card["alias"], format!("p{i:03}"));
+        assert_eq!(card["state"], "fresh");
+        assert_eq!(card["main"], "antigravity");
+        assert_eq!(card["crewTotal"], 3);
+        assert!(card["crew"].is_array());
+        assert!(
+            card.to_string().len() <= per_card_cap_128,
+            "card len {} exceeded per_card_cap {}",
+            card.to_string().len(),
+            per_card_cap_128
+        );
+    }
+    assert!(!source.join("last-call.json").exists());
+    assert!(!trap_marker.exists());
 }
 // Execute only the packaged remote shell command in a synthetic host. Its local
 // oms shim opens this fixture's real MCP server with the requested profile.
@@ -1049,10 +2177,34 @@ fn desktop_reviewed_issue() {
         tool(status)["_meta"]["ui"]["visibility"],
         json!(["app", "model"])
     );
+    let hashed = format!("{:x}", Sha256::digest(thread.as_bytes()))[..32].to_owned();
+    let matched_main = json!({"source":"room-session","provider":"codex","harness":"codex","participant":"codex-main","room":"room-main","state":"joined","incomplete":false});
     bad(
         &c.call("tools/call", params(record_tool, &args, &json!({}))),
-        "bound conversation",
+        "This conversation is not bound to project demo. Open the OMS panel in that project's conversation to act on it.",
     );
+    assert!(!source.join("last-call.json").exists());
+    fixture_settings(&source, json!({"stdout":receipt.to_string()}));
+    bad(
+        &c.call("tools/call", params(record_tool, &args, &host)),
+        "This conversation is not bound to project demo. Open the OMS panel in that project's conversation to act on it.",
+    );
+    assert_eq!(record(&source)["argv"][0], "dashboard");
+    let catalog_bindings = json!({
+        repo.to_str().unwrap(): {
+            &hashed: {
+                "conversationBinding": "matched",
+                "conversationMain": matched_main
+            }
+        }
+    });
+    let configure = |data: &Value| {
+        fixture_settings(
+            &source,
+            json!({"stdout":data.to_string(),"catalogBindings":catalog_bindings}),
+        );
+    };
+    configure(&receipt);
     for (key, val) in [
         ("issue", "elsewhere"),
         ("issue", "org/..#7"),
@@ -1068,6 +2220,7 @@ fn desktop_reviewed_issue() {
             c.call("tools/call", params(record_tool, &wrong, &host))["result"]["isError"],
             true
         );
+        assert_eq!(record(&source)["argv"][0], "dashboard");
     }
     let mut forged = args.clone();
     forged["conversationDigest"] = json!("b".repeat(32));
@@ -1079,19 +2232,18 @@ fn desktop_reviewed_issue() {
         &c.call("tools/call", params(status, &args, &host)),
         "Choose an exact",
     );
+    std::fs::remove_file(source.join("last-call.json")).unwrap();
     let mut child = Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "1".as_ref());
     bad(
         &child.call("tools/call", params(record_tool, &args, &host)),
         "parent app",
     );
     assert!(!source.join("last-call.json").exists());
-    let configure = |data: &Value| fixture_settings(&source, json!({"stdout":data.to_string()}));
     configure(&receipt);
     assert_eq!(
         payload(&c.call("tools/call", params(record_tool, &args, &host))),
         receipt
     );
-    let hashed = format!("{:x}", Sha256::digest(thread.as_bytes()))[..32].to_owned();
     assert_eq!(
         record(&source)["argv"],
         json!([
@@ -1177,6 +2329,18 @@ fn desktop_reviewed_issue() {
     assert!(!error.to_string().contains("private fixture text"));
     let other = t.0.join("other");
     std::fs::create_dir_all(other.join(".oms")).unwrap();
+    std::fs::write(&map, json!({"demo":&repo,"other":&other}).to_string()).unwrap();
+    std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+    configure(&receipt);
+    let mut cross_alias = args.clone();
+    cross_alias["project"] = json!("other");
+    bad(
+        &c.call("tools/call", params(record_tool, &cross_alias, &host)),
+        "This conversation is not bound to project other. Open the OMS panel in that project's conversation to act on it.",
+    );
+    assert_eq!(record(&source)["argv"][0], "dashboard");
+    assert_eq!(record(&source)["argv"][2], json!(other));
+    bind(&repo);
     fixture_settings(&source, json!({"hold":true,"stdout":receipt.to_string()}));
     let frame = json!({"id":915,"jsonrpc":"2.0","method":"tools/call","params":params(status,&address,&host)});
     std::fs::remove_file(source.join("last-call.json")).unwrap();
@@ -3201,8 +4365,9 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 27);
+    assert_eq!(tools.as_array().unwrap().len(), 28);
     assert_eq!(tools[0]["name"], "oms_open_panel");
+    assert_eq!(tools[1]["name"], "oms_open_home");
     assert_eq!(
         tools[0]["description"],
         "Open the OMS panel (expands beside or over the conversation when the host allows it)."
@@ -3245,8 +4410,9 @@ fn conversation_panel() {
         json!([])
     );
     let resources = c.call("resources/list", json!({}))["result"]["resources"].clone();
-    assert_eq!(resources.as_array().unwrap().len(), 1);
+    assert_eq!(resources.as_array().unwrap().len(), 2);
     assert_eq!(resources[0]["uri"], *uri);
+    assert_eq!(resources[1]["uri"], "ui://oms/home/v1.html");
     let read = |c: &mut Client, uri: &Value| {
         c.call("resources/read", json!({"uri":uri}))["result"]["contents"][0].clone()
     };
@@ -4239,7 +5405,43 @@ fn conversation_panel() {
     );
     let mut routed = start;
     routed["project"] = json!("demo");
-    good(&c.tool("oms_start_main", routed.clone()));
+    let expected_demo_refusal = "This conversation is not bound to project demo. Open the OMS panel in that project's conversation to act on it.";
+    std::fs::remove_file(source.join("last-call.json")).unwrap();
+    bad(
+        &c.tool("oms_start_main", routed.clone()),
+        expected_demo_refusal,
+    );
+    assert!(!source.join("last-call.json").exists());
+    bad(
+        &c.call(
+            "tools/call",
+            json!({"name":"oms_start_main","arguments":routed,"_meta":{"threadId":thread}}),
+        ),
+        expected_demo_refusal,
+    );
+    assert_eq!(record(&source)["argv"][0], "dashboard");
+    {
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(thread.as_bytes()));
+        fixture_settings(
+            &source,
+            json!({
+                "stdout": json!({"status":"started","provider":"codex","room":room,"attempt":"native-main"}).to_string(),
+                "catalogBindings": {
+                    repo.to_str().unwrap(): {
+                        &digest[..32]: {
+                            "conversationBinding": "matched",
+                            "conversationMain": expected_main
+                        }
+                    }
+                }
+            }),
+        );
+    }
+    good(&c.call(
+        "tools/call",
+        json!({"name":"oms_start_main","arguments":routed,"_meta":{"threadId":thread}}),
+    ));
     let recovered = json!({"requestId":routed["requestId"],"room":room,"status":"recorded","attempt":"native-main","state":"done","provider":"codex","terminal":true});
     fixture_settings(&source, json!({"stdout":recovered.to_string()}));
     assert_eq!(
@@ -4266,6 +5468,901 @@ fn conversation_panel() {
         &c.tool("oms_list_projects", json!({})),
         "Invalid OMS project map",
     );
+}
+
+fn catalog_write_binding_boundaries() {
+    use sha2::{Digest, Sha256};
+    use std::collections::BTreeSet;
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = Temp::new();
+    let source = tmp.source();
+    let repo_a = tmp.repo();
+    let repo_b = tmp.0.join("repo-b");
+    let repo_pin = tmp.0.join("repo-pin");
+    for checkout in [&repo_a, &repo_b, &repo_pin] {
+        std::fs::create_dir_all(checkout.join(".oms")).unwrap();
+    }
+
+    let config_dir = source.join("test-config/oh-my-setting");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let map = config_dir.join("desktop-projects.json");
+    std::fs::write(&map, json!({"alpha": &repo_a, "beta": &repo_b}).to_string()).unwrap();
+    std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let mut c = Client::with_depth(
+        &source,
+        &repo_a,
+        "chatgpt-panel",
+        false,
+        false,
+        "0".as_ref(),
+    );
+    let listed = c.call("tools/list", json!({}));
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    let mut write_tools = Vec::new();
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap().to_owned();
+        let read_only = tool["annotations"]["readOnlyHint"]
+            .as_bool()
+            .expect("every panel tool must declare boolean readOnlyHint");
+        if !read_only {
+            assert!(
+                tool["inputSchema"]["properties"].get("project").is_some(),
+                "write tool {name} must accept project alias"
+            );
+            write_tools.push(name);
+        }
+    }
+    let expected_write_set: BTreeSet<&str> = [
+        "oms_start_main",
+        "oms_decide_approval",
+        "oms_assign_provider",
+        "oms_send_lead_message",
+        "oms_stop_lead_message",
+        "oms_update_lead_settings",
+        "oms_open_lead_conversations",
+        "oms_record_reviewed_issue",
+        "oms_prepare_lead_plan_context",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        write_tools
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        expected_write_set
+    );
+
+    let thread_a = "01900000-0000-7000-8000-0000000000bb";
+    let thread_unbound = "01900000-0000-7000-8000-0000000000cc";
+    let digest_a = format!("{:x}", Sha256::digest(thread_a.as_bytes()))[..32].to_owned();
+    let matched_main = json!({
+        "source": "room-session",
+        "provider": "codex",
+        "harness": "codex",
+        "participant": "codex-main",
+        "room": "lead-room",
+        "state": "joined",
+        "incomplete": false
+    });
+    let expected_msg = |alias: &str| {
+        format!(
+            "This conversation is not bound to project {alias}. Open the OMS panel in that project's conversation to act on it."
+        )
+    };
+    let call_log_path = source.join("call-log.jsonl");
+    let reset_calls = || {
+        let _ = std::fs::remove_file(&call_log_path);
+        let _ = std::fs::remove_file(source.join("last-call.json"));
+    };
+    let logged_calls = || -> Vec<Value> {
+        std::fs::read_to_string(&call_log_path)
+            .ok()
+            .map(|raw| {
+                raw.lines()
+                    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let snapshot_tree = |root: &Path| -> Vec<String> {
+        fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            entries.sort();
+            for entry in entries {
+                let rel = entry
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                if entry.is_dir() {
+                    out.push(format!("{rel}/"));
+                    walk(base, &entry, out);
+                } else {
+                    out.push(format!(
+                        "{rel}:{}",
+                        std::fs::metadata(&entry).unwrap().len()
+                    ));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(root, root, &mut out);
+        out
+    };
+    let assert_exact_refusal = |reply: &Value, alias: &str, context: &str| {
+        assert_eq!(reply["result"]["isError"], true, "{context}: {reply}");
+        assert_eq!(
+            reply["result"]["content"][0]["text"].as_str(),
+            Some(expected_msg(alias).as_str()),
+            "{context}: {reply}"
+        );
+    };
+
+    let before_a = snapshot_tree(&repo_a);
+    let before_b = snapshot_tree(&repo_b);
+    let card_cache = source.join("test-cache/oh-my-setting/project-cards");
+
+    // 1. Catalog binding, no threadId (as in Claude/Antigravity or missing/invalid _meta):
+    // every readOnlyHint: false tool fails closed with zero subprocesses and zero state written.
+    fixture_settings(&source, json!({"recordAll": true}));
+    reset_calls();
+    for meta in [
+        Value::Null,
+        json!({}),
+        json!({"threadId": ""}),
+        json!({"threadId": "not-a-uuid"}),
+        json!({"threadId": "01900000-0000-7000-8000-0000000000BB"}),
+    ] {
+        for name in &write_tools {
+            let params = if meta.is_null() {
+                json!({"name": name, "arguments": {"project": "alpha"}})
+            } else {
+                json!({"name": name, "arguments": {"project": "alpha"}, "_meta": meta})
+            };
+            let reply = c.call("tools/call", params);
+            assert_exact_refusal(&reply, "alpha", name);
+        }
+    }
+    assert!(
+        logged_calls().is_empty(),
+        "missing/invalid threadId must not spawn oms"
+    );
+    assert_eq!(snapshot_tree(&repo_a), before_a);
+    assert_eq!(snapshot_tree(&repo_b), before_b);
+    assert!(!card_cache.exists());
+
+    // Inline OMS_PANEL_PROJECTS catalog behaves identically.
+    let inline_client_cmd = Command::new(std::env::current_exe().unwrap())
+        .env_remove("PYTHONUTF8")
+        .env_remove("PYTHONIOENCODING")
+        .arg("--stdio")
+        .arg(&source)
+        .arg(&repo_a)
+        .arg("chatgpt-panel")
+        .arg("0")
+        .env_remove("OMS_PANEL_REPO")
+        .env(
+            "OMS_PANEL_PROJECTS",
+            json!({"alpha": &repo_a, "beta": &repo_b}).to_string(),
+        )
+        .env_remove("OMS_PANEL_PROJECTS_FILE")
+        .env_remove("OMS_ROOM_PARTICIPANT")
+        .env("XDG_CONFIG_HOME", source.join("empty-config"))
+        .env("XDG_CACHE_HOME", source.join("test-cache"))
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut inline_client = Client::from_child(inline_client_cmd);
+    for name in &write_tools {
+        let reply = inline_client.call(
+            "tools/call",
+            json!({"name": name, "arguments": {"project": "alpha"}}),
+        );
+        assert_exact_refusal(&reply, "alpha", name);
+    }
+    drop(inline_client);
+    assert!(logged_calls().is_empty());
+
+    // 2. Catalog binding, write to an alias with no matched conversation (unconfirmed, ambiguous,
+    // forged conversationMain, or failing snapshot): every write tool refused, no state written.
+    let mut forged_main = matched_main.clone();
+    forged_main["provider"] = json!("claude");
+    for (label, binding_cfg) in [
+        (
+            "unconfirmed",
+            json!({"recordAll": true, "binding": {"conversationBinding": "unconfirmed", "conversationMain": null}}),
+        ),
+        (
+            "ambiguous",
+            json!({"recordAll": true, "binding": {"conversationBinding": "ambiguous", "conversationMain": null}}),
+        ),
+        (
+            "forged-main",
+            json!({"recordAll": true, "binding": {"conversationBinding": "matched", "conversationMain": forged_main}}),
+        ),
+        (
+            "snapshot-error",
+            json!({"recordAll": true, "dashboardExit": 2}),
+        ),
+    ] {
+        fixture_settings(&source, binding_cfg);
+        reset_calls();
+        for name in &write_tools {
+            let reply = c.call(
+                "tools/call",
+                json!({
+                    "name": name,
+                    "arguments": {"project": "alpha"},
+                    "_meta": {"threadId": thread_unbound}
+                }),
+            );
+            assert_exact_refusal(&reply, "alpha", &format!("{label}/{name}"));
+        }
+        let calls = logged_calls();
+        assert_eq!(calls.len(), write_tools.len(), "{label}");
+        assert!(
+            calls
+                .iter()
+                .all(|entry| entry["argv"][0] == "dashboard" && entry["argv"][2] == json!(repo_a)),
+            "{label}: {calls:?}"
+        );
+        assert_eq!(snapshot_tree(&repo_a), before_a);
+        assert_eq!(snapshot_tree(&repo_b), before_b);
+        assert!(!card_cache.exists());
+    }
+
+    // 3. Catalog binding, matched conversation for alias "alpha", write to alias "beta":
+    // every write tool refused (both minimal alias-only args and full valid per-tool args),
+    // and read tools remain unchanged across both aliases.
+    let key_a = payload(&c.tool("oms_list_projects", json!({})))["projectKeys"]["alpha"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let key_b = payload(&c.tool("oms_list_projects", json!({})))["projectKeys"]["beta"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let catalog_bindings = json!({
+        repo_a.to_str().unwrap(): {
+            &digest_a: {
+                "conversationBinding": "matched",
+                "conversationMain": matched_main
+            }
+        }
+    });
+    let full_write_args = |alias: &str, project_key: &str| -> Vec<(&'static str, Value)> {
+        vec![
+            (
+                "oms_start_main",
+                json!({
+                    "project": alias,
+                    "main": "codex",
+                    "goal": "Run bounded check",
+                    "requestId": "4d6acd01-bd18-4567-bf69-ea05fb048b27"
+                }),
+            ),
+            (
+                "oms_decide_approval",
+                json!({
+                    "project": alias,
+                    "id": "lead-room/q1",
+                    "version": 1,
+                    "digest": "a".repeat(64),
+                    "decision": "approve"
+                }),
+            ),
+            (
+                "oms_assign_provider",
+                json!({
+                    "project": alias,
+                    "room": "lead-room",
+                    "requestId": "5d6acd01-bd18-4567-bf69-ea05fb048b27",
+                    "provider": "claude",
+                    "title": "Check callers",
+                    "task": "Inspect callers"
+                }),
+            ),
+            (
+                "oms_open_lead_conversations",
+                json!({
+                    "project": alias,
+                    "room": "lead-room",
+                    "projectKey": project_key,
+                    "providers": ["codex"]
+                }),
+            ),
+            (
+                "oms_update_lead_settings",
+                json!({
+                    "project": alias,
+                    "projectKey": project_key,
+                    "room": "lead-room",
+                    "provider": "codex",
+                    "leadRequestId": "d0000000-0000-8000-8000-000000000000",
+                    "revision": "b".repeat(64),
+                    "model": "gpt-6-astra",
+                    "effort": "high"
+                }),
+            ),
+            (
+                "oms_send_lead_message",
+                json!({
+                    "project": alias,
+                    "projectKey": project_key,
+                    "room": "lead-room",
+                    "provider": "codex",
+                    "leadRequestId": "d0000000-0000-8000-8000-000000000000",
+                    "turnId": "10000000-0000-4000-8000-000000000001",
+                    "text": "Private fixture follow-up 1"
+                }),
+            ),
+            (
+                "oms_stop_lead_message",
+                json!({
+                    "project": alias,
+                    "projectKey": project_key,
+                    "room": "lead-room",
+                    "provider": "codex",
+                    "leadRequestId": "d0000000-0000-8000-8000-000000000000",
+                    "turnId": "10000000-0000-4000-8000-000000000001"
+                }),
+            ),
+            (
+                "oms_record_reviewed_issue",
+                json!({
+                    "project": alias,
+                    "room": "lead-room",
+                    "owner": "codex-main",
+                    "requestId": "40000000-0000-4000-8000-000000000001",
+                    "issue": "Org/repo#7",
+                    "sha256": "c".repeat(64)
+                }),
+            ),
+            (
+                "oms_prepare_lead_plan_context",
+                json!({
+                    "project": alias,
+                    "projectKey": project_key,
+                    "room": "lead-room",
+                    "provider": "codex",
+                    "leadRequestId": "d0000000-0000-8000-8000-000000000000",
+                    "turnId": "10000000-0000-4000-8000-000000000001",
+                    "answerPage": "",
+                    "answerSha256": "d".repeat(64),
+                    "offset": 0,
+                    "bytes": 4,
+                    "excerptSha256": "e".repeat(64),
+                    "excerpt": "test",
+                    "taskId": "reviewed-task",
+                    "taskSha256": "f".repeat(64),
+                    "executionProvider": "claude"
+                }),
+            ),
+        ]
+    };
+
+    fixture_settings(
+        &source,
+        json!({"recordAll": true, "catalogBindings": catalog_bindings}),
+    );
+    reset_calls();
+    for name in &write_tools {
+        let reply = c.call(
+            "tools/call",
+            json!({
+                "name": name,
+                "arguments": {"project": "beta"},
+                "_meta": {"threadId": thread_a}
+            }),
+        );
+        assert_exact_refusal(&reply, "beta", &format!("cross-minimal/{name}"));
+    }
+    for (name, args) in full_write_args("beta", &key_b) {
+        let reply = c.call(
+            "tools/call",
+            json!({
+                "name": name,
+                "arguments": args,
+                "_meta": {"threadId": thread_a}
+            }),
+        );
+        assert_exact_refusal(&reply, "beta", &format!("cross-full/{name}"));
+    }
+    let cross_calls = logged_calls();
+    assert_eq!(cross_calls.len(), write_tools.len() * 2);
+    assert!(
+        cross_calls
+            .iter()
+            .all(|entry| entry["argv"][0] == "dashboard" && entry["argv"][2] == json!(repo_b)),
+        "{cross_calls:?}"
+    );
+    assert_eq!(snapshot_tree(&repo_a), before_a);
+    assert_eq!(snapshot_tree(&repo_b), before_b);
+
+    // Read tools stay unchanged on a catalog binding across every registered project.
+    good(&c.tool("oms_open_home", json!({})));
+    assert_eq!(
+        registry_summary(&c.tool("oms_list_projects", json!({}))),
+        json!({"binding": "catalog", "projects": ["alpha", "beta"], "readOnly": false})
+    );
+    let cards_reply = c.tool("oms_list_projects", json!({"cards": true}));
+    good(&cards_reply);
+    assert_eq!(
+        cards_reply["result"]["structuredContent"]["cards"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let snap_fixture = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {"scope": "repository", "project": "beta", "goal": "Read beta"}
+    });
+    fixture_settings(
+        &source,
+        json!({"stdout": snap_fixture.to_string(), "catalogBindings": catalog_bindings}),
+    );
+    for alias in ["alpha", "beta"] {
+        good(&c.tool("oms_open_panel", json!({"project": alias})));
+        good(&c.call(
+            "tools/call",
+            json!({"name": "oms_panel_snapshot", "arguments": {"project": alias}, "_meta": {"threadId": thread_a}}),
+        ));
+    }
+
+    // 4. Catalog binding, matched conversation for alias "alpha", write to "alpha":
+    // allowed as today for all 9 write tools.
+    let host_a = json!({"threadId": thread_a});
+    let start_req = "4d6acd01-bd18-4567-bf69-ea05fb048b27";
+    let start_room = format!("oms-app-{start_req}");
+    fixture_settings(
+        &source,
+        json!({
+            "stdout": json!({"status": "started", "provider": "codex", "room": start_room, "attempt": "main-alpha"}).to_string(),
+            "catalogBindings": catalog_bindings
+        }),
+    );
+    let started = c.call(
+        "tools/call",
+        json!({
+            "name": "oms_start_main",
+            "arguments": {"project": "alpha", "main": "codex", "goal": "Launch alpha", "requestId": start_req},
+            "_meta": host_a
+        }),
+    );
+    good(&started);
+    assert_eq!(payload(&started)["attempt"], "main-alpha");
+
+    let decide_digest = "a".repeat(64);
+    fixture_settings(
+        &source,
+        json!({
+            "stdout": json!({"decision": "approve", "id": "lead-room/q1", "digest": decide_digest}).to_string(),
+            "catalogBindings": catalog_bindings
+        }),
+    );
+    let decided = c.call(
+        "tools/call",
+        json!({
+            "name": "oms_decide_approval",
+            "arguments": {"project": "alpha", "id": "lead-room/q1", "version": 1, "digest": decide_digest, "decision": "approve"},
+            "_meta": host_a
+        }),
+    );
+    good(&decided);
+    assert_eq!(payload(&decided)["decision"], "approve");
+
+    let issue_req = "40000000-0000-4000-8000-000000000001";
+    let issue_sha = "c".repeat(64);
+    let issue_receipt = json!({
+        "schema": 1,
+        "kind": "oms-reviewed-issue-receipt",
+        "status": "recorded",
+        "room": "lead-room",
+        "participant": "codex-main",
+        "requestId": issue_req,
+        "issue": "Org/repo#7",
+        "sha256": issue_sha
+    });
+    fixture_settings(
+        &source,
+        json!({"stdout": issue_receipt.to_string(), "catalogBindings": catalog_bindings}),
+    );
+    let recorded_issue = c.call(
+        "tools/call",
+        json!({
+            "name": "oms_record_reviewed_issue",
+            "arguments": {
+                "project": "alpha",
+                "room": "lead-room",
+                "owner": "codex-main",
+                "requestId": issue_req,
+                "issue": "Org/repo#7",
+                "sha256": issue_sha
+            },
+            "_meta": host_a
+        }),
+    );
+    good(&recorded_issue);
+    assert_eq!(payload(&recorded_issue), issue_receipt);
+
+    let assign_req = "5d6acd01-bd18-4567-bf69-ea05fb048b27";
+    let assign_row = json!({
+        "request": assign_req,
+        "room": "lead-room",
+        "participant": format!("ask-{assign_req}"),
+        "provider": "claude",
+        "role": "researcher",
+        "title": "Check callers",
+        "task": "Inspect callers",
+        "readOnly": true,
+        "thread": Value::Null,
+        "status": "assigned",
+        "operation": Value::Null,
+        "assignedAt": "2026-11-24T01:02:03Z",
+        "fresh": true
+    });
+    fixture_settings(
+        &source,
+        json!({
+            "room": {
+                "desktop-assign": assign_row.to_string(),
+                "desktop-assign-receipt": assign_row.to_string()
+            },
+            "catalogBindings": catalog_bindings
+        }),
+    );
+    let assigned = c.call(
+        "tools/call",
+        json!({
+            "name": "oms_assign_provider",
+            "arguments": {
+                "project": "alpha",
+                "room": "lead-room",
+                "requestId": assign_req,
+                "provider": "claude",
+                "title": "Check callers",
+                "task": "Inspect callers"
+            },
+            "_meta": host_a
+        }),
+    );
+    good(&assigned);
+    let assign_op = payload(&assigned)["operation"].as_str().unwrap().to_owned();
+    until(|| {
+        repo_a
+            .join(".oms/artifacts/mcp")
+            .join(&assign_op)
+            .join("status")
+            .is_file()
+    });
+
+    std::fs::create_dir_all(source.join("config")).unwrap();
+    std::fs::write(
+        source.join("config/panel-routing.json"),
+        json!({"schema": 2, "tiers": {"deep": [{"provider": "claude", "model": "opus", "effort": "high"}]}}).to_string(),
+    )
+    .unwrap();
+    let plan_task = json!({
+        "id": "reviewed-task",
+        "title": "Frozen implementation",
+        "brief": "Implement src with evidence",
+        "state": "ready",
+        "task_sha256": "a".repeat(64),
+        "contract_stale": false,
+        "allowed_paths": ["src"],
+        "forbidden_paths": [],
+        "verify": "true",
+        "depends": [],
+        "role": "implementation-worker",
+        "assignment": {"provider": "claude", "model": "frozen-model", "reasoning_effort": "high"}
+    });
+    fixture_settings(
+        &source,
+        json!({
+            "leadRoom": true,
+            "leadContextTask": plan_task,
+            "catalogBindings": catalog_bindings
+        }),
+    );
+    let opened_leads = c.call(
+        "tools/call",
+        json!({
+            "name": "oms_open_lead_conversations",
+            "arguments": {"project": "alpha", "room": "lead-room", "projectKey": key_a, "providers": ["codex"]},
+            "_meta": host_a
+        }),
+    );
+    good(&opened_leads);
+    let lead_req = payload(&opened_leads)["leads"][0]["requestId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    until(|| {
+        let st = c.call(
+            "tools/call",
+            json!({
+                "name": "oms_lead_conversation_status",
+                "arguments": {"project": "alpha", "room": "lead-room", "provider": "codex"},
+                "_meta": host_a
+            }),
+        );
+        payload(&st)["leads"][0]["status"] == "ready"
+    });
+    let settings_view = c.call(
+        "tools/call",
+        json!({
+            "name": "oms_lead_settings",
+            "arguments": {"project": "alpha", "projectKey": key_a, "room": "lead-room", "provider": "codex", "leadRequestId": lead_req},
+            "_meta": host_a
+        }),
+    );
+    good(&settings_view);
+    let rev = payload(&settings_view)["revision"].clone();
+    let updated_settings = c.call(
+        "tools/call",
+        json!({
+            "name": "oms_update_lead_settings",
+            "arguments": {
+                "project": "alpha",
+                "projectKey": key_a,
+                "room": "lead-room",
+                "provider": "codex",
+                "leadRequestId": lead_req,
+                "revision": rev,
+                "model": "gpt-6-astra",
+                "effort": "high"
+            },
+            "_meta": host_a
+        }),
+    );
+    good(&updated_settings);
+
+    let turn_1 = "10000000-0000-4000-8000-000000000001";
+    let sent = c.call(
+        "tools/call",
+        json!({
+            "name": "oms_send_lead_message",
+            "arguments": {
+                "project": "alpha",
+                "projectKey": key_a,
+                "room": "lead-room",
+                "provider": "codex",
+                "leadRequestId": lead_req,
+                "turnId": turn_1,
+                "text": "Private fixture follow-up 1"
+            },
+            "_meta": host_a
+        }),
+    );
+    good(&sent);
+    until(|| {
+        let st = c.call(
+            "tools/call",
+            json!({
+                "name": "oms_lead_conversation_status",
+                "arguments": {"project": "alpha", "room": "lead-room", "provider": "codex", "turnId": turn_1},
+                "_meta": host_a
+            }),
+        );
+        payload(&st)["turn"]["status"] == "replied"
+    });
+    let page_reply = c.call(
+        "tools/call",
+        json!({
+            "name": "oms_lead_conversation_status",
+            "arguments": {
+                "project": "alpha",
+                "projectKey": key_a,
+                "room": "lead-room",
+                "provider": "codex",
+                "leadRequestId": lead_req,
+                "turnId": turn_1,
+                "answerPage": ""
+            },
+            "_meta": host_a
+        }),
+    );
+    good(&page_reply);
+    let answer = &page_reply["result"]["_meta"]["leadConversation"]["answer"];
+    let excerpt = "codex received";
+    let prepared = c.call(
+        "tools/call",
+        json!({
+            "name": "oms_prepare_lead_plan_context",
+            "arguments": {
+                "project": "alpha",
+                "projectKey": key_a,
+                "room": "lead-room",
+                "provider": "codex",
+                "leadRequestId": lead_req,
+                "turnId": turn_1,
+                "answerPage": "",
+                "answerSha256": answer["digest"],
+                "offset": 0,
+                "bytes": excerpt.len(),
+                "excerpt": excerpt,
+                "excerptSha256": oms_command_plan::json::sha(excerpt),
+                "taskId": "reviewed-task",
+                "taskSha256": "a".repeat(64),
+                "executionProvider": "claude"
+            },
+            "_meta": host_a
+        }),
+    );
+    good(&prepared);
+    assert_eq!(payload(&prepared)["status"], "prepared");
+
+    fixture_settings(
+        &source,
+        json!({
+            "leadRoom": true,
+            "gate": true,
+            "catalogBindings": catalog_bindings
+        }),
+    );
+    let turn_2 = "10000000-0000-4000-8000-000000000002";
+    good(&c.call(
+        "tools/call",
+        json!({
+            "name": "oms_send_lead_message",
+            "arguments": {
+                "project": "alpha",
+                "projectKey": key_a,
+                "room": "lead-room",
+                "provider": "codex",
+                "leadRequestId": lead_req,
+                "turnId": turn_2,
+                "text": "Private fixture follow-up 2"
+            },
+            "_meta": host_a
+        }),
+    ));
+    until(|| {
+        let st = c.call(
+            "tools/call",
+            json!({
+                "name": "oms_lead_conversation_status",
+                "arguments": {"project": "alpha", "room": "lead-room", "provider": "codex", "turnId": turn_2},
+                "_meta": host_a
+            }),
+        );
+        payload(&st)["turn"]["status"] == "running"
+    });
+    let stopped = c.call(
+        "tools/call",
+        json!({
+            "name": "oms_stop_lead_message",
+            "arguments": {
+                "project": "alpha",
+                "projectKey": key_a,
+                "room": "lead-room",
+                "provider": "codex",
+                "leadRequestId": lead_req,
+                "turnId": turn_2
+            },
+            "_meta": host_a
+        }),
+    );
+    good(&stopped);
+    until(|| {
+        let st = c.call(
+            "tools/call",
+            json!({
+                "name": "oms_lead_conversation_status",
+                "arguments": {"project": "alpha", "room": "lead-room", "provider": "codex", "turnId": turn_2},
+                "_meta": host_a
+            }),
+        );
+        payload(&st)["turn"]["status"] == "stopped"
+    });
+
+    // 5. Pinned binding (OMS_PANEL_REPO) keeps its current behavior even when
+    // desktop-projects.json exists in XDG_CONFIG_HOME: one project, no alias choice,
+    // and write tools run without catalog conversation-binding snapshot checks.
+    let pinned_child = Command::new(std::env::current_exe().unwrap())
+        .env_remove("PYTHONUTF8")
+        .env_remove("PYTHONIOENCODING")
+        .arg("--stdio")
+        .arg(&source)
+        .arg(&repo_a)
+        .arg("chatgpt-panel")
+        .arg("0")
+        .env("OMS_PANEL_REPO", &repo_pin)
+        .env_remove("OMS_PANEL_PROJECTS")
+        .env_remove("OMS_PANEL_PROJECTS_FILE")
+        .env_remove("OMS_ROOM_PARTICIPANT")
+        .env("XDG_CONFIG_HOME", source.join("test-config"))
+        .env("XDG_CACHE_HOME", source.join("test-cache"))
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut pinned = Client::from_child(pinned_child);
+    assert_eq!(
+        registry_summary(&pinned.tool("oms_list_projects", json!({}))),
+        json!({"binding": "pinned", "projects": [], "readOnly": false})
+    );
+    assert_eq!(
+        registry_summary(&pinned.tool("oms_list_projects", json!({"cards": true}))),
+        json!({"binding": "pinned", "projects": [], "readOnly": false})
+    );
+    bad(
+        &pinned.tool("oms_panel_snapshot", json!({"project": "alpha"})),
+        "OMS_PANEL_REPO",
+    );
+    bad(
+        &pinned.tool(
+            "oms_start_main",
+            json!({"project": "alpha", "main": "codex", "goal": "No alias choice", "requestId": start_req}),
+        ),
+        "OMS_PANEL_REPO",
+    );
+    reset_calls();
+    let own_validation = pinned.tool(
+        "oms_start_main",
+        json!({"main": "codex", "goal": "Pinned validation", "requestId": "not-a-uuid"}),
+    );
+    bad(&own_validation, "A lowercase UUID requestId is required.");
+    assert!(
+        !own_validation["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not bound to project"),
+        "{own_validation}"
+    );
+    assert!(logged_calls().is_empty());
+    fixture_settings(
+        &source,
+        json!({
+            "recordAll": true,
+            "dashboardExit": 2,
+            "stdout": json!({"status": "started", "provider": "codex", "room": start_room, "attempt": "main-pin"}).to_string()
+        }),
+    );
+    reset_calls();
+    let pinned_start = pinned.tool(
+        "oms_start_main",
+        json!({"main": "codex", "goal": "Pinned launch", "requestId": start_req}),
+    );
+    good(&pinned_start);
+    assert_eq!(payload(&pinned_start)["attempt"], "main-pin");
+    assert_eq!(logged_calls().len(), 1);
+    assert_eq!(logged_calls()[0]["argv"][0], "panel");
+    assert_eq!(logged_calls()[0]["argv"][2], json!(repo_pin));
+
+    fixture_settings(
+        &source,
+        json!({
+            "recordAll": true,
+            "dashboardExit": 2,
+            "stdout": json!({"decision": "deny", "id": "lead-room/q1", "digest": decide_digest}).to_string()
+        }),
+    );
+    reset_calls();
+    let pinned_decide = pinned.tool(
+        "oms_decide_approval",
+        json!({"id": "lead-room/q1", "version": 1, "digest": decide_digest, "decision": "deny"}),
+    );
+    good(&pinned_decide);
+    assert_eq!(payload(&pinned_decide)["decision"], "deny");
+    assert_eq!(logged_calls().len(), 1);
+    assert_eq!(logged_calls()[0]["argv"][1], "desktop-decide");
+    assert_eq!(logged_calls()[0]["argv"][3], json!(repo_pin));
 }
 
 fn panel_command_catalog() {
@@ -7495,6 +9592,14 @@ fn fake_oms() {
     let tmp = source.join(format!(".call-{}", std::process::id()));
     std::fs::write(&tmp, record.to_string()).unwrap();
     std::fs::rename(tmp, source.join("last-call.json")).unwrap();
+    if cfg["recordAll"] == true {
+        let mut log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(source.join("call-log.jsonl"))
+            .unwrap();
+        writeln!(log, "{record}").unwrap();
+    }
     if cfg["leadRoom"] == true && args.first().is_some_and(|a| a == "agent-plan") {
         assert_eq!(args.len(), 6);
         assert_eq!(args[1], "--repo");
@@ -7543,12 +9648,41 @@ fn fake_oms() {
     if args.first().is_some_and(|v| v == "dashboard")
         && args.iter().any(|v| v == "--conversation-digest")
     {
-        let mut report: Value = serde_json::from_str(cfg["stdout"].as_str().unwrap()).unwrap();
-        report["dashboard"]["conversationBinding"] = cfg["binding"]["conversationBinding"]
+        if let Some(code) = cfg["dashboardExit"].as_i64() {
+            std::process::exit(code as i32);
+        }
+        let arg = |flag: &str| {
+            args.windows(2)
+                .find(|pair| pair[0] == flag)
+                .and_then(|pair| pair[1].to_str())
+        };
+        let mut report: Value = cfg["stdout"]
+            .as_str()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .filter(|v| v["kind"] == "oms-panel-snapshot")
+            .unwrap_or_else(|| {
+                json!({
+                    "schema": 1,
+                    "kind": "oms-panel-snapshot",
+                    "dashboard": {"scope": "repository"}
+                })
+            });
+        let binding = if let Some(by_repo) = cfg.get("catalogBindings").and_then(Value::as_object) {
+            arg("--repo")
+                .and_then(|r| by_repo.get(r))
+                .and_then(|by_digest| arg("--conversation-digest").and_then(|d| by_digest.get(d)))
+                .cloned()
+                .unwrap_or_else(|| {
+                    json!({"conversationBinding": "unconfirmed", "conversationMain": Value::Null})
+                })
+        } else {
+            cfg["binding"].clone()
+        };
+        report["dashboard"]["conversationBinding"] = binding["conversationBinding"]
             .as_str()
             .unwrap_or("unconfirmed")
             .into();
-        report["dashboard"]["conversationMain"] = cfg["binding"]["conversationMain"].clone();
+        report["dashboard"]["conversationMain"] = binding["conversationMain"].clone();
         println!("{report}");
         return;
     }
@@ -8371,16 +10505,21 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 38] = [
+    let cases: [(&str, fn()); 40] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
         ("owner_validation", owner_validation),
         ("environment_profile", environment_profile),
         ("cross_host_project_reads", cross_host_project_reads),
+        ("home_panel_opener", home_panel_opener),
         ("desktop_reviewed_issue", desktop_reviewed_issue),
         ("mcp_app_binding_boundaries", mcp_app_binding_boundaries),
         ("conversation_panel", conversation_panel),
+        (
+            "catalog_write_binding_boundaries",
+            catalog_write_binding_boundaries,
+        ),
         ("desktop_lead_conversations", desktop_lead_conversations),
         (
             "lead_turn_failure_degrades_per_row",

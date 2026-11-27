@@ -124,10 +124,31 @@ fn executable_fixture(repo: &Repo, name: &str) {
     repo.write(name, "#!/bin/sh\nprintf 'fixture answer\\n'\n");
     fs::set_permissions(repo.0.join(name), fs::Permissions::from_mode(0o755)).unwrap();
 }
+fn host_executable(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).find_map(|dir| {
+        let candidate = dir.join(name);
+        fs::metadata(&candidate)
+            .ok()
+            .filter(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .map(|_| candidate)
+    })
+}
 fn provider_isolated(name: &str, layout: &str, body: impl FnOnce()) {
     provider_isolated_with_env(name, layout, &[], body);
 }
+fn provider_isolated_without_host_providers(name: &str, layout: &str, body: impl FnOnce()) {
+    provider_isolated_inner(name, layout, &[], true, body);
+}
 fn provider_isolated_with_env(name: &str, layout: &str, env: &[(&str, &str)], body: impl FnOnce()) {
+    provider_isolated_inner(name, layout, env, false, body);
+}
+fn provider_isolated_inner(
+    name: &str,
+    layout: &str,
+    env: &[(&str, &str)],
+    strict_path: bool,
+    body: impl FnOnce(),
+) {
     if std::env::var(CHILD_ENV).as_deref() == Ok(name) {
         if std::env::var("PROVIDER_LAYOUT").as_deref() == Ok(layout) {
             body();
@@ -163,10 +184,22 @@ fn provider_isolated_with_env(name: &str, layout: &str, env: &[(&str, &str)], bo
     }
     fixture.write("bin/oms-agent-adapter-disabled", "inert\n");
     fs::create_dir(fixture.0.join("tmp")).unwrap();
-    let mut paths = vec![fixture.0.join("bin")];
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
+    let paths = if strict_path {
+        let sysbin = fixture.0.join("sysbin");
+        fs::create_dir(&sysbin).unwrap();
+        for tool in ["bash", "sh", "git", "env", "true", "false"] {
+            if let Some(target) = host_executable(tool) {
+                std::os::unix::fs::symlink(target, sysbin.join(tool)).unwrap();
+            }
+        }
+        vec![fixture.0.join("bin"), sysbin]
+    } else {
+        let mut paths = vec![fixture.0.join("bin")];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        paths
+    };
     let mut command = if layout == "private" {
         let mut command = Command::new("bash");
         command
@@ -4937,6 +4970,336 @@ fn unavailable_services_refuse() {
             .is_err()
     );
 }
+#[test]
+fn adaptive_review_bounds_calls_and_keeps_gate_requirements() {
+    provider_isolated_without_host_providers(
+        "adaptive_review_bounds_calls_and_keeps_gate_requirements",
+        "private",
+        || {
+            struct Probe(ProviderProbe);
+            impl Executor for Probe {
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    if request.argv[0] == "bash" {
+                        return Native.execute(request, stop);
+                    }
+                    self.0.execute(request, stop)
+                }
+            }
+            let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let invoke = |repo: &Repo, extra: &[&str], answer: &str| {
+                let probe = Probe(ProviderProbe {
+                    answer: Some(answer.as_bytes().to_vec()),
+                    ..Default::default()
+                });
+                let mut argv = args(&[
+                    "--adaptive",
+                    "--writer",
+                    "codex",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "--no-graph-context",
+                    "--prompt",
+                    "Check concrete defects",
+                ]);
+                argv.extend(args(extra));
+                let output = oms_command_peer::run_with_executor(
+                    "peer-review",
+                    &argv,
+                    &repo.0,
+                    &source,
+                    &STOP,
+                    &probe,
+                );
+                (output, probe.0.calls.into_inner().unwrap())
+            };
+            for (path, body, expected) in [
+                ("README.md", "ordinary prose\n", 0usize),
+                ("src/lib.rs", "fn changed() {}\n", 1),
+                ("AGENTS.md", "Keep the gate.\n", 2),
+                ("roles/reviewer.md", "Check source evidence.\n", 2),
+                ("crates/oms-command-room/src/lib.rs", "fn state() {}\n", 2),
+                ("asset.bin", "\0changed\n", 1),
+                ("docs/script.md", "#!/bin/sh\ntrue\n", 1),
+            ] {
+                let repo = provider_repo();
+                repo.write(path, body);
+                if path == "docs/script.md" {
+                    fs::set_permissions(repo.0.join(path), fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+                repo.git(&["add", path]);
+                let (out, calls) = invoke(&repo, &[], "No concrete defects found.\n");
+                assert_eq!(out.0, 0, "{path}: {}", message(&out));
+                assert_eq!(calls.len(), expected, "{path}: {}", message(&out));
+                assert!(calls.iter().all(|call| call.request.argv[0] != "codex"));
+                if expected == 0 {
+                    assert!(message(&out).contains("skipped (advisory; no gate evidence)"));
+                    let index = fs::read_to_string(repo.0.join(".oms/artifacts/index.jsonl"))
+                        .unwrap_or_default();
+                    assert!(!index.contains("review-outcome"), "{index}");
+                } else {
+                    assert!(calls.iter().all(|call| {
+                        String::from_utf8_lossy(&call.prompt).contains("Ignore style preferences")
+                    }));
+                }
+            }
+            let repo = provider_repo();
+            repo.write("AGENTS.md", "Keep the gate.\n");
+            repo.git(&["add", "AGENTS.md"]);
+            let (out, calls) = invoke(
+                &repo,
+                &["--providers", "claude", "--model", "claude-sonnet-5-5"],
+                "No concrete defects found.\n",
+            );
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(calls.len(), 1, "an explicit reviewer budget stays pinned");
+            assert_eq!(
+                option_value(&calls[0].request.argv, "--model").unwrap(),
+                "claude-sonnet-5-5"
+            );
+
+            let repo = provider_repo();
+            repo.write("README.md", "ordinary prose\n");
+            repo.git(&["add", "README.md"]);
+            let pass = "No defects found.\nCONFIDENCE: 0.9\nGATE: pass\n";
+            let (out, calls) = invoke(&repo, &["--gate", "--verify", "true"], pass);
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(calls.len(), 1, "an explicit gate cannot skip its reviewer");
+            assert!(message(&out).contains("verify: pass"));
+            let (out, calls) = invoke(&repo, &["--gate", "--verify", "false"], pass);
+            assert_eq!(out.0, 1, "{}", message(&out));
+            assert_eq!(calls.len(), 1);
+            assert!(message(&out).contains("verify: fail"));
+            repo.write("untracked.rs", "fn omitted() {}\n");
+            let (out, calls) = invoke(&repo, &[], pass);
+            assert_ne!(
+                out.0, 0,
+                "untracked source cannot become a zero-review success"
+            );
+            assert!(calls.is_empty());
+            fs::remove_file(repo.0.join("untracked.rs")).unwrap();
+
+            for extra in [
+                vec!["--gate"],
+                vec!["--gate", "--no-verify"],
+                vec!["--providers", "codex"],
+                vec!["--providers", "claude:optional"],
+                vec!["--providers", "claude", "--model", "private-model-alias"],
+                vec!["--providers", "claude", "--model", "o3"],
+                vec!["--providers", "claude", "--fallback-model", "gpt-5.4"],
+                vec!["--no-verify"],
+                vec!["--debate", "1"],
+                vec!["--until-agreement"],
+                vec!["--synthesize", "claude"],
+                vec!["--no-diff"],
+            ] {
+                let (out, calls) = invoke(&repo, &extra, pass);
+                assert_ne!(out.0, 0, "{extra:?}: {}", message(&out));
+                assert!(
+                    calls.is_empty(),
+                    "{extra:?} must refuse before any provider call"
+                );
+            }
+            let (out, calls) = invoke(
+                &repo,
+                &["--providers", "claude", "--fallback-model", "sonnet"],
+                pass,
+            );
+            assert_eq!(out.0, 0, "{}", message(&out));
+            assert_eq!(calls.len(), 1, "native fallback aliases stay supported");
+
+            let repo = provider_repo();
+            repo.write("tracked.txt", "changed\n");
+            let first = ".oms/artifacts/review-first";
+            let second = ".oms/artifacts/review-second";
+            let blocker = "Concrete defect.\n```findings\n{\"file\":\"tracked.txt\",\"line\":1,\"severity\":\"blocking\",\"summary\":\"A concrete defect\",\"quote\":\"changed\"}\n```\nCONFIDENCE: 0.9\nGATE: fail\n";
+            let (out, calls) = invoke(&repo, &["--artifact-dir", first], blocker);
+            assert_eq!(
+                out.0,
+                2,
+                "plain adaptive review must preserve blockers: {}",
+                message(&out)
+            );
+            assert_eq!(calls.len(), 1);
+            let finding_rows = || {
+                V::parse(&success(run(
+                    &repo,
+                    &source,
+                    "peer-review",
+                    &["findings", "list", "--json", "--artifact-dir", first],
+                )))
+                .unwrap()
+            };
+            let rows = finding_rows();
+            let ident = rows.array()[0].get("id").text().unwrap().to_owned();
+            let verify_args = ["--gate", "--verify", "true", "--artifact-dir", second];
+            let (out, _) = invoke(&repo, &verify_args, pass);
+            assert_eq!(
+                out.0,
+                2,
+                "a new artifact directory cannot forget an unresolved blocker: {}",
+                message(&out)
+            );
+            let scope_path = repo
+                .0
+                .join(first)
+                .join(rows.array()[0].get("scope").text().unwrap());
+            let scope_bytes = fs::read(&scope_path).unwrap();
+            for invalid in [None, Some(b"{}".as_slice())] {
+                if let Some(bytes) = invalid {
+                    fs::write(&scope_path, bytes).unwrap();
+                } else {
+                    fs::remove_file(&scope_path).unwrap();
+                }
+                let (out, _) = invoke(&repo, &verify_args, pass);
+                assert_eq!(
+                    out.0,
+                    2,
+                    "unknown required finding scope cannot silently pass: {}",
+                    message(&out)
+                );
+            }
+            fs::write(scope_path, scope_bytes).unwrap();
+
+            let downgrade = blocker
+                .replace("\"blocking\"", "\"advisory\"")
+                .replace("GATE: fail", "GATE: pass");
+            let (out, _) = invoke(
+                &repo,
+                &["--gate", "--verify", "true", "--artifact-dir", first],
+                &downgrade,
+            );
+            assert_eq!(
+                out.0,
+                2,
+                "a later advisory claim cannot dispose of a blocking finding: {}",
+                message(&out)
+            );
+            success(run(
+                &repo,
+                &source,
+                "peer-review",
+                &[
+                    "findings",
+                    "fix",
+                    &ident,
+                    "--note",
+                    "Fix claimed; verification pending",
+                    "--artifact-dir",
+                    first,
+                ],
+            ));
+            let (out, _) = invoke(&repo, &verify_args, pass);
+            assert_eq!(out.0, 2, "fixed does not mean verified: {}", message(&out));
+            assert!(message(&out).contains("fixed is not verified"));
+
+            repo.write("tracked.txt", "baseline\n");
+            repo.write("other.rs", "fn unrelated() {}\n");
+            repo.git(&["add", "other.rs"]);
+            let (out, _) = invoke(&repo, &verify_args, pass);
+            assert_eq!(
+                out.0,
+                0,
+                "unrelated file scope must not inherit the blocker: {}",
+                message(&out)
+            );
+            repo.git(&["reset", "--quiet", "--", "other.rs"]);
+            fs::remove_file(repo.0.join("other.rs")).unwrap();
+            repo.write("tracked.txt", "changed\n");
+            success(run(
+                &repo,
+                &source,
+                "peer-review",
+                &[
+                    "findings",
+                    "dismiss",
+                    &ident,
+                    "--reason",
+                    "Owner checked the claimed behavior and found no defect",
+                    "--artifact-dir",
+                    first,
+                ],
+            ));
+            let (out, _) = invoke(&repo, &verify_args, pass);
+            assert_eq!(
+                out.0,
+                0,
+                "reasoned owner disposition clears the blocker: {}",
+                message(&out)
+            );
+
+            let (out, calls) = invoke(
+                &repo,
+                &[
+                    "--gate",
+                    "--verify",
+                    "true",
+                    "--artifact-dir",
+                    ".oms/artifacts/review-confirm",
+                    "--confirm",
+                    "antigravity",
+                ],
+                blocker,
+            );
+            assert_eq!(
+                out.0,
+                1,
+                "confirmation never changes a failed gate: {}",
+                message(&out)
+            );
+            assert_eq!(
+                calls.len(),
+                2,
+                "one initial reviewer plus one targeted confirmation"
+            );
+            assert!(message(&out).contains("labels are advisory"));
+            repo.git(&["add", "tracked.txt"]);
+            repo.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "new base",
+            ]);
+            repo.write("tracked.txt", "another change\n");
+            let (out, _) = invoke(&repo, &verify_args, pass);
+            assert_eq!(
+                out.0,
+                0,
+                "a different base must not inherit the earlier blocker: {}",
+                message(&out)
+            );
+
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            fs::remove_file(home.join("bin/agy")).unwrap();
+            repo.write("AGENTS.md", "Keep the gate.\n");
+            repo.git(&["add", "AGENTS.md"]);
+            let (out, calls) = invoke(&repo, &[], pass);
+            assert_ne!(
+                out.0, 0,
+                "a high-risk review cannot silently lose its second reviewer"
+            );
+            assert!(calls.is_empty());
+            fs::remove_file(home.join("bin/claude")).unwrap();
+            repo.write("src/lib.rs", "fn changed() {}\n");
+            repo.git(&["add", "src/lib.rs"]);
+            let (out, calls) = invoke(&repo, &[], pass);
+            assert_ne!(
+                out.0, 0,
+                "missing independent reviewers must not produce success"
+            );
+            assert!(calls.is_empty());
+        },
+    );
+}
+
 #[test]
 fn review_depth_preserves_risk_globs() {
     isolated("review_depth_preserves_risk_globs", || {

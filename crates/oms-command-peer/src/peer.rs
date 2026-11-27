@@ -86,6 +86,7 @@ pub(crate) const FLAGS: &[&str] = &[
     "no-strategy",
     "no-failures",
     "gate",
+    "adaptive",
     "no-verify",
     "require-dispositions",
     "since-last",
@@ -185,6 +186,9 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
     }
     if args.has("help") {
         return Ok(out(help(tool).to_vec()));
+    }
+    if args.has("adaptive") {
+        return fail("--adaptive belongs to peer-review");
     }
     if tool == "peer-delegate" {
         return crate::delegate::run(&args, context);
@@ -468,6 +472,9 @@ pub(crate) fn prompt(
             args.get("_review-incremental-note").as_bytes(),
         )?;
     }
+    if tool == "peer-review" && args.has("adaptive") {
+        body.push_str("Use one concise review pass. Focus on concrete correctness, regressions, unsafe behavior and unmet acceptance criteria; inspect relevant security boundaries when touched. Ignore style preferences, speculative redesign and requests for another general review. Report only actionable findings with source evidence; say when evidence is missing.\n");
+    }
     body.push_str(discussion::COUNCIL_INITIAL_PRECEDENCE);
     if args.has("hypothesis") {
         body.push_str("Attack this experiment design before compute is spent: falsifiability, cheapest test, confounds, tuned baseline fairness, split/leakage, metric fit, variance and preregistered effect size.\n");
@@ -619,6 +626,8 @@ pub(crate) fn prompt(
         body.push_str(discussion::COUNCIL_INITIAL_SECTIONS);
     } else if args.has("gate") {
         body.push_str(crate::review::GATE_INSTRUCTION);
+    } else if tool == "peer-review" && args.has("adaptive") {
+        body.push_str(crate::review::ADAPTIVE_FINDINGS_INSTRUCTION);
     } else {
         body.push_str("\nAnswer:\nTradeoffs:\nEvidence:\nRisks:\nRecommendation:\nVerification:\n");
     }
@@ -1009,7 +1018,18 @@ fn call_routed(
             diff_bytes,
         });
     }
-    let before = process::git(context, repo, &["diff", "--binary", "HEAD", "--"]);
+    let before = process::git(
+        context,
+        repo,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--binary",
+            "HEAD",
+            "--",
+        ],
+    );
     let private = if before.is_ok() {
         Some(crate::delegate::Worktree::create(repo, "HEAD", context)?)
     } else if target.provider == "antigravity" {
@@ -1023,7 +1043,7 @@ fn call_routed(
         process::git_input(
             context,
             &tree.path,
-            &["apply", "--binary", "--whitespace=nowarn", "-"],
+            &["apply", "--index", "--binary", "--whitespace=nowarn", "-"],
             Some(patch.clone()),
         )?;
     }
@@ -1231,9 +1251,20 @@ fn call_routed(
     }
     if let Some(tree) = private {
         let unchanged = tree.identity(context).is_ok()
-            && process::git(context, &tree.path, &["diff", "--binary", "HEAD", "--"])
-                .ok()
-                .as_ref()
+            && process::git(
+                context,
+                &tree.path,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--binary",
+                    "HEAD",
+                    "--",
+                ],
+            )
+            .ok()
+            .as_ref()
                 == before.as_ref().ok()
             && process::git(
                 context,
@@ -1681,6 +1712,11 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     let captured = if tool == "peer-review" {
         crate::review::pin_base(&mut resolved, &repo, context)?;
         let scoped = crate::review::scope(&resolved, &repo, context)?;
+        if resolved.has("_review-policy-diff")
+            && resolved.get("_review-policy-diff") != crate::text(&scoped.0, "diff_sha256")
+        {
+            return fail("review source changed after adaptive selection; no reviewer started");
+        }
         let diff_bytes = if resolved.has("no-diff") {
             0
         } else {
@@ -1715,6 +1751,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         context,
     )?;
     let mut output = args.get("_review-incremental-note").to_owned();
+    output.push_str(args.get("_review-policy-note"));
     if tool == "consult" && args.has("thread") {
         output.push_str(&format!("{}\n", args.get("thread")));
     }

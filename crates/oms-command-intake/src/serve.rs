@@ -9,6 +9,7 @@ use crate::model::{
 };
 use crate::source::{
     BindingDecision, OutboundAck, PayloadDecision, RequestHeaders, RoomDelivery, Source,
+    TransportError,
 };
 use oms_command_room::{Room, Send as RoomSend, Services as RoomServices, Session as RoomSession};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
@@ -28,8 +29,22 @@ pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8787";
 pub const MAX_HEADER_BYTES: usize = 16 * 1024;
 pub const MAX_BODY_BYTES: usize = 512 * 1024;
 pub const READ_TIMEOUT: Duration = Duration::from_secs(2);
+pub const ACK_WINDOW: Duration = Duration::from_secs(10);
+pub const ACCEPT_BACKOFF_INITIAL: Duration = Duration::from_millis(100);
+pub const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
 const BG_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const BG_QUEUE_CAP: usize = 64;
+const POLL_SLICE: Duration = Duration::from_millis(50);
+
+pub const ROOM_CONTENT_REFUSAL_MESSAGES: &[&str] = &[
+    "turn looks sensitive; it would be replayed into other agents' prompts",
+    "room metadata contains sensitive-looking content or could not be checked",
+    "message needs 1..4000 UTF-8 bytes",
+    "--text or --text-file is required",
+    "room metadata cannot be encoded as UTF-8",
+    "room metadata is oversized",
+];
+pub const ROOM_DUPLICATE_CONFLICT_MESSAGE: &str = "message id conflicts with its existing content";
 
 #[derive(Clone)]
 pub struct ServeConfig {
@@ -104,11 +119,132 @@ pub fn validate_serve_room(
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+pub struct AcceptBackoff {
+    next_delay: Duration,
+    active_error: Option<(std::io::ErrorKind, Option<i32>)>,
+}
+
+impl Default for AcceptBackoff {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AcceptBackoff {
+    pub const fn new() -> Self {
+        Self {
+            next_delay: ACCEPT_BACKOFF_INITIAL,
+            active_error: None,
+        }
+    }
+
+    /// Record an `accept` failure and return `(backoff_delay, is_new_distinct_burst)`.
+    pub fn on_error(&mut self, err: &std::io::Error) -> (Duration, bool) {
+        let sig = (err.kind(), err.raw_os_error());
+        let is_new_burst = self.active_error != Some(sig);
+        self.active_error = Some(sig);
+        let delay = self.next_delay;
+        self.next_delay = self.next_delay.saturating_mul(2).min(ACCEPT_BACKOFF_MAX);
+        (delay, is_new_burst)
+    }
+
+    pub fn on_success(&mut self) {
+        self.next_delay = ACCEPT_BACKOFF_INITIAL;
+        self.active_error = None;
+    }
+}
+
+struct QueuedAck {
+    ack: OutboundAck,
+    deadline: Instant,
+}
+
+fn ack_error_kind(err: &TransportError) -> &'static str {
+    match err {
+        TransportError::OutcomeUnknown(_) => "outcome_unknown",
+        TransportError::Rejected(_) => "rejected",
+    }
+}
+
+fn deliver_queued_ack(
+    source: &dyn Source,
+    secrets: &SecretStore,
+    queued: &QueuedAck,
+    interrupted: &AtomicBool,
+    stop: &AtomicBool,
+    log_tx: &mpsc::Sender<String>,
+) {
+    let ack = &queued.ack;
+    let first_timeout = queued
+        .deadline
+        .saturating_duration_since(Instant::now())
+        .min(BG_ACK_TIMEOUT);
+    let Err(first_err) = source.deliver_ack(secrets, ack, first_timeout, interrupted) else {
+        return;
+    };
+    if interrupted.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
+        return;
+    }
+    let remaining = queued.deadline.saturating_duration_since(Instant::now());
+    let can_retry = !remaining.is_zero();
+    let source_name = source.name();
+    let session = sanitize_log_id(Some(&ack.session_ref));
+    let kind = sanitize_log_id(Some(&ack.kind));
+    let err_kind = ack_error_kind(&first_err);
+    let retry_note = if can_retry { "once" } else { "none" };
+    let _ = log_tx.send(format!(
+        "intake serve: outbound ack failed: source={source_name} session={session} kind={kind} error={err_kind} retry={retry_note}"
+    ));
+    if !can_retry || interrupted.load(Ordering::Acquire) || stop.load(Ordering::Acquire) {
+        return;
+    }
+    let retry_timeout = remaining.min(BG_ACK_TIMEOUT);
+    if let Err(retry_err) = source.deliver_ack(secrets, ack, retry_timeout, interrupted)
+        && !interrupted.load(Ordering::Acquire)
+        && !stop.load(Ordering::Acquire)
+    {
+        let retry_err_kind = ack_error_kind(&retry_err);
+        let _ = log_tx.send(format!(
+            "intake serve: outbound ack retry failed: source={source_name} session={session} kind={kind} error={retry_err_kind}"
+        ));
+    }
+}
+
+fn flush_worker_logs(log_rx: &mpsc::Receiver<String>, stderr: &mut dyn Write) {
+    let mut wrote = false;
+    while let Ok(line) = log_rx.try_recv() {
+        let _ = writeln!(stderr, "{line}");
+        wrote = true;
+    }
+    if wrote {
+        let _ = stderr.flush();
+    }
+}
+
+fn sleep_interruptibly(
+    duration: Duration,
+    interrupted: &AtomicBool,
+    log_rx: &mpsc::Receiver<String>,
+    stderr: &mut dyn Write,
+) {
+    let deadline = Instant::now() + duration;
+    while !interrupted.load(Ordering::Acquire) {
+        flush_worker_logs(log_rx, stderr);
+        let rem = deadline.saturating_duration_since(Instant::now());
+        if rem.is_zero() {
+            break;
+        }
+        thread::sleep(rem.min(POLL_SLICE));
+    }
+}
+
 pub struct PreparedServer {
     listener: TcpListener,
     local_addr: SocketAddr,
     route_path: String,
     cfg: ServeConfig,
+    ack_window: Duration,
 }
 
 impl PreparedServer {
@@ -135,7 +271,13 @@ impl PreparedServer {
             local_addr,
             route_path,
             cfg,
+            ack_window: ACK_WINDOW,
         })
+    }
+
+    pub fn with_ack_window(mut self, ack_window: Duration) -> Self {
+        self.ack_window = ack_window;
+        self
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -152,31 +294,34 @@ impl PreparedServer {
         interrupted: &AtomicBool,
         stderr: &mut dyn Write,
     ) -> Result<(), String> {
-        let poll_ts =
-            Timespec::try_from(Duration::from_millis(50)).expect("valid fixed poll duration");
+        let poll_ts = Timespec::try_from(POLL_SLICE).expect("valid fixed poll duration");
         let source_name = self.cfg.source.name();
+        let ack_window = self.ack_window;
         let worker_stop = AtomicBool::new(false);
 
         thread::scope(|scope| {
-            let (tx, rx) = mpsc::sync_channel::<OutboundAck>(BG_QUEUE_CAP);
+            let (tx, rx) = mpsc::sync_channel::<QueuedAck>(BG_QUEUE_CAP);
+            let (log_tx, log_rx) = mpsc::channel::<String>();
             let source = Arc::clone(&self.cfg.source);
             let secrets = self.cfg.secrets.clone();
             let stop_ref = &worker_stop;
 
-            scope.spawn(move || {
+            let worker_handle = scope.spawn(move || {
                 while !interrupted.load(Ordering::Acquire) && !stop_ref.load(Ordering::Acquire) {
-                    let Ok(ack) = rx.recv() else {
+                    let Ok(queued) = rx.recv() else {
                         break;
                     };
                     if interrupted.load(Ordering::Acquire) || stop_ref.load(Ordering::Acquire) {
                         break;
                     }
-                    let _ = source.deliver_ack(&secrets, &ack, BG_ACK_TIMEOUT, interrupted);
+                    deliver_queued_ack(&*source, &secrets, &queued, interrupted, stop_ref, &log_tx);
                 }
             });
 
             let mut loop_res = Ok(());
+            let mut accept_backoff = AcceptBackoff::new();
             while !interrupted.load(Ordering::Acquire) {
+                flush_worker_logs(&log_rx, stderr);
                 let mut fds = [PollFd::new(&self.listener, PollFlags::IN)];
                 match poll(&mut fds, Some(&poll_ts)) {
                     Ok(0) => continue,
@@ -194,6 +339,8 @@ impl PreparedServer {
                     }
                     match self.listener.accept() {
                         Ok((stream, _peer)) => {
+                            accept_backoff.on_success();
+                            let accepted_at = Instant::now();
                             let outcome = handle_connection(
                                 stream,
                                 &self.route_path,
@@ -207,25 +354,47 @@ impl PreparedServer {
                                 outcome.status,
                                 sanitize_log_id(outcome.session_id.as_deref())
                             );
-                            if let Some(ack) = outcome.post_response_ack
-                                && matches!(tx.try_send(ack), Err(mpsc::TrySendError::Full(_)))
-                            {
-                                let _ = writeln!(
-                                    stderr,
-                                    "intake serve: ack queue full; dropped outbound acknowledgement (source={source_name})"
-                                );
+                            if let Some(ack) = outcome.post_response_ack {
+                                let queued = QueuedAck {
+                                    ack,
+                                    deadline: accepted_at + ack_window,
+                                };
+                                if matches!(tx.try_send(queued), Err(mpsc::TrySendError::Full(_))) {
+                                    let _ = writeln!(
+                                        stderr,
+                                        "intake serve: ack queue full; dropped outbound acknowledgement (source={source_name})"
+                                    );
+                                }
                             }
+                            flush_worker_logs(&log_rx, stderr);
                             let _ = stderr.flush();
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(_) => break,
+                        Err(e) => {
+                            let (delay, is_new_burst) = accept_backoff.on_error(&e);
+                            if is_new_burst {
+                                let errno = e
+                                    .raw_os_error()
+                                    .map_or_else(|| "-".to_owned(), |n| n.to_string());
+                                let _ = writeln!(
+                                    stderr,
+                                    "intake serve: accept failed: source={source_name} kind={:?} errno={errno}; backing off",
+                                    e.kind()
+                                );
+                                let _ = stderr.flush();
+                            }
+                            sleep_interruptibly(delay, interrupted, &log_rx, stderr);
+                            break;
+                        }
                     }
                 }
             }
 
             worker_stop.store(true, Ordering::Release);
             drop(tx);
+            let _ = worker_handle.join();
+            flush_worker_logs(&log_rx, stderr);
             loop_res
         })
     }
@@ -241,8 +410,13 @@ pub struct ServerHandle {
 
 impl ServerHandle {
     pub fn spawn(cfg: ServeConfig) -> Result<Self, String> {
+        Self::spawn_with_ack_window(cfg, ACK_WINDOW)
+    }
+
+    pub fn spawn_with_ack_window(cfg: ServeConfig, ack_window: Duration) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
-        let prepared = PreparedServer::bind(cfg, &oms_command_room::LocalServices, &stop)?;
+        let prepared = PreparedServer::bind(cfg, &oms_command_room::LocalServices, &stop)?
+            .with_ack_window(ack_window);
         let local_addr = prepared.local_addr();
         let route_path = prepared.route_path().to_owned();
         let worker_stop = Arc::clone(&stop);
@@ -690,16 +864,8 @@ fn process_verified_intake(
     }
 }
 
-fn is_room_content_refusal(msg: &str) -> bool {
-    matches!(
-        msg,
-        "turn looks sensitive; it would be replayed into other agents' prompts"
-            | "room metadata contains sensitive-looking content or could not be checked"
-            | "message needs 1..4000 UTF-8 bytes"
-            | "--text or --text-file is required"
-            | "room metadata cannot be encoded as UTF-8"
-            | "room metadata is oversized"
-    )
+pub fn is_room_content_refusal(msg: &str) -> bool {
+    ROOM_CONTENT_REFUSAL_MESSAGES.contains(&msg)
 }
 
 fn deliver_to_room(
@@ -738,9 +904,7 @@ fn deliver_to_room(
         },
     ) {
         Ok(_) => Ok(RoomDelivery::AppendedNew),
-        Err(e) if e.message == "message id conflicts with its existing content" => {
-            Ok(RoomDelivery::Duplicate)
-        }
+        Err(e) if e.message == ROOM_DUPLICATE_CONFLICT_MESSAGE => Ok(RoomDelivery::Duplicate),
         Err(e) if is_room_content_refusal(&e.message) => Ok(RoomDelivery::Refused),
         Err(_) => Err(()),
     }
