@@ -1297,19 +1297,25 @@ fn native_text(row: &oms_json::Value, key: &str) -> Option<String> {
     row.get(key)?.as_string()?.to_str_checked()
 }
 
-pub(crate) fn native_stopped_early(row: &oms_json::Value) -> bool {
+fn native_row_stopped_early(row: &oms_json::Value) -> bool {
     [
         native_text(row, "stop_reason"),
         native_text(row, "finish_reason"),
         row.get("message")
             .and_then(|m| native_text(m, "stop_reason")),
-        row.get("event")
-            .and_then(|e| e.get("delta"))
-            .and_then(|d| native_text(d, "stop_reason")),
     ]
     .into_iter()
     .flatten()
     .any(|reason| incomplete_stop(&reason))
+}
+
+pub(crate) fn native_stopped_early(row: &oms_json::Value) -> bool {
+    native_row_stopped_early(row)
+        || row
+            .get("event")
+            .and_then(|e| e.get("delta"))
+            .and_then(|d| native_text(d, "stop_reason"))
+            .is_some_and(|reason| incomplete_stop(&reason))
 }
 
 fn decode_native_output(provider: &str, raw: &[u8]) -> Option<String> {
@@ -1332,6 +1338,7 @@ fn decode_native_output(provider: &str, raw: &[u8]) -> Option<String> {
     }
     let mut answer = None;
     let mut terminal = false;
+    let mut claude_stream_stopped_early = false;
     for line in std::str::from_utf8(raw)
         .ok()?
         .lines()
@@ -1339,10 +1346,28 @@ fn decode_native_output(provider: &str, raw: &[u8]) -> Option<String> {
     {
         let row = oms_json::parse_strict(line.as_bytes()).ok()?;
         let kind = native_text(&row, "type")?;
+        let claude_stream = provider == "claude" && kind == "stream_event";
         // The terminal event closes the stream. Trailing partial events and
         // explicit errors invalidate the proof even after an answer was seen.
-        if terminal || native_stopped_early(&row) {
+        if terminal
+            || if claude_stream {
+                native_row_stopped_early(&row)
+            } else {
+                native_stopped_early(&row)
+            }
+        {
             return None;
+        }
+        if claude_stream && let Some(event) = row.get("event") {
+            if native_text(event, "type").as_deref() == Some("message_start") {
+                claude_stream_stopped_early = false;
+            }
+            if let Some(reason) = event
+                .get("delta")
+                .and_then(|d| native_text(d, "stop_reason"))
+            {
+                claude_stream_stopped_early = incomplete_stop(&reason);
+            }
         }
         match (provider, kind.as_str()) {
             ("codex", "turn.failed" | "error") | ("claude", "error") => return None,
@@ -1355,7 +1380,8 @@ fn decode_native_output(provider: &str, raw: &[u8]) -> Option<String> {
             }
             ("codex", "turn.completed") => terminal = true,
             ("claude", "result") => {
-                if native_text(&row, "subtype").as_deref() != Some("success")
+                if claude_stream_stopped_early
+                    || native_text(&row, "subtype").as_deref() != Some("success")
                     || !matches!(row.get("is_error"), Some(oms_json::Value::Bool(false)))
                 {
                     return None;
@@ -1424,6 +1450,7 @@ fn decode_provider_events(
     let mut recognized = false;
     let mut terminal = false;
     let mut stopped_early = false;
+    let mut claude_stream_stopped_early = false;
     let mut malformed = false;
     for line in input.lines().filter(|line| !line.trim().is_empty()) {
         let Ok(row) = V::parse(line.as_bytes()) else {
@@ -1439,15 +1466,32 @@ fn decode_provider_events(
         if require_terminal_json && !native_result_footer(provider, kind, &row) {
             terminal = false;
         }
+        let claude_stream = provider == "claude" && kind == "stream_event";
         for reason in [
             row.get("stop_reason"),
             row.get("finish_reason"),
             row.get("message").get("stop_reason"),
-            row.get("event").get("delta").get("stop_reason"),
         ] {
             if reason.text().is_some_and(incomplete_stop) {
                 stopped_early = true;
             }
+        }
+        if claude_stream {
+            let event = row.get("event");
+            if text(event, "type") == "message_start" {
+                claude_stream_stopped_early = false;
+            }
+            if let Some(reason) = event.get("delta").get("stop_reason").text() {
+                claude_stream_stopped_early = incomplete_stop(reason);
+            }
+        } else if row
+            .get("event")
+            .get("delta")
+            .get("stop_reason")
+            .text()
+            .is_some_and(incomplete_stop)
+        {
+            stopped_early = true;
         }
         if provider == "codex" {
             if matches!(
@@ -1488,6 +1532,9 @@ fn decode_provider_events(
             }
             if kind == "result" {
                 recognized = true;
+                if claude_stream_stopped_early {
+                    stopped_early = true;
+                }
                 terminal = !row.get("is_error").truth()
                     && !matches!(
                         text(&row, "subtype"),
@@ -1552,6 +1599,7 @@ fn decode_provider_events(
             }
         }
     }
+    let stopped_early = stopped_early || claude_stream_stopped_early;
     recognized.then(|| {
         (
             output.join("\n\n"),
@@ -2286,6 +2334,11 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
     )
 }
 
+const PROVIDER_CAPTURE_MAX_BYTES: usize = 64 * 1024 * 1024;
+// Dedicated capture headroom for `--include-partial-messages` `stream_event`
+// rows on Claude write turns, bounded by the host executor's 256 MiB ceiling.
+const CLAUDE_WRITE_PARTIAL_ALLOWANCE_BYTES: usize = 192 * 1024 * 1024;
+
 #[allow(clippy::too_many_arguments)]
 fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
     route: &mut Route,
@@ -2348,6 +2401,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
         .filter(|secs| *secs > 0)
         .map(Duration::from_secs);
     let mut transport = transport(route, prompt.bytes(), cwd, write, timeouts.wall)?;
+    let mut write_partials = false;
     let stream = if route.provider == "claude" {
         match output_mode {
             OutputMode::Observed(_, Some(tap)) if !write => {
@@ -2369,6 +2423,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                     transport
                         .argv
                         .insert(at, "--include-partial-messages".into());
+                    write_partials = true;
                 }
                 None
             }
@@ -2622,7 +2677,12 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
             remove_environment,
             timeout: Duration::from_secs(timeouts.wall),
             stall,
-            max_bytes: 64 * 1024 * 1024,
+            max_bytes: PROVIDER_CAPTURE_MAX_BYTES
+                + if write_partials {
+                    CLAUDE_WRITE_PARTIAL_ALLOWANCE_BYTES
+                } else {
+                    0
+                },
             merge: false,
             launch_fence: Some(pending_usage.launch_fence()),
             physical_call: Some(
@@ -3335,6 +3395,118 @@ mod bridge_route_tests {
         assert_eq!(
             decode_bound_output("claude", claude_partial_complete.as_bytes()),
             decode_bound_output("claude", claude_without_partials.as_bytes())
+        );
+        assert_eq!(
+            decode_native_output("claude", claude_partial_complete.as_bytes()),
+            decode_native_output("claude", claude_without_partials.as_bytes())
+        );
+        let claude_recovered_partial = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"stop_reason\":null}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Early sub-turn hit limit.\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_stop\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Early sub-turn hit limit.\"}],\"stop_reason\":null}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Continue\"}]}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"stop_reason\":null}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Recovered answer.\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_stop\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Recovered answer.\"}],\"stop_reason\":null}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Recovered answer.\"}\n",
+        );
+        let claude_recovered_without_partials = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Early sub-turn hit limit.\"}],\"stop_reason\":null}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Continue\"}]}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Recovered answer.\"}],\"stop_reason\":null}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Recovered answer.\"}\n",
+        );
+        assert_eq!(
+            decode_output("claude", claude_recovered_partial.as_bytes()),
+            (
+                "Early sub-turn hit limit.\n\nRecovered answer.".into(),
+                true
+            )
+        );
+        assert_eq!(
+            decode_output("claude", claude_recovered_partial.as_bytes()),
+            decode_output("claude", claude_recovered_without_partials.as_bytes())
+        );
+        assert_eq!(
+            decode_bound_output("claude", claude_recovered_partial.as_bytes()),
+            (
+                "Early sub-turn hit limit.\n\nRecovered answer.".into(),
+                true
+            )
+        );
+        assert_eq!(
+            decode_bound_output("claude", claude_recovered_partial.as_bytes()),
+            decode_bound_output("claude", claude_recovered_without_partials.as_bytes())
+        );
+        assert_eq!(
+            decode_native_output("claude", claude_recovered_partial.as_bytes()),
+            Some("Recovered answer.".into())
+        );
+        assert_eq!(
+            decode_native_output("claude", claude_recovered_partial.as_bytes()),
+            decode_native_output("claude", claude_recovered_without_partials.as_bytes())
+        );
+        let claude_final_max_tokens = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"stop_reason\":null}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Inspecting files.\"}],\"stop_reason\":null}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"ok\"}]}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"stop_reason\":null}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Truncated final\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}}\n",
+            "{\"type\":\"stream_event\",\"event\":{\"type\":\"message_stop\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Truncated final\"}],\"stop_reason\":null}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Truncated final\"}\n",
+        );
+        assert_eq!(
+            decode_output("claude", claude_final_max_tokens.as_bytes()),
+            ("Inspecting files.\n\nTruncated final".into(), false)
+        );
+        assert_eq!(
+            decode_bound_output("claude", claude_final_max_tokens.as_bytes()),
+            ("Inspecting files.\n\nTruncated final".into(), false)
+        );
+        assert_eq!(
+            decode_native_output("claude", claude_final_max_tokens.as_bytes()),
+            None
+        );
+        let claude_trailing_start = format!(
+            "{claude_final_max_tokens}{{\"type\":\"stream_event\",\"event\":{{\"type\":\"message_start\",\"message\":{{\"stop_reason\":null}}}}}}\n"
+        );
+        assert!(!decode_output("claude", claude_trailing_start.as_bytes()).1);
+        assert!(!decode_bound_output("claude", claude_trailing_start.as_bytes()).1);
+        assert_eq!(
+            decode_native_output("claude", claude_trailing_start.as_bytes()),
+            None
+        );
+        let claude_assistant_stop = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Truncated.\"}],\"stop_reason\":\"max_tokens\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Done.\"}],\"stop_reason\":\"end_turn\"}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Done.\"}\n",
+        );
+        assert!(!decode_output("claude", claude_assistant_stop.as_bytes()).1);
+        assert_eq!(
+            decode_native_output("claude", claude_assistant_stop.as_bytes()),
+            None
+        );
+        let codex_delta_stop = concat!(
+            "{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n",
+            "{\"type\":\"event\",\"event\":{\"delta\":{\"stop_reason\":\"max_tokens\"}}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}\n",
+            "{\"type\":\"turn.completed\"}\n",
+        );
+        assert!(!decode_output("codex", codex_delta_stop.as_bytes()).1);
+        assert_eq!(
+            decode_native_output("codex", codex_delta_stop.as_bytes()),
+            None
         );
         assert!(
             !decode_bound_output(
@@ -4409,6 +4581,7 @@ mod bridge_route_tests {
                             })
                             .collect();
                         assert_eq!(request.argv[1..], expected, "{provider} exact={exact}");
+                        assert_eq!(request.max_bytes, PROVIDER_CAPTURE_MAX_BYTES);
                         let selected_effort = (exact && !flag.is_empty()).then(|| "high".into());
                         assert_eq!(
                             *capture.1.lock().unwrap(),
@@ -4472,8 +4645,173 @@ mod bridge_route_tests {
                                 "claude write with stall active exact={exact}"
                             );
                             assert_eq!(stall_calls[0].stall, Some(Duration::from_secs(1_200)));
+                            assert_eq!(
+                                stall_calls[0].max_bytes,
+                                PROVIDER_CAPTURE_MAX_BYTES + CLAUDE_WRITE_PARTIAL_ALLOWANCE_BYTES
+                            );
                         }
                     }
+                }
+                if mode == "normal" {
+                    use oms_command_telemetry::store::usage::{self, Phase};
+                    use oms_supervisor::{
+                        capture::{CaptureOptions, LimitAction},
+                        process::{Progress, Reactor, Request, StopReason, Streams},
+                    };
+                    struct DrainFalsePartialStream {
+                        observed_bytes: std::sync::atomic::AtomicU64,
+                    }
+                    impl Executor for DrainFalsePartialStream {
+                        fn execute(
+                            &self,
+                            request: Invocation,
+                            stop: &AtomicBool,
+                        ) -> Result<Completed> {
+                            if request.argv[0] == "git" {
+                                return Ok(Completed {
+                                    code: 0,
+                                    stdout: Vec::new(),
+                                    stderr: Vec::new(),
+                                    complete: true,
+                                    stalled: None,
+                                    cleanup_complete: Some(true),
+                                    owned_cleanup: None,
+                                    elapsed: Duration::ZERO,
+                                });
+                            }
+                            // Emit >64 MiB of valid `stream_event` partial lines using POSIX
+                            // shell builtins (`PATH` is isolated), including an early `max_tokens`
+                            // sub-turn recovered by a final `end_turn` sub-turn + `result`.
+                            let script = concat!(
+                                "b='xxxxxxxx'; ",
+                                "i=0; while [ \"$i\" -lt 13 ]; do b=\"$b$b\"; i=$((i + 1)); done; ",
+                                "line=\"{\\\"type\\\":\\\"stream_event\\\",\\\"event\\\":{\\\"type\\\":\\\"content_block_delta\\\",\\\"index\\\":0,\\\"delta\\\":{\\\"type\\\":\\\"text_delta\\\",\\\"text\\\":\\\"$b\\\"}}}\"; ",
+                                "four=\"$line\n$line\n$line\n$line\"; ",
+                                "sixteen=\"$four\n$four\n$four\n$four\"; ",
+                                "printf '%s\\n' ",
+                                "'{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"12345678-1234-4234-8234-123456789abc\"}' ",
+                                "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"stop_reason\":null}}}' ",
+                                "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}}' ",
+                                "'{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Recovered draft.\"}],\"stop_reason\":null}}' ",
+                                "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_start\",\"message\":{\"stop_reason\":null}}}'; ",
+                                "i=0; while [ \"$i\" -lt 64 ]; do printf '%s\\n' \"$sixteen\"; i=$((i + 1)); done; ",
+                                "printf '%s\\n' ",
+                                "'{\"type\":\"stream_event\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}}' ",
+                                "'{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Completed after >64 MiB partials.\"}],\"stop_reason\":null}}' ",
+                                "'{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Completed after >64 MiB partials.\",\"usage\":{\"input_tokens\":40,\"output_tokens\":60,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0},\"total_cost_usd\":0.0025}'"
+                            );
+                            let mut child =
+                                Request::new(vec!["/bin/sh".into(), "-c".into(), script.into()]);
+                            child.cwd = Some(request.cwd);
+                            child.streams = Streams::Separate;
+                            child.deadline = Some(std::time::Instant::now() + request.timeout);
+                            child.capture = CaptureOptions {
+                                max_bytes: request.max_bytes,
+                                on_limit: LimitAction::Terminate,
+                                lines: None,
+                            };
+                            child.stderr_capture = Some(child.capture.clone());
+                            let mut reactor = Reactor::new();
+                            let id = reactor.start(child).unwrap();
+                            let mut tracker = crate::process::StallTracker::new(request.stall);
+                            loop {
+                                if stop.load(std::sync::atomic::Ordering::Acquire) {
+                                    reactor.stop(id, StopReason::Cancelled).unwrap();
+                                }
+                                match reactor.poll(id, Duration::from_millis(50)).unwrap() {
+                                    Progress::Pending(snapshot) => {
+                                        if tracker.poll(&snapshot, std::time::Instant::now()) {
+                                            reactor.stop(id, StopReason::Deadline).unwrap();
+                                        }
+                                    }
+                                    Progress::Complete(done) => {
+                                        self.observed_bytes.store(
+                                            done.stdout.observed_bytes,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
+                                        let code = match done.stop {
+                                            Some(StopReason::Deadline) => 124,
+                                            Some(StopReason::Cancelled) => 130,
+                                            Some(_) => 125,
+                                            None => done.exit.map_or(125, |e| e.shell_code()),
+                                        };
+                                        let complete = done.stop.is_none()
+                                            && done.output_complete()
+                                            && done.cleanup_complete()
+                                            && done.supervision_error.is_none();
+                                        let cleanup_complete = Some(done.cleanup_complete());
+                                        let owned_cleanup = done.owned_cleanup().cloned();
+                                        return Ok(Completed {
+                                            code,
+                                            stdout: done.stdout.bytes,
+                                            stderr: done.stderr.map_or_else(Vec::new, |s| s.bytes),
+                                            complete,
+                                            stalled: tracker.finish(done.stop),
+                                            cleanup_complete,
+                                            owned_cleanup,
+                                            elapsed: done.duration,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let state = repo.join("partial-allowance-state");
+                    fs::create_dir(&state).unwrap();
+                    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+                    let extra = vec![("OMS_STATE_REPO".into(), state.as_os_str().to_owned())];
+                    let stop = AtomicBool::new(false);
+                    let exec = DrainFalsePartialStream {
+                        observed_bytes: std::sync::atomic::AtomicU64::new(0),
+                    };
+                    let ctx = Context {
+                        cwd,
+                        source: repo,
+                        interrupted: &stop,
+                        executor: &exec,
+                        heartbeat: None,
+                    };
+                    let mut claude_route = Route {
+                        provider: "claude".into(),
+                        model: "provider-default".into(),
+                        effort: String::new(),
+                        explicit: false,
+                        account: String::new(),
+                        account_pinned: false,
+                        public_research: false,
+                    };
+                    let ok = execute_env_with_output(
+                        &mut claude_route,
+                        b"long partial write".as_slice(),
+                        cwd,
+                        true,
+                        crate::peer::Timeouts {
+                            wall: 86_400,
+                            stall: Some(1_200),
+                        },
+                        repo,
+                        &extra,
+                        OutputMode::Legacy,
+                        &ctx,
+                    )
+                    .unwrap();
+                    assert!(
+                        exec.observed_bytes
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            > PROVIDER_CAPTURE_MAX_BYTES as u64,
+                        "expected partial stream above 64 MiB"
+                    );
+                    assert_eq!(ok.code, 0);
+                    assert!(ok.complete);
+                    assert_eq!(
+                        String::from_utf8_lossy(&ok.stdout),
+                        "Recovered draft.\n\nCompleted after >64 MiB partials."
+                    );
+                    let calls = usage::load(&state).unwrap().calls;
+                    assert_eq!(calls.len(), 1);
+                    assert_eq!(calls[0].receipt.phase, Phase::Final);
+                    assert_eq!(calls[0].tokens, Some(100));
+                    assert_eq!(calls[0].cost_microusd, Some(2_500));
                 }
                 for provider in ["deepseek", "vibe", "openhands", "blocked", "phantom"] {
                     let route = Route {
