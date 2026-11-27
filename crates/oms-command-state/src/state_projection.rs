@@ -728,9 +728,11 @@ pub(super) fn enrich(
             ),
         ]),
     )?;
-    let timestamp = timestamp(epoch())?;
-    let (storage_health, unsealed) =
-        oms_command_journal::cold::journal_storage_with_cold_count(&ctx.repo, &timestamp[..7]);
+    let (storage_health, unsealed) = oms_command_journal::cold::journal_storage_with_unsealed_count(
+        &ctx.repo,
+        None,
+        oms_command_journal::tz::current_utc_now(),
+    );
     let storage_value = storage_health
         .to_json()
         .into_value()
