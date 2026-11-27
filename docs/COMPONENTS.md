@@ -3191,8 +3191,10 @@ and prints a `warn:` when Claude `sandbox.enabled`, a Codex `sandbox_mode` other
 documented to use is unusable here (Claude needs `bwrap` with user namespaces allowed; Codex and
 Antigravity pass with `bwrap` or Landlock; macOS needs `sandbox-exec`). A fact is not a guarantee:
 `--probe` is the only option that starts a process, and only on Linux with `bwrap` present. It runs
-`bwrap --ro-bind / / --unshare-all --die-with-parent true` once with a 5 second timeout and prints
-`works` or `fails: <first stderr line>`. Without `--probe` nothing is executed. No setting is
+`bwrap --ro-bind / / --unshare-all --die-with-parent true` once with a 5 second timeout and then
+probes the worker `bwrap` wrapper to confirm that the OpenSSH directory (`.ssh`), OMS SSH control
+directory (`oms-ssh` under `XDG_RUNTIME_DIR`), and `ssh-agent` (`SSH_AUTH_SOCK`) are isolated.
+Without `--probe` nothing is executed. No setting is
 changed, nothing is installed and nothing is contacted. The exit status is 0 for any finding and 2
 for bad usage; `--json` is schema 1, kind `oms-doctor-sandbox`.
 
