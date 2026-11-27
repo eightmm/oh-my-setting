@@ -31,6 +31,7 @@ const REPO_OMS_MCP_JSON: &str = include_str!("../../../plugins/oms/mcp.json");
 const CODEX_BLOCK_BEGIN: &str = "# BEGIN oh-my-setting codex-panel";
 const CODEX_BLOCK_END: &str = "# END oh-my-setting codex-panel";
 const CODEX_UNTRUSTED_REASON: &str = "codex-project-untrusted";
+const CODEX_TRUST_UNKNOWN_REASON: &str = "codex-trust-unknown";
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const VENDOR_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CAPTURE_BYTES: usize = 64 * 1024;
@@ -106,6 +107,10 @@ pub(super) struct PanelRecord {
     pub created_codex_dir: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_exclude: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator_added: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_separator_added: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,6 +119,8 @@ struct CodexRowMeta {
     created_config: bool,
     created_codex_dir: bool,
     created_exclude: bool,
+    separator_added: bool,
+    exclude_separator_added: bool,
 }
 
 fn valid_sha256_hex(raw: &str) -> bool {
@@ -187,6 +194,7 @@ fn parse_panels_json(raw: &str) -> Result<PanelMap> {
         "Invalid OMS project panel map: exceeds 128 entries",
     )?;
     let mut out = BTreeMap::new();
+    let mut seen_codex_paths = BTreeSet::new();
     for (alias, rows) in raw_map {
         require(
             valid_alias(&alias) && !rows.is_empty() && rows.len() <= 8,
@@ -203,6 +211,8 @@ fn parse_panels_json(raw: &str) -> Result<PanelMap> {
                         && row.created_config.is_none()
                         && row.created_codex_dir.is_none()
                         && row.created_exclude.is_none()
+                        && row.separator_added.is_none()
+                        && row.exclude_separator_added.is_none()
                 }
                 PanelApp::Codex => {
                     row.block_sha256.as_deref().is_some_and(valid_sha256_hex)
@@ -211,6 +221,10 @@ fn parse_panels_json(raw: &str) -> Result<PanelMap> {
                         && row.created_exclude.is_some()
                         && !(row.created_codex_dir == Some(true)
                             && row.created_config == Some(false))
+                        && !(row.separator_added == Some(true) && row.created_config == Some(true))
+                        && !(row.exclude_separator_added == Some(true)
+                            && row.created_exclude != Some(true))
+                        && seen_codex_paths.insert(row.path.clone())
                 }
             };
             require(
@@ -783,12 +797,32 @@ fn try_rmdir_if_empty_at(parent_fd: &OwnedFd, name: &OsStr, label: &str) -> Resu
     }
 }
 
-fn resolve_codex_home_dir(cwd: &Path) -> Result<Option<PathBuf>> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CodexTrustStatus {
+    Trusted,
+    Untrusted { trust_target: PathBuf },
+    Unknown { hint: String },
+}
+
+fn sanitize_single_line(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if matches!(c, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn resolve_codex_home_dir_for_trust(cwd: &Path) -> std::result::Result<Option<PathBuf>, String> {
     if let Some(raw) = std::env::var_os("CODEX_HOME").filter(|v| !v.is_empty()) {
-        require(
-            raw.to_str().is_some() && !raw.as_bytes().contains(&0),
-            "CODEX_HOME must be valid UTF-8",
-        )?;
+        if raw.to_str().is_none() || raw.as_bytes().contains(&0) {
+            return Err("Cannot verify Codex project trust: CODEX_HOME is not valid UTF-8.".into());
+        }
         let candidate = PathBuf::from(raw);
         return Ok(Some(if candidate.is_absolute() {
             candidate
@@ -800,74 +834,394 @@ fn resolve_codex_home_dir(cwd: &Path) -> Result<Option<PathBuf>> {
         return Ok(None);
     };
     let home_path = PathBuf::from(home);
-    require(
-        normalized_abs_utf8(&home_path),
-        "HOME must be a normalized UTF-8 absolute path",
-    )?;
+    if !normalized_abs_utf8(&home_path) {
+        return Err(
+            "Cannot verify Codex project trust: HOME is not a normalized UTF-8 absolute path."
+                .into(),
+        );
+    }
     Ok(Some(home_path.join(".codex")))
 }
 
-fn is_codex_project_trusted_in_toml(raw: &[u8], physical_repo: &Path) -> bool {
-    let Some(repo_str) = physical_repo.to_str() else {
-        return false;
+fn resolve_codex_trust_in_toml(
+    raw: &[u8],
+    physical_repo: &Path,
+    repo_root: Option<&Path>,
+    config_label: &Path,
+) -> CodexTrustStatus {
+    let trust_target = repo_root.unwrap_or(physical_repo).to_path_buf();
+    let Some(cwd_str) = physical_repo.to_str() else {
+        return CodexTrustStatus::Untrusted { trust_target };
     };
     let Ok(table) = oms_toml::parse_bounded(raw, MAX_CONFIG_BYTES) else {
-        return false;
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} is not valid TOML.",
+                config_label.display()
+            )),
+        };
     };
-    table
-        .get("projects")
-        .and_then(oms_toml::Value::as_table)
-        .and_then(|projects| projects.get(repo_str))
-        .and_then(oms_toml::Value::as_table)
-        .and_then(|proj| proj.get("trust_level"))
-        .and_then(oms_toml::Value::as_str)
-        == Some("trusted")
-}
+    let projects = match table.get("projects") {
+        None => return CodexTrustStatus::Untrusted { trust_target },
+        Some(oms_toml::Value::Table(projects)) => projects,
+        Some(_) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: {} has an invalid 'projects' entry.",
+                    config_label.display()
+                )),
+            };
+        }
+    };
 
-fn check_codex_project_trusted(cwd: &Path, physical_repo: &Path) -> Result<bool> {
-    let Some(codex_home) = resolve_codex_home_dir(cwd)? else {
-        return Ok(false);
-    };
-    match std::fs::symlink_metadata(&codex_home) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return Err(Error::new("refusing symlinked CODEX_HOME directory"));
+    match projects.get(cwd_str) {
+        Some(oms_toml::Value::Table(cwd_proj)) => {
+            if let Some(level) = cwd_proj.get("trust_level") {
+                return if level.as_str() == Some("trusted") {
+                    CodexTrustStatus::Trusted
+                } else {
+                    CodexTrustStatus::Untrusted { trust_target }
+                };
+            }
         }
-        Ok(meta) if !meta.is_dir() => {
-            return Err(Error::new("Invalid CODEX_HOME: not a directory"));
+        Some(_) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: {} has an invalid entry under [projects].",
+                    config_label.display()
+                )),
+            };
         }
-        Ok(_) => {}
-        Err(e) => {
-            return Err(Error::new(format!(
-                "cannot inspect CODEX_HOME {}: {e}",
-                codex_home.display()
-            )));
+        None => {}
+    }
+
+    if let Some(root) = repo_root
+        && root != physical_repo
+        && let Some(root_str) = root.to_str()
+    {
+        match projects.get(root_str) {
+            Some(oms_toml::Value::Table(root_proj)) => {
+                if root_proj
+                    .get("trust_level")
+                    .and_then(oms_toml::Value::as_str)
+                    == Some("trusted")
+                {
+                    return CodexTrustStatus::Trusted;
+                }
+            }
+            Some(_) => {
+                return CodexTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Codex project trust: {} has an invalid entry under [projects].",
+                        config_label.display()
+                    )),
+                };
+            }
+            None => {}
         }
     }
-    let dir_fd = open_dir_nofollow(&codex_home, "CODEX_HOME directory")?;
-    let Some((bytes, _)) = read_regular_file_nofollow_at(
-        &dir_fd,
-        OsStr::new("config.toml"),
-        "CODEX_HOME/config.toml",
-    )?
-    else {
-        return Ok(false);
-    };
-    Ok(is_codex_project_trusted_in_toml(&bytes, physical_repo))
+
+    CodexTrustStatus::Untrusted { trust_target }
 }
 
-fn codex_untrusted_hint(physical_repo: &Path) -> String {
-    format!(
-        "Trust {} in Codex so it loads .codex/config.toml.",
-        physical_repo.display()
+fn check_codex_project_trust_at(
+    codex_home: &Path,
+    physical_repo: &Path,
+    repo_root: Option<&Path>,
+    expected_uid: u32,
+) -> CodexTrustStatus {
+    use std::os::unix::fs::MetadataExt;
+    let trust_target = repo_root.unwrap_or(physical_repo).to_path_buf();
+
+    match std::fs::symlink_metadata(codex_home) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return CodexTrustStatus::Untrusted { trust_target };
+        }
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot inspect CODEX_HOME ({}): {e}.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: CODEX_HOME ({}) is a symlink.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Ok(meta) if !meta.is_dir() => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: CODEX_HOME ({}) is not a directory.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Ok(meta) if meta.uid() != expected_uid => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: CODEX_HOME ({}) is not owned by the current user.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Ok(_) => {}
+    }
+
+    let dir_fd = match fs::open(
+        codex_home,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return CodexTrustStatus::Untrusted { trust_target },
+        Err(Errno::LOOP) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: CODEX_HOME ({}) is a symlink.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Err(Errno::NOTDIR) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: CODEX_HOME ({}) is not a directory.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot read CODEX_HOME ({}): {e}.",
+                    codex_home.display()
+                )),
+            };
+        }
+    };
+
+    let dir_stat = match fs::fstat(&dir_fd) {
+        Ok(stat) => stat,
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot inspect CODEX_HOME ({}): {e}.",
+                    codex_home.display()
+                )),
+            };
+        }
+    };
+    if FileType::from_raw_mode(dir_stat.st_mode) != FileType::Directory {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: CODEX_HOME ({}) is not a directory.",
+                codex_home.display()
+            )),
+        };
+    }
+    if dir_stat.st_uid != expected_uid {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: CODEX_HOME ({}) is not owned by the current user.",
+                codex_home.display()
+            )),
+        };
+    }
+
+    let config_path = codex_home.join("config.toml");
+    let named = match fs::statat(
+        &dir_fd,
+        OsStr::new("config.toml"),
+        AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Err(Errno::NOENT) => return CodexTrustStatus::Untrusted { trust_target },
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot inspect {}: {e}.",
+                    config_path.display()
+                )),
+            };
+        }
+        Ok(stat) => {
+            let kind = FileType::from_raw_mode(stat.st_mode);
+            if kind == FileType::Symlink {
+                return CodexTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Codex project trust: {} is a symlink.",
+                        config_path.display()
+                    )),
+                };
+            }
+            if kind != FileType::RegularFile {
+                return CodexTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Codex project trust: {} is not a regular file.",
+                        config_path.display()
+                    )),
+                };
+            }
+            if stat.st_uid != expected_uid {
+                return CodexTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Codex project trust: {} is not owned by the current user.",
+                        config_path.display()
+                    )),
+                };
+            }
+            stat
+        }
+    };
+
+    let fd = match fs::openat(
+        &dir_fd,
+        OsStr::new("config.toml"),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return CodexTrustStatus::Untrusted { trust_target },
+        Err(Errno::LOOP) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: {} is a symlink.",
+                    config_path.display()
+                )),
+            };
+        }
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot read {}: {e}.",
+                    config_path.display()
+                )),
+            };
+        }
+    };
+
+    let opened = match fs::fstat(&fd) {
+        Ok(stat) => stat,
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot inspect {}: {e}.",
+                    config_path.display()
+                )),
+            };
+        }
+    };
+    if FileType::from_raw_mode(opened.st_mode) != FileType::RegularFile {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} is not a regular file.",
+                config_path.display()
+            )),
+        };
+    }
+    if opened.st_uid != expected_uid {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} is not owned by the current user.",
+                config_path.display()
+            )),
+        };
+    }
+    if !same_stat(&named, &opened) {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} changed while opening.",
+                config_path.display()
+            )),
+        };
+    }
+
+    let mut file = std::fs::File::from(fd);
+    let mut bytes = Vec::new();
+    if let Err(e) = (&mut file)
+        .take((MAX_CONFIG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+    {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: cannot read {}: {e}.",
+                config_path.display()
+            )),
+        };
+    }
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} exceeds 1 MiB.",
+                config_path.display()
+            )),
+        };
+    }
+    let Ok(after) = fs::fstat(&file) else {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: cannot verify {} after reading.",
+                config_path.display()
+            )),
+        };
+    };
+    if !same_stat(&opened, &after) {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} changed while reading.",
+                config_path.display()
+            )),
+        };
+    }
+
+    resolve_codex_trust_in_toml(&bytes, physical_repo, repo_root, &config_path)
+}
+
+fn check_codex_project_trust(
+    cwd: &Path,
+    physical_repo: &Path,
+    repo_root: Option<&Path>,
+) -> CodexTrustStatus {
+    let trust_target = repo_root.unwrap_or(physical_repo).to_path_buf();
+    let codex_home = match resolve_codex_home_dir_for_trust(cwd) {
+        Ok(Some(dir)) => dir,
+        Ok(None) => return CodexTrustStatus::Untrusted { trust_target },
+        Err(hint) => return CodexTrustStatus::Unknown { hint },
+    };
+    check_codex_project_trust_at(
+        &codex_home,
+        physical_repo,
+        repo_root,
+        rustix::process::geteuid().as_raw(),
     )
 }
 
-fn attach_codex_trust_fields(report: &mut serde_json::Value, physical_repo: &Path, trusted: bool) {
-    report["active"] = json!(trusted);
-    if !trusted {
-        report["reason"] = json!(CODEX_UNTRUSTED_REASON);
-        report["hint"] = json!(codex_untrusted_hint(physical_repo));
+fn codex_untrusted_hint(trust_target: &Path) -> String {
+    format!(
+        "Trust {} in Codex so it loads .codex/config.toml.",
+        trust_target.display()
+    )
+}
+
+fn attach_codex_trust_fields(report: &mut serde_json::Value, trust: &CodexTrustStatus) {
+    match trust {
+        CodexTrustStatus::Trusted => {
+            report["active"] = json!(true);
+        }
+        CodexTrustStatus::Untrusted { trust_target } => {
+            report["active"] = json!(false);
+            report["reason"] = json!(CODEX_UNTRUSTED_REASON);
+            report["hint"] = json!(codex_untrusted_hint(trust_target));
+        }
+        CodexTrustStatus::Unknown { hint } => {
+            report["active"] = json!(false);
+            report["reason"] = json!(CODEX_TRUST_UNKNOWN_REASON);
+            report["hint"] = json!(hint);
+        }
     }
 }
 
@@ -1401,30 +1755,36 @@ fn contains_exact_line(text: &str, target: &str) -> bool {
         .any(|line| line.strip_suffix('\r').unwrap_or(line) == target)
 }
 
-fn append_exclude_line_bytes(prior: Option<&[u8]>, line: &str) -> Result<(Vec<u8>, bool)> {
+fn append_exclude_line_bytes(prior: Option<&[u8]>, line: &str) -> Result<(Vec<u8>, bool, bool)> {
     let prior_text = match prior {
         Some(bytes) => std::str::from_utf8(bytes)
             .map_err(|_| Error::new("git info/exclude file is not valid UTF-8"))?,
         None => "",
     };
     if contains_exact_line(prior_text, line) {
-        return Ok((prior_text.as_bytes().to_vec(), false));
+        return Ok((prior_text.as_bytes().to_vec(), false, false));
     }
     let mut out = String::with_capacity(prior_text.len() + line.len() + 2);
     out.push_str(prior_text);
-    if !out.is_empty() && !out.ends_with('\n') {
+    let separator_added = !out.is_empty() && !out.ends_with('\n');
+    if separator_added {
         out.push('\n');
     }
     out.push_str(line);
     out.push('\n');
-    Ok((out.into_bytes(), true))
+    Ok((out.into_bytes(), true, separator_added))
 }
 
-fn remove_exact_line_bytes(raw: &[u8], target_line: &str) -> Result<Option<Vec<u8>>> {
+fn remove_exact_line_bytes(
+    raw: &[u8],
+    target_line: &str,
+    remove_preceding_separator: bool,
+) -> Result<Option<(Vec<u8>, bool)>> {
     let text = std::str::from_utf8(raw)
         .map_err(|_| Error::new("git info/exclude file is not valid UTF-8"))?;
     let mut out = String::with_capacity(text.len());
     let mut removed = false;
+    let mut separator_removed = false;
     let mut pos = 0usize;
     while pos < text.len() {
         let end = match text[pos..].find('\n') {
@@ -1436,12 +1796,16 @@ fn remove_exact_line_bytes(raw: &[u8], target_line: &str) -> Result<Option<Vec<u
         let bare = bare.strip_suffix('\r').unwrap_or(bare);
         if !removed && bare == target_line {
             removed = true;
+            if remove_preceding_separator && end == text.len() && out.ends_with('\n') {
+                out.pop();
+                separator_removed = true;
+            }
         } else {
             out.push_str(segment);
         }
         pos = end;
     }
-    Ok(removed.then(|| out.into_bytes()))
+    Ok(removed.then(|| (out.into_bytes(), separator_removed)))
 }
 
 struct ExcludeBackup {
@@ -1605,12 +1969,32 @@ fn rollback_codex_files(
     Err(err)
 }
 
-fn other_codex_panel_shares_common_git_dir(
+fn find_conflicting_codex_alias<'a>(
+    panels: &'a PanelMap,
+    alias: &str,
+    physical: &Path,
+) -> Option<&'a str> {
+    for (other_alias, rows) in panels {
+        if other_alias == alias {
+            continue;
+        }
+        if rows
+            .iter()
+            .any(|r| r.app == PanelApp::Codex.as_str() && r.path == physical)
+        {
+            return Some(other_alias.as_str());
+        }
+    }
+    None
+}
+
+fn find_other_codex_panel_sharing_exclude(
     panels: &PanelMap,
     excluding_alias: &str,
     common_git_dir: &Path,
+    exclude_line: &str,
     stop: &AtomicBool,
-) -> bool {
+) -> Option<String> {
     for (other_alias, rows) in panels {
         if other_alias == excluding_alias {
             continue;
@@ -1621,15 +2005,47 @@ fn other_codex_panel_shares_common_git_dir(
             }
             if let Ok(GitConfigState::Untracked {
                 common_git_dir: other_common,
+                exclude_line: other_line,
+                ..
+            }) = inspect_git_codex_config(&row.path, stop)
+                && other_common == common_git_dir
+                && other_line == exclude_line
+            {
+                return Some(other_alias.clone());
+            }
+        }
+    }
+    None
+}
+
+fn find_other_codex_panel_owning_exclude_in_common_dir(
+    panels: &PanelMap,
+    excluding_alias: &str,
+    common_git_dir: &Path,
+    stop: &AtomicBool,
+) -> Option<String> {
+    for (other_alias, rows) in panels {
+        if other_alias == excluding_alias {
+            continue;
+        }
+        for row in rows {
+            if row.app != PanelApp::Codex.as_str()
+                || row.created_exclude != Some(true)
+                || !row.path.is_dir()
+            {
+                continue;
+            }
+            if let Ok(GitConfigState::Untracked {
+                common_git_dir: other_common,
                 ..
             }) = inspect_git_codex_config(&row.path, stop)
                 && other_common == common_git_dir
             {
-                return true;
+                return Some(other_alias.clone());
             }
         }
     }
-    false
+    None
 }
 
 fn sanitized_vendor_reason(out: &CmdOutput) -> Option<String> {
@@ -1941,14 +2357,23 @@ fn upsert_panel_row(
     physical: &Path,
     codex_meta: Option<CodexRowMeta>,
 ) {
-    let (block_sha256, created_config, created_codex_dir, created_exclude) = match codex_meta {
+    let (
+        block_sha256,
+        created_config,
+        created_codex_dir,
+        created_exclude,
+        separator_added,
+        exclude_separator_added,
+    ) = match codex_meta {
         Some(m) => (
             Some(m.block_sha256),
             Some(m.created_config),
             Some(m.created_codex_dir),
             Some(m.created_exclude),
+            m.separator_added.then_some(true),
+            m.exclude_separator_added.then_some(true),
         ),
-        None => (None, None, None, None),
+        None => (None, None, None, None, None, None),
     };
     let rows = panels.entry(alias.to_owned()).or_default();
     if let Some(slot) = rows.iter_mut().find(|r| r.app == app.as_str()) {
@@ -1959,6 +2384,8 @@ fn upsert_panel_row(
         slot.created_config = created_config;
         slot.created_codex_dir = created_codex_dir;
         slot.created_exclude = created_exclude;
+        slot.separator_added = separator_added;
+        slot.exclude_separator_added = exclude_separator_added;
     } else {
         rows.push(PanelRecord {
             app: app.as_str().to_owned(),
@@ -1969,6 +2396,8 @@ fn upsert_panel_row(
             created_config,
             created_codex_dir,
             created_exclude,
+            separator_added,
+            exclude_separator_added,
         });
     }
 }
@@ -2040,6 +2469,8 @@ enum CodexInstallPlan {
     Write {
         candidate_bytes: Vec<u8>,
         block_sha256: String,
+        replaced_existing_block: bool,
+        added_separator: bool,
     },
 }
 
@@ -2047,6 +2478,7 @@ struct PreparedCodexInstall {
     plan: CodexInstallPlan,
     codex_dir_existed: bool,
     prior_config: Option<(Vec<u8>, Stat)>,
+    repo_root: Option<PathBuf>,
     exclude_target: Option<(PathBuf, String)>,
 }
 
@@ -2068,8 +2500,8 @@ fn prepare_codex_install(
         None => None,
     };
 
-    let exclude_target = match inspect_git_codex_config(physical, stop)? {
-        GitConfigState::NotGit => None,
+    let (repo_root, exclude_target) = match inspect_git_codex_config(physical, stop)? {
+        GitConfigState::NotGit => (None, None),
         GitConfigState::Tracked => {
             return Err(Error::new(format!(
                 "refusing to modify tracked file .codex/config.toml in {}; untrack it first",
@@ -2080,7 +2512,11 @@ fn prepare_codex_install(
             common_git_dir,
             exclude_line,
             already_ignored,
-        } => (!already_ignored).then_some((common_git_dir, exclude_line)),
+        } => {
+            let root = common_git_dir.parent().map(Path::to_path_buf);
+            let target = (!already_ignored).then_some((common_git_dir, exclude_line));
+            (root, target)
+        }
     };
 
     let resource_version = codex_panel_resource_version();
@@ -2155,6 +2591,8 @@ fn prepare_codex_install(
                         CodexInstallPlan::Write {
                             candidate_bytes: candidate.into_bytes(),
                             block_sha256: expected_sha,
+                            replaced_existing_block: true,
+                            added_separator: false,
                         },
                         outside_table,
                     )
@@ -2184,15 +2622,18 @@ fn prepare_codex_install(
                 )));
             }
         } else {
-            let candidate = if prior_str.is_empty() || prior_str.ends_with('\n') {
-                format!("{prior_str}{expected_block}")
-            } else {
+            let needs_separator = !prior_str.is_empty() && !prior_str.ends_with('\n');
+            let candidate = if needs_separator {
                 format!("{prior_str}\n{expected_block}")
+            } else {
+                format!("{prior_str}{expected_block}")
             };
             (
                 CodexInstallPlan::Write {
                     candidate_bytes: candidate.into_bytes(),
                     block_sha256: expected_sha,
+                    replaced_existing_block: false,
+                    added_separator: needs_separator,
                 },
                 outside_table,
             )
@@ -2202,6 +2643,8 @@ fn prepare_codex_install(
             CodexInstallPlan::Write {
                 candidate_bytes: expected_block.into_bytes(),
                 block_sha256: expected_sha,
+                replaced_existing_block: false,
+                added_separator: false,
             },
             oms_toml::Table::new(),
         )
@@ -2230,6 +2673,7 @@ fn prepare_codex_install(
         plan,
         codex_dir_existed,
         prior_config,
+        repo_root,
         exclude_target,
     })
 }
@@ -2238,21 +2682,25 @@ fn format_codex_install_text(
     alias: &str,
     physical: &Path,
     verb_prefix: &str,
-    trusted: bool,
+    trust: &CodexTrustStatus,
 ) -> Vec<u8> {
-    if trusted {
-        format!(
+    match trust {
+        CodexTrustStatus::Trusted => format!(
             "{verb_prefix} codex panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
             physical.display()
         )
-        .into_bytes()
-    } else {
-        format!(
+        .into_bytes(),
+        CodexTrustStatus::Untrusted { trust_target } => format!(
             "{verb_prefix} codex panel {PANEL_ENTRY_NAME} for {alias}: {} (inactive: {CODEX_UNTRUSTED_REASON})\nhint: {}\n",
             physical.display(),
-            codex_untrusted_hint(physical)
+            codex_untrusted_hint(trust_target)
         )
-        .into_bytes()
+        .into_bytes(),
+        CodexTrustStatus::Unknown { hint } => format!(
+            "{verb_prefix} codex panel {PANEL_ENTRY_NAME} for {alias}: {} (inactive: {CODEX_TRUST_UNKNOWN_REASON})\nhint: {hint}\n",
+            physical.display(),
+        )
+        .into_bytes(),
     }
 }
 
@@ -2347,8 +2795,18 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 return Ok((0, text.into_bytes(), vec![]));
             }
             PanelApp::Codex => {
-                let trusted = check_codex_project_trusted(cwd, &physical)?;
-                let _ = prepare_codex_install(&alias, &physical, &launcher, recorded_row, stop)?;
+                if let Some(existing_alias) =
+                    find_conflicting_codex_alias(&panels, &alias, &physical)
+                {
+                    return Err(Error::new(format!(
+                        "checkout {} already has a recorded codex panel under project alias '{existing_alias}'; use '{existing_alias}' or run `oms panel --uninstall-panel codex --project {existing_alias}` first",
+                        physical.display()
+                    )));
+                }
+                let prepared =
+                    prepare_codex_install(&alias, &physical, &launcher, recorded_row, stop)?;
+                let trust =
+                    check_codex_project_trust(cwd, &physical, prepared.repo_root.as_deref());
                 if want_json {
                     let mut report = panel_action_json(
                         app,
@@ -2358,12 +2816,12 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                         "install",
                         false,
                     );
-                    attach_codex_trust_fields(&mut report, &physical, trusted);
+                    attach_codex_trust_fields(&mut report, &trust);
                     return Ok((0, json(&report)?, vec![]));
                 }
                 return Ok((
                     0,
-                    format_codex_install_text(&alias, &physical, "would install", trusted),
+                    format_codex_install_text(&alias, &physical, "would install", &trust),
                     vec![],
                 ));
             }
@@ -2549,9 +3007,15 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
             ))
         }
         PanelApp::Codex => {
-            let trusted = check_codex_project_trusted(cwd, &physical)?;
+            if let Some(existing_alias) = find_conflicting_codex_alias(&panels, &alias, &physical) {
+                return Err(Error::new(format!(
+                    "checkout {} already has a recorded codex panel under project alias '{existing_alias}'; use '{existing_alias}' or run `oms panel --uninstall-panel codex --project {existing_alias}` first",
+                    physical.display()
+                )));
+            }
             let prepared =
                 prepare_codex_install(&alias, &physical, &launcher, recorded_row.as_ref(), stop)?;
+            let trust = check_codex_project_trust(cwd, &physical, prepared.repo_root.as_deref());
 
             if matches!(prepared.plan, CodexInstallPlan::NoOp) {
                 if want_json {
@@ -2563,12 +3027,12 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                         "install",
                         false,
                     );
-                    attach_codex_trust_fields(&mut report, &physical, trusted);
+                    attach_codex_trust_fields(&mut report, &trust);
                     return Ok((0, json(&report)?, vec![]));
                 }
                 return Ok((
                     0,
-                    format_codex_install_text(&alias, &physical, "already installed", trusted),
+                    format_codex_install_text(&alias, &physical, "already installed", &trust),
                     vec![],
                 ));
             }
@@ -2584,67 +3048,85 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
             let mut config_backup: Option<ConfigBackup> = None;
             let mut exclude_backup: Option<ExcludeBackup> = None;
 
-            let (action_str, text_prefix, block_sha256, created_config_now, created_codex_dir_now) =
-                match prepared.plan {
-                    CodexInstallPlan::NoOp => unreachable!(),
-                    CodexInstallPlan::Adopt { block_sha256 } => {
-                        ("adopted", "adopted existing", block_sha256, false, false)
-                    }
-                    CodexInstallPlan::Write {
-                        candidate_bytes,
-                        block_sha256,
-                    } => {
-                        let repo_fd = open_dir_nofollow(&physical, "project checkout")?;
-                        let (codex_fd, created_dir) = ensure_subdir_nofollow_at(
-                            &repo_fd,
-                            OsStr::new(".codex"),
-                            0o700,
-                            ".codex directory",
-                        )?;
-                        let before_stat = prepared.prior_config.as_ref().map(|(_, st)| st);
-                        let target_mode = match before_stat {
-                            Some(st) => st.st_mode & 0o777,
-                            None => 0o600,
-                        };
-                        let created_file = before_stat.is_none();
-                        let published_cfg_stat = match write_regular_file_atomic_at(
-                            &codex_fd,
-                            OsStr::new("config.toml"),
-                            before_stat,
-                            &candidate_bytes,
-                            target_mode,
-                            ".codex/config.toml",
-                        ) {
-                            Ok(st) => st,
-                            Err(write_err) => {
-                                drop(codex_fd);
-                                if created_dir {
-                                    let _ = try_rmdir_if_empty_at(
-                                        &repo_fd,
-                                        OsStr::new(".codex"),
-                                        ".codex directory",
-                                    );
-                                }
-                                return Err(write_err);
+            let (
+                action_str,
+                text_prefix,
+                block_sha256,
+                created_config_now,
+                created_codex_dir_now,
+                replaced_existing_block,
+                added_separator_now,
+            ) = match prepared.plan {
+                CodexInstallPlan::NoOp => unreachable!(),
+                CodexInstallPlan::Adopt { block_sha256 } => (
+                    "adopted",
+                    "adopted existing",
+                    block_sha256,
+                    false,
+                    false,
+                    false,
+                    false,
+                ),
+                CodexInstallPlan::Write {
+                    candidate_bytes,
+                    block_sha256,
+                    replaced_existing_block,
+                    added_separator,
+                } => {
+                    let repo_fd = open_dir_nofollow(&physical, "project checkout")?;
+                    let (codex_fd, created_dir) = ensure_subdir_nofollow_at(
+                        &repo_fd,
+                        OsStr::new(".codex"),
+                        0o700,
+                        ".codex directory",
+                    )?;
+                    let before_stat = prepared.prior_config.as_ref().map(|(_, st)| st);
+                    let target_mode = match before_stat {
+                        Some(st) => st.st_mode & 0o777,
+                        None => 0o600,
+                    };
+                    let created_file = before_stat.is_none();
+                    let published_cfg_stat = match write_regular_file_atomic_at(
+                        &codex_fd,
+                        OsStr::new("config.toml"),
+                        before_stat,
+                        &candidate_bytes,
+                        target_mode,
+                        ".codex/config.toml",
+                    ) {
+                        Ok(st) => st,
+                        Err(write_err) => {
+                            drop(codex_fd);
+                            if created_dir {
+                                let _ = try_rmdir_if_empty_at(
+                                    &repo_fd,
+                                    OsStr::new(".codex"),
+                                    ".codex directory",
+                                );
                             }
-                        };
-                        config_backup = Some(ConfigBackup {
-                            physical_repo: physical.clone(),
-                            created_codex_dir: created_dir,
-                            prior_config: prepared.prior_config,
-                            published_stat: Some(published_cfg_stat),
-                        });
-                        (
-                            "install",
-                            "installed",
-                            block_sha256,
-                            created_file,
-                            created_dir,
-                        )
-                    }
-                };
+                            return Err(write_err);
+                        }
+                    };
+                    config_backup = Some(ConfigBackup {
+                        physical_repo: physical.clone(),
+                        created_codex_dir: created_dir,
+                        prior_config: prepared.prior_config,
+                        published_stat: Some(published_cfg_stat),
+                    });
+                    (
+                        "install",
+                        "installed",
+                        block_sha256,
+                        created_file,
+                        created_dir,
+                        replaced_existing_block,
+                        added_separator,
+                    )
+                }
+            };
 
             let mut added_exclude_now = false;
+            let mut added_exclude_sep_now = false;
             if let Some((common_git_dir, exclude_line)) = prepared.exclude_target {
                 let exclude_step: Result<()> = (|| {
                     let common_fd = open_dir_nofollow(&common_git_dir, "git common directory")?;
@@ -2659,7 +3141,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                         OsStr::new("exclude"),
                         "git info/exclude",
                     )?;
-                    let (next_bytes, added) = append_exclude_line_bytes(
+                    let (next_bytes, added, sep_added) = append_exclude_line_bytes(
                         prior_exclude.as_ref().map(|(b, _)| b.as_slice()),
                         &exclude_line,
                     )?;
@@ -2678,6 +3160,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                             "git info/exclude",
                         )?;
                         added_exclude_now = true;
+                        added_exclude_sep_now = sep_added;
                         exclude_backup = Some(ExcludeBackup {
                             common_git_dir,
                             created_info_dir,
@@ -2719,10 +3202,22 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 Some(prev) if prepared.codex_dir_existed => prev.created_codex_dir == Some(true),
                 _ => created_codex_dir_now,
             };
-            let created_exclude = recorded_row
-                .as_ref()
-                .is_some_and(|r| r.created_exclude == Some(true))
-                || added_exclude_now;
+            let separator_added = if replaced_existing_block {
+                recorded_row
+                    .as_ref()
+                    .is_some_and(|prev| prev.separator_added == Some(true))
+            } else {
+                added_separator_now
+            };
+            let (created_exclude, exclude_separator_added) = if added_exclude_now {
+                (true, added_exclude_sep_now)
+            } else if let Some(prev) = &recorded_row
+                && prev.created_exclude == Some(true)
+            {
+                (true, prev.exclude_separator_added == Some(true))
+            } else {
+                (false, false)
+            };
 
             upsert_panel_row(
                 &mut panels,
@@ -2734,6 +3229,8 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                     created_config,
                     created_codex_dir,
                     created_exclude,
+                    separator_added,
+                    exclude_separator_added,
                 }),
             );
             if let Err(record_err) =
@@ -2756,12 +3253,12 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
             if want_json {
                 let mut report =
                     panel_action_json(app, &alias, &physical, PANEL_ENTRY_NAME, action_str, true);
-                attach_codex_trust_fields(&mut report, &physical, trusted);
+                attach_codex_trust_fields(&mut report, &trust);
                 return Ok((0, json(&report)?, vec![]));
             }
             Ok((
                 0,
-                format_codex_install_text(&alias, &physical, text_prefix, trusted),
+                format_codex_install_text(&alias, &physical, text_prefix, &trust),
                 vec![],
             ))
         }
@@ -2781,6 +3278,7 @@ fn inspect_codex_config_for_uninstall(
     target_repo: &Path,
     expected_sha: &str,
     created_config: bool,
+    separator_added: bool,
 ) -> Result<CodexUninstallInspect> {
     let repo_fd = open_dir_nofollow(target_repo, "project checkout")?;
     let Some(codex_fd) =
@@ -2809,7 +3307,17 @@ fn inspect_codex_config_for_uninstall(
             if oms_panel_core::digest(on_disk_block.as_bytes()) != expected_sha {
                 return Ok(CodexUninstallInspect::Edited);
             }
-            let remaining = format!("{}{}", split.before, split.after);
+            let before_trimmed = if separator_added
+                && split.before.ends_with('\n')
+                && (split.after.is_empty()
+                    || split.after.starts_with('\n')
+                    || split.after.starts_with("\r\n"))
+            {
+                &split.before[..split.before.len() - 1]
+            } else {
+                split.before
+            };
+            let remaining = format!("{before_trimmed}{}", split.after);
             let Ok(parsed_remaining) =
                 oms_toml::parse_bounded(remaining.as_bytes(), MAX_CONFIG_BYTES)
             else {
@@ -3148,9 +3656,15 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
             let created_config = row.created_config == Some(true);
             let created_codex_dir = row.created_codex_dir == Some(true);
             let created_exclude = row.created_exclude == Some(true);
+            let separator_added = row.separator_added == Some(true);
+            let exclude_separator_added = row.exclude_separator_added == Some(true);
 
-            let inspect =
-                inspect_codex_config_for_uninstall(&row.path, expected_sha, created_config)?;
+            let inspect = inspect_codex_config_for_uninstall(
+                &row.path,
+                expected_sha,
+                created_config,
+                separator_added,
+            )?;
             let git_state = inspect_git_codex_config(&row.path, stop)?;
             if matches!(git_state, GitConfigState::Tracked) {
                 return Err(Error::new(format!(
@@ -3260,69 +3774,108 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                     exclude_line,
                     ..
                 } = git_state
-                && !other_codex_panel_shares_common_git_dir(&panels, &alias, &common_git_dir, stop)
             {
-                let exclude_step: Result<()> = (|| {
-                    let common_fd = open_dir_nofollow(&common_git_dir, "git common directory")?;
-                    let Some(info_fd) = open_existing_subdir_nofollow_at(
-                        &common_fd,
-                        OsStr::new("info"),
-                        "git info directory",
-                    )?
-                    else {
-                        return Ok(());
-                    };
-                    let Some((prior_bytes, prior_stat)) = read_regular_file_nofollow_at(
-                        &info_fd,
-                        OsStr::new("exclude"),
-                        "git info/exclude",
-                    )?
-                    else {
-                        return Ok(());
-                    };
-                    if let Some(next_bytes) = remove_exact_line_bytes(&prior_bytes, &exclude_line)?
+                if let Some(handover_alias) = find_other_codex_panel_sharing_exclude(
+                    &panels,
+                    &alias,
+                    &common_git_dir,
+                    &exclude_line,
+                    stop,
+                ) {
+                    if let Some(other_rows) = panels.get_mut(&handover_alias)
+                        && let Some(other_codex) = other_rows
+                            .iter_mut()
+                            .find(|r| r.app == PanelApp::Codex.as_str())
                     {
-                        let published_excl_stat = if next_bytes.is_empty() {
-                            unlink_regular_file_checked_at(
-                                &info_fd,
-                                OsStr::new("exclude"),
-                                Some(&prior_stat),
-                                "git info/exclude",
-                            )?;
-                            None
-                        } else {
-                            Some(write_regular_file_atomic_at(
-                                &info_fd,
-                                OsStr::new("exclude"),
-                                Some(&prior_stat),
-                                &next_bytes,
-                                prior_stat.st_mode & 0o777,
-                                "git info/exclude",
-                            )?)
+                        other_codex.created_exclude = Some(true);
+                        if exclude_separator_added {
+                            other_codex.exclude_separator_added = Some(true);
+                        }
+                    }
+                } else {
+                    let mut separator_removed = false;
+                    let exclude_step: Result<()> = (|| {
+                        let common_fd = open_dir_nofollow(&common_git_dir, "git common directory")?;
+                        let Some(info_fd) = open_existing_subdir_nofollow_at(
+                            &common_fd,
+                            OsStr::new("info"),
+                            "git info directory",
+                        )?
+                        else {
+                            return Ok(());
                         };
-                        exclude_backup = Some(ExcludeBackup {
-                            common_git_dir,
-                            created_info_dir: false,
-                            prior_exclude: Some((prior_bytes, prior_stat)),
-                            published_stat: published_excl_stat,
-                        });
-                    }
-                    Ok(())
-                })();
+                        let Some((prior_bytes, prior_stat)) = read_regular_file_nofollow_at(
+                            &info_fd,
+                            OsStr::new("exclude"),
+                            "git info/exclude",
+                        )?
+                        else {
+                            return Ok(());
+                        };
+                        if let Some((next_bytes, sep_removed)) = remove_exact_line_bytes(
+                            &prior_bytes,
+                            &exclude_line,
+                            exclude_separator_added,
+                        )? {
+                            separator_removed = sep_removed;
+                            let published_excl_stat = if next_bytes.is_empty() {
+                                unlink_regular_file_checked_at(
+                                    &info_fd,
+                                    OsStr::new("exclude"),
+                                    Some(&prior_stat),
+                                    "git info/exclude",
+                                )?;
+                                None
+                            } else {
+                                Some(write_regular_file_atomic_at(
+                                    &info_fd,
+                                    OsStr::new("exclude"),
+                                    Some(&prior_stat),
+                                    &next_bytes,
+                                    prior_stat.st_mode & 0o777,
+                                    "git info/exclude",
+                                )?)
+                            };
+                            exclude_backup = Some(ExcludeBackup {
+                                common_git_dir: common_git_dir.clone(),
+                                created_info_dir: false,
+                                prior_exclude: Some((prior_bytes, prior_stat)),
+                                published_stat: published_excl_stat,
+                            });
+                        }
+                        Ok(())
+                    })();
 
-                if let Err(ex_err) = exclude_step {
-                    if config_backup.is_some() {
-                        return rollback_codex_files(
-                            want_json,
-                            &alias,
-                            &row.path,
-                            "uninstall",
-                            config_backup.as_ref(),
-                            None,
-                            ex_err,
-                        );
+                    if let Err(ex_err) = exclude_step {
+                        if config_backup.is_some() {
+                            return rollback_codex_files(
+                                want_json,
+                                &alias,
+                                &row.path,
+                                "uninstall",
+                                config_backup.as_ref(),
+                                None,
+                                ex_err,
+                            );
+                        }
+                        return Err(ex_err);
                     }
-                    return Err(ex_err);
+
+                    if exclude_separator_added
+                        && !separator_removed
+                        && let Some(sep_alias) = find_other_codex_panel_owning_exclude_in_common_dir(
+                            &panels,
+                            &alias,
+                            &common_git_dir,
+                            stop,
+                        )
+                        && let Some(other_rows) = panels.get_mut(&sep_alias)
+                        && let Some(other_codex) = other_rows
+                            .iter_mut()
+                            .find(|r| r.app == PanelApp::Codex.as_str())
+                    {
+                        other_codex.exclude_separator_added = Some(true);
+                    }
                 }
             }
 
@@ -3368,10 +3921,11 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeScope, CmdOutput, OMS_PACKAGE_VERSION, PanelApp, claude_panel_entry_json,
-        codex_panel_block, codex_panel_block_for_versions, codex_panel_resource_version,
-        expected_codex_panel_server_table, is_codex_project_trusted_in_toml, is_mcp_entry_missing,
-        parse_claude_mcp_get, parse_panels_json, split_codex_panel_block,
+        ClaudeScope, CmdOutput, CodexTrustStatus, OMS_PACKAGE_VERSION, PanelApp,
+        check_codex_project_trust_at, claude_panel_entry_json, codex_panel_block,
+        codex_panel_block_for_versions, codex_panel_resource_version,
+        expected_codex_panel_server_table, is_mcp_entry_missing, parse_claude_mcp_get,
+        parse_panels_json, resolve_codex_trust_in_toml, split_codex_panel_block,
     };
     use std::path::Path;
 
@@ -3488,19 +4042,88 @@ mod tests {
             );
         }
 
+        let cfg_label = Path::new("/tmp/codex-home/config.toml");
+        let sub = Path::new("/srv/checkouts/PoseFixer/sub");
+        let wt = Path::new("/srv/worktrees/PoseFixer-wt");
         let trusted_toml = br#"[projects."/srv/checkouts/PoseFixer"]
 trust_level = "trusted"
 "#;
-        assert!(is_codex_project_trusted_in_toml(trusted_toml, repo));
-        assert!(!is_codex_project_trusted_in_toml(
-            trusted_toml,
-            Path::new("/srv/checkouts/other")
-        ));
-        let untrusted_toml = br#"[projects."/srv/checkouts/PoseFixer"]
+        assert_eq!(
+            resolve_codex_trust_in_toml(trusted_toml, repo, Some(repo), cfg_label),
+            CodexTrustStatus::Trusted
+        );
+        assert_eq!(
+            resolve_codex_trust_in_toml(trusted_toml, sub, Some(repo), cfg_label),
+            CodexTrustStatus::Trusted
+        );
+        assert_eq!(
+            resolve_codex_trust_in_toml(trusted_toml, wt, Some(repo), cfg_label),
+            CodexTrustStatus::Trusted
+        );
+        assert_eq!(
+            resolve_codex_trust_in_toml(
+                trusted_toml,
+                Path::new("/srv/checkouts/other"),
+                Some(Path::new("/srv/checkouts/other")),
+                cfg_label,
+            ),
+            CodexTrustStatus::Untrusted {
+                trust_target: Path::new("/srv/checkouts/other").to_path_buf(),
+            }
+        );
+
+        // Explicit untrusted on worktree wins over trusted repo root, and hint names repo root.
+        let wt_untrusted = br#"[projects."/srv/checkouts/PoseFixer"]
+trust_level = "trusted"
+
+[projects."/srv/worktrees/PoseFixer-wt"]
 trust_level = "untrusted"
 "#;
-        assert!(!is_codex_project_trusted_in_toml(untrusted_toml, repo));
-        assert!(!is_codex_project_trusted_in_toml(b"[broken\n", repo));
+        assert_eq!(
+            resolve_codex_trust_in_toml(wt_untrusted, wt, Some(repo), cfg_label),
+            CodexTrustStatus::Untrusted {
+                trust_target: repo.to_path_buf(),
+            }
+        );
+
+        // Non-repo ancestor never counts.
+        let parent_trusted = br#"[projects."/srv/checkouts"]
+trust_level = "trusted"
+"#;
+        assert_eq!(
+            resolve_codex_trust_in_toml(parent_trusted, repo, Some(repo), cfg_label),
+            CodexTrustStatus::Untrusted {
+                trust_target: repo.to_path_buf(),
+            }
+        );
+        assert_eq!(
+            resolve_codex_trust_in_toml(parent_trusted, repo, None, cfg_label),
+            CodexTrustStatus::Untrusted {
+                trust_target: repo.to_path_buf(),
+            }
+        );
+
+        // Invalid TOML reports Unknown rather than Untrusted.
+        assert!(matches!(
+            resolve_codex_trust_in_toml(b"[broken\n", repo, Some(repo), cfg_label),
+            CodexTrustStatus::Unknown { .. }
+        ));
+
+        // Foreign UID on CODEX_HOME or config.toml reports Unknown rather than failing.
+        let tmp = std::env::temp_dir().join(format!("oms-trust-uid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("config.toml"), trusted_toml).unwrap();
+        let euid = rustix::process::geteuid().as_raw();
+        assert_eq!(
+            check_codex_project_trust_at(&tmp, repo, Some(repo), euid),
+            CodexTrustStatus::Trusted
+        );
+        assert!(matches!(
+            check_codex_project_trust_at(&tmp, repo, Some(repo), euid.wrapping_add(1)),
+            CodexTrustStatus::Unknown { ref hint } if hint.contains("not owned by the current user")
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -3520,13 +4143,14 @@ trust_level = "untrusted"
 
         let sha = "a".repeat(64);
         let ok = format!(
-            r#"{{"PoseFixer":[{{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/PoseFixer"}},{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/PoseFixer","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":true}}]}}"#
+            r#"{{"PoseFixer":[{{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/PoseFixer"}},{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/PoseFixer","block_sha256":"{sha}","created_config":false,"created_codex_dir":false,"created_exclude":true,"separator_added":true,"exclude_separator_added":true}}]}}"#
         );
         assert_eq!(parse_panels_json(&ok).unwrap()["PoseFixer"].len(), 2);
 
         let claude_with_codex_fields = format!(
             r#"{{"alpha":[{{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":false,"created_codex_dir":false,"created_exclude":false}}]}}"#
         );
+        let claude_with_sep_field = r#"{"alpha":[{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha","separator_added":true}]}"#;
         let codex_old_plugin_shape = format!(
             r#"{{"alpha":[{{"app":"codex","scope":"user","name":"oms-alpha@oms-host-panels","path":"/srv/alpha","plugin_sha256":"{sha}","mcp_sha256":"{sha}"}}]}}"#
         );
@@ -3540,13 +4164,26 @@ trust_level = "untrusted"
         let codex_dir_without_file = format!(
             r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":false,"created_codex_dir":true,"created_exclude":false}}]}}"#
         );
+        let codex_sep_with_created_file = format!(
+            r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":false,"separator_added":true}}]}}"#
+        );
+        let codex_excl_sep_without_excl = format!(
+            r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":false,"exclude_separator_added":true}}]}}"#
+        );
+        let codex_duplicate_checkout_aliases = format!(
+            r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":true}}],"beta":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":false,"created_codex_dir":false,"created_exclude":false}}]}}"#
+        );
         for bad in [
             r#"{"alpha":[]}"#,
             claude_with_codex_fields.as_str(),
+            claude_with_sep_field,
             codex_old_plugin_shape.as_str(),
             codex_upper_hash.as_str(),
             codex_missing_flags.as_str(),
             codex_dir_without_file.as_str(),
+            codex_sep_with_created_file.as_str(),
+            codex_excl_sep_without_excl.as_str(),
+            codex_duplicate_checkout_aliases.as_str(),
             r#"{"alpha":[{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha"}]}"#,
             r#"{"alpha":[{"app":"codex","scope":"user","name":"oms-panel","path":"/srv/alpha"}]}"#,
             r#"{"alpha":[{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"short","created_config":true,"created_codex_dir":true,"created_exclude":true}]}"#,

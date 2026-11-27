@@ -5677,6 +5677,132 @@ fn project_panels_codex_lifecycle_parity() {
     assert_eq!(std::fs::read(&alpha_exclude).unwrap(), alpha_exclude_before);
     assert!(!panels_sidecar.exists());
 
+    // 2b. Existing `.codex/config.toml` and `.git/info/exclude` WITHOUT trailing newlines:
+    //     install records `separator_added` and `exclude_separator_added`, preserves them across
+    //     block refresh, and uninstall restores the exact original unterminated bytes.
+    let unterminated_user_cfg = b"# Unterminated user config\r\nmodel = \"gpt-5\"\n[mcp_servers.other-tool]\ncommand = \"/usr/local/bin/other\"";
+    let unterminated_exclude = b"# Unterminated exclude file\n*.local-tmp";
+    assert!(!unterminated_user_cfg.ends_with(b"\n"));
+    assert!(!unterminated_exclude.ends_with(b"\n"));
+    std::fs::write(&alpha_codex_cfg, unterminated_user_cfg).unwrap();
+    std::fs::set_permissions(&alpha_codex_cfg, std::fs::Permissions::from_mode(0o640)).unwrap();
+    std::fs::write(&alpha_exclude, unterminated_exclude).unwrap();
+    std::fs::set_permissions(&alpha_exclude, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let (code, unterm_inst_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let unterm_inst_json: Value = serde_json::from_str(&unterm_inst_raw).unwrap();
+    assert_eq!(unterm_inst_json["changed"], true);
+
+    let mut expected_unterm_cfg = unterminated_user_cfg.to_vec();
+    expected_unterm_cfg.push(b'\n');
+    expected_unterm_cfg.extend_from_slice(expected_alpha_block.as_bytes());
+    assert_eq!(
+        std::fs::read(&alpha_codex_cfg).unwrap(),
+        expected_unterm_cfg
+    );
+    let mut expected_unterm_excl = unterminated_exclude.to_vec();
+    expected_unterm_excl.extend_from_slice(b"\n/.codex/config.toml\n");
+    assert_eq!(std::fs::read(&alpha_exclude).unwrap(), expected_unterm_excl);
+
+    let unterm_sidecar: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert_eq!(unterm_sidecar["alpha-service"][0]["separator_added"], true);
+    assert_eq!(
+        unterm_sidecar["alpha-service"][0]["exclude_separator_added"],
+        true
+    );
+
+    // Simulate an older OMS block version on disk and verify refresh keeps both separator flags.
+    let older_alpha_block = render_expected_block(&alpha_canon, "0.7.0-older", expected_res_ver);
+    let older_alpha_sha = oms_panel_core::digest(older_alpha_block.as_bytes());
+    let mut older_unterm_cfg = unterminated_user_cfg.to_vec();
+    older_unterm_cfg.push(b'\n');
+    older_unterm_cfg.extend_from_slice(older_alpha_block.as_bytes());
+    std::fs::write(&alpha_codex_cfg, &older_unterm_cfg).unwrap();
+    std::fs::set_permissions(&alpha_codex_cfg, std::fs::Permissions::from_mode(0o640)).unwrap();
+    write_private_file(
+        &panels_sidecar,
+        serde_json::to_string_pretty(&json!({
+            "alpha-service": [{
+                "app": "codex",
+                "scope": "project",
+                "name": "oms-panel",
+                "path": alpha_canon,
+                "block_sha256": older_alpha_sha,
+                "created_config": false,
+                "created_codex_dir": false,
+                "created_exclude": true,
+                "separator_added": true,
+                "exclude_separator_added": true,
+            }]
+        }))
+        .unwrap()
+        .as_bytes(),
+    );
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let refreshed_unterm_sidecar: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert_eq!(
+        refreshed_unterm_sidecar["alpha-service"][0]["separator_added"],
+        true
+    );
+    assert_eq!(
+        refreshed_unterm_sidecar["alpha-service"][0]["exclude_separator_added"],
+        true
+    );
+
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        std::fs::read(&alpha_codex_cfg).unwrap(),
+        unterminated_user_cfg,
+        "uninstall must remove separator_added byte to restore exact original config bytes"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&alpha_codex_cfg).unwrap().mode() & 0o7777,
+        0o640
+    );
+    assert_eq!(
+        std::fs::read(&alpha_exclude).unwrap(),
+        unterminated_exclude,
+        "uninstall must remove exclude_separator_added byte to restore exact original exclude bytes"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&alpha_exclude).unwrap().mode() & 0o7777,
+        0o644
+    );
+    assert!(!panels_sidecar.exists());
+    std::fs::write(&alpha_exclude, &alpha_exclude_before).unwrap();
+
     // 3. Refusal on unmanaged `mcp_servers.oms-panel`, invalid TOML, symlinks, and tracked file.
     for (label, bad_toml, expected_err) in [
         (
@@ -6202,6 +6328,546 @@ fn project_panels_codex_lifecycle_parity() {
     assert!(!alpha_codex_cfg.exists() && !alpha_codex_dir.exists());
     assert_eq!(std::fs::read(&alpha_exclude).unwrap(), alpha_exclude_before);
     std::fs::remove_file(&panels_sidecar).unwrap();
+
+    // 8. One owner per block in one sidecar (second alias for same physical checkout is refused
+    //    naming the existing alias before any change), while an unowned exact OMS block is adopted.
+    assert_eq!(
+        run_panel(
+            &alpha_canon,
+            &["--register-project", "--alias", "alpha-dup"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let sidecar_before_dup = std::fs::read(&panels_sidecar).unwrap();
+    let cfg_before_dup = std::fs::read(&alpha_codex_cfg).unwrap();
+    let excl_before_dup = std::fs::read(&alpha_exclude).unwrap();
+
+    for extra_flag in [Some("--dry-run"), None] {
+        let mut args = vec!["--install-panel", "codex", "--project", "alpha-dup"];
+        if let Some(flag) = extra_flag {
+            args.push(flag);
+        }
+        let (code, _, dup_err) = run_panel(base, &args, true, &[]);
+        assert_ne!(
+            code, 0,
+            "second Codex alias for same checkout must be refused ({extra_flag:?})"
+        );
+        assert!(
+            dup_err.contains("alpha-service"),
+            "error must name existing alias 'alpha-service': {dup_err}"
+        );
+        assert_eq!(std::fs::read(&panels_sidecar).unwrap(), sidecar_before_dup);
+        assert_eq!(std::fs::read(&alpha_codex_cfg).unwrap(), cfg_before_dup);
+        assert_eq!(std::fs::read(&alpha_exclude).unwrap(), excl_before_dup);
+    }
+
+    // Lost sidecar recovery: when no row owns the exact on-disk OMS block, install adopts it.
+    std::fs::remove_file(&panels_sidecar).unwrap();
+    let (code, adopt_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-dup",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let adopt_json: Value = serde_json::from_str(&adopt_raw).unwrap();
+    assert_eq!(adopt_json["action"], "adopted");
+    assert_eq!(adopt_json["changed"], true);
+    assert_eq!(std::fs::read(&alpha_codex_cfg).unwrap(), cfg_before_dup);
+
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "alpha-dup"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run_panel(base, &["--unregister-project", "alpha-dup"], true, &[]).0,
+        0
+    );
+    let _ = std::fs::remove_file(&alpha_codex_cfg);
+    let _ = std::fs::remove_dir(&alpha_codex_dir);
+    std::fs::write(&alpha_exclude, &alpha_exclude_before).unwrap();
+
+    // 9. Hand over exclude-line ownership across two linked worktrees of one repo:
+    //    install A -> install B -> uninstall A -> uninstall B restores `info/exclude` byte-for-byte.
+    let _ = std::fs::remove_file(&wt_extra);
+    let _ = std::fs::remove_dir(linked_canon.join(".codex"));
+    let linked_wt_b = base.join("checkouts/alpha-linked-wt-b");
+    git_ok(
+        &alpha_canon,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "wt-branch-b",
+            linked_wt_b.to_str().unwrap(),
+        ],
+    );
+    let linked_b_canon = linked_wt_b.canonicalize().unwrap();
+    assert_eq!(
+        run_panel(
+            &linked_b_canon,
+            &["--register-project", "--alias", "alpha-wt-b"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+
+    let shared_excl_orig = b"# shared repo exclude without trailing newline\n*.tmp-build";
+    std::fs::write(&alpha_exclude, shared_excl_orig).unwrap();
+
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "alpha-wt"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "alpha-wt-b"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+
+    let both_wt_sidecar: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert_eq!(both_wt_sidecar["alpha-wt"][0]["created_exclude"], true);
+    assert_eq!(
+        both_wt_sidecar["alpha-wt"][0]["exclude_separator_added"],
+        true
+    );
+    assert_eq!(both_wt_sidecar["alpha-wt-b"][0]["created_exclude"], false);
+    assert!(both_wt_sidecar["alpha-wt-b"][0]["exclude_separator_added"].is_null());
+
+    // Uninstall A while B remains: exclude line stays active and ownership transfers to B.
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "alpha-wt"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert!(!linked_canon.join(".codex").exists());
+    assert_eq!(git_ok(&linked_b_canon, &["status", "--porcelain"]), "");
+    let after_a_sidecar: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert!(after_a_sidecar["alpha-wt"].is_null());
+    assert_eq!(after_a_sidecar["alpha-wt-b"][0]["created_exclude"], true);
+    assert_eq!(
+        after_a_sidecar["alpha-wt-b"][0]["exclude_separator_added"],
+        true
+    );
+
+    // Uninstall B: last owner removes exclude line AND separator, restoring exact original bytes.
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "alpha-wt-b"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert!(!linked_b_canon.join(".codex").exists());
+    assert!(!panels_sidecar.exists());
+    assert_eq!(
+        std::fs::read(&alpha_exclude).unwrap(),
+        shared_excl_orig,
+        "two-worktree install A, install B, uninstall A, uninstall B must restore info/exclude byte-for-byte"
+    );
+    std::fs::write(&alpha_exclude, &alpha_exclude_before).unwrap();
+
+    // 10. Trust lookup matches Codex resolution:
+    //     - `[projects."<cwd>"].trust_level` checked first;
+    //     - falls back to `[projects."<repo-root>"]` (parent of canonical `--git-common-dir`);
+    //     - explicit `untrusted` on worktree overrides trusted main root;
+    //     - non-repository parent never counts;
+    //     - untrusted hint names repo root when inside Git and checkout path otherwise.
+    let nonrepo_parent = base.join("trust-matrix/nonrepo-parent");
+    ensure_private_dir(&nonrepo_parent);
+    let nonrepo_parent_canon = nonrepo_parent.canonicalize().unwrap();
+    let tm_main = nonrepo_parent.join("main-repo");
+    std::fs::create_dir_all(&tm_main).unwrap();
+    init_git_repo(&tm_main);
+    let tm_main_canon = tm_main.canonicalize().unwrap();
+
+    let tm_sub = tm_main_canon.join("packages/sub-checkout");
+    std::fs::create_dir_all(tm_sub.join(".oms")).unwrap();
+    let tm_sub_canon = tm_sub.canonicalize().unwrap();
+
+    let tm_wt = base.join("trust-matrix/linked-wt");
+    git_ok(
+        &tm_main_canon,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "tm-wt-branch",
+            tm_wt.to_str().unwrap(),
+        ],
+    );
+    let tm_wt_canon = tm_wt.canonicalize().unwrap();
+
+    let tm_nongit = nonrepo_parent_canon.join("standalone-oms");
+    std::fs::create_dir_all(tm_nongit.join(".oms")).unwrap();
+    let tm_nongit_canon = tm_nongit.canonicalize().unwrap();
+
+    for (dir, alias) in [
+        (&tm_main_canon, "tm-main"),
+        (&tm_sub_canon, "tm-sub"),
+        (&tm_wt_canon, "tm-wt"),
+        (&tm_nongit_canon, "tm-nongit"),
+    ] {
+        assert_eq!(
+            run_panel(dir, &["--register-project", "--alias", alias], true, &[]).0,
+            0
+        );
+    }
+
+    let trust_codex_dir = base.join("trust-codex-home");
+    ensure_private_dir(&trust_codex_dir);
+    let trust_codex_cfg = trust_codex_dir.join("config.toml");
+    let trust_codex_str = trust_codex_dir.to_str().unwrap();
+
+    let probe_trust = |alias: &str| -> Value {
+        let (code, out, err) = run_panel(
+            base,
+            &[
+                "--install-panel",
+                "codex",
+                "--project",
+                alias,
+                "--dry-run",
+                "--json",
+            ],
+            false,
+            &[("CODEX_HOME", trust_codex_str)],
+        );
+        assert_eq!(code, 0, "dry-run trust probe failed for {alias}: {err}");
+        serde_json::from_str(&out).unwrap()
+    };
+
+    // 10(a): Non-repo parent folder trusted -> none of main, main/sub, linked wt, or nongit are active;
+    //        Git checkouts hint the main repo root while non-Git checkout hints its own path.
+    write_private_file(
+        &trust_codex_cfg,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            nonrepo_parent_canon.display()
+        )
+        .as_bytes(),
+    );
+    let expected_repo_root_hint = format!(
+        "Trust {} in Codex so it loads .codex/config.toml.",
+        tm_main_canon.display()
+    );
+    for git_alias in ["tm-main", "tm-sub", "tm-wt"] {
+        let res = probe_trust(git_alias);
+        assert_eq!(res["active"], false, "{git_alias}: {res}");
+        assert_eq!(res["reason"], "codex-project-untrusted");
+        assert_eq!(res["hint"], expected_repo_root_hint, "{git_alias}: {res}");
+    }
+    let nongit_res = probe_trust("tm-nongit");
+    assert_eq!(nongit_res["active"], false);
+    assert_eq!(nongit_res["reason"], "codex-project-untrusted");
+    assert_eq!(
+        nongit_res["hint"],
+        format!(
+            "Trust {} in Codex so it loads .codex/config.toml.",
+            tm_nongit_canon.display()
+        )
+    );
+
+    // 10(b): Main repo root trusted -> main, main/sub, AND linked worktree are all active!
+    write_private_file(
+        &trust_codex_cfg,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            tm_main_canon.display()
+        )
+        .as_bytes(),
+    );
+    for (alias, expect_active) in [
+        ("tm-main", true),
+        ("tm-sub", true),
+        ("tm-wt", true),
+        ("tm-nongit", false),
+    ] {
+        let (code, inst_raw, err) = run_panel(
+            base,
+            &["--install-panel", "codex", "--project", alias, "--json"],
+            false,
+            &[("CODEX_HOME", trust_codex_str)],
+        );
+        assert_eq!(code, 0, "{alias}: {err}");
+        let inst: Value = serde_json::from_str(&inst_raw).unwrap();
+        assert_eq!(inst["active"], expect_active, "{alias}: {inst}");
+        if expect_active {
+            assert!(inst.get("reason").is_none() && inst.get("hint").is_none());
+        }
+    }
+
+    // 10(c): Explicit `untrusted` on linked worktree wins over trusted main repo root,
+    //        and its hint still names the repo root.
+    write_private_file(
+        &trust_codex_cfg,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n\n[projects.\"{}\"]\ntrust_level = \"untrusted\"\n",
+            tm_main_canon.display(),
+            tm_wt_canon.display()
+        )
+        .as_bytes(),
+    );
+    assert_eq!(probe_trust("tm-main")["active"], true);
+    assert_eq!(probe_trust("tm-sub")["active"], true);
+    let wt_override = probe_trust("tm-wt");
+    assert_eq!(wt_override["active"], false);
+    assert_eq!(wt_override["reason"], "codex-project-untrusted");
+    assert_eq!(wt_override["hint"], expected_repo_root_hint);
+
+    // 10(d): Linked worktree path only trusted -> only linked worktree is active.
+    write_private_file(
+        &trust_codex_cfg,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            tm_wt_canon.display()
+        )
+        .as_bytes(),
+    );
+    assert_eq!(probe_trust("tm-main")["active"], false);
+    assert_eq!(probe_trust("tm-sub")["active"], false);
+    assert_eq!(probe_trust("tm-wt")["active"], true);
+
+    // 10(e): Subdirectory path only trusted -> only subdirectory checkout is active.
+    write_private_file(
+        &trust_codex_cfg,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            tm_sub_canon.display()
+        )
+        .as_bytes(),
+    );
+    assert_eq!(probe_trust("tm-main")["active"], false);
+    assert_eq!(probe_trust("tm-sub")["active"], true);
+    assert_eq!(probe_trust("tm-wt")["active"], false);
+
+    for alias in ["tm-main", "tm-sub", "tm-wt", "tm-nongit"] {
+        assert_eq!(
+            run_panel(
+                base,
+                &["--uninstall-panel", "codex", "--project", alias],
+                false,
+                &[("CODEX_HOME", trust_codex_str)],
+            )
+            .0,
+            0
+        );
+    }
+
+    // 11. Read-only trust inspection never fails the install when CODEX_HOME or config.toml is a
+    //     symlink, non-regular file, unreadable, or invalid TOML (`reason: "codex-trust-unknown"`,
+    //     without following symlinks).
+    let symlink_codex_home = base.join("symlinked-codex-home");
+    // Point symlinked CODEX_HOME at `codex_home` (where `PoseFixer` IS trusted!) to prove the
+    // symlink is not followed.
+    std::os::unix::fs::symlink(&codex_home, &symlink_codex_home).unwrap();
+    let (code, sym_home_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "PoseFixer",
+            "--json",
+        ],
+        false,
+        &[("CODEX_HOME", symlink_codex_home.to_str().unwrap())],
+    );
+    assert_eq!(
+        code, 0,
+        "symlinked CODEX_HOME must not fail install: {stderr}"
+    );
+    let sym_home_json: Value = serde_json::from_str(&sym_home_raw).unwrap();
+    assert_eq!(sym_home_json["changed"], true);
+    assert_eq!(sym_home_json["active"], false);
+    assert_eq!(sym_home_json["reason"], "codex-trust-unknown");
+    assert!(
+        sym_home_json["hint"]
+            .as_str()
+            .is_some_and(|h| h.contains("symlink") && !h.contains('\n')),
+        "{sym_home_json}"
+    );
+    assert!(pose_codex_cfg.is_file());
+
+    // Plain output also reports `codex-trust-unknown` with a `hint:` line.
+    let (code, sym_plain, stderr) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "PoseFixer"],
+        false,
+        &[("CODEX_HOME", symlink_codex_home.to_str().unwrap())],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        sym_plain.contains("(inactive: codex-trust-unknown)\nhint: "),
+        "{sym_plain}"
+    );
+
+    // Symlinked `CODEX_HOME/config.toml`, non-regular `config.toml` (directory), invalid TOML,
+    // and unreadable `config.toml` (0000) all succeed with `codex-trust-unknown`.
+    let broken_codex_home = base.join("broken-codex-home");
+    ensure_private_dir(&broken_codex_home);
+    let broken_cfg = broken_codex_home.join("config.toml");
+    let broken_home_str = broken_codex_home.to_str().unwrap();
+
+    // (a) symlinked config.toml pointing to trusted `codex_home_cfg` (must not follow)
+    std::os::unix::fs::symlink(&codex_home_cfg, &broken_cfg).unwrap();
+    let (code, out, err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "PoseFixer",
+            "--json",
+        ],
+        false,
+        &[("CODEX_HOME", broken_home_str)],
+    );
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["active"], false);
+    assert_eq!(v["reason"], "codex-trust-unknown");
+    assert!(v["hint"].as_str().is_some_and(|h| h.contains("symlink")));
+    std::fs::remove_file(&broken_cfg).unwrap();
+
+    // (b) config.toml is a directory (not a regular file)
+    ensure_private_dir(&broken_cfg);
+    let (code, out, err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "PoseFixer",
+            "--json",
+        ],
+        false,
+        &[("CODEX_HOME", broken_home_str)],
+    );
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["active"], false);
+    assert_eq!(v["reason"], "codex-trust-unknown");
+    assert!(
+        v["hint"]
+            .as_str()
+            .is_some_and(|h| h.contains("regular file"))
+    );
+    std::fs::remove_dir(&broken_cfg).unwrap();
+
+    // (c) invalid TOML in config.toml
+    write_private_file(&broken_cfg, b"[projects\nbroken = [\n");
+    let (code, out, err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "PoseFixer",
+            "--json",
+        ],
+        false,
+        &[("CODEX_HOME", broken_home_str)],
+    );
+    assert_eq!(code, 0, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["active"], false);
+    assert_eq!(v["reason"], "codex-trust-unknown");
+    assert!(
+        v["hint"]
+            .as_str()
+            .is_some_and(|h| h.contains("valid TOML") && !h.contains('\n'))
+    );
+
+    // (d) unreadable config.toml (when running as non-root)
+    if std::fs::metadata(base).unwrap().uid() != 0 {
+        std::fs::set_permissions(&broken_cfg, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (code, out, err) = run_panel(
+            base,
+            &[
+                "--install-panel",
+                "codex",
+                "--project",
+                "PoseFixer",
+                "--json",
+            ],
+            false,
+            &[("CODEX_HOME", broken_home_str)],
+        );
+        std::fs::set_permissions(&broken_cfg, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(code, 0, "{err}");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["active"], false);
+        assert_eq!(v["reason"], "codex-trust-unknown");
+        assert!(
+            v["hint"]
+                .as_str()
+                .is_some_and(|h| !h.is_empty() && !h.contains('\n'))
+        );
+    }
+
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "PoseFixer"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert!(!pose_codex_cfg.exists() && !pose_codex_dir.exists() && !panels_sidecar.exists());
+    assert_eq!(std::fs::read(&pose_exclude).unwrap(), pose_exclude_before);
 
     // 8. Verify temp HOME/.claude.json, HOME/.codex/config.toml, and CODEX_HOME/config.toml
     //    remained completely untouched by OMS.

@@ -369,17 +369,29 @@ Git-tracked `.codex/config.toml`. When `.codex/config.toml` is untracked and not
 Git checkout, OMS adds `/.codex/config.toml` to `<common-git-dir>/info/exclude` (using
 `--git-common-dir` for linked worktrees). Ownership is recorded in
 `desktop-project-panels.json` with `scope: "project"`, `name: "oms-panel"`, `block_sha256`,
-`created_config`, `created_codex_dir`, and `created_exclude`, rolling back exact prior file
-bytes on failure; identical reinstalls are no-ops (`changed: false`), unedited out-of-date
-blocks (older OMS package or panel resource version) are rewritten (`changed: true`), and
-edited blocks are refused untouched. Install reads `$CODEX_HOME/config.toml` (default
-`~/.codex/config.toml`) read-only without ever writing under `CODEX_HOME`, reporting
-`"active": true` when `[projects."<physical-checkout>"].trust_level == "trusted"` and
-otherwise still installing while reporting `"active": false`,
-`"reason": "codex-project-untrusted"`, and a one-line hint to trust the project in Codex.
-`--uninstall-panel codex --project ALIAS` forgets deleted checkouts (`action: "forgotten"`),
-removes only an OMS block whose bytes match `block_sha256` (leaving edited blocks in place
-and reporting them via `preservedFiles`), removes `.codex/config.toml`, `.codex`, and the
-`info/exclude` line only when OMS created them and they are now empty or unchanged, and drops
-the sidecar row, while `--unregister-project` refuses aliases that still have a recorded
-panel.
+`created_config`, `created_codex_dir`, `created_exclude`, and optional `separator_added` /
+`exclude_separator_added` flags when OMS inserted a leading newline before an unterminated
+prior file, rolling back exact prior file bytes on failure; identical reinstalls are no-ops
+(`changed: false`), unedited out-of-date blocks (older OMS package or panel resource version)
+are rewritten (`changed: true`), edited blocks are refused untouched, an unowned exact OMS
+block on disk is adopted (`action: "adopted"`), and a second Codex alias in the same sidecar
+for the same physical checkout is refused naming the existing alias. Two different project map
+files pointing at one checkout cannot be detected from one sidecar. Install reads
+`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) read-only without ever writing under
+`CODEX_HOME` or following symlinks: it checks `[projects."<physical-checkout>"].trust_level`
+first (`"trusted"` is active, any other value is inactive) and falls back to
+`[projects."<repo-root>"].trust_level` (parent of canonical `--git-common-dir`, never a
+non-repository ancestor) only when that key is absent, reporting `"active": false`,
+`"reason": "codex-project-untrusted"`, and a one-line hint naming `<repo-root>` (or
+`<physical-checkout>` outside Git) when untrusted, or `"active": false`,
+`"reason": "codex-trust-unknown"`, and a hint explaining why without failing the install when
+`CODEX_HOME` or `config.toml` is a symlink, non-regular, not owned by the current user,
+unreadable, or invalid TOML. `--uninstall-panel codex --project ALIAS` forgets deleted
+checkouts (`action: "forgotten"`), removes only an OMS block whose bytes match `block_sha256`
+(leaving edited blocks in place and reporting them via `preservedFiles`), removes
+`.codex/config.toml` (including any recorded `separator_added` byte), `.codex`, and the
+`info/exclude` line (plus `exclude_separator_added`, or hands `created_exclude` and its
+separator flag to another Codex row in the same sidecar that still shares that exclude rule so
+the last uninstall removes it) only when OMS created them and they are now empty or unchanged,
+and drops the sidecar row, while `--unregister-project` refuses aliases that still have a
+recorded panel.
