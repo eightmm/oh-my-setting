@@ -1272,6 +1272,17 @@ fn frontdoor_error(err: oms_bootstrap::Error) -> ! {
     std::process::exit(err.status);
 }
 
+fn unowned_dispatch_exit(argv: &[OsString]) -> ! {
+    use std::io::Write;
+    let tool = argv.first().map_or(OsStr::new(""), OsString::as_os_str);
+    let mut msg = oms_bootstrap::unknown_tool(tool).diagnostic().to_vec();
+    msg.push(b'\n');
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(&msg);
+    let _ = stderr.flush();
+    std::process::exit(2);
+}
+
 fn prepare_frontdoor(argv: &[OsString]) -> (Vec<OsString>, PathBuf) {
     use std::io::Write;
     let parsed = match oms_bootstrap::PrivateInvocation::parse(argv) {
@@ -1896,8 +1907,11 @@ fn main() {
         .map(str::to_owned)
     {
         if !owns_invocation(&argv) {
-            if dispatch {
+            if select {
                 std::process::exit(75);
+            }
+            if dispatch {
+                unowned_dispatch_exit(&argv);
             }
         } else {
             if select {
@@ -1914,7 +1928,10 @@ fn main() {
         }
     }
     if dispatch && argv.first().is_none_or(|v| v != "runtime") {
-        std::process::exit(75);
+        if select {
+            std::process::exit(75);
+        }
+        unowned_dispatch_exit(&argv);
     }
     let mut subcommand = false;
     let mut legacy = false;
