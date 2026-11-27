@@ -288,11 +288,11 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 }
 #chat-scroll{flex:1;overflow:auto;overscroll-behavior:contain;overflow-anchor:none;padding:12px 16px;scrollbar-gutter:stable}
 #chat-messages{list-style:none;padding:0;margin:0}
-#chat-messages li{width:fit-content;max-width:100%;padding:8px 0}
+#chat-messages>li{width:fit-content;max-width:100%;padding:8px 0}
 #chat-messages small{font-weight:650}
 #chat-messages p{margin-top:4px}
 #chat-messages time{display:block;color:var(--soft);font-size:.72rem;text-align:end}
-#chat-messages li.user{max-width:85%;margin-block:4px;margin-inline-start:auto;background-color:var(--surface);border-radius:var(--r);padding:8px 12px}
+#chat-messages>li.user{max-width:85%;margin-block:4px;margin-inline-start:auto;background-color:var(--surface);border-radius:var(--r);padding:8px 12px}
 #chat-result:not(:empty){margin-top:8px;padding:10px 12px;background-color:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm)}
 #chat-compose{flex:none;padding:10px 16px 12px;border-top:1px solid var(--line)}
 #chat-compose label{font-weight:620}
@@ -344,6 +344,14 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 #full-answer-body{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
 #chat-new{align-self:center;flex:none;margin:.2rem .7rem}
 #chat-count{margin-top:0}
+#chat-messages>li:not(.user){width:100%}
+.md>*{margin:6px 0 0}.md p{margin-top:6px}.md .h{font-weight:700}.md ul,.md ol{padding-inline-start:1.3rem}
+.md pre{overflow:auto;padding:8px 10px;background-color:var(--surface);border-radius:var(--r-xs);font-size:.8rem;white-space:pre}
+.md code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.86em}.md :not(pre)>code{background-color:var(--surface);border-radius:4px;padding:0 3px}
+#chat-typing{display:flex;align-items:center;gap:8px;color:var(--soft);font-size:.82rem;margin:6px 0}#chat-typing[hidden]{display:none}
+.dots{display:inline-flex;gap:3px}.dots i{width:5px;height:5px;border-radius:50%;background-color:currentColor;animation:dot 1.2s infinite ease-in-out}.dots i:nth-child(2){animation-delay:.15s}.dots i:nth-child(3){animation-delay:.3s}
+@keyframes dot{0%,80%,100%{opacity:.25}40%{opacity:1}}@media(prefers-reduced-motion:reduce){.dots i{animation:none;opacity:.6}}
+#chat-stop{min-height:var(--tap-lg);font-weight:620}
 #settings-scope,#settings-catalog{white-space:pre-line}
 button,textarea{max-width:100%}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
@@ -423,10 +431,10 @@ header{gap:8px;padding-bottom:8px}
 <label><span data-i18n="prefs.model">모델</span><select id="settings-model"></select></label>
 <label><span data-i18n="prefs.effort">추론 강도</span><select id="settings-effort"></select></label></fieldset>
 <p id="settings-hint" class="note"></p><div id="settings-controls"><p id="settings-status" class="note" role="status"></p><button id="settings-read" type="button" data-i18n="refresh" hidden>새로고침</button><button id="settings-save" type="button" data-i18n="prefs.save" hidden>저장</button></div></section>
-<p id="chat-status" class="note" role="status"></p><button id="chat-new" type="button" class="subtle" data-i18n="chat.new" hidden>새 메시지 보기</button><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-result"></p><p id="chat-result-limited" class="note" data-i18n="turn.partial" hidden>부분 답변</p><button id="chat-result-full" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button>
+<p id="chat-status" class="note" role="status"></p><button id="chat-new" type="button" class="subtle" data-i18n="chat.new" hidden>새 메시지 보기</button><div id="chat-scroll" role="region" tabindex="0" aria-labelledby="chat-title"><button id="chat-older" type="button" data-i18n="older" hidden>이전 메시지</button><ul id="chat-messages"></ul><p id="chat-typing" hidden><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span id="chat-typing-text"></span></p><p id="chat-result"></p><p id="chat-result-limited" class="note" data-i18n="turn.partial" hidden>부분 답변</p><button id="chat-result-full" type="button" data-i18n="answer.full" hidden>전체 출력 읽기</button>
 <section id="full-answer" hidden><div class="section-head"><h3 data-i18n="answer.title">기록된 출력</h3><button id="answer-close" type="button" data-i18n="close">닫기</button></div><pre id="full-answer-body"></pre><p id="answer-status" class="note" role="status"></p><div class="actions"><button id="answer-first" type="button" data-i18n="answer.first" hidden>처음부터 읽기</button><button id="answer-more" type="button" data-i18n="answer.more" hidden>다음 부분 읽기</button><button id="answer-copy" type="button" data-i18n="answer.copy" hidden>표시된 부분 복사</button><button id="answer-followup" class="primary" type="button" data-i18n="followup.result" hidden>이 결과로 요청</button></div></section></div>
-<form id="chat-compose" hidden><label for="chat-text" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000" aria-describedby="chat-count chat-delivery"></textarea><span id="chat-count" class="count"></span>
-<div class="actions"><span id="chat-delivery" role="status"></span><button id="chat-check" type="button" hidden></button><button id="chat-send" type="submit" data-i18n="chatSend">보내기</button></div></form></dialog>
+<form id="chat-compose" hidden><label for="chat-text" class="sr-only" data-i18n="chatMessage">메시지</label><textarea id="chat-text" rows="2" maxlength="4000" aria-describedby="chat-count chat-delivery"></textarea><span id="chat-count" class="count"></span>
+<div class="actions"><span id="chat-delivery" role="status"></span><button id="chat-check" type="button" hidden></button><button id="chat-stop" type="button" data-i18n="chat.stop" hidden>중지</button><button id="chat-send" type="submit" data-i18n="chatSend">보내기</button></div></form></dialog>
 <dialog id="inspection" aria-labelledby="inspect-title"><div class="dialog-body"><div class="section-head"><h2 id="inspect-title" data-i18n="inspect.title">프로젝트 더 살펴보기</h2><button id="inspect-close" type="button" data-i18n="close">닫기</button></div><div class="actions"><label for="inspect-kind" class="sr-only" data-i18n="inspect.choose">살펴볼 항목</label><select id="inspect-kind"><option value="usage" data-i18n="inspect.usage">사용량과 쿼터</option><option value="graph" data-i18n="inspect.graph">프로젝트 관계</option><option value="routes" data-i18n="inspect.routes">예상 라우팅</option><option value="modelcatalog" data-i18n="inspect.modelcatalog">모델 카탈로그</option></select><button id="inspect-refresh" type="button" data-i18n="refresh">새로고침</button></div><form id="inspect-graph-form" class="actions" hidden><label for="inspect-query" class="sr-only" data-i18n="inspect.searchLabel">이름 또는 경로</label><input id="inspect-query" maxlength="256" placeholder="이름 또는 경로"><button id="inspect-search" type="submit" data-i18n="inspect.search">찾기</button><button id="inspect-root" type="button" data-i18n="inspect.root">전체 범위</button></form><p id="inspect-note" class="note"></p><p id="inspect-status" class="note" role="status"></p><div id="inspect-content"></div><div class="actions"><button id="inspect-prev" type="button" data-i18n="inspect.prev" hidden>이전 페이지</button><button id="inspect-next" type="button" data-i18n="inspect.next" hidden>다음 페이지</button></div></div></dialog>
 </main><script>
 'use strict';
@@ -474,6 +482,10 @@ const messages = {
   "turn.invalid_answer_range": ["답변 크기 또는 범위를 읽을 수 없습니다.", "Answer size or range unavailable."],
   "turn.invalid_turn_record": ["전달 기록을 읽을 수 없습니다.", "Turn record unreadable."],
   "turn.receipt_changed": ["접수 상태가 변경되어 전달을 확인할 수 없습니다.", "Receipt changed · delivery unconfirmed."],
+  "turn.stopped": ["중지됨", "Stopped"],
+  "chat.stop": ["중지", "Stop"],
+  "chat.typing": ["{v} 답하는 중", "{v} is replying"],
+  "chat.hint": ["{v}에게 메시지 · Enter 보내기, Shift+Enter 줄바꿈", "Message {v} · Enter to send, Shift+Enter for a new line"],
   "turn.not_found": ["이전 전송 기록을 찾을 수 없습니다.", "The previous send was not found."],
   "turn.check": ["전달 상태 확인", "Check delivery"],
   "turn.retry": ["원래 메시지 다시 보내기", "Retry original message"],
@@ -1279,7 +1291,7 @@ function clearChat() {
   clearTimeout(managedChat?.timer);selectedChat=undefined;managedChat=undefined;chatCursor=null;chatPage++;
   el('chat-compose').hidden=true;el('chat-avatar').hidden=true;el('chat-text').value='';el('chat-delivery').textContent='';
   el('chat-messages').replaceChildren();el('chat-result').textContent='';
-  el('chat-older').hidden=true;
+  el('chat-older').hidden=el('chat-typing').hidden=el('chat-stop').hidden=true;el('chat-send').hidden=false;
   el('chat-new').hidden=true;el('chat-count').textContent='';roomResult=null;roomPageSeen=false;roomMessageKeys.clear();
   el('chat-result-limited').hidden=el('chat-result-full').hidden=true;clearFullAnswer();
 }
@@ -1667,7 +1679,7 @@ function paintLeadControls(){
     const latest=row?.latestTurn,turnState=row?.turnState;
     put(slot.turn,()=>!latest?(turnState?t(Object.hasOwn(messages,'turn.'+turnState.reason)?'turn.'+turnState.reason:'turn.unconfirmed'):''):['reserved','running','unconfirmed'].includes(latest.status)?t('lead.waitingReply'):
       latest.status==='replied'?t(ctl.seenTurns?.get(provider)===latest.turnId?'lead.replyRead':'lead.newReply'):
-      latest.status==='failed'?t('turn.failed'):'');
+      latest.status==='failed'?t('turn.failed'):latest.status==='stopped'?t('turn.stopped'):'');
   }
 }
 function validatedTeam(response,ctl,provider){
@@ -1907,6 +1919,10 @@ function paintComposer(c){
   el('settings-toggle').disabled=blocked && !c.settings;
   if(c.settings)paintSettings(c);
   el('chat-send').disabled=blocked || !c.verified || c.reading || s.settingsSaving || s.writing || !!p || !!c.previous || !validText(s.draft);
+  const live=['reserved','running'].includes(c.previous || p?.status);
+  el('chat-typing').hidden=!live;put('chat-typing-text',()=>t('chat.typing',{v:names[c.provider]}));
+  el('chat-stop').hidden=!live;el('chat-stop').disabled=blocked || !c.verified || !!c.stopping;el('chat-send').hidden=live;
+  el('chat-text').placeholder=t('chat.hint',{v:names[c.provider]});
   const state=s.writing?'sending':c.previous?'previous':p?.status || s.outcome;
   const bytes=new TextEncoder().encode(s.draft||'').length;
   put('chat-count',()=>t('chat.bytes',{n:bytes.toLocaleString(lang)}));el('chat-count').setAttribute('data-tone',bytes>4000?'warn':'muted');
@@ -1917,7 +1933,7 @@ function paintComposer(c){
 function settleTurn(c,result,p){
   if(!p)return;
   const turn=result.structuredContent?.turn;
-  if(turn?.turnId!==p.id || !['not_found','reserved','running','replied','unconfirmed','failed'].includes(turn.status))throw uiError('chatMismatch');
+  if(turn?.turnId!==p.id || !['not_found','reserved','running','replied','unconfirmed','failed','stopped'].includes(turn.status))throw uiError('chatMismatch');
   const s=c.session;
   if(s.pending!==p)return;
   p.status=turn.status;
@@ -1928,7 +1944,7 @@ function settleTurn(c,result,p){
     if(s.draft===p.text){p.restore=true;s.draft='';el('chat-text').value='';}
   }
   if(p.status==='failed' && p.restore){s.draft=p.text;el('chat-text').value=p.text;}
-  if(p.status==='replied' || p.status==='failed'){s.outcome=p.status;s.pending=null;}
+  if(['replied','failed','stopped'].includes(p.status)){s.outcome=p.status;s.pending=null;}
 }
 function paintTurns(c,page,before){
   const scroll=el('chat-scroll'),list=el('chat-messages'),height=scroll.scrollHeight,top=scroll.scrollTop;
@@ -1947,7 +1963,7 @@ function paintTurns(c,page,before){
     row.append(node('small',()=>{
       const who=user?t('chatYou'):names[c.provider];
       return Number.isFinite(stamp)?who+' · '+new Intl.DateTimeFormat(lang,{hour:'numeric',minute:'2-digit'}).format(stamp):who;
-    }),node('p',r.text));
+    }),user?node('p',r.text):md(r.text));
     const failure=user?node('small',''):null;
     if(failure)row.append(failure);
     c.keys.set(key(r),failure);
@@ -1961,7 +1977,7 @@ function paintTurns(c,page,before){
   }
   for(const r of incoming){
     const failure=c.keys.get(key(r));
-    if(failure){failure.hidden=r.status!=='failed';put(failure,()=>r.status==='failed'?t('turn.failed'):'');}
+    if(failure){failure.hidden=!['failed','stopped'].includes(r.status);put(failure,()=>['failed','stopped'].includes(r.status)?t('turn.'+r.status):'');}
   }
   if(before)list.prepend(...nodes);else list.append(...nodes);
   if(before || replace || !c.cursor)c.cursor=page.hasMore===true && turnUuid(page.cursor) && !c.visited.has(page.cursor)?page.cursor:null;
@@ -1994,7 +2010,7 @@ async function readManaged(c,before=null){
       c.previous=latest && latest.turnId!==p?.id && ['reserved','running','unconfirmed'].includes(latest.status)?latest.status:null;
       const answered=page.transcript.turns.filter(r=>r.role!=='user' && turnUuid(r.turnId)).at(-1);
       if(answered){c.ctl.seenTurns??=new Map();c.ctl.seenTurns.set(c.provider,answered.turnId);}
-      if(latest && turnUuid(latest.turnId) && ['reserved','running','replied','failed','unconfirmed'].includes(latest.status)){
+      if(latest && turnUuid(latest.turnId) && ['reserved','running','replied','failed','stopped','unconfirmed'].includes(latest.status)){
         const row=c.ctl.items.get(c.provider);
         row.latestTurn={turnId:latest.turnId,status:latest.status,submittedAt:latest.at||null,lastObservedAt:null};row.turnState=null;
       }
@@ -2008,7 +2024,7 @@ async function readManaged(c,before=null){
       c.reading=false;el('chat-older').disabled=hostToolsUnavailable || disposed;paintComposer(c);
       const waiting=['reserved','running'].includes(c.previous || c.session.pending?.status);
       c.pollPaused=waiting && Date.now()>=c.until;
-      if(!hostToolsUnavailable && waiting && !c.pollPaused)c.timer=setTimeout(()=>readManaged(c),8000);
+      if(!hostToolsUnavailable && waiting && !c.pollPaused)c.timer=setTimeout(()=>readManaged(c),4000);
       paintComposer(c);paintLeadControls();
     }
   }
@@ -2032,6 +2048,30 @@ async function sendManaged(c,retry=false){
     const current=managedChat;
     if(currentManaged(current) && current.session===s)await readManaged(current);
   }
+}
+async function stopManaged(c){
+  const id=c.session.pending?.id || c.latestTurn;
+  if(hostToolsUnavailable || !currentManaged(c) || c.stopping || !turnUuid(id))return;
+  c.stopping=true;paintComposer(c);
+  try{await tool('oms_stop_lead_message',{room:c.ctl.room,projectKey:c.ctl.projectKey,provider:c.provider,leadRequestId:c.requestId,turnId:id},c.ctl.generation);}catch{}
+  finally{c.stopping=false;if(currentManaged(c)){c.until=Date.now()+120000;c.pollPaused=false;await readManaged(c);}}
+}
+onClick('chat-stop',()=>stopManaged(managedChat));
+// Markdown as DOM nodes only: fences, headings, lists, paragraphs, `code`, **bold**.
+function md(text){
+  const box=node('div','','md'),lines=text.split('\n');let list=null,kind='',para=[];
+  const inline=(e,v)=>{v.split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/).forEach((x,i)=>{if(x)e.append(i%2?x[0]==='`'?node('code',x.slice(1,-1)):node('strong',x.slice(2,-2)):x);});return e;};
+  const flush=()=>{if(para.length)box.append(inline(node('p',''),para.join('\n')));para=[];};
+  for(let i=0;i<lines.length;i++){
+    const l=lines[i],h=/^#{1,6}\s+(.*)/.exec(l),li=/^\s*([-*+]|\d+[.)])\s+(.*)/.exec(l);
+    if(/^\s*```/.test(l)){flush();list=null;const code=[];while(++i<lines.length && !/^\s*```/.test(lines[i]))code.push(lines[i]);
+      const pre=node('pre','');pre.append(node('code',code.join('\n')));box.append(pre);}
+    else if(h){flush();list=null;box.append(inline(node('p','','h'),h[1]));}
+    else if(li){flush();const k=/\d/.test(li[1])?'ol':'ul';if(!list || kind!==k){list=node(k,'');kind=k;box.append(list);}list.append(inline(node('li',''),li[2]));}
+    else if(!l.trim()){flush();list=null;}
+    else{list=null;para.push(l);}
+  }
+  flush();return box;
 }
 function showChat(){
   if(el('conversation').open)return;
@@ -2062,7 +2102,7 @@ on('chat-text','input',()=>{const c=managedChat;if(currentManaged(c)){
   paintComposer(c);
 }});
 on('chat-compose','submit',e=>{e.preventDefault();sendManaged(managedChat);});
-on('chat-text','keydown',e=>{if(e.key==='Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing){e.preventDefault();sendManaged(managedChat);}});
+on('chat-text','keydown',e=>{if(e.key==='Enter' && !e.shiftKey && !e.altKey && !e.isComposing){e.preventDefault();sendManaged(managedChat);}});
 onClick('chat-check',()=>{
   const c=managedChat;if(hostToolsUnavailable || !currentManaged(c))return;
   if(c.session.pending?.status==='not_found' && !c.previous)sendManaged(c,true);

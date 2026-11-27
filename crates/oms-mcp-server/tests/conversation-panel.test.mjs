@@ -756,7 +756,7 @@ test('recorded Lead turns poll reads only while open and keep a draft typed whil
     },
     oms_send_lead_message:a=>{sent={...a};return {...leadStatus(a,'ready'),turn:{turnId:a.turnId,status:state}};}
   }});
-  const polls=()=>[...timers.values()].filter(v=>v.ms===8000);
+  const polls=()=>[...timers.values()].filter(v=>v.ms===4000);
   const open=p.get('leads').children[2].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
   p.host.delayTool='oms_send_lead_message';p.get('chat-text').value='First';await p.event('chat-text','input');
   await p.event('chat-compose','submit');await p.event('chat-compose','submit');
@@ -768,6 +768,34 @@ test('recorded Lead turns poll reads only while open and keep a draft typed whil
   state='failed';open.dispatchEvent(new Event('click'));await setImmediate();assert.match(p.get('chat-delivery').textContent,/ended without a reply/);
   assert.equal(p.get('chat-text').value,'Next');assert.equal(polls().length,0);
   assert.equal(p.calls.filter(c=>c.name==='oms_send_lead_message').length,1);
+});
+
+test('a Lead reply renders as Markdown nodes, Enter sends, and Stop ends a running reply',async()=>{
+  const id=randomUUID();let state='running',sent,stopped;
+  const reply='## Plan\nUse `oms land` **now**.\n- one\n- two\n```\n<b>raw</b>\n```';
+  const p=await panel(['one'],dashboard,{locale:'en',timers:{setTimeout:()=>0,clearTimeout(){}},tools:{
+    [managedRead]:a=>{const v=leadStatus(a,'ready');
+      if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Old',turnId:id,status:'replied'},{role:'antigravity',text:reply,turnId:id}]}};
+      if(a.turnId)v.turn={turnId:a.turnId,status:state};return v;},
+    oms_send_lead_message:a=>{sent={...a};return {...leadStatus(a,'ready'),turn:{turnId:a.turnId,status:state}};},
+    oms_stop_lead_message:a=>{stopped={...a};state='stopped';return {...leadStatus(a,'ready'),turn:{turnId:a.turnId,status:state}};}
+  }});
+  p.get('leads').children[2].children[1].children.find(e=>e.type==='button').dispatchEvent(new Event('click'));await setImmediate();
+  const md=kids(kids(p.get('chat-messages'))[1])[1];
+  assert.deepEqual(kids(md).map(e=>e.tagName.toLowerCase()),['p','p','ul','pre']);
+  assert.equal(md.textContent,'PlanUse oms land now.onetwo<b>raw</b>');assert.ok(!kids(md).some(e=>/^b$/i.test(e.tagName)));
+  assert.equal(kids(kids(md)[1]).map(e=>e.tagName?.toLowerCase()).filter(Boolean).join(),'code,strong');
+  assert.match(p.get('chat-text').placeholder,/Message AGY · Enter to send/);
+  const key=async extra=>{p.get('chat-text').dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'Enter',...extra}));await setImmediate();};
+  p.get('chat-text').value='Go';await p.event('chat-text','input');
+  await key({shiftKey:true});assert.equal(sent,undefined);
+  await key({});assert.equal(sent.text,'Go');
+  assert.ok(!p.get('chat-typing').hidden);assert.match(p.get('chat-typing-text').textContent,/AGY is replying/);
+  assert.ok(!p.get('chat-stop').hidden);assert.ok(p.get('chat-send').hidden);
+  await p.event('chat-stop','click');
+  assert.equal(stopped.turnId,sent.turnId);assert.equal(stopped.leadRequestId,sent.leadRequestId);
+  assert.ok(p.get('chat-typing').hidden);assert.ok(p.get('chat-stop').hidden);assert.ok(!p.get('chat-send').hidden);
+  assert.match(p.get('chat-delivery').textContent,/Stopped/);
 });
 
 test('a verified unresolved message from another view blocks a new dispatch until its turn settles',async()=>{
@@ -2068,7 +2096,7 @@ test('pending-turn polling pauses visibly and slot badges change only after a co
     if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Recorded question',turnId:id,status:state},...(state==='replied'?[{role:'claude',text:'Recorded reply',turnId:id}]:[])]}};
     return v;
   }}});
-  assert.equal([...jobs.values()].filter(v=>v.ms>=8000 && v.ms<=15000).length,0);
+  assert.equal([...jobs.values()].filter(v=>v.ms>=4000 && v.ms<=15000).length,0);
   assert.match(p.get('leads').children[0].textContent,/Ask Codex/);
   assert.match(p.get('leads').children[1].textContent,/Reply pending/);
   assert.match(p.get('leads').children[2].textContent,/Ask AGY.*Answer withheld by the safety scan/);
@@ -2085,10 +2113,10 @@ test('pending-turn polling pauses visibly and slot badges change only after a co
     await choose(p,'en');
   }
   const open=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
-  const poll=[...jobs].find(([,v])=>v.ms===8000);jobs.delete(poll[0]);now=130000;poll[1].fn();await setImmediate();
-  assert.match(p.get('chat-delivery').textContent,/Automatic checks paused/);assert.equal([...jobs.values()].filter(v=>v.ms===8000).length,0);
+  const poll=[...jobs].find(([,v])=>v.ms===4000);jobs.delete(poll[0]);now=130000;poll[1].fn();await setImmediate();
+  assert.match(p.get('chat-delivery').textContent,/Automatic checks paused/);assert.equal([...jobs.values()].filter(v=>v.ms===4000).length,0);
   const mark=p.calls.length;await p.event('chat-check','click');assert.equal(p.calls.length,mark+1);assert.equal(p.calls.at(-1).name,managedRead);
-  await p.event('chat-back','click');assert.equal([...jobs.values()].filter(v=>v.ms>=8000 && v.ms<=15000).length,0);
+  await p.event('chat-back','click');assert.equal([...jobs.values()].filter(v=>v.ms>=4000 && v.ms<=15000).length,0);
   state='replied';agyTurnState=null;await p.event('lead-refresh','click');assert.match(p.get('leads').children[1].textContent,/New reply/);
   assert.doesNotMatch(p.get('leads').children[2].textContent,/withheld|unreadable|unconfirmed/);
   open.dispatchEvent(new Event('click'));await setImmediate();await p.event('chat-back','click');assert.match(p.get('leads').children[1].textContent,/Reply read/);
