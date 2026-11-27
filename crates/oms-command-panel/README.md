@@ -366,14 +366,26 @@ pinned with `OMS_PANEL_REPO`, `OMS_MCP_TOOL_PROFILE=chatgpt-panel`,
 matching the Claude panel because GUI apps may lack the user `PATH`, without copying skills),
 builds `marketplace.json` from the aliases that own a marked bundle on disk plus the alias being
 installed, registers the marketplace once and adds `oms-ALIAS@oms-host-panels` via
-`OMS_CODEX_BIN`/`codex`, and records a `user`-scope ownership row (rolling back `codex plugin add`
-whenever Codex did not already list `oms-ALIAS@oms-host-panels` before the run, and reporting
-`uncertain: true` while keeping the bundle and marketplace entry on disk if `plugin remove` fails
-so a later uninstall can clean up); `--uninstall-panel codex --project ALIAS` leaves user-edited
-`plugin.json` or `mcp.json` bundles and the marketplace in place (running `codex plugin remove`
-only when the installed plugin still matches OMS, dropping the ownership row, and reporting the
-edited file), keeps `oms-host-panels` and the root when Codex still lists another plugin from
-`oms-host-panels` (reporting what remains installed) or another bundle remains on disk, and
-otherwise removes the ownership marker last after all other OMS-written files and directories are
-gone (restoring the marker and keeping the row if removing the root fails), while
-`--unregister-project` refuses aliases that still have a recorded panel.
+`OMS_CODEX_BIN`/`codex`, and records a `user`-scope ownership row carrying the `plugin_sha256` and
+`mcp_sha256` digests of the written bundle files (strictly required on Codex rows while Claude rows
+carry none; rolling back `codex plugin add` whenever Codex did not already list
+`oms-ALIAS@oms-host-panels` before the run, and reporting `uncertain: true` while keeping the
+bundle and marketplace entry on disk if `plugin remove` fails so a later uninstall can clean up).
+Reinstalling an alias with a matching row and unedited bundle refreshes `plugin.json` and
+`mcp.json` to the running OMS package and panel resource versions, re-runs `codex plugin add` so
+Codex updates its local plugin cache, and updates the recorded SHA-256 digests (refusing if the
+bundle on disk was modified outside OMS, while treating an already-current bundle as a no-op);
+installing with no row when `oms-ALIAS@oms-host-panels` and its marked bundle match OMS's manifest
+for that alias and checkout apart from `version` and `OMS_MCP_PANEL_RESOURCE_VERSION` adopts the
+existing registration (`action: "adopted"`) and records its on-disk digests instead of refusing as
+unmanaged. `--uninstall-panel codex --project ALIAS` identifies OMS-installed Codex plugins by
+`oms-ALIAS`, `oms-host-panels`, and the recorded checkout rather than version, checks bundle edits
+against the recorded `plugin_sha256`/`mcp_sha256` digests so OMS upgrades uninstall cleanly while
+leaving genuinely user-edited `plugin.json` or `mcp.json` bundles and the marketplace in place
+(running `codex plugin remove` only when the installed plugin still matches OMS and the recorded
+checkout, dropping the ownership row, and reporting the edited file), keeps `oms-host-panels` and
+the root when Codex still lists another plugin from `oms-host-panels` (reporting what remains
+installed) or another bundle remains on disk, and otherwise removes the ownership marker last after
+all other OMS-written files and directories are gone (restoring the marker and keeping the row if
+removing the root fails), while `--unregister-project` refuses aliases that still have a recorded
+panel.

@@ -5879,6 +5879,8 @@ fn project_panels_codex_lifecycle_parity() {
         })
     );
 
+    let alpha_plugin_sha = oms_panel_core::digest(&std::fs::read(&alpha_plugin_path).unwrap());
+    let alpha_mcp_sha = oms_panel_core::digest(&std::fs::read(&alpha_mcp_path).unwrap());
     let sidecar_val: Value =
         serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
     assert_eq!(
@@ -5889,6 +5891,8 @@ fn project_panels_codex_lifecycle_parity() {
                 "scope": "user",
                 "name": "oms-alpha-service@oms-host-panels",
                 "path": alpha_canon,
+                "plugin_sha256": alpha_plugin_sha,
+                "mcp_sha256": alpha_mcp_sha,
             }]
         })
     );
@@ -6492,6 +6496,7 @@ fn project_panels_codex_lifecycle_parity() {
     let _ = take_calls();
     // Simulate a stale sidecar: drop `alpha-service` and record a stale `ghost-service` that has no
     // bundle on disk.
+    let dummy_sha = "0".repeat(64);
     write_private_file(
         &panels_sidecar,
         serde_json::to_string_pretty(&json!({
@@ -6500,6 +6505,8 @@ fn project_panels_codex_lifecycle_parity() {
                 "scope": "user",
                 "name": "oms-ghost-service@oms-host-panels",
                 "path": alpha_canon,
+                "plugin_sha256": dummy_sha,
+                "mcp_sha256": dummy_sha,
             }]
         }))
         .unwrap()
@@ -6527,6 +6534,11 @@ fn project_panels_codex_lifecycle_parity() {
         "marketplace.json must be built from marked bundles on disk + installed alias"
     );
     // Clean up both alpha-service (unrecorded on-disk bundle) and beta-service, plus drop stale sidecar.
+    let beta_bundle_dir = mp_root.join("plugins/oms-beta-service");
+    let beta_p_sha =
+        oms_panel_core::digest(&std::fs::read(beta_bundle_dir.join("plugin.json")).unwrap());
+    let beta_m_sha =
+        oms_panel_core::digest(&std::fs::read(beta_bundle_dir.join("mcp.json")).unwrap());
     std::fs::remove_file(&panels_sidecar).unwrap();
     write_private_file(
         &panels_sidecar,
@@ -6536,6 +6548,8 @@ fn project_panels_codex_lifecycle_parity() {
                 "scope": "user",
                 "name": "oms-beta-service@oms-host-panels",
                 "path": beta_canon,
+                "plugin_sha256": beta_p_sha,
+                "mcp_sha256": beta_m_sha,
             }]
         }))
         .unwrap()
@@ -6734,12 +6748,13 @@ fn project_panels_codex_lifecycle_parity() {
     let beta_plugin_path = mp_root.join("plugins/oms-beta-service/plugin.json");
     let mut edited_plugin: Value =
         serde_json::from_slice(&std::fs::read(&beta_plugin_path).unwrap()).unwrap();
-    edited_plugin["version"] = json!("9.9.9-custom");
+    edited_plugin["description"] = json!("custom plugin description");
     let edited_plugin_bytes = serde_json::to_vec_pretty(&edited_plugin).unwrap();
     write_private_file(&beta_plugin_path, &edited_plugin_bytes);
+    let foreign_bundle_src = base.join("foreign-plugin-source");
     let mut custom_state = read_codex_state();
-    custom_state["installed"]["oms-beta-service@oms-host-panels"]["version"] =
-        json!("9.9.9-custom");
+    custom_state["installed"]["oms-beta-service@oms-host-panels"]["source"]["path"] =
+        json!(foreign_bundle_src);
     write_private_file(&state_file, &serde_json::to_vec(&custom_state).unwrap());
 
     let (code, ed2_out, ed2_err) = run_panel(
@@ -6759,21 +6774,351 @@ fn project_panels_codex_lifecycle_parity() {
             json!({"cwd": beta_canon, "argv": ["plugin", "list", "--json"]}),
             json!({"cwd": beta_canon, "argv": ["plugin", "marketplace", "list"]}),
         ],
-        "must NOT run `codex plugin remove` when installed plugin is no longer the one OMS installed"
+        "must NOT run `codex plugin remove` when installed plugin source no longer matches OMS"
     );
     assert_eq!(
         std::fs::read(&beta_plugin_path).unwrap(),
         edited_plugin_bytes
     );
     assert_eq!(
-        read_codex_state()["installed"]["oms-beta-service@oms-host-panels"]["version"],
-        "9.9.9-custom"
+        read_codex_state()["installed"]["oms-beta-service@oms-host-panels"]["source"]["path"],
+        json!(foreign_bundle_src)
     );
     assert!(!panels_sidecar.exists());
     std::fs::remove_dir_all(&mp_root).unwrap();
     reset_codex_state();
 
-    // 17. Checkout trees and Codex config sentinels remain completely untouched.
+    // 17. OMS upgrade survival (version A -> version B):
+    //     Simulate an installation written by an older OMS release A (`0.7.0-old` + `panel-res-v0`),
+    //     then run the current OMS binary (release B: `expected_version` + `expected_res_ver`):
+    //     (a) uninstall removes the plugin from Codex (never gated on version), deletes the bundle
+    //         and marketplace root (judged by recorded sha256 digests, not today's bytes), and
+    //         cleans up cleanly;
+    //     (b) reinstall refreshes the unedited bundle to release B, re-runs `codex plugin add` so
+    //         Codex picks up the updated bundle, and updates the recorded sha256 digests;
+    //     (c) install with no sidecar row adopts an unrecorded release-A OMS bundle for this alias
+    //         and checkout instead of refusing as unmanaged;
+    //     (d) an actually edited file is still refused on reinstall and preserved on uninstall.
+    let old_pkg_version = "0.7.0-old";
+    let old_res_version = "panel-res-v0";
+    assert_ne!(old_pkg_version, expected_version);
+    assert_ne!(old_res_version, expected_res_ver);
+
+    let seed_version_a_alpha = |record_row: bool| -> (Vec<u8>, Vec<u8>, String, String) {
+        assert_eq!(
+            run_panel(
+                base,
+                &["--install-panel", "codex", "--project", "alpha-service"],
+                true,
+                &[],
+            )
+            .0,
+            0
+        );
+        let _ = take_calls();
+
+        let mut old_plugin = alpha_plugin_val.clone();
+        old_plugin["version"] = json!(old_pkg_version);
+        let mut old_plugin_bytes = serde_json::to_vec_pretty(&old_plugin).unwrap();
+        old_plugin_bytes.push(b'\n');
+
+        let mut old_mcp = alpha_mcp_val.clone();
+        old_mcp["mcpServers"]["oms-panel"]["env"]["OMS_MCP_PANEL_RESOURCE_VERSION"] =
+            json!(old_res_version);
+        let mut old_mcp_bytes = serde_json::to_vec_pretty(&old_mcp).unwrap();
+        old_mcp_bytes.push(b'\n');
+
+        write_private_file(&alpha_plugin_path, &old_plugin_bytes);
+        write_private_file(&alpha_mcp_path, &old_mcp_bytes);
+
+        let old_p_sha = oms_panel_core::digest(&old_plugin_bytes);
+        let old_m_sha = oms_panel_core::digest(&old_mcp_bytes);
+        if record_row {
+            let mut row_bytes = serde_json::to_vec_pretty(&json!({
+                "alpha-service": [{
+                    "app": "codex",
+                    "scope": "user",
+                    "name": "oms-alpha-service@oms-host-panels",
+                    "path": alpha_canon,
+                    "plugin_sha256": old_p_sha,
+                    "mcp_sha256": old_m_sha,
+                }]
+            }))
+            .unwrap();
+            row_bytes.push(b'\n');
+            write_private_file(&panels_sidecar, &row_bytes);
+        } else {
+            std::fs::remove_file(&panels_sidecar).unwrap();
+        }
+
+        let mut st = read_codex_state();
+        st["installed"]["oms-alpha-service@oms-host-panels"]["version"] = json!(old_pkg_version);
+        write_private_file(&state_file, &serde_json::to_vec(&st).unwrap());
+        (old_plugin_bytes, old_mcp_bytes, old_p_sha, old_m_sha)
+    };
+
+    // 17(a): Upgrade from A -> B, then `--uninstall-panel` removes plugin, bundle, marketplace, and row.
+    let _ = seed_version_a_alpha(true);
+    let (code, up_un_raw, up_un_err) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{up_un_err}");
+    let up_un_json: Value = serde_json::from_str(&up_un_raw).unwrap();
+    assert_eq!(
+        up_un_json,
+        json!({
+            "app": "codex",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-alpha-service@oms-host-panels",
+            "action": "uninstall",
+            "changed": true,
+        }),
+        "upgrade uninstall must not treat version-A OMS bundle as user-edited"
+    );
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "remove", "oms-alpha-service@oms-host-panels"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "remove", "oms-host-panels"]}),
+        ],
+        "upgrade uninstall must remove older-version OMS plugin and marketplace"
+    );
+    assert!(!mp_root.exists() && !panels_sidecar.exists());
+    assert!(
+        read_codex_state()["installed"]
+            .get("oms-alpha-service@oms-host-panels")
+            .is_none()
+    );
+
+    // 17(b): Upgrade from A -> B, then `--install-panel` refreshes bundle + Codex plugin to B and
+    //        updates recorded hashes; subsequent reinstall with B is a no-op.
+    let _ = seed_version_a_alpha(true);
+    let (code, ref_raw, ref_err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{ref_err}");
+    let ref_json: Value = serde_json::from_str(&ref_raw).unwrap();
+    assert_eq!(ref_json["action"], "install");
+    assert_eq!(ref_json["changed"], true);
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "add", "oms-alpha-service@oms-host-panels"]}),
+        ],
+        "refresh must re-run `codex plugin add` without re-adding the marketplace"
+    );
+    let refreshed_plugin: Value =
+        serde_json::from_slice(&std::fs::read(&alpha_plugin_path).unwrap()).unwrap();
+    assert_eq!(refreshed_plugin["version"], expected_version);
+    let refreshed_mcp: Value =
+        serde_json::from_slice(&std::fs::read(&alpha_mcp_path).unwrap()).unwrap();
+    assert_eq!(
+        refreshed_mcp["mcpServers"]["oms-panel"]["env"]["OMS_MCP_PANEL_RESOURCE_VERSION"],
+        expected_res_ver
+    );
+    assert_eq!(
+        read_codex_state()["installed"]["oms-alpha-service@oms-host-panels"]["version"],
+        expected_version
+    );
+    let refreshed_sidecar: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert_eq!(
+        refreshed_sidecar["alpha-service"][0]["plugin_sha256"],
+        alpha_plugin_sha
+    );
+    assert_eq!(
+        refreshed_sidecar["alpha-service"][0]["mcp_sha256"],
+        alpha_mcp_sha
+    );
+
+    let (code, post_ref_raw, post_ref_err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{post_ref_err}");
+    let post_ref_json: Value = serde_json::from_str(&post_ref_raw).unwrap();
+    assert_eq!(post_ref_json["changed"], false);
+    let _ = take_calls();
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+
+    // 17(c): Install with no sidecar row adopts an unrecorded version-A OMS bundle for this alias
+    //        and checkout instead of refusing as unmanaged, then refreshes cleanly on reinstall.
+    let (_, _, old_p_sha, old_m_sha) = seed_version_a_alpha(false);
+    let (code, ad_old_raw, ad_old_err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{ad_old_err}");
+    let ad_old_json: Value = serde_json::from_str(&ad_old_raw).unwrap();
+    assert_eq!(ad_old_json["action"], "adopted");
+    assert_eq!(ad_old_json["changed"], true);
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+        ]
+    );
+    let adopted_sidecar: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert_eq!(
+        adopted_sidecar["alpha-service"][0]["plugin_sha256"],
+        old_p_sha
+    );
+    assert_eq!(adopted_sidecar["alpha-service"][0]["mcp_sha256"], old_m_sha);
+
+    let (code, ad_ref_raw, ad_ref_err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{ad_ref_err}");
+    let ad_ref_json: Value = serde_json::from_str(&ad_ref_raw).unwrap();
+    assert_eq!(ad_ref_json["changed"], true);
+    let _ = take_calls();
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+
+    // 17(d): Across an upgrade from A -> B, an actually edited bundle file is still refused on
+    //        reinstall, preserved on uninstall, and refused as unmanaged if reinstall is retried
+    //        while the edited file remains on disk.
+    let (old_p_bytes, _, _, _) = seed_version_a_alpha(true);
+    let mut user_edited_old: Value = serde_json::from_slice(&old_p_bytes).unwrap();
+    user_edited_old["description"] = json!("user-customized description on old bundle");
+    let mut user_edited_old_bytes = serde_json::to_vec_pretty(&user_edited_old).unwrap();
+    user_edited_old_bytes.push(b'\n');
+    write_private_file(&alpha_plugin_path, &user_edited_old_bytes);
+
+    let (code, _, ref_ed_err) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(
+        code, 0,
+        "reinstall must refuse overwriting user-edited bundle"
+    );
+    assert!(ref_ed_err.contains("modified outside OMS"), "{ref_ed_err}");
+    assert!(take_calls().is_empty());
+    assert_eq!(
+        std::fs::read(&alpha_plugin_path).unwrap(),
+        user_edited_old_bytes
+    );
+
+    let (code, un_ed_raw, un_ed_err) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{un_ed_err}");
+    let un_ed_json: Value = serde_json::from_str(&un_ed_raw).unwrap();
+    assert_eq!(un_ed_json["preservedFiles"], json!([alpha_plugin_path]));
+    assert_eq!(
+        std::fs::read(&alpha_plugin_path).unwrap(),
+        user_edited_old_bytes
+    );
+    assert!(!panels_sidecar.exists());
+    assert!(
+        read_codex_state()["installed"]
+            .get("oms-alpha-service@oms-host-panels")
+            .is_none(),
+        "OMS-installed plugin for the recorded checkout must still be removed from Codex"
+    );
+    let _ = take_calls();
+
+    let (code, _, retry_ed_err) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(
+        code, 0,
+        "install with no row must refuse overwriting preserved user-edited bundle"
+    );
+    assert!(retry_ed_err.contains("unmanaged"), "{retry_ed_err}");
+    assert_eq!(
+        std::fs::read(&alpha_plugin_path).unwrap(),
+        user_edited_old_bytes
+    );
+    let _ = take_calls();
+    std::fs::remove_dir_all(&mp_root).unwrap();
+    reset_codex_state();
+
+    // 18. Checkout trees and Codex config sentinels remain completely untouched.
     assert_eq!(snapshot_tree(&alpha_canon), alpha_tree_before);
     assert_eq!(snapshot_tree(&beta_canon), beta_tree_before);
     for ((path, expected_bytes), expected_ino) in sentinel_files.iter().zip(sentinel_inodes.iter())
