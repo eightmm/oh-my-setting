@@ -4895,6 +4895,26 @@ mod tests {
     #[test]
     fn plan_and_autonomy_resolve_explicit_and_policy_routes() {
         let root = Tmp::repo(&[("a", "x")]);
+        if std::env::var_os("OMS_ROUTE_TEST_ISOLATED").as_deref() != Some(std::ffi::OsStr::new("1"))
+        {
+            let cap_dir = root.path().join("empty-capabilities");
+            std::fs::create_dir_all(&cap_dir).unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "services_control::tests::plan_and_autonomy_resolve_explicit_and_policy_routes",
+                    "--nocapture",
+                ])
+                .env("OMS_ROUTE_TEST_ISOLATED", "1")
+                .env("OMS_CAPABILITY_DIR", &cap_dir)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(out.status.success(), "{stdout}{stderr}");
+            assert!(stdout.contains("1 passed;"), "{stdout}{stderr}");
+            return;
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let control = services(&stop, root.path(), Vec::new());
         let route = |v: Value| control.resolve_route(root.path(), &v, "worker", &stop);
@@ -5536,6 +5556,7 @@ mod tests {
                         merge: false,
                         physical_call: Some(tag.clone()),
                         launch_fence: Some(call.launch_fence()),
+                        heartbeat: None,
                     },
                     &stop,
                 )

@@ -68,7 +68,7 @@ oms uninstall    # Remove managed links and restore backed-up config files
 
 The goal of oh-my-setting is one project panel that follows you between agents. The Rust runtime keeps the project state (goal, plan, attempts, reviews, usage) and reads Git and GitHub status live, and every host draws its view from OMS instead of keeping its own copy. In the terminal, `oms` opens the full Board with Main selection and switching, provider overview, quota, and the results reader ([In the terminal](#in-the-terminal) · [guide](docs/TERMINAL-PANEL.md)). Agent apps receive the panel from `oms mcp-server` as an MCP App, and the Claude Code pane reads OMS on the same machine.
 
-`oms --version` prints the release shared by the runtime and bundled plugins, while the panel resource suffix (for example, `v34`) identifies cached UI content. Hooks and panel plugins are independent, so projects can use the panel without enabling hooks.
+`oms --version` prints the release shared by the runtime and bundled plugins, while the panel resource suffix (for example, `v37`) identifies cached UI content. Hooks and panel plugins are independent, so projects can use the panel without enabling hooks.
 
 ### Plugins and integrations
 

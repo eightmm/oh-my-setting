@@ -832,6 +832,41 @@ fn inbox_codes(repo: &Path) -> Vec<String> {
 }
 
 #[test]
+fn inbox_recommends_sealing_only_eligible_live_journal_rows() {
+    use oms_command_journal::store::JournalStore;
+    use oms_command_journal::tz::current_utc_now;
+
+    let repo = TempRepo::new();
+    seed(repo.path());
+    let now = current_utc_now();
+    let store = JournalStore::open_for_write(repo.path(), None).unwrap();
+    // Leave room for state and inbox to sample their clocks across a local month rollover.
+    let retained_at = (now + chrono::Duration::days(2)).to_rfc3339();
+    for (id, occurred_at) in [
+        ("past", "2020-01-15T12:00:00Z"),
+        ("retained", retained_at.as_str()),
+    ] {
+        let raw = format!(
+            r#"{{"event_type":"run","occurred_at":"{occurred_at}","source":{{"type":"run-ledger","id":"{id}"}},"verification_status":"not_verified"}}"#
+        );
+        let event = oms_json::parse_python_ordered(raw.as_bytes()).unwrap();
+        assert!(store.record_event(&event, now).unwrap().1);
+    }
+    let observed = || {
+        let unsealed = view_json("state", repo.path())
+            .get("work_journal")
+            .get("unsealed")
+            .int()
+            .unwrap();
+        let recommended = inbox_codes(repo.path()).contains(&"unsealed-journal".to_owned());
+        (unsealed, recommended)
+    };
+    assert_eq!(observed(), (1, true));
+    assert_eq!(store.seal(true, now).unwrap(), 1);
+    assert_eq!(observed(), (0, false));
+}
+
+#[test]
 fn inbox_projects_pending_memory_review_without_accepting_or_copying_notes() {
     let repo = TempRepo::new();
     seed(repo.path());

@@ -687,18 +687,26 @@ impl<'a> Plan<'a> {
             github_cache: None,
             github_origin: std::cell::OnceCell::new(),
         };
-        let tasks = s.ordered()?;
-        for task in tasks {
-            if task.opt("completion_kind").is_some() || task.opt("completion_receipt").is_some() {
-                require(
-                    self.context.canonical(),
-                    "completion references belong only to canonical active plan",
-                )?;
-                if crate::completion::validate_done(self, &s.plan, &task, true)?
-                    == crate::completion::CompletionState::Unavailable
-                {
-                    s.unverified.insert(task.text("id").into());
-                }
+        let mut completion_tasks = s
+            .plan
+            .get("tasks")
+            .object()?
+            .iter()
+            .map(|(_, task)| task)
+            .filter(|task| {
+                task.opt("completion_kind").is_some() || task.opt("completion_receipt").is_some()
+            })
+            .collect::<Vec<_>>();
+        completion_tasks.sort_by(|a, b| a.text("created").cmp(b.text("created")));
+        for task in completion_tasks {
+            require(
+                self.context.canonical(),
+                "completion references belong only to canonical active plan",
+            )?;
+            if crate::completion::validate_done(self, &s.plan, task, true)?
+                == crate::completion::CompletionState::Unavailable
+            {
+                s.unverified.insert(task.text("id").into());
             }
         }
         Ok(s)

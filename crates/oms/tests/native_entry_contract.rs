@@ -411,20 +411,38 @@ fn dispatch_owns_runtime_subcommands_and_leaves_unowned_tools_to_legacy() {
         assert!(!out.stdout.is_empty(), "{sub}");
     }
 
-    let unowned = Command::new(f.binary())
-        .arg("--oms-dispatch")
-        .arg(&f.0)
-        .args([
-            "1111111111111111111111111111111111111111",
-            "--",
-            "unowned-legacy-probe",
-            "--help",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(unowned.status.code(), Some(75));
-    assert!(unowned.stdout.is_empty());
-    assert!(unowned.stderr.is_empty());
+    exact(
+        Command::new(f.binary())
+            .arg("--oms-select")
+            .arg(&f.0)
+            .args([
+                "1111111111111111111111111111111111111111",
+                "--",
+                "unowned-legacy-probe",
+                "--help",
+            ])
+            .output()
+            .unwrap(),
+        75,
+        b"",
+        b"",
+    );
+    exact(
+        Command::new(f.binary())
+            .arg("--oms-dispatch")
+            .arg(&f.0)
+            .args([
+                "1111111111111111111111111111111111111111",
+                "--",
+                "unowned-legacy-probe",
+                "--help",
+            ])
+            .output()
+            .unwrap(),
+        2,
+        b"",
+        b"error: unknown tool: unowned-legacy-probe (run: oms list --all)\n",
+    );
 }
 
 #[test]
@@ -1466,26 +1484,58 @@ fn public_attempt_bundle_matches_canonical_json_and_text() {
 }
 
 #[test]
-fn selection_is_inert_and_unowned_dispatch_returns_empty_75() {
+fn selection_is_inert_and_unowned_dispatch_reports_error() {
+    use std::os::unix::ffi::OsStringExt;
     let f = Fixture::new();
     let bin = f.guarded_tools();
     let data = f.0.join("data");
     std::fs::create_dir(data.join(".oms")).unwrap();
     std::fs::write(data.join(".oms/inputs"), b"must never be read as state").unwrap();
     let before = files(&data);
-    for argv in [
-        vec![""],
-        vec!["artifact-index.sh", "telemetry"],
-        vec!["unowned-legacy-probe", "--help"],
+    for (argv, dispatch_err) in [
+        (
+            vec![std::ffi::OsString::from("")],
+            b"error: unknown tool:  (run: oms list --all)\n".as_slice(),
+        ),
+        (
+            vec!["artifact-index.sh".into(), "telemetry".into()],
+            b"error: unknown tool: artifact-index.sh (run: oms list --all)\n".as_slice(),
+        ),
+        (
+            vec!["unowned-legacy-probe".into(), "--help".into()],
+            b"error: unknown tool: unowned-legacy-probe (run: oms list --all)\n".as_slice(),
+        ),
+        (
+            vec!["zzz".into()],
+            b"error: unknown tool: zzz (run: oms list --all)\n".as_slice(),
+        ),
+        (
+            vec!["plan".into()],
+            b"error: unknown tool: plan (run: oms list --all)\n".as_slice(),
+        ),
+        (
+            vec![std::ffi::OsString::from_vec(b"bad\xff".to_vec())],
+            b"error: unknown tool: bad\xff (run: oms list --all)\n".as_slice(),
+        ),
     ] {
-        for mode in ["--oms-select", "--oms-dispatch"] {
-            exact(
-                f.private(&bin, mode).args(&argv).output().unwrap(),
-                75,
-                b"",
-                b"",
-            );
-        }
+        exact(
+            f.private(&bin, "--oms-select")
+                .args(&argv)
+                .output()
+                .unwrap(),
+            75,
+            b"",
+            b"",
+        );
+        exact(
+            f.private(&bin, "--oms-dispatch")
+                .args(&argv)
+                .output()
+                .unwrap(),
+            2,
+            b"",
+            dispatch_err,
+        );
     }
     exact(
         f.private(&bin, "--oms-select")

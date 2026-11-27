@@ -2903,6 +2903,14 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
         let out = call("doctor", &["--json", "--no-model-doctor"], source, host);
         let report: Value = serde_json::from_slice(&out.1).unwrap();
         assert_eq!(snapshot(root), before, "doctor is read-only");
+        assert!(
+            report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["section"] == "mcp servers" && v["level"] != "error"),
+            "{report}"
+        );
         report["findings"]
             .as_array()
             .unwrap()

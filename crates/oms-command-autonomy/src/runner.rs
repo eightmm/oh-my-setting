@@ -554,8 +554,10 @@ pub(crate) fn preflight(ctx: &Context<'_>, args: &Args) -> Result<Duration> {
     }
     context_pack(ctx, args)?;
     ctx.git(&["rev-parse", "--git-dir"])?;
+    // The wall is forwarded to peer-delegate as OMS_PEER_TIMEOUT, so a shorter
+    // default here would cut peer-delegate's own 20-minute write default.
     ctx.peer_wall.map_or_else(
-        || verify::duration(&std::env::var("OMS_PEER_TIMEOUT").unwrap_or_else(|_| "5m".into())),
+        || verify::duration(&std::env::var("OMS_PEER_TIMEOUT").unwrap_or_else(|_| "20m".into())),
         Ok,
     )
 }

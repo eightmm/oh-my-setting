@@ -512,6 +512,17 @@ impl Services for FeedbackMock {
                     .collect();
                 let arg = |name: &str| args.windows(2).find(|w| w[0] == name).unwrap()[1].clone();
                 assert!(!args.iter().any(|arg| arg == "--repair"));
+                // Without an operator override, plan-run must not cut peer-delegate's
+                // own 20-minute write default.
+                if std::env::var_os("OMS_PEER_TIMEOUT").is_none() {
+                    assert!(
+                        call.environment
+                            .iter()
+                            .any(|(key, value)| key == "OMS_PEER_TIMEOUT" && value == "1200s"),
+                        "{:?}",
+                        call.environment
+                    );
+                }
                 let binding =
                     serde_json::from_str::<serde_json::Value>(&arg("--plan-binding")).unwrap();
                 if self.mode.starts_with("lead-context") {

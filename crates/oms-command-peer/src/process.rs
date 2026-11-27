@@ -8,6 +8,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttemptHeartbeat {
+    pub repo: PathBuf,
+    pub attempt: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Invocation {
     pub argv: Vec<OsString>,
@@ -20,6 +26,7 @@ pub struct Invocation {
     pub merge: bool,
     pub physical_call: Option<oms_supervisor::process::PhysicalCall>,
     pub launch_fence: Option<LaunchFence>,
+    pub heartbeat: Option<AttemptHeartbeat>,
 }
 #[derive(Clone, Debug)]
 pub struct Completed {
@@ -72,6 +79,7 @@ impl HandoffProjection {
             merge: false,
             physical_call: None,
             launch_fence: None,
+            heartbeat: None,
         }
     }
 }
@@ -699,6 +707,7 @@ pub(crate) fn invoke_env(
             merge,
             physical_call: None,
             launch_fence: None,
+            heartbeat: context.heartbeat.cloned(),
         },
         context.interrupted,
     )
@@ -755,6 +764,7 @@ pub(crate) fn git_input(
             merge: false,
             physical_call: None,
             launch_fence: None,
+            heartbeat: None,
         },
         context.interrupted,
     )?;
@@ -849,6 +859,7 @@ mod tests {
                 Instant::now() + Duration::from_secs(1),
                 Some(1),
             )),
+            heartbeat: None,
         };
         assert_eq!(Native.execute(request.clone(), &stop).unwrap_err().code, 75);
         let mut deadline = request;

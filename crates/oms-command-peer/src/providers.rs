@@ -1755,6 +1755,9 @@ fn transport(
             cmd.args(&["--output-format", "stream-json", "--verbose", "-p"]);
         }
         "antigravity" => {
+            if let Some(resume) = nonempty_env("OMS_RESUME_SESSION") {
+                cmd.option("--conversation", resume);
+            }
             cmd.model(route);
             cmd.option("--add-dir", cwd);
             cmd.effort(route, "--effort");
@@ -2561,6 +2564,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                 oms_supervisor::process::PhysicalCall::new(&usage_receipt.identity.call_id)
                     .map_err(|e| Error::new(2, e))?,
             ),
+            heartbeat: context.heartbeat.cloned(),
         };
         let result = crate::plan_delegate::check_launch(&extra_env, &route.provider, cwd, context)
             .and_then(|plan| {
@@ -3130,6 +3134,7 @@ mod bridge_route_tests {
             source: repo,
             interrupted: &stop,
             executor: capture,
+            heartbeat: None,
         };
         let mut route = route.clone();
         execute_env(&mut route, prompt, cwd, write, 12, repo, &[], &context)
@@ -3407,6 +3412,7 @@ mod bridge_route_tests {
                         source: repo,
                         interrupted: &stop,
                         executor: &executor,
+                        heartbeat: None,
                     };
                     let mut route = Route {
                         provider: "claude".into(),
@@ -3634,6 +3640,7 @@ mod bridge_route_tests {
                         source: repo,
                         interrupted: &stop,
                         executor: &report,
+                        heartbeat: None,
                     };
                     let result =
                         execute_env(&mut route, b"fixture", cwd, false, 12, repo, &[], &context)
@@ -3757,6 +3764,7 @@ mod bridge_route_tests {
                     source: repo,
                     interrupted: &stop,
                     executor: &reports,
+                    heartbeat: None,
                 };
                 let mut route = Route {
                     provider: "claude".into(),
@@ -4263,6 +4271,8 @@ mod bridge_route_tests {
                                     + "resume|--all|fixture-session|-";
                             } else if provider == "claude" {
                                 expanded = "--resume|fixture-session|".to_owned() + &expanded;
+                            } else if provider == "antigravity" {
+                                expanded = "--conversation|fixture-session|".to_owned() + &expanded;
                             }
                         }
                         let expected: Vec<OsString> = expanded
@@ -4415,7 +4425,12 @@ mod bridge_route_tests {
                         let valid = prompt.len() <= 120000
                             && std::str::from_utf8(&prompt).is_ok()
                             && !prompt.contains(&0);
-                        assert_eq!(result.is_ok(), valid, "{provider}, {} bytes", prompt.len());
+                        assert_eq!(
+                            result.is_ok(),
+                            valid,
+                            "{provider}, {} bytes: {result:?}",
+                            prompt.len()
+                        );
                         assert_eq!(capture.0.lock().unwrap().len(), usize::from(valid));
                     }
                 }
@@ -4431,7 +4446,11 @@ mod bridge_route_tests {
                 for size in [0, 120000, 120001] {
                     let capture = Capture::default();
                     let result = direct(&route, &vec![b'x'; size], true, repo, cwd, &capture);
-                    assert_eq!(result.is_ok(), mode != "interactive" || size <= 120000);
+                    assert_eq!(
+                        result.is_ok(),
+                        mode != "interactive" || size <= 120000,
+                        "{mode}, {size} bytes: {result:?}"
+                    );
                     let calls = capture.0.lock().unwrap();
                     if let Some(call) = calls.first() {
                         let dirs: Vec<_> = call
