@@ -83,9 +83,11 @@ pub struct FileSnapshot {
 fn io(e: impl std::fmt::Display) -> crate::Error {
     error(format!("plan storage: {e}"))
 }
-impl From<ByteError> for crate::Error {
+struct SnapshotReadError(crate::Error);
+
+impl From<ByteError> for SnapshotReadError {
     fn from(e: ByteError) -> Self {
-        error(format!("plan read: {e:?}"))
+        Self(error(format!("plan read: {e:?}")))
     }
 }
 fn flags() -> OFlags {
@@ -334,17 +336,23 @@ impl Store {
             };
         };
         self.trusted(&before, false, false)?;
-        let (raw, after) = self.root.read_no_follow_checked(
-            path,
-            ByteReadOptions {
-                missing_ok: false,
-                max_bytes: limit,
-            },
-            |opened| {
-                self.trusted(opened, false, false)?;
-                require(stable(&before, opened), "plan object changed during open")
-            },
-        )?;
+        let (raw, after) = self
+            .root
+            .read_no_follow_checked(
+                path,
+                ByteReadOptions {
+                    missing_ok: false,
+                    max_bytes: limit,
+                },
+                |opened| {
+                    self.trusted(opened, false, false)
+                        .and_then(|()| {
+                            require(stable(&before, opened), "plan object changed during open")
+                        })
+                        .map_err(SnapshotReadError)
+                },
+            )
+            .map_err(|e| e.0)?;
         let after = after.ok_or_else(|| error("plan object disappeared"))?;
         let named = a.stat()?.ok_or_else(|| error("plan object disappeared"))?;
         require(
