@@ -481,11 +481,11 @@ dependencies = [
  "oms-command-graph",
  "oms-command-hooks",
  "oms-command-input",
+ "oms-command-intake",
  "oms-command-job-digest",
  "oms-command-journal",
  "oms-command-landing",
  "oms-command-lifecycle",
- "oms-command-linear",
  "oms-command-memory",
  "oms-command-operations",
  "oms-command-panel",
@@ -671,6 +671,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-command-intake"
+version = "0.1.0"
+dependencies = [
+ "oms-command-room",
+ "oms-safe-fs",
+ "oms-scrub",
+ "rustix",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "oms-command-job-digest"
 version = "0.1.0"
 dependencies = [
@@ -746,18 +758,6 @@ dependencies = [
  "regex",
  "rustix",
  "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "oms-command-linear"
-version = "0.1.0"
-dependencies = [
- "oms-command-room",
- "oms-safe-fs",
- "oms-scrub",
- "rustix",
  "serde_json",
  "sha2",
 ]

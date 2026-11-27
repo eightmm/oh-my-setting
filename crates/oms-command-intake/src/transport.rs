@@ -1,14 +1,14 @@
-//! Bounded `curl` subprocess GraphQL client keeping credentials out of `argv`.
+//! Bounded `curl` subprocess HTTP JSON client keeping credentials out of `argv`.
 
 use crate::crypto::SecretValue;
-use crate::model::{ActivityKind, DeliveryState};
+use crate::source::TransportError;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{self as rfs, AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use rustix::process::{
     Pid, Signal, WaitId, WaitIdOptions, WaitIdStatus, geteuid, kill_process_group, waitid,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::fs::{self, File};
 use std::hint::black_box;
 use std::io::Write as _;
@@ -21,31 +21,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_LINEAR_API_URL: &str = "https://api.linear.app/graphql";
-pub const ENV_LINEAR_API_URL: &str = "OMS_LINEAR_API_URL";
-
 const MAX_CHILD_STDOUT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_CHILD_STDERR_BYTES: u64 = 256 * 1024;
 
 static REQUEST_DIR_SEQ: AtomicU64 = AtomicU64::new(1);
-
-const QUERY_AGENT_ACTIVITY: &str =
-    "query OmsAgentActivity($id: String!) { agentActivity(id: $id) { id } }";
-const MUTATION_AGENT_ACTIVITY_CREATE: &str = "mutation OmsAgentActivityCreate($input: AgentActivityCreateInput!) { agentActivityCreate(input: $input) { success agentActivity { id } } }";
-
-#[derive(Clone, Debug)]
-pub enum ApiError {
-    OutcomeUnknown(String),
-    Rejected(String),
-}
-
-impl ApiError {
-    pub fn message(&self) -> &str {
-        match self {
-            Self::OutcomeUnknown(m) | Self::Rejected(m) => m,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EndpointScheme {
@@ -60,14 +39,14 @@ pub struct EndpointUrl {
 }
 
 impl EndpointUrl {
-    pub fn from_env() -> Result<Self, String> {
-        match std::env::var_os(ENV_LINEAR_API_URL) {
-            None => Self::parse(DEFAULT_LINEAR_API_URL),
-            Some(raw) if raw.is_empty() => Self::parse(DEFAULT_LINEAR_API_URL),
+    pub fn from_env(var_name: &str, default_url: &str) -> Result<Self, String> {
+        match std::env::var_os(var_name) {
+            None => Self::parse(default_url),
+            Some(raw) if raw.is_empty() => Self::parse(default_url),
             Some(raw) => {
                 let text = raw
                     .into_string()
-                    .map_err(|_| format!("invalid {ENV_LINEAR_API_URL}: must be valid UTF-8"))?;
+                    .map_err(|_| format!("invalid {var_name}: must be valid UTF-8"))?;
                 Self::parse(&text)
             }
         }
@@ -79,12 +58,12 @@ impl EndpointUrl {
             || raw.starts_with('-')
             || raw.bytes().any(|b| b <= 0x20 || b == 0x7f)
         {
-            return Err("invalid Linear API URL".into());
+            return Err("invalid intake API URL".into());
         }
         if let Some(rest) = raw.strip_prefix("https://") {
             let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
             if authority.is_empty() || authority.contains('@') {
-                return Err("invalid https Linear API URL".into());
+                return Err("invalid https intake API URL".into());
             }
             return Ok(Self {
                 url: raw.to_owned(),
@@ -96,7 +75,7 @@ impl EndpointUrl {
             if authority.is_empty() || authority.contains('@') || !is_loopback_authority(authority)
             {
                 return Err(
-                    "Linear API URL over http is accepted only for loopback addresses".into(),
+                    "intake API URL over http is accepted only for loopback addresses".into(),
                 );
             }
             return Ok(Self {
@@ -104,14 +83,14 @@ impl EndpointUrl {
                 scheme: EndpointScheme::LoopbackHttp,
             });
         }
-        Err("Linear API URL must use https or loopback http".into())
+        Err("intake API URL must use https or loopback http".into())
     }
 
     pub fn as_str(&self) -> &str {
         &self.url
     }
 
-    fn curl_proto(&self) -> &'static str {
+    pub(crate) fn curl_proto(&self) -> &'static str {
         match self.scheme {
             EndpointScheme::Https => "=https",
             EndpointScheme::LoopbackHttp => "=http",
@@ -158,7 +137,8 @@ struct RequestTempDir {
 }
 
 impl RequestTempDir {
-    fn create() -> Result<Self, ApiError> {
+    #[allow(clippy::unnecessary_cast)]
+    fn create() -> Result<Self, TransportError> {
         let tmp_base = std::env::temp_dir();
         let uid = geteuid().as_raw();
         let pid = std::process::id();
@@ -173,7 +153,7 @@ impl RequestTempDir {
                 ^ seq.wrapping_mul(0x9e37_79b9_7f4a_7c15)
                 ^ u64::from(pid).wrapping_shl(16)
                 ^ attempt.wrapping_mul(0x517c_c1b7_2722_0a95);
-            let dir_path = tmp_base.join(format!("oms-lin-curl-{pid}-{seq}-{tag:016x}"));
+            let dir_path = tmp_base.join(format!("oms-intake-curl-{pid}-{seq}-{tag:016x}"));
 
             match rfs::mkdir(&dir_path, Mode::from_raw_mode(0o700)) {
                 Ok(()) => {
@@ -183,17 +163,17 @@ impl RequestTempDir {
                         Mode::empty(),
                     )
                     .map_err(|e| {
-                        ApiError::OutcomeUnknown(format!(
+                        TransportError::OutcomeUnknown(format!(
                             "failed opening private request temp dir: {e}"
                         ))
                     })?;
                     let fd_stat = rfs::fstat(&dir_fd).map_err(|e| {
-                        ApiError::OutcomeUnknown(format!(
+                        TransportError::OutcomeUnknown(format!(
                             "failed inspecting private request temp dir: {e}"
                         ))
                     })?;
                     let path_stat = rfs::lstat(&dir_path).map_err(|e| {
-                        ApiError::OutcomeUnknown(format!(
+                        TransportError::OutcomeUnknown(format!(
                             "failed verifying private request temp dir: {e}"
                         ))
                     })?;
@@ -206,7 +186,7 @@ impl RequestTempDir {
                         || fd_stat.st_dev != path_stat.st_dev
                         || fd_stat.st_ino != path_stat.st_ino
                     {
-                        return Err(ApiError::OutcomeUnknown(
+                        return Err(TransportError::OutcomeUnknown(
                             "private request temp dir failed identity verification".into(),
                         ));
                     }
@@ -221,13 +201,13 @@ impl RequestTempDir {
                 }
                 Err(Errno::EXIST) => continue,
                 Err(e) => {
-                    return Err(ApiError::OutcomeUnknown(format!(
+                    return Err(TransportError::OutcomeUnknown(format!(
                         "failed creating private request temp dir: {e}"
                     )));
                 }
             }
         }
-        Err(ApiError::OutcomeUnknown(
+        Err(TransportError::OutcomeUnknown(
             "exhausted attempts creating private request temp dir".into(),
         ))
     }
@@ -236,16 +216,18 @@ impl RequestTempDir {
         self.dir_path.join("cfg")
     }
 
-    fn write_cfg_exclusive(&mut self, body: &mut [u8]) -> Result<(), ApiError> {
+    #[allow(clippy::unnecessary_cast)]
+    fn write_cfg_exclusive(&mut self, body: &mut [u8]) -> Result<(), TransportError> {
         let fd = rfs::openat(
             &self.dir_fd,
             "cfg",
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )
-        .map_err(|e| ApiError::OutcomeUnknown(format!("failed creating curl config: {e}")))?;
-        let st = rfs::fstat(&fd)
-            .map_err(|e| ApiError::OutcomeUnknown(format!("failed inspecting curl config: {e}")))?;
+        .map_err(|e| TransportError::OutcomeUnknown(format!("failed creating curl config: {e}")))?;
+        let st = rfs::fstat(&fd).map_err(|e| {
+            TransportError::OutcomeUnknown(format!("failed inspecting curl config: {e}"))
+        })?;
         self.cfg_id = Some((st.st_dev as u64, st.st_ino as u64));
 
         let ftype = FileType::from_raw_mode(st.st_mode);
@@ -258,7 +240,7 @@ impl RequestTempDir {
         {
             body.fill(0);
             black_box(&body);
-            return Err(ApiError::OutcomeUnknown(
+            return Err(TransportError::OutcomeUnknown(
                 "curl config failed exclusive regular-file verification".into(),
             ));
         }
@@ -267,7 +249,8 @@ impl RequestTempDir {
         let write_res = file.write_all(body).and_then(|()| file.flush());
         body.fill(0);
         black_box(&body);
-        write_res.map_err(|e| ApiError::OutcomeUnknown(format!("failed writing curl config: {e}")))
+        write_res
+            .map_err(|e| TransportError::OutcomeUnknown(format!("failed writing curl config: {e}")))
     }
 }
 
@@ -324,10 +307,10 @@ impl ChildGroupGuard {
         }
     }
 
-    fn probe_exited_nowait(&mut self) -> Result<Option<WaitIdStatus>, ApiError> {
+    fn probe_exited_nowait(&mut self) -> Result<Option<WaitIdStatus>, TransportError> {
         let Some(pgid) = self.pgid else {
             self.identity_uncertain = true;
-            return Err(ApiError::OutcomeUnknown(
+            return Err(TransportError::OutcomeUnknown(
                 "child process missing valid pid/pgid".into(),
             ));
         };
@@ -343,12 +326,12 @@ impl ChildGroupGuard {
                 Err(Errno::CHILD) => {
                     self.identity_uncertain = true;
                     self.reaped = true;
-                    return Err(ApiError::OutcomeUnknown(
+                    return Err(TransportError::OutcomeUnknown(
                         "child process identity lost (ECHILD)".into(),
                     ));
                 }
                 Err(e) => {
-                    return Err(ApiError::OutcomeUnknown(format!(
+                    return Err(TransportError::OutcomeUnknown(format!(
                         "waitid on child process failed: {e}"
                     )));
                 }
@@ -356,9 +339,9 @@ impl ChildGroupGuard {
         }
     }
 
-    fn reap_after_group_kill(&mut self) -> Result<ExitStatus, ApiError> {
+    fn reap_after_group_kill(&mut self) -> Result<ExitStatus, TransportError> {
         if self.reaped || self.identity_uncertain {
-            return Err(ApiError::OutcomeUnknown(
+            return Err(TransportError::OutcomeUnknown(
                 "cannot reap child: already reaped or identity uncertain".into(),
             ));
         }
@@ -366,9 +349,9 @@ impl ChildGroupGuard {
             let _ = kill_process_group(pgid, Signal::KILL);
         }
         self.reaped = true;
-        self.child
-            .wait()
-            .map_err(|e| ApiError::OutcomeUnknown(format!("failed reaping child process: {e}")))
+        self.child.wait().map_err(|e| {
+            TransportError::OutcomeUnknown(format!("failed reaping child process: {e}"))
+        })
     }
 }
 
@@ -439,7 +422,7 @@ fn drain_pipe(
     buf: &mut Vec<u8>,
     limit: u64,
     truncated: &mut bool,
-) -> Result<PipeDrain, ApiError> {
+) -> Result<PipeDrain, TransportError> {
     let mut scratch = [0u8; 8192];
     for _ in 0..32 {
         match pipe.read(&mut scratch) {
@@ -459,7 +442,7 @@ fn drain_pipe(
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(PipeDrain::Open),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => {
-                return Err(ApiError::OutcomeUnknown(format!(
+                return Err(TransportError::OutcomeUnknown(format!(
                     "failed reading curl pipe: {e}"
                 )));
             }
@@ -474,9 +457,9 @@ fn run_curl_bounded(
     timeout: Duration,
     interrupted: &AtomicBool,
     cred_for_redaction: &str,
-) -> Result<ChildRunOutput, ApiError> {
+) -> Result<ChildRunOutput, TransportError> {
     if interrupted.load(Ordering::Relaxed) {
-        return Err(ApiError::OutcomeUnknown("interrupted".into()));
+        return Err(TransportError::OutcomeUnknown("interrupted".into()));
     }
     cmd.process_group(0)
         .stdin(Stdio::piped())
@@ -485,13 +468,13 @@ fn run_curl_bounded(
 
     let child = cmd
         .spawn()
-        .map_err(|e| ApiError::OutcomeUnknown(format!("failed spawning curl: {e}")))?;
+        .map_err(|e| TransportError::OutcomeUnknown(format!("failed spawning curl: {e}")))?;
     let mut guard = ChildGroupGuard::new(child);
 
     let mut stdin_opt = match guard.child.stdin.take() {
         Some(pipe) if !stdin_bytes.is_empty() => {
             set_nonblocking(&pipe).map_err(|e| {
-                ApiError::OutcomeUnknown(format!("failed configuring curl stdin: {e}"))
+                TransportError::OutcomeUnknown(format!("failed configuring curl stdin: {e}"))
             })?;
             Some(pipe)
         }
@@ -500,26 +483,26 @@ fn run_curl_bounded(
             None
         }
         None => {
-            return Err(ApiError::OutcomeUnknown(
+            return Err(TransportError::OutcomeUnknown(
                 "missing piped stdin handle for curl".into(),
             ));
         }
     };
 
-    let stdout_pipe =
-        guard.child.stdout.take().ok_or_else(|| {
-            ApiError::OutcomeUnknown("missing piped stdout handle for curl".into())
-        })?;
-    set_nonblocking(&stdout_pipe)
-        .map_err(|e| ApiError::OutcomeUnknown(format!("failed configuring curl stdout: {e}")))?;
+    let stdout_pipe = guard.child.stdout.take().ok_or_else(|| {
+        TransportError::OutcomeUnknown("missing piped stdout handle for curl".into())
+    })?;
+    set_nonblocking(&stdout_pipe).map_err(|e| {
+        TransportError::OutcomeUnknown(format!("failed configuring curl stdout: {e}"))
+    })?;
     let mut stdout_opt = Some(stdout_pipe);
 
-    let stderr_pipe =
-        guard.child.stderr.take().ok_or_else(|| {
-            ApiError::OutcomeUnknown("missing piped stderr handle for curl".into())
-        })?;
-    set_nonblocking(&stderr_pipe)
-        .map_err(|e| ApiError::OutcomeUnknown(format!("failed configuring curl stderr: {e}")))?;
+    let stderr_pipe = guard.child.stderr.take().ok_or_else(|| {
+        TransportError::OutcomeUnknown("missing piped stderr handle for curl".into())
+    })?;
+    set_nonblocking(&stderr_pipe).map_err(|e| {
+        TransportError::OutcomeUnknown(format!("failed configuring curl stderr: {e}"))
+    })?;
     let mut stderr_opt = Some(stderr_pipe);
 
     let mut stdin_offset = 0usize;
@@ -534,12 +517,12 @@ fn run_curl_bounded(
 
     loop {
         if interrupted.load(Ordering::Relaxed) {
-            return Err(ApiError::OutcomeUnknown("interrupted".into()));
+            return Err(TransportError::OutcomeUnknown("interrupted".into()));
         }
         let now = Instant::now();
         if now >= deadline {
-            return Err(ApiError::OutcomeUnknown(
-                "Linear API request timed out".into(),
+            return Err(TransportError::OutcomeUnknown(
+                "external API request timed out".into(),
             ));
         }
         if !leader_exited && guard.probe_exited_nowait()?.is_some() {
@@ -561,7 +544,7 @@ fn run_curl_bounded(
 
         let slice = remaining.min(Duration::from_millis(15));
         let ts = Timespec::try_from(slice)
-            .map_err(|e| ApiError::OutcomeUnknown(format!("invalid poll timeout: {e}")))?;
+            .map_err(|e| TransportError::OutcomeUnknown(format!("invalid poll timeout: {e}")))?;
 
         let (si_r, so_r, se_r, bad_fd) = {
             let mut fds = Vec::with_capacity(3);
@@ -604,7 +587,7 @@ fn run_curl_bounded(
                 }
                 Err(Errno::INTR) => continue,
                 Err(e) => {
-                    return Err(ApiError::OutcomeUnknown(format!(
+                    return Err(TransportError::OutcomeUnknown(format!(
                         "failed polling curl pipes: {e}"
                     )));
                 }
@@ -612,7 +595,7 @@ fn run_curl_bounded(
         };
 
         if bad_fd {
-            return Err(ApiError::OutcomeUnknown(
+            return Err(TransportError::OutcomeUnknown(
                 "invalid curl pipe descriptor".into(),
             ));
         }
@@ -624,7 +607,7 @@ fn run_curl_bounded(
                 }
                 match pipe.write(&stdin_bytes[stdin_offset..]) {
                     Ok(0) => {
-                        return Err(ApiError::OutcomeUnknown(
+                        return Err(TransportError::OutcomeUnknown(
                             "unexpected zero write on curl stdin".into(),
                         ));
                     }
@@ -637,7 +620,7 @@ fn run_curl_bounded(
                         break;
                     }
                     Err(e) => {
-                        return Err(ApiError::OutcomeUnknown(format!(
+                        return Err(TransportError::OutcomeUnknown(format!(
                             "failed writing curl stdin: {e}"
                         )));
                     }
@@ -683,13 +666,13 @@ fn run_curl_bounded(
     if status.success() {
         if stdin_broken_pipe {
             let diag = sanitize_diag(&stderr_buf, cred_for_redaction);
-            return Err(ApiError::OutcomeUnknown(format!(
+            return Err(TransportError::OutcomeUnknown(format!(
                 "curl exited before reading full request body ({diag})"
             )));
         }
         if stdout_truncated {
-            return Err(ApiError::OutcomeUnknown(
-                "Linear API response exceeded stdout limit".into(),
+            return Err(TransportError::OutcomeUnknown(
+                "external API response exceeded stdout limit".into(),
             ));
         }
     }
@@ -702,225 +685,100 @@ fn run_curl_bounded(
     })
 }
 
-#[derive(Clone, Debug)]
-pub struct LinearClient {
-    endpoint: EndpointUrl,
-    access_cred: SecretValue,
-}
-
-impl LinearClient {
-    pub fn new(endpoint: EndpointUrl, access_cred: SecretValue) -> Self {
-        Self {
-            endpoint,
-            access_cred,
-        }
+/// POST a JSON payload with an exclusive `0600` Bearer header config file.
+pub fn post_json_bearer(
+    endpoint: &EndpointUrl,
+    access_cred: &SecretValue,
+    payload: &Value,
+    timeout: Duration,
+    interrupted: &AtomicBool,
+) -> Result<Value, TransportError> {
+    let body_bytes = serde_json::to_vec(payload)
+        .map_err(|e| TransportError::Rejected(format!("failed serializing JSON body: {e}")))?;
+    let cred_str = access_cred.as_str();
+    if body_bytes
+        .windows(cred_str.len())
+        .any(|window| window == cred_str.as_bytes())
+    {
+        return Err(TransportError::Rejected(
+            "refusing outbound payload containing access credential".into(),
+        ));
     }
 
-    fn graphql_post(
-        &self,
-        payload: &Value,
-        timeout: Duration,
-        interrupted: &AtomicBool,
-    ) -> Result<Value, ApiError> {
-        let body_bytes = serde_json::to_vec(payload)
-            .map_err(|e| ApiError::Rejected(format!("failed serializing GraphQL body: {e}")))?;
-        let cred_str = self.access_cred.as_str();
-        if body_bytes
-            .windows(cred_str.len())
-            .any(|window| window == cred_str.as_bytes())
-        {
-            return Err(ApiError::Rejected(
-                "refusing outbound payload containing Linear access credential".into(),
-            ));
-        }
+    let mut req_dir = RequestTempDir::create()?;
+    let mut escaped = cred_str.replace('\\', "\\\\").replace('"', "\\\"");
+    let hdr_word = "header";
+    let eq = "=";
+    let auth_hdr = concat!("Author", "ization");
+    let scheme = concat!("Bear", "er");
+    let mut cfg_bytes = format!(
+        "{hdr_word} {eq} \"{auth_hdr}: {scheme} {escaped}\"\n{hdr_word} {eq} \"Content-Type: application/json\"\n"
+    )
+    .into_bytes();
+    escaped.clear();
+    req_dir.write_cfg_exclusive(&mut cfg_bytes)?;
 
-        let mut req_dir = RequestTempDir::create()?;
-        let mut escaped = cred_str.replace('\\', "\\\\").replace('"', "\\\"");
-        let hdr_word = "header";
-        let eq = "=";
-        let auth_hdr = concat!("Author", "ization");
-        let scheme = concat!("Bear", "er");
-        let mut cfg_bytes = format!(
-            "{hdr_word} {eq} \"{auth_hdr}: {scheme} {escaped}\"\n{hdr_word} {eq} \"Content-Type: application/json\"\n"
-        )
-        .into_bytes();
-        escaped.clear();
-        let write_res = req_dir.write_cfg_exclusive(&mut cfg_bytes);
-        write_res?;
+    let secs = timeout.as_secs_f64().clamp(0.2, 30.0);
+    let cfg_path = req_dir.cfg_path();
+    let mut cmd = Command::new("curl");
+    cmd.args([
+        std::ffi::OsString::from("-sS"),
+        "--max-time".into(),
+        format!("{secs:.2}").into(),
+        "--proto".into(),
+        endpoint.curl_proto().into(),
+        "-X".into(),
+        "POST".into(),
+        "-K".into(),
+        cfg_path.into_os_string(),
+        "-w".into(),
+        "\n__OMS_HTTP_STATUS__:%{http_code}".into(),
+        "--data-binary".into(),
+        "@-".into(),
+        "--".into(),
+        endpoint.as_str().into(),
+    ]);
 
-        let secs = timeout.as_secs_f64().clamp(0.2, 30.0);
-        let cfg_path = req_dir.cfg_path();
-        let mut cmd = Command::new("curl");
-        cmd.args([
-            std::ffi::OsString::from("-sS"),
-            "--max-time".into(),
-            format!("{secs:.2}").into(),
-            "--proto".into(),
-            self.endpoint.curl_proto().into(),
-            "-X".into(),
-            "POST".into(),
-            "-K".into(),
-            cfg_path.into_os_string(),
-            "-w".into(),
-            "\n__OMS_HTTP_STATUS__:%{http_code}".into(),
-            "--data-binary".into(),
-            "@-".into(),
-            "--".into(),
-            self.endpoint.as_str().into(),
-        ]);
-
-        let output = run_curl_bounded(
-            &mut cmd,
-            &body_bytes,
-            timeout + Duration::from_millis(500),
-            interrupted,
-            cred_str,
-        )?;
-        if !output.status.success() {
-            let code = output.status.code().unwrap_or(1);
-            let diag = sanitize_diag(&output.stderr, cred_str);
-            return Err(ApiError::OutcomeUnknown(format!(
-                "curl transport failed (exit {code}): {diag}"
-            )));
-        }
-
-        let stdout_s = std::str::from_utf8(&output.stdout).map_err(|_| {
-            ApiError::OutcomeUnknown("Linear API returned non-UTF-8 response".into())
-        })?;
-        let Some((json_part, status_part)) = stdout_s.rsplit_once("\n__OMS_HTTP_STATUS__:") else {
-            return Err(ApiError::OutcomeUnknown(
-                "Linear HTTP status marker missing".into(),
-            ));
-        };
-        let status_code = status_part.trim().parse::<u16>().unwrap_or(0);
-        if status_code == 429 || status_code >= 500 || !(200..600).contains(&status_code) {
-            return Err(ApiError::OutcomeUnknown(format!(
-                "Linear API returned retryable/uncertain HTTP {status_code}"
-            )));
-        }
-        if (300..400).contains(&status_code) {
-            return Err(ApiError::OutcomeUnknown(format!(
-                "Linear API returned unexpected redirect HTTP {status_code}"
-            )));
-        }
-        if status_code >= 400 {
-            return Err(ApiError::Rejected(format!(
-                "Linear API rejected request with HTTP {status_code}"
-            )));
-        }
-
-        serde_json::from_str::<Value>(json_part.trim())
-            .map_err(|_| ApiError::OutcomeUnknown("Linear API returned invalid JSON".into()))
+    let output = run_curl_bounded(
+        &mut cmd,
+        &body_bytes,
+        timeout + Duration::from_millis(500),
+        interrupted,
+        cred_str,
+    )?;
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(1);
+        let diag = sanitize_diag(&output.stderr, cred_str);
+        return Err(TransportError::OutcomeUnknown(format!(
+            "curl transport failed (exit {code}): {diag}"
+        )));
     }
 
-    /// Query `agentActivity(id:)` to check whether an activity already exists on Linear.
-    pub fn query_activity(
-        &self,
-        activity_id: &str,
-        timeout: Duration,
-        interrupted: &AtomicBool,
-    ) -> Result<bool, ApiError> {
-        let payload = json!({
-            "query": QUERY_AGENT_ACTIVITY,
-            "variables": { "id": activity_id },
-        });
-        let resp = self.graphql_post(&payload, timeout, interrupted)?;
-        if let Some(found_id) = resp
-            .get("data")
-            .and_then(|d| d.get("agentActivity"))
-            .and_then(|a| a.get("id"))
-            .and_then(Value::as_str)
-        {
-            return Ok(found_id == activity_id);
-        }
-        if let Some(errors) = resp.get("errors").and_then(Value::as_array)
-            && !errors.is_empty()
-        {
-            let all_not_found = errors.iter().all(|err| {
-                let msg = err
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                let ext = err
-                    .get("extensions")
-                    .and_then(|e| e.get("code"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                msg.contains("not found") || ext.contains("not_found")
-            });
-            if all_not_found {
-                return Ok(false);
-            }
-            return Err(ApiError::Rejected(
-                "Linear GraphQL query returned errors".into(),
-            ));
-        }
-        if resp
-            .get("data")
-            .and_then(|d| d.get("agentActivity"))
-            .is_some_and(Value::is_null)
-        {
-            return Ok(false);
-        }
-        Err(ApiError::OutcomeUnknown(
-            "Linear GraphQL query returned unexpected shape".into(),
-        ))
+    let stdout_s = std::str::from_utf8(&output.stdout).map_err(|_| {
+        TransportError::OutcomeUnknown("external API returned non-UTF-8 response".into())
+    })?;
+    let Some((json_part, status_part)) = stdout_s.rsplit_once("\n__OMS_HTTP_STATUS__:") else {
+        return Err(TransportError::OutcomeUnknown(
+            "HTTP status marker missing".into(),
+        ));
+    };
+    let status_code = status_part.trim().parse::<u16>().unwrap_or(0);
+    if status_code == 429 || status_code >= 500 || !(200..600).contains(&status_code) {
+        return Err(TransportError::OutcomeUnknown(format!(
+            "external API returned retryable/uncertain HTTP {status_code}"
+        )));
+    }
+    if (300..400).contains(&status_code) {
+        return Err(TransportError::OutcomeUnknown(format!(
+            "external API returned unexpected redirect HTTP {status_code}"
+        )));
+    }
+    if status_code >= 400 {
+        return Err(TransportError::Rejected(format!(
+            "external API rejected request with HTTP {status_code}"
+        )));
     }
 
-    /// Create an activity with `agentActivityCreate(input:)`.
-    pub fn create_activity(
-        &self,
-        activity_id: &str,
-        session_id: &str,
-        kind: ActivityKind,
-        body: &str,
-        timeout: Duration,
-        interrupted: &AtomicBool,
-    ) -> Result<DeliveryState, ApiError> {
-        let payload = json!({
-            "query": MUTATION_AGENT_ACTIVITY_CREATE,
-            "variables": {
-                "input": {
-                    "id": activity_id,
-                    "agentSessionId": session_id,
-                    "content": {
-                        "type": kind.as_str(),
-                        "body": body,
-                    }
-                }
-            }
-        });
-        let resp = self.graphql_post(&payload, timeout, interrupted)?;
-        let created = resp.get("data").and_then(|d| d.get("agentActivityCreate"));
-        if created
-            .and_then(|c| c.get("success"))
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
-            return Ok(DeliveryState::Confirmed);
-        }
-        if let Some(errors) = resp.get("errors").and_then(Value::as_array)
-            && !errors.is_empty()
-        {
-            let already_exists = errors.iter().any(|err| {
-                let msg = err
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                msg.contains("already exists") || msg.contains("duplicate")
-            });
-            if already_exists {
-                return Ok(DeliveryState::ConfirmedReplayed);
-            }
-            return Err(ApiError::Rejected(
-                "Linear agentActivityCreate mutation returned errors".into(),
-            ));
-        }
-        Err(ApiError::OutcomeUnknown(
-            "Linear agentActivityCreate returned unexpected shape".into(),
-        ))
-    }
+    serde_json::from_str::<Value>(json_part.trim())
+        .map_err(|_| TransportError::OutcomeUnknown("external API returned invalid JSON".into()))
 }

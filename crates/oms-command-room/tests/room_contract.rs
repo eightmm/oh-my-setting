@@ -563,66 +563,6 @@ fn room_lifecycle_and_cursor() {
         let decided = fs::read(&log).unwrap();
         success(decide(&version, digest, accepted));
         assert_eq!(fs::read(&log).unwrap(), decided);
-        success(run(
-            &repo,
-            &[
-                "send",
-                "--id",
-                "room-fixture",
-                "--participant",
-                "reader",
-                "--to",
-                "owner",
-                "--kind",
-                "question",
-                "--message-id",
-                "followup-root",
-                "--text",
-                "Initial question for owner?",
-            ],
-        ));
-        success(run(
-            &repo,
-            &[
-                "send",
-                "--id",
-                "room-fixture",
-                "--participant",
-                "reader",
-                "--to",
-                "owner",
-                "--kind",
-                "question",
-                "--reply-to",
-                "followup-root",
-                "--message-id",
-                "followup-next",
-                "--text",
-                "Additional context on initial question?",
-            ],
-        ));
-        assert_eq!(
-            run(
-                &repo,
-                &[
-                    "send",
-                    "--id",
-                    "room-fixture",
-                    "--participant",
-                    "reader",
-                    "--to",
-                    "owner",
-                    "--kind",
-                    "note",
-                    "--reply-to",
-                    "followup-root",
-                    "--text",
-                    "Non-question self-reply must still fail",
-                ],
-            )
-            .0,
-            2
-        );
         assert!(
             success(run(&repo, &["desktop-requests"]))
                 .list("approvals")

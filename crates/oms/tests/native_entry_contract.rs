@@ -2111,7 +2111,7 @@ fn newly_wired_wave3_families_select_and_dispatch_without_python() {
         vec!["agent-plan", "--help"],
         vec!["agent-task", "--help"],
         vec!["room", "--help"],
-        vec!["linear", "--help"],
+        vec!["intake", "--help"],
         vec!["journal", "--help"],
         vec!["graph", "--help"],
         vec!["land", "--help"],
@@ -2148,6 +2148,24 @@ fn newly_wired_wave3_families_select_and_dispatch_without_python() {
         );
         assert!(!out.stdout.is_empty(), "{argv:?} stdout empty");
     }
+    exact(
+        f.private(&bin, "--oms-select")
+            .args(["linear", "--help"])
+            .output()
+            .unwrap(),
+        75,
+        b"",
+        b"",
+    );
+    exact(
+        f.private(&bin, "--oms-dispatch")
+            .args(["linear", "--help"])
+            .output()
+            .unwrap(),
+        75,
+        b"",
+        b"",
+    );
     for hook in [
         "command-guard-hook",
         "command-guard-hook.sh",

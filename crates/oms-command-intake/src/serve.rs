@@ -1,16 +1,20 @@
-//! Loopback HTTP webhook receiver mapping Linear `AgentSessionEvent` webhooks into an OMS Room.
+//! Source-neutral loopback HTTP intake listener and Room `question` mapper.
 
-use crate::crypto::{SecretValue, verify_linear_signature};
-use crate::model::{
-    ActivityKind, CREATED_THOUGHT_CALLER_KEY, FIRST_THOUGHT_BODY, REFUSED_CONTENT_ERROR_BODY,
-    created_message_id, derive_activity_id, format_created_room_text, format_prompted_room_text,
-    prompted_message_id, sanitize_log_id, validate_external_id,
+use crate::crypto::{
+    SecretStore, TIMESTAMP_WINDOW_MS, current_unix_ms, verify_hmac_sha256_hex,
+    within_timestamp_window_ms,
 };
-use crate::transport::{EndpointUrl, LinearClient};
+use crate::model::{
+    WorkRequest, format_work_request_room_text, intake_path, sanitize_log_id, validate_source_name,
+};
+use crate::source::{
+    BindingDecision, OutboundAck, PayloadDecision, RequestHeaders, RoomDelivery, Source,
+};
 use oms_command_room::{Room, Send as RoomSend, Services as RoomServices, Session as RoomSession};
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::Errno;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io::{Read as _, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -18,29 +22,25 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8787";
-pub const WEBHOOK_PATH: &str = "/linear/webhook";
 pub const MAX_HEADER_BYTES: usize = 16 * 1024;
 pub const MAX_BODY_BYTES: usize = 512 * 1024;
 pub const READ_TIMEOUT: Duration = Duration::from_secs(2);
-pub const TIMESTAMP_WINDOW_MS: u64 = 60_000;
-const BG_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
+const BG_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const BG_QUEUE_CAP: usize = 64;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServeConfig {
+    pub source: Arc<dyn Source>,
     pub repo: PathBuf,
     pub room: String,
     pub participant: String,
     pub to: String,
-    pub organization: String,
-    pub app_user: String,
+    pub binding_flags: BTreeMap<String, String>,
     pub listen: SocketAddr,
-    pub signing_material: SecretValue,
-    pub access_cred: SecretValue,
-    pub api_url: EndpointUrl,
+    pub secrets: SecretStore,
 }
 
 pub fn parse_loopback_listen(raw: &str) -> Result<SocketAddr, String> {
@@ -49,7 +49,7 @@ pub fn parse_loopback_listen(raw: &str) -> Result<SocketAddr, String> {
         .map_err(|_| format!("invalid --listen address '{raw}': expected LOOPBACK_IP:PORT"))?;
     if !addr.ip().is_loopback() {
         return Err(format!(
-            "refusing non-loopback --listen address '{addr}': oms linear serve binds loopback only"
+            "refusing non-loopback --listen address '{addr}': oms intake serve binds loopback only"
         ));
     }
     Ok(addr)
@@ -60,6 +60,7 @@ pub fn validate_serve_room(
     room_services: &dyn RoomServices,
     interrupted: &AtomicBool,
 ) -> Result<(), String> {
+    validate_source_name(cfg.source.name())?;
     oms_command_room::identifier(&cfg.room, "room").map_err(|e| e.message)?;
     oms_command_room::identifier(&cfg.participant, "participant").map_err(|e| e.message)?;
     if cfg.to != "all" {
@@ -68,8 +69,16 @@ pub fn validate_serve_room(
     if cfg.participant == cfg.to {
         return Err("--participant and --to must name distinct Room participants".into());
     }
-    validate_external_id(&cfg.organization, "organization")?;
-    validate_external_id(&cfg.app_user, "app-user")?;
+    cfg.source.validate_binding(&cfg.binding_flags)?;
+    for spec in cfg.source.serve_env() {
+        if spec.sensitive && spec.required && cfg.secrets.get(spec.name).is_none() {
+            return Err(format!(
+                "missing required environment variable {}",
+                spec.name
+            ));
+        }
+    }
+    cfg.source.validate_endpoint()?;
 
     let room = Room::open(
         &cfg.repo,
@@ -95,33 +104,18 @@ pub fn validate_serve_room(
     Ok(())
 }
 
-#[derive(Clone)]
-struct BackgroundActivity {
-    activity_id: String,
-    session_id: String,
-    kind: ActivityKind,
-    body: String,
-}
-
-struct ActivityDispatcher {
-    tx: Option<SyncSender<BackgroundActivity>>,
+struct AckDispatcher {
+    tx: Option<SyncSender<OutboundAck>>,
     worker: Option<JoinHandle<()>>,
 }
 
-impl ActivityDispatcher {
-    fn spawn(client: LinearClient) -> Self {
-        let (tx, rx) = mpsc::sync_channel::<BackgroundActivity>(BG_QUEUE_CAP);
+impl AckDispatcher {
+    fn spawn(source: Arc<dyn Source>, secrets: SecretStore) -> Self {
+        let (tx, rx) = mpsc::sync_channel::<OutboundAck>(BG_QUEUE_CAP);
         let worker = thread::spawn(move || {
             let never_stop = AtomicBool::new(false);
-            while let Ok(task) = rx.recv() {
-                let _ = client.create_activity(
-                    &task.activity_id,
-                    &task.session_id,
-                    task.kind,
-                    &task.body,
-                    BG_ACTIVITY_TIMEOUT,
-                    &never_stop,
-                );
+            while let Ok(ack) = rx.recv() {
+                let _ = source.deliver_ack(&secrets, &ack, BG_ACK_TIMEOUT, &never_stop);
             }
         });
         Self {
@@ -130,7 +124,7 @@ impl ActivityDispatcher {
         }
     }
 
-    fn enqueue(&self, item: BackgroundActivity) {
+    fn enqueue(&self, item: OutboundAck) {
         if let Some(tx) = &self.tx {
             let _ = tx.try_send(item);
         }
@@ -144,7 +138,7 @@ impl ActivityDispatcher {
     }
 }
 
-impl Drop for ActivityDispatcher {
+impl Drop for AckDispatcher {
     fn drop(&mut self) {
         self.shutdown();
     }
@@ -153,6 +147,7 @@ impl Drop for ActivityDispatcher {
 pub struct PreparedServer {
     listener: TcpListener,
     local_addr: SocketAddr,
+    route_path: String,
     cfg: ServeConfig,
 }
 
@@ -163,7 +158,7 @@ impl PreparedServer {
         interrupted: &AtomicBool,
     ) -> Result<Self, String> {
         if !cfg.listen.ip().is_loopback() {
-            return Err("oms linear serve binds loopback addresses only".into());
+            return Err("oms intake serve binds loopback addresses only".into());
         }
         validate_serve_room(&cfg, room_services, interrupted)?;
         let listener = TcpListener::bind(cfg.listen)
@@ -174,9 +169,11 @@ impl PreparedServer {
         listener
             .set_nonblocking(true)
             .map_err(|e| format!("failed configuring non-blocking listener: {e}"))?;
+        let route_path = intake_path(cfg.source.name());
         Ok(Self {
             listener,
             local_addr,
+            route_path,
             cfg,
         })
     }
@@ -185,16 +182,20 @@ impl PreparedServer {
         self.local_addr
     }
 
+    pub fn route_path(&self) -> &str {
+        &self.route_path
+    }
+
     pub fn serve_until_stopped(
         self,
         room_services: &dyn RoomServices,
         interrupted: &AtomicBool,
         stderr: &mut dyn Write,
     ) -> Result<(), String> {
-        let client = LinearClient::new(self.cfg.api_url.clone(), self.cfg.access_cred.clone());
-        let mut bg = ActivityDispatcher::spawn(client);
+        let mut bg = AckDispatcher::spawn(Arc::clone(&self.cfg.source), self.cfg.secrets.clone());
         let poll_ts =
             Timespec::try_from(Duration::from_millis(50)).expect("valid fixed poll duration");
+        let source_name = self.cfg.source.name();
 
         while !interrupted.load(Ordering::Acquire) {
             let mut fds = [PollFd::new(&self.listener, PollFlags::IN)];
@@ -204,7 +205,7 @@ impl PreparedServer {
                 Err(Errno::INTR) => continue,
                 Err(e) => {
                     bg.shutdown();
-                    return Err(format!("poll on webhook listener failed: {e}"));
+                    return Err(format!("poll on intake listener failed: {e}"));
                 }
             }
 
@@ -214,11 +215,17 @@ impl PreparedServer {
                 }
                 match self.listener.accept() {
                     Ok((stream, _peer)) => {
-                        let outcome =
-                            handle_connection(stream, &self.cfg, room_services, interrupted, &bg);
+                        let outcome = handle_connection(
+                            stream,
+                            &self.route_path,
+                            &self.cfg,
+                            room_services,
+                            interrupted,
+                            &bg,
+                        );
                         let _ = writeln!(
                             stderr,
-                            "linear serve: status={} session={}",
+                            "intake serve: source={source_name} status={} session={}",
                             outcome.status,
                             sanitize_log_id(outcome.session_id.as_deref())
                         );
@@ -239,6 +246,7 @@ impl PreparedServer {
 /// In-process background server handle for fixture tests using `oms_command_room::LocalServices`.
 pub struct ServerHandle {
     local_addr: SocketAddr,
+    route_path: String,
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<Vec<u8>>>,
 }
@@ -248,6 +256,7 @@ impl ServerHandle {
         let stop = Arc::new(AtomicBool::new(false));
         let prepared = PreparedServer::bind(cfg, &oms_command_room::LocalServices, &stop)?;
         let local_addr = prepared.local_addr();
+        let route_path = prepared.route_path().to_owned();
         let worker_stop = Arc::clone(&stop);
         let join = thread::spawn(move || {
             let mut logs = Vec::new();
@@ -260,6 +269,7 @@ impl ServerHandle {
         });
         Ok(Self {
             local_addr,
+            route_path,
             stop,
             join: Some(join),
         })
@@ -269,8 +279,8 @@ impl ServerHandle {
         self.local_addr
     }
 
-    pub fn webhook_url(&self) -> String {
-        format!("http://{}{WEBHOOK_PATH}", self.local_addr)
+    pub fn intake_url(&self) -> String {
+        format!("http://{}{}", self.local_addr, self.route_path)
     }
 
     pub fn shutdown(mut self) -> Vec<u8> {
@@ -294,25 +304,18 @@ impl Drop for ServerHandle {
 struct RequestOutcome {
     status: u16,
     session_id: Option<String>,
-    post_response_activity: Option<BackgroundActivity>,
+    post_response_ack: Option<OutboundAck>,
 }
 
 enum ParsedHttp {
     Request {
-        signature: Option<String>,
+        headers: RequestHeaders,
         body: Vec<u8>,
     },
     Reject {
         status: u16,
         allow_post: bool,
     },
-}
-
-fn current_unix_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
 }
 
 fn write_http_response(stream: &mut TcpStream, status: u16, allow_post: bool) {
@@ -337,7 +340,7 @@ fn write_http_response(stream: &mut TcpStream, status: u16, allow_post: bool) {
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
-fn read_bounded_http(stream: &mut TcpStream) -> ParsedHttp {
+fn read_bounded_http(stream: &mut TcpStream, expected_path: &str) -> ParsedHttp {
     if stream.set_nonblocking(false).is_err() {
         return ParsedHttp::Reject {
             status: 400,
@@ -430,7 +433,7 @@ fn read_bounded_http(stream: &mut TcpStream) -> ParsedHttp {
             allow_post: false,
         };
     }
-    if target != WEBHOOK_PATH {
+    if target != expected_path {
         return ParsedHttp::Reject {
             status: 404,
             allow_post: false,
@@ -444,8 +447,7 @@ fn read_bounded_http(stream: &mut TcpStream) -> ParsedHttp {
     }
 
     let mut content_length: Option<usize> = None;
-    let mut signature: Option<String> = None;
-    let mut duplicate_sig = false;
+    let mut headers = RequestHeaders::new();
 
     for line in lines {
         if line.is_empty() {
@@ -493,12 +495,8 @@ fn read_bounded_http(stream: &mut TcpStream) -> ParsedHttp {
                 };
             }
             content_length = Some(parsed_len);
-        } else if raw_name.eq_ignore_ascii_case("linear-signature") {
-            if signature.is_some() {
-                duplicate_sig = true;
-            } else {
-                signature = Some(val.to_owned());
-            }
+        } else {
+            headers.push(raw_name.to_owned(), val.to_owned());
         }
     }
 
@@ -508,12 +506,6 @@ fn read_bounded_http(stream: &mut TcpStream) -> ParsedHttp {
             allow_post: false,
         };
     };
-    if duplicate_sig {
-        return ParsedHttp::Reject {
-            status: 401,
-            allow_post: false,
-        };
-    }
 
     let body_start = header_end + 4;
     let initial_body = &buf[body_start..];
@@ -557,86 +549,77 @@ fn read_bounded_http(stream: &mut TcpStream) -> ParsedHttp {
         }
     }
 
-    ParsedHttp::Request { signature, body }
+    ParsedHttp::Request { headers, body }
 }
 
 fn handle_connection(
     mut stream: TcpStream,
+    expected_path: &str,
     cfg: &ServeConfig,
     room_services: &dyn RoomServices,
     interrupted: &AtomicBool,
-    bg: &ActivityDispatcher,
+    bg: &AckDispatcher,
 ) -> RequestOutcome {
-    let (signature, raw_body) = match read_bounded_http(&mut stream) {
+    let (headers, raw_body) = match read_bounded_http(&mut stream, expected_path) {
         ParsedHttp::Reject { status, allow_post } => {
             write_http_response(&mut stream, status, allow_post);
             return RequestOutcome {
                 status,
                 session_id: None,
-                post_response_activity: None,
+                post_response_ack: None,
             };
         }
-        ParsedHttp::Request { signature, body } => (signature, body),
+        ParsedHttp::Request { headers, body } => (headers, body),
     };
 
-    let outcome = process_verified_webhook(
-        signature.as_deref(),
-        &raw_body,
-        cfg,
-        room_services,
-        interrupted,
-    );
+    let outcome = process_verified_intake(&headers, &raw_body, cfg, room_services, interrupted);
     write_http_response(&mut stream, outcome.status, false);
     drop(stream);
 
-    if let Some(activity) = outcome.post_response_activity.clone() {
-        bg.enqueue(activity);
+    if let Some(ack) = outcome.post_response_ack.clone() {
+        bg.enqueue(ack);
     }
     outcome
 }
 
-fn extract_webhook_timestamp_ms(val: &Value) -> Option<i64> {
-    val.as_i64().or_else(|| {
-        val.as_f64()
-            .filter(|f| f.is_finite() && f.fract() == 0.0 && *f >= 0.0 && *f <= i64::MAX as f64)
-            .map(|f| f as i64)
-    })
-}
-
-fn extract_prompt_body(content: Option<&Value>) -> Option<String> {
-    match content {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) => Some(s.clone()),
-        Some(Value::Object(map)) => {
-            if let Some(body) = map.get("body").and_then(Value::as_str) {
-                Some(body.to_owned())
-            } else {
-                serde_json::to_string(map).ok()
-            }
-        }
-        Some(other) => serde_json::to_string(other).ok(),
-    }
-}
-
-fn process_verified_webhook(
-    signature: Option<&str>,
+fn process_verified_intake(
+    headers: &RequestHeaders,
     raw_body: &[u8],
     cfg: &ServeConfig,
     room_services: &dyn RoomServices,
     interrupted: &AtomicBool,
 ) -> RequestOutcome {
-    let Some(sig) = signature else {
+    let sig_header = cfg.source.signature_header();
+    if headers.count(sig_header) != 1 {
         return RequestOutcome {
             status: 401,
             session_id: None,
-            post_response_activity: None,
+            post_response_ack: None,
+        };
+    }
+    let Some(sig_input) = cfg.source.signature_input(headers, raw_body) else {
+        return RequestOutcome {
+            status: 401,
+            session_id: None,
+            post_response_ack: None,
         };
     };
-    if !verify_linear_signature(cfg.signing_material.as_bytes(), raw_body, sig) {
+    let Some(signing_secret) = cfg.secrets.get(sig_input.secret_env) else {
         return RequestOutcome {
             status: 401,
             session_id: None,
-            post_response_activity: None,
+            post_response_ack: None,
+        };
+    };
+    if !verify_hmac_sha256_hex(
+        signing_secret.as_bytes(),
+        &sig_input.message,
+        sig_input.signature_hex,
+    ) {
+        return RequestOutcome {
+            status: 401,
+            session_id: None,
+            post_response_ack: None,
         };
     }
 
@@ -644,240 +627,85 @@ fn process_verified_webhook(
         return RequestOutcome {
             status: 400,
             session_id: None,
-            post_response_activity: None,
+            post_response_ack: None,
         };
     };
 
-    let observed_session = payload
-        .get("agentSession")
-        .and_then(|s| s.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
+    let observed_session = cfg.source.observed_session_ref(&payload);
 
-    let Some(ts_ms) = payload
-        .get("webhookTimestamp")
-        .and_then(extract_webhook_timestamp_ms)
-    else {
+    let Some(ts_ms) = cfg.source.extract_timestamp_ms(headers, &payload) else {
         return RequestOutcome {
             status: 400,
             session_id: observed_session,
-            post_response_activity: None,
+            post_response_ack: None,
         };
     };
-    if current_unix_ms().abs_diff(ts_ms) > TIMESTAMP_WINDOW_MS {
+    if !within_timestamp_window_ms(current_unix_ms(), ts_ms, TIMESTAMP_WINDOW_MS) {
         return RequestOutcome {
             status: 400,
             session_id: observed_session,
-            post_response_activity: None,
+            post_response_ack: None,
         };
     }
 
-    let Some(event_type) = payload.get("type").and_then(Value::as_str) else {
-        return RequestOutcome {
-            status: 400,
-            session_id: observed_session,
-            post_response_activity: None,
-        };
-    };
-    if event_type != "AgentSessionEvent" {
-        return RequestOutcome {
-            status: 200,
-            session_id: None,
-            post_response_activity: None,
-        };
-    }
-
-    let org_id = payload.get("organizationId").and_then(Value::as_str);
-    let app_user_id = payload.get("appUserId").and_then(Value::as_str);
-    if org_id != Some(cfg.organization.as_str()) || app_user_id != Some(cfg.app_user.as_str()) {
-        return RequestOutcome {
-            status: 403,
-            session_id: observed_session,
-            post_response_activity: None,
-        };
-    }
-
-    let Some(action) = payload.get("action").and_then(Value::as_str) else {
-        return RequestOutcome {
-            status: 400,
-            session_id: observed_session,
-            post_response_activity: None,
-        };
-    };
-    if !matches!(action, "created" | "prompted") {
-        return RequestOutcome {
-            status: 200,
-            session_id: observed_session,
-            post_response_activity: None,
-        };
-    }
-
-    let Some(session_obj) = payload.get("agentSession").and_then(Value::as_object) else {
-        return RequestOutcome {
-            status: 400,
-            session_id: observed_session,
-            post_response_activity: None,
-        };
-    };
-    let Some(raw_session_id) = session_obj.get("id").and_then(Value::as_str) else {
-        return RequestOutcome {
-            status: 400,
-            session_id: None,
-            post_response_activity: None,
-        };
-    };
-    if validate_external_id(raw_session_id, "agentSession.id").is_err() {
-        return RequestOutcome {
-            status: 400,
-            session_id: None,
-            post_response_activity: None,
-        };
-    }
-    let session_id = raw_session_id.to_owned();
-
-    if action == "created" {
-        let prompt_ctx = match payload.get("promptContext") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(s)) => Some(s.as_str()),
-            Some(_) => {
-                return RequestOutcome {
-                    status: 400,
-                    session_id: Some(session_id),
-                    post_response_activity: None,
-                };
-            }
-        };
-        let issue_identifier = session_obj
-            .get("issue")
-            .and_then(|i| i.get("identifier"))
-            .and_then(Value::as_str);
-        let session_url = session_obj.get("url").and_then(Value::as_str).or_else(|| {
-            session_obj
-                .get("issue")
-                .and_then(|i| i.get("url"))
-                .and_then(Value::as_str)
-        });
-
-        let msg_id = created_message_id(&session_id);
-        let text = format_created_room_text(&session_id, issue_identifier, session_url, prompt_ctx);
-
-        let deliver = deliver_to_room(cfg, room_services, interrupted, &msg_id, None, &text);
-        let post_response_activity = match deliver {
-            RoomDelivery::AppendedNew => Some(BackgroundActivity {
-                activity_id: derive_activity_id(&session_id, &cfg.room, CREATED_THOUGHT_CALLER_KEY),
-                session_id: session_id.clone(),
-                kind: ActivityKind::Thought,
-                body: FIRST_THOUGHT_BODY.to_owned(),
-            }),
-            RoomDelivery::Duplicate => None,
-            RoomDelivery::Refused => Some(BackgroundActivity {
-                activity_id: derive_activity_id(
-                    &session_id,
-                    &cfg.room,
-                    &format!("error:refused:{msg_id}"),
-                ),
-                session_id: session_id.clone(),
-                kind: ActivityKind::Error,
-                body: REFUSED_CONTENT_ERROR_BODY.to_owned(),
-            }),
-        };
-
-        return RequestOutcome {
-            status: 200,
-            session_id: Some(session_id),
-            post_response_activity,
-        };
-    }
-
-    let Some(activity_obj) = payload.get("agentActivity").and_then(Value::as_object) else {
-        return RequestOutcome {
-            status: 400,
-            session_id: Some(session_id),
-            post_response_activity: None,
-        };
-    };
-    let Some(activity_id) = activity_obj.get("id").and_then(Value::as_str) else {
-        return RequestOutcome {
-            status: 400,
-            session_id: Some(session_id),
-            post_response_activity: None,
-        };
-    };
-    if validate_external_id(activity_id, "agentActivity.id").is_err() {
-        return RequestOutcome {
-            status: 400,
-            session_id: Some(session_id),
-            post_response_activity: None,
-        };
-    }
-    if let Some(act_sess) = activity_obj.get("agentSessionId").and_then(Value::as_str)
-        && !act_sess.is_empty()
-        && act_sess != session_id
-    {
-        return RequestOutcome {
-            status: 400,
-            session_id: Some(session_id),
-            post_response_activity: None,
-        };
-    }
-    let signal = match activity_obj.get("signal") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) => Some(s.as_str()),
-        Some(_) => {
+    match cfg.source.check_binding(&cfg.binding_flags, &payload) {
+        BindingDecision::Matched => {}
+        BindingDecision::Ignore => {
+            return RequestOutcome {
+                status: 200,
+                session_id: None,
+                post_response_ack: None,
+            };
+        }
+        BindingDecision::Forbidden => {
+            return RequestOutcome {
+                status: 403,
+                session_id: observed_session,
+                post_response_ack: None,
+            };
+        }
+        BindingDecision::BadRequest => {
             return RequestOutcome {
                 status: 400,
-                session_id: Some(session_id),
-                post_response_activity: None,
+                session_id: observed_session,
+                post_response_ack: None,
+            };
+        }
+    }
+
+    let req = match cfg.source.parse_work_request(&payload) {
+        PayloadDecision::Work(req) => req,
+        PayloadDecision::Ignore => {
+            return RequestOutcome {
+                status: 200,
+                session_id: observed_session,
+                post_response_ack: None,
+            };
+        }
+        PayloadDecision::BadRequest => {
+            return RequestOutcome {
+                status: 400,
+                session_id: observed_session,
+                post_response_ack: None,
             };
         }
     };
-    let prompt_body = extract_prompt_body(activity_obj.get("content"));
-    let msg_id = prompted_message_id(activity_id);
-    let created_id = created_message_id(&session_id);
-    let text = format_prompted_room_text(&session_id, activity_id, signal, prompt_body.as_deref());
 
-    let deliver = deliver_to_room(
-        cfg,
-        room_services,
-        interrupted,
-        &msg_id,
-        Some(&created_id),
-        &text,
-    );
-    let post_response_activity = match deliver {
-        RoomDelivery::AppendedNew | RoomDelivery::Duplicate => None,
-        RoomDelivery::Refused => Some(BackgroundActivity {
-            activity_id: derive_activity_id(
-                &session_id,
-                &cfg.room,
-                &format!("error:refused:{msg_id}"),
-            ),
-            session_id: session_id.clone(),
-            kind: ActivityKind::Error,
-            body: REFUSED_CONTENT_ERROR_BODY.to_owned(),
-        }),
-    };
+    let delivery = deliver_to_room(cfg, room_services, interrupted, &req);
+    let post_response_ack = cfg.source.first_ack(&req, &cfg.room, delivery);
 
     RequestOutcome {
         status: 200,
-        session_id: Some(session_id),
-        post_response_activity,
+        session_id: Some(req.session_ref),
+        post_response_ack,
     }
-}
-
-enum RoomDelivery {
-    AppendedNew,
-    Duplicate,
-    Refused,
 }
 
 fn deliver_to_room(
     cfg: &ServeConfig,
     room_services: &dyn RoomServices,
     interrupted: &AtomicBool,
-    msg_id: &str,
-    want_reply_to: Option<&str>,
-    text: &str,
+    req: &WorkRequest,
 ) -> RoomDelivery {
     let Ok(room) = Room::open(
         &cfg.repo,
@@ -892,24 +720,18 @@ fn deliver_to_room(
     let Ok(existing) = room.messages(&cfg.room) else {
         return RoomDelivery::Refused;
     };
+    let msg_id = &req.idempotency_key;
     let already_exists = existing.iter().any(|m| m.text("id") == msg_id);
-    let reply_to = want_reply_to.filter(|parent_id| {
-        existing.iter().any(|m| {
-            m.text("id") == *parent_id
-                && m.text("message_kind") == "question"
-                && m.text("sender") == cfg.participant
-                && m.text("recipient") == cfg.to
-        })
-    });
+    let text = format_work_request_room_text(req);
 
     match room.send(
         &cfg.room,
         RoomSend {
             sender: &cfg.participant,
             recipient: &cfg.to,
-            text,
+            text: &text,
             kind: "question",
-            reply_to,
+            reply_to: None,
             message_id: Some(msg_id),
             linked: false,
             quiet: false,

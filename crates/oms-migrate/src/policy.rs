@@ -32,9 +32,9 @@ const LAYERS: &[(Layer, &[&str])] = &[
     (Command, &[
         "oms-command-agent-role", "oms-command-attempt-bundle", "oms-command-autonomy",
         "oms-command-experiment", "oms-command-failure", "oms-command-graph",
-        "oms-command-hooks", "oms-command-input", "oms-command-job-digest",
+        "oms-command-hooks", "oms-command-input", "oms-command-intake", "oms-command-job-digest",
         "oms-command-journal", "oms-command-landing", "oms-command-lifecycle",
-        "oms-command-linear", "oms-command-memory", "oms-command-operations", "oms-command-peer", "oms-command-plan",
+        "oms-command-memory", "oms-command-operations", "oms-command-peer", "oms-command-plan",
         "oms-command-providers-skills", "oms-command-room", "oms-command-runs",
         "oms-command-slurm-lint", "oms-command-slurm-submit", "oms-command-state",
         "oms-command-task", "oms-command-telemetry",

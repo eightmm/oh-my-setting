@@ -1,10 +1,14 @@
-//! HMAC-SHA256 verification and redacted secret storage over workspace `sha2`.
+//! HMAC-SHA256 verification, timestamp-window check, and redacted secret storage.
 
+use crate::source::EnvVarSpec;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::hint::black_box;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const BLOCK_LEN: usize = 64;
+pub const TIMESTAMP_WINDOW_MS: u64 = 60_000;
 
 /// In-memory credential wrapper that redacts `Debug` output and zeroes bytes on drop.
 #[derive(Clone)]
@@ -58,6 +62,60 @@ impl Drop for SecretValue {
     fn drop(&mut self) {
         self.bytes.fill(0);
         black_box(&self.bytes);
+    }
+}
+
+/// Named collection of environment-sourced secrets for an intake adapter.
+#[derive(Clone, Debug, Default)]
+pub struct SecretStore {
+    entries: BTreeMap<String, SecretValue>,
+}
+
+impl SecretStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_env_specs(specs: &[EnvVarSpec]) -> Result<Self, String> {
+        let mut store = Self::new();
+        for spec in specs {
+            if !spec.sensitive {
+                continue;
+            }
+            match std::env::var_os(spec.name) {
+                None => {
+                    if spec.required {
+                        return Err(format!(
+                            "missing required environment variable {}",
+                            spec.name
+                        ));
+                    }
+                }
+                Some(raw) => {
+                    let Ok(text) = raw.into_string() else {
+                        return Err(format!(
+                            "invalid environment variable {}: must be valid UTF-8",
+                            spec.name
+                        ));
+                    };
+                    let val = SecretValue::parse_checked(spec.name, text)?;
+                    store.entries.insert(spec.name.to_owned(), val);
+                }
+            }
+        }
+        Ok(store)
+    }
+
+    pub fn insert(&mut self, name: impl Into<String>, value: SecretValue) {
+        self.entries.insert(name.into(), value);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&SecretValue> {
+        self.entries.get(name)
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &SecretValue)> {
+        self.entries.iter().map(|(k, v)| (k.as_str(), v))
     }
 }
 
@@ -131,7 +189,8 @@ fn decode_lower_nibble(b: u8) -> Option<u8> {
     }
 }
 
-fn ct_eq_32(left: &[u8; 32], right: &[u8; 32]) -> bool {
+/// Constant-time 32-byte digest comparison.
+pub fn ct_eq_32(left: &[u8; 32], right: &[u8; 32]) -> bool {
     let mut diff = 0u8;
     for i in 0..32 {
         diff |= left[i] ^ right[i];
@@ -139,16 +198,27 @@ fn ct_eq_32(left: &[u8; 32], right: &[u8; 32]) -> bool {
     black_box(diff) == 0
 }
 
-/// Verify `Linear-Signature` (lowercase hex HMAC-SHA256) against raw request bytes.
-pub fn verify_linear_signature(
+/// Verify a lowercase hex HMAC-SHA256 digest in constant time.
+pub fn verify_hmac_sha256_hex(
     signing_material: &[u8],
-    raw_body: &[u8],
-    signature_header: &str,
+    message: &[u8],
+    signature_hex: &str,
 ) -> bool {
-    let trimmed = signature_header.trim_matches([' ', '\t']);
+    let trimmed = signature_hex.trim_matches([' ', '\t']);
     let Some(provided) = decode_lowercase_hex_32(trimmed) else {
         return false;
     };
-    let expected = hmac_sha256(signing_material, raw_body);
+    let expected = hmac_sha256(signing_material, message);
     ct_eq_32(&provided, &expected)
+}
+
+pub fn current_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+pub fn within_timestamp_window_ms(now_ms: i64, event_ts_ms: i64, window_ms: u64) -> bool {
+    now_ms.abs_diff(event_ts_ms) <= window_ms
 }

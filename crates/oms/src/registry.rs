@@ -20,7 +20,7 @@ The terminal panel is the human entrypoint. The other tools are the agent's
 hands; give your coding agent the goal instead of composing harness commands.
 "#;
 
-pub(crate) const PUBLIC: &str = "advise\nagent-call\nagent-events\nagent-memory\nagent-plan\nagent-role\nagent-supervisor\nagent-task\napply-project-template\napproval-inbox\nartifact-index\nartifact-view\nauto-update\nautopilot\ncandidate\nchange-guard\ncheckpoint\nci-status\ncite\ncleanup\nconnect-services\nconsult\ndashboard\ndata-manifest\ndeps\ndoctor\ndraft-pr\nexperiment-board\nexternal\nfail-ledger\ngc\ngithub\ngoal-drive\ngraph\nharness\nhud\ninbox\ninit\ninput\ninstall-profile\nintent\njob-digest\njournal\nland\nlease\nlinear\nmodel-doctor\nmodels\noutput-digest\npanel\npatch-admit\npatch-land\npeer-ask\npeer-delegate\npeer-review\nplan-from-spec\nplan-run\nproject-doctor\nproject-private\nprovider-permissions\nrecipe\nremove-project-template\nreport\nroom\nrun\nrun-ledger\nrun-reconcile\nruntime\nscratch-worktree\nsession\nsession-handoff\nskill-doctor\nskill-forge\nslurm-lint\nslurm-submit\nsnapshot\nstate\nstate-verify\nstatus\nsync-shared\nthread\ntick\ntsp-queue\nuninstall\nupdate";
+pub(crate) const PUBLIC: &str = "advise\nagent-call\nagent-events\nagent-memory\nagent-plan\nagent-role\nagent-supervisor\nagent-task\napply-project-template\napproval-inbox\nartifact-index\nartifact-view\nauto-update\nautopilot\ncandidate\nchange-guard\ncheckpoint\nci-status\ncite\ncleanup\nconnect-services\nconsult\ndashboard\ndata-manifest\ndeps\ndoctor\ndraft-pr\nexperiment-board\nexternal\nfail-ledger\ngc\ngithub\ngoal-drive\ngraph\nharness\nhud\ninbox\ninit\ninput\ninstall-profile\nintake\nintent\njob-digest\njournal\nland\nlease\nmodel-doctor\nmodels\noutput-digest\npanel\npatch-admit\npatch-land\npeer-ask\npeer-delegate\npeer-review\nplan-from-spec\nplan-run\nproject-doctor\nproject-private\nprovider-permissions\nrecipe\nremove-project-template\nreport\nroom\nrun\nrun-ledger\nrun-reconcile\nruntime\nscratch-worktree\nsession\nsession-handoff\nskill-doctor\nskill-forge\nslurm-lint\nslurm-submit\nsnapshot\nstate\nstate-verify\nstatus\nsync-shared\nthread\ntick\ntsp-queue\nuninstall\nupdate";
 const FRONTDOOR: &str = "# Daily work\npanel\ninbox\nagent-plan\njournal\n# Collaboration and delivery\nconsult\npeer-delegate\npeer-review\nland\n# Setup and maintenance\ninit\nstatus\ndoctor\nupdate\nuninstall";
 
 const DESCRIPTIONS: &[(&str, &str)] = &[
@@ -164,6 +164,10 @@ const DESCRIPTIONS: &[(&str, &str)] = &[
         "Inspect or install only the tools required by selected OMS capability profiles, reusing the digest-verified transactional installers.",
     ),
     (
+        "intake",
+        "Receive external tracker webhooks into an OMS Room and send outbound-scanned replies with retry-safe receipts.",
+    ),
+    (
         "intent",
         "Vague goal -> reviewed intent spec -> PROJECT.md.",
     ),
@@ -182,10 +186,6 @@ const DESCRIPTIONS: &[(&str, &str)] = &[
     (
         "lease",
         "Advisory file leases: parallel sessions in one repository declare, with a time limit, which paths they intend to edit, so others see it before they collide.",
-    ),
-    (
-        "linear",
-        "Bridge Linear agent sessions into an OMS Room and send outbound-scanned activity replies with retry-safe receipts.",
     ),
     (
         "model-doctor",
@@ -433,6 +433,7 @@ mod tests {
             "tick",
             "patch-land",
             "lease",
+            "intake",
         ] {
             assert!(is_public(std::ffi::OsStr::new(advanced)));
             assert!(
@@ -441,6 +442,7 @@ mod tests {
                     .any(|line| line.starts_with(&format!("{advanced:<26} ")))
             );
         }
+        assert!(!is_public(std::ffi::OsStr::new("linear")));
         let (code, help, _) = run(&["help".into()], missing);
         assert_eq!(code, 0);
         assert!(help.ends_with(front.as_bytes()));

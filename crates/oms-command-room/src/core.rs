@@ -981,16 +981,11 @@ impl<'a> Room<'a> {
             {
                 let found = self.lineage_messages(&state, &BTreeSet::from([mid.clone()]))?;
                 if let Some(original) = found.get(mid)
-                    && (original
+                    && original
                         .list("targets")
                         .iter()
                         .any(|p| p.as_str() == Some(send.sender))
-                        && send.recipient == original.text("sender")
-                        || send.kind == "question"
-                            && original.text("message_kind") == "question"
-                            && send.sender == original.text("sender")
-                            && send.recipient == original.text("recipient")
-                            && send.recipient != "all")
+                    && send.recipient == original.text("sender")
                 {
                     self.notices.borrow_mut().push(format!("room: {mid} stayed in a sealed predecessor when it rolled over; sending without --reply-to"));
                     reply = None;
