@@ -132,17 +132,49 @@ pub(super) fn collect(
     file: &mut impl Write,
 ) -> Result<(u64, String)> {
     resumable::check_request(req)?;
-    let permit = admit_ssh_connection(
-        req.cwd,
-        req.target,
+    let ssh_bin = ssh_program();
+    match ensure_ssh_control_master(&SshMasterRequest {
+        ssh_program: &ssh_bin,
+        cwd: req.cwd,
+        target_label: req.target,
+        host: req.host,
+        port: req.port,
+        action: "collect",
+        control_path: req.control,
+        control_persist_secs: req.control_persist,
+        deadline: req.deadline,
+        interrupted: req.interrupted,
+        clock: req.clock,
+    }) {
+        Ok(SshMasterOutcome::Ready { .. }) => {}
+        Ok(SshMasterOutcome::ConnectFailed { code, stderr, .. }) => {
+            return Err(status(
+                code,
+                format!(
+                    "remote collect failed (exit {code}): {}",
+                    String::from_utf8_lossy(&stderr).trim()
+                ),
+            ));
+        }
+        Ok(SshMasterOutcome::LaunchFailed { message }) => return Err(error(message)),
+        Ok(SshMasterOutcome::TimedOut) => {
+            return Err(status(
+                124,
+                "collection request timed out; destination unchanged",
+            ));
+        }
+        Err(e) if e.code == 130 => {
+            return Err(status(130, "collection interrupted; destination unchanged"));
+        }
+        Err(e) => return Err(e),
+    }
+    let mut command = build_ssh(
+        &ssh_bin,
         req.host,
         req.port,
-        "collect",
         req.control,
-        req.deadline,
-        req.clock,
+        req.control_persist,
     )?;
-    let mut command = build_ssh(req.host, req.port, req.control, req.control_persist)?;
     command.arg(format!("sh -lc {}", quote(script)));
     let argv = std::iter::once(command.get_program())
         .chain(command.get_args())
@@ -253,20 +285,7 @@ pub(super) fn collect(
                     .stderr
                     .as_ref()
                     .map_or(&[][..], |capture| capture.bytes.as_slice());
-                let empty_stdout: &[u8] = if total == 0 { &[] } else { b"x" };
-                record_ssh_outcome(
-                    &permit,
-                    is_connect_failure(exit, empty_stdout, stderr),
-                    req.deadline,
-                    req.clock,
-                );
                 if exit != 0 {
-                    if !permit.reused_control
-                        && total == 0
-                        && is_interactive_auth_failure(exit, b"", stderr)
-                    {
-                        return Err(error(INTERACTIVE_AUTH_UNSUPPORTED));
-                    }
                     return Err(status(
                         exit,
                         format!(

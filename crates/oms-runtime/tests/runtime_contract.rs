@@ -1916,21 +1916,173 @@ fn snapshot_xdg_ssh_tree(xdg: Option<&OsStr>) -> std::collections::BTreeMap<Path
     out
 }
 
+#[test]
+fn fake_ssh_master_helper() {
+    use std::io::{Read, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let Some(action) = std::env::var_os("OMS_TEST_MASTER_ACTION") else {
+        return;
+    };
+    let sock = PathBuf::from(std::env::var_os("OMS_TEST_MASTER_SOCK").unwrap());
+    let dir = PathBuf::from(std::env::var_os("OMS_TEST_MASTER_DIR").unwrap());
+    if action == "spawn" {
+        use std::os::unix::fs::DirBuilderExt;
+        let ready_dir = PathBuf::from(format!("/tmp/oms-tmr-{}", std::process::id()));
+        let _ = std::fs::DirBuilder::new().mode(0o700).create(&ready_dir);
+        let ready_sock = ready_dir.join("r.s");
+        let _ = std::fs::remove_file(&ready_sock);
+        let ready_listener = std::os::unix::net::UnixListener::bind(&ready_sock).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let status = Command::new("sh")
+            .args([
+                OsStr::new("-c"),
+                OsStr::new("\"$1\" --exact \"$2\" --nocapture </dev/null >/dev/null 2>&1 &"),
+                OsStr::new("sh"),
+                exe.as_os_str(),
+                OsStr::new("fake_ssh_master_helper"),
+            ])
+            .env("OMS_TEST_MASTER_ACTION", "serve")
+            .env("OMS_TEST_MASTER_SOCK", &sock)
+            .env("OMS_TEST_MASTER_DIR", &dir)
+            .env("OMS_TEST_MASTER_READY", &ready_sock)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        let mut fds = [rustix::event::PollFd::new(
+            &ready_listener,
+            rustix::event::PollFlags::IN,
+        )];
+        let ts = rustix::event::Timespec {
+            tv_sec: 10,
+            tv_nsec: 0,
+        };
+        let mut ack = [0u8; 1];
+        let ok = status.success()
+            && matches!(rustix::event::poll(&mut fds, Some(&ts)), Ok(n) if n > 0)
+            && ready_listener
+                .accept()
+                .ok()
+                .and_then(|(mut s, _)| s.read_exact(&mut ack).ok())
+                .is_some()
+            && ack == *b"1";
+        let _ = std::fs::remove_dir_all(&ready_dir);
+        if !ok {
+            std::process::exit(1);
+        }
+        return;
+    }
+    if action == "serve" {
+        let ready_sock = PathBuf::from(std::env::var_os("OMS_TEST_MASTER_READY").unwrap());
+        let listener = match std::os::unix::net::UnixListener::bind(&sock) {
+            Ok(l) => l,
+            Err(_) => {
+                if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&ready_sock) {
+                    let _ = s.write_all(b"0");
+                }
+                std::process::exit(1);
+            }
+        };
+        let mut tsv = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("masters.tsv"))
+            .unwrap();
+        let _ = writeln!(tsv, "{}\t{}", std::process::id(), sock.display());
+        if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&ready_sock) {
+            let _ = s.write_all(b"1");
+        }
+        let stop_file = dir.join("stop");
+        loop {
+            let mut fds = [rustix::event::PollFd::new(
+                &listener,
+                rustix::event::PollFlags::IN,
+            )];
+            let ts = rustix::event::Timespec {
+                tv_sec: 30,
+                tv_nsec: 0,
+            };
+            match rustix::event::poll(&mut fds, Some(&ts)) {
+                Ok(0) | Err(_) => {
+                    let _ = std::fs::remove_file(&sock);
+                    break;
+                }
+                Ok(_) => {
+                    if let Ok((mut stream, _)) = listener.accept()
+                        && stop_file.exists()
+                    {
+                        let _ = std::fs::remove_file(&sock);
+                        let _ = stream.write_all(b"bye");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn run_remote_experiment_child() {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    struct MasterCleanup(PathBuf);
+    impl Drop for MasterCleanup {
+        fn drop(&mut self) {
+            let stop = self.0.join("stop");
+            let tsv = self.0.join("masters.tsv");
+            let _ = std::fs::write(&stop, b"1");
+            if let Ok(raw) = std::fs::read_to_string(&tsv) {
+                for line in raw.lines() {
+                    if let Some((_, sock)) = line.split_once('\t') {
+                        if let Ok(mut s) = std::os::unix::net::UnixStream::connect(sock) {
+                            let mut ack = Vec::new();
+                            let _ = s.read_to_end(&mut ack);
+                        }
+                        let _ = std::fs::remove_file(sock);
+                    }
+                }
+            }
+        }
+    }
     let f = Fixture::new();
+    let master_dir = f.0.join("fake-masters");
+    std::fs::create_dir_all(&master_dir).unwrap();
+    let _cleanup = MasterCleanup(master_dir.clone());
     let fake = f.0.join("ssh-fixture");
+    let exe = std::env::current_exe().unwrap();
     std::fs::write(
         &fake,
-        r#"#!/bin/sh
-printf 'call\n' >> "$OMS_TEST_REMOTE_EVENTS"
-for last do :; done
-if [ -f "$OMS_TEST_REMOTE_DROP" ]; then
-  rm -f "$OMS_TEST_REMOTE_DROP"
-  sh -c "$last" >/dev/null 2>&1
-  exit 255
-fi
-exec sh -c "$last"
-"#,
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "ctrl=''\n",
+                "is_master=0\n",
+                "for arg in \"$@\"; do\n",
+                "  [ \"$arg\" = \"--\" ] && break\n",
+                "  case \"$arg\" in\n",
+                "    ControlPath=*) ctrl=${{arg#ControlPath=}} ;;\n",
+                "    -fN) is_master=1 ;;\n",
+                "  esac\n",
+                "done\n",
+                "if [ \"$is_master\" = 1 ]; then\n",
+                "  OMS_TEST_MASTER_ACTION=spawn OMS_TEST_MASTER_SOCK=\"$ctrl\" OMS_TEST_MASTER_DIR='{mdir}' \\\n",
+                "    exec '{exe}' --exact fake_ssh_master_helper --nocapture\n",
+                "fi\n",
+                "[ -S \"$ctrl\" ] || exit 97\n",
+                "printf 'call\\n' >> \"$OMS_TEST_REMOTE_EVENTS\"\n",
+                "for last do :; done\n",
+                "if [ -f \"$OMS_TEST_REMOTE_DROP\" ]; then\n",
+                "  rm -f \"$OMS_TEST_REMOTE_DROP\"\n",
+                "  sh -c \"$last\" >/dev/null 2>&1\n",
+                "  exit 255\n",
+                "fi\n",
+                "exec sh -c \"$last\"\n",
+            ),
+            mdir = master_dir.display(),
+            exe = exe.display(),
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
