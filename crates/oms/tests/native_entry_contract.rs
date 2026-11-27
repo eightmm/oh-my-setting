@@ -2212,9 +2212,9 @@ fn newly_wired_wave3_families_select_and_dispatch_without_python() {
             .args(["linear", "--help"])
             .output()
             .unwrap(),
-        75,
+        2,
         b"",
-        b"",
+        b"error: unknown tool: linear (run: oms list --all)\n",
     );
     for hook in [
         "command-guard-hook",
