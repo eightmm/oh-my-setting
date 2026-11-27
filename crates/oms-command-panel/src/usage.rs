@@ -574,6 +574,48 @@ pub fn text(snap: &Value) -> String {
             header.push_str(&format!(" · accounts {}", names.join(", ")));
         }
         lines.push(header);
+        if name == "codex"
+            && let Some(accounts) = p["account"]["accounts"].as_object()
+        {
+            let fresh_secs = snap["fresh_seconds"]
+                .as_f64()
+                .unwrap_or(metrics::READING_FRESH_SECONDS);
+            let now_ts = snap["now"].as_f64();
+            for (alias, info) in accounts {
+                if let Some(err) = info["error"].as_str().filter(|s| !s.is_empty()) {
+                    lines.push(format!("  @{alias:<6}  unavailable ({err})"));
+                    continue;
+                }
+                let Some(used) = info["weekly_used"].as_u64() else {
+                    lines.push(format!("  @{alias:<6}  unreported"));
+                    continue;
+                };
+                let left = 100u64.saturating_sub(used);
+                let mut parts = vec![format!("{used}% used ({left}% left)")];
+                if let (Some(reset), Some(now)) = (info["resets_at"].as_f64(), now_ts)
+                    && reset.is_finite()
+                    && reset > now
+                {
+                    parts.push(format!("resets in {}", format_duration(reset - now)));
+                }
+                if let (Some(obs), Some(now)) = (info["observed_at"].as_f64(), now_ts)
+                    && obs.is_finite()
+                    && obs <= now
+                {
+                    let age = (now - obs).max(0.0);
+                    parts.push(format!("age {}", format_age(age)));
+                    if let Some(src) = info["source"].as_str() {
+                        parts.push(format!("source {src}"));
+                    }
+                    if age > fresh_secs {
+                        parts.push("stale".into());
+                    }
+                } else if let Some(src) = info["source"].as_str() {
+                    parts.push(format!("source {src}"));
+                }
+                lines.push(format!("  @{alias:<6}  {}", parts.join("; ")));
+            }
+        }
         if name == "claude"
             && let Some(observations) = p["account"]["local_weekly_observations"].as_object()
         {
@@ -637,18 +679,22 @@ pub fn text(snap: &Value) -> String {
             lines.push(format!("  cache read share: {pct}%"));
         }
         if let Some(calls) = p["tokens"]["recent_7d"]["calls"].as_u64() {
-            let inp = p["tokens"]["recent_7d"]["input_tokens"]
-                .as_u64()
-                .unwrap_or(0);
-            let cache = p["tokens"]["recent_7d"]["cache_read_tokens"]
-                .as_u64()
-                .unwrap_or(0);
-            let out = p["tokens"]["recent_7d"]["output_tokens"]
-                .as_u64()
-                .unwrap_or(0);
-            lines.push(format!(
-                "  recent 7d: {calls} calls ({inp} input, {cache} cache read, {out} output)"
-            ));
+            let inp = p["tokens"]["recent_7d"]["input_tokens"].as_u64();
+            let cache = p["tokens"]["recent_7d"]["cache_read_tokens"].as_u64();
+            let out = p["tokens"]["recent_7d"]["output_tokens"].as_u64();
+            if inp.is_none() && cache.is_none() && out.is_none() {
+                lines.push(format!("  recent 7d: {calls} calls (tokens unreported)"));
+            } else {
+                let fmt = |v: Option<u64>, label: &str| {
+                    v.map_or_else(|| format!("{label} unreported"), |n| format!("{n} {label}"))
+                };
+                lines.push(format!(
+                    "  recent 7d: {calls} calls ({}, {}, {})",
+                    fmt(inp, "input"),
+                    fmt(cache, "cache read"),
+                    fmt(out, "output"),
+                ));
+            }
         }
     }
     if let Some(reason) = snap["projection"]["unreported"].as_str() {
@@ -867,5 +913,60 @@ mod tests {
         );
         assert_eq!(stale["windows"], json!([]));
         assert_eq!(stale["reading"]["stale"], true);
+    }
+
+    #[test]
+    fn text_renders_codex_accounts_and_unreported_agy_tokens() {
+        use super::{snapshot, text};
+
+        let now = 1_900_000_000.0;
+        let report = json!({
+            "provider_status": {
+                "codex": {
+                    "source": "session log",
+                    "weekly_used": 97,
+                    "weekly_resets_at": now + 3600.0,
+                    "observed_at": now - 45.0,
+                    "accounts": {
+                        "snu": {
+                            "weekly_used": 47,
+                            "used": 47,
+                            "source": "session log",
+                            "resets_at": now + 7200.0,
+                            "observed_at": now - 900.0
+                        },
+                        "broken": {
+                            "weekly_used": null,
+                            "error": "account home unavailable"
+                        }
+                    }
+                },
+                "claude": {"source": "no active consumer"},
+                "antigravity": {
+                    "source": "OMS artifacts",
+                    "calls": 12,
+                    "input_tokens": null,
+                    "cache_read_tokens": null,
+                    "output_tokens": null
+                }
+            }
+        });
+        let snap = snapshot(&report, now);
+        let rendered = text(&snap);
+        assert!(
+            rendered.contains(
+                "@snu     47% used (53% left); resets in 2h00m; age 15m; source session log; stale"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("@broken  unavailable (account home unavailable)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("  recent 7d: 12 calls (tokens unreported)"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("0 input"), "{rendered}");
     }
 }
