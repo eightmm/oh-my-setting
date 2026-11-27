@@ -1238,10 +1238,7 @@ fn call_routed(
             );
         }
     }
-    let answer = safety::redact(&result.stdout).map_or_else(
-        |_| "[oms-redacted:scan-failed]\n".to_owned(),
-        |redacted| String::from_utf8_lossy(&redacted).into_owned(),
-    );
+    let answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
     let findings = if tool == "peer-review" {
         Some(crate::review::seat_findings(&String::from_utf8_lossy(
             &result.stdout,
