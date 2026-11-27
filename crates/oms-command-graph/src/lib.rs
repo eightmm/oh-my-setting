@@ -186,7 +186,8 @@ pub fn run_with_host(
     }
     let groups = runtime_services
         .and_then(|s| s.group_resolver())
-        .or_else(|| plan_services.group_membership_resolver());
+        .or_else(|| plan_services.group_membership_resolver())
+        .or_else(util::current_group_resolver);
     let _groups_guard = util::with_group_resolver(groups);
     let work = || -> Result<CommandResult> {
         if std::env::var_os("OMS_HARNESS_CHILD").as_deref() == Some(std::ffi::OsStr::new("1"))

@@ -88,6 +88,7 @@ fn command(
                 })
                 .collect(),
             timeout: deadline.saturating_duration_since(Instant::now()),
+            stall: None,
             max_bytes: 1024 * 1024,
             physical_call: None,
             launch_fence: None,

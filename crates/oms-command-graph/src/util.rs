@@ -202,14 +202,51 @@ pub fn git(repo: &Path, args: &[&str], cancel: &AtomicBool) -> String {
         .map(|v| String::from_utf8_lossy(&v.1).trim().to_owned())
         .unwrap_or_default()
 }
+pub fn physical_temp_dir(temp_dir: &Path, cwd: &Path) -> PathBuf {
+    let absolute = if temp_dir.is_absolute() {
+        temp_dir.to_path_buf()
+    } else {
+        cwd.join(temp_dir)
+    };
+    if let Ok(physical) = std::fs::canonicalize(&absolute) {
+        return physical;
+    }
+    for ancestor in absolute.ancestors() {
+        if let Ok(physical) = std::fs::canonicalize(ancestor) {
+            if let Ok(rest) = absolute.strip_prefix(ancestor)
+                && rest
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            {
+                return physical.join(rest);
+            }
+            break;
+        }
+    }
+    absolute
+}
 pub fn repo_root(selected: &Path, cancel: &AtomicBool) -> Result<PathBuf> {
     let physical = std::fs::canonicalize(selected)?;
     let root = git(&physical, &["rev-parse", "--show-toplevel"], cancel);
     if root.is_empty() {
-        Ok(physical)
-    } else {
-        Ok(std::fs::canonicalize(root)?)
+        return Ok(physical);
     }
+    let found = std::fs::canonicalize(root)?;
+    if let Ok(rel) = physical.strip_prefix(&found)
+        && !rel.as_os_str().is_empty()
+    {
+        let inside_hidden_state = rel
+            .components()
+            .any(|c| matches!(c.as_os_str().to_str(), Some(".oms" | ".git")));
+        let inside_nested_tmp = std::env::current_dir().ok().is_some_and(|cwd| {
+            let tmp = physical_temp_dir(&std::env::temp_dir(), &cwd);
+            tmp.starts_with(&found) && tmp != found && physical.starts_with(&tmp)
+        });
+        if inside_hidden_state || inside_nested_tmp {
+            return Ok(physical);
+        }
+    }
+    Ok(found)
 }
 pub fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")

@@ -571,14 +571,59 @@ pub(crate) fn verification(args: &Args, repo: &Path, read: bool) -> Result<Optio
         fail("check.sh has no declared fast mode; give --verify CMD or --no-verify")
     }
 }
-fn graph_context_projection(code: i32, bytes: &[u8]) -> String {
+fn graph_failure_reason(stderr: &[u8]) -> &'static str {
+    let text = String::from_utf8_lossy(stderr);
+    if text.contains("account proof service unavailable") {
+        "graph-command-failed:group-proof-unavailable"
+    } else if text.contains("unsafe plan ownership, permissions or links")
+        || text.contains("exact private mode")
+    {
+        "graph-command-failed:unsafe-state-permissions"
+    } else if text.contains("symbolic link") {
+        "graph-command-failed:symlinked-state-path"
+    } else if text.contains("file lock: InvalidSettings")
+        || text.contains("file lock: InvalidTarget")
+    {
+        "graph-command-failed:lock-settings"
+    } else if text.contains("file lock: Busy") {
+        "graph-command-failed:lock-busy"
+    } else if text.contains("file lock:") {
+        "graph-command-failed:lock-failed"
+    } else if text.contains("Python parser helper") {
+        "graph-command-failed:python-helper-untrusted"
+    } else if text.contains("auto-build skipped") {
+        "graph-command-failed:autobuild-bound-exceeded"
+    } else if text.contains("project extraction cache")
+        || text.contains("invalid graph cache file")
+        || text.contains("project SQLite")
+    {
+        "graph-command-failed:cache-failed"
+    } else if text.contains("source changed during") {
+        "graph-command-failed:source-changed"
+    } else if text.contains("OMS_PROJECT_GRAPH_STATE") {
+        "graph-command-failed:invalid-state-dir"
+    } else if text.contains("harness child") {
+        "graph-command-failed:harness-child-refused"
+    } else if text.contains("plan write")
+        || text.contains("plan read")
+        || text.contains("plan storage")
+        || text.contains("cannot open plan repository")
+        || text.contains("graph state")
+    {
+        "graph-command-failed:state-storage-failed"
+    } else {
+        "graph-command-failed"
+    }
+}
+
+fn graph_context_projection(code: i32, bytes: &[u8], stderr: &[u8]) -> String {
     let unavailable = |reason: &str| {
         format!(
             "{{\"schema\":1,\"kind\":\"oms-delegate-graph-context\",\"delivery_status\":\"error\",\"retrieval\":{{\"status\":\"error\",\"reason\":\"{reason}\"}},\"worker_snapshot_bound\":false,\"text\":\"Graph orientation unavailable; search source directly. Missing matches do not prove missing code.\"}}"
         )
     };
     if code != 0 {
-        return unavailable("graph-command-failed");
+        return unavailable(graph_failure_reason(stderr));
     }
     if bytes.len() > 128 * 1024 {
         return unavailable("graph-result-exceeds-limit");
@@ -629,6 +674,7 @@ fn graph_context_projection(code: i32, bytes: &[u8]) -> String {
 fn build_graph_context(
     repo: &Path,
     question: &str,
+    groups: Option<oms_command_plan::services::GroupResolver>,
     interrupted: &std::sync::atomic::AtomicBool,
 ) -> Result<String> {
     use std::os::unix::fs::PermissionsExt;
@@ -664,10 +710,11 @@ fn build_graph_context(
         "--repo".into(),
         repo.as_os_str().to_owned(),
     ];
-    let (code, stdout, _) =
+    let _groups = oms_command_graph::with_group_resolver(groups);
+    let (code, stdout, stderr) =
         oms_command_graph::run_with_helper(&argv, repo, interrupted, helper.as_deref());
     crate::check(interrupted)?;
-    Ok(graph_context_projection(code, &stdout))
+    Ok(graph_context_projection(code, &stdout, &stderr))
 }
 
 static INTERACTIVE_BUFFERED: std::sync::atomic::AtomicBool =
@@ -918,7 +965,12 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         && !args.has("no-graph-context")
         && !args.has("context-pack")
     {
-        let graph_text = build_graph_context(&repo, &question, context.interrupted)?;
+        let graph_text = build_graph_context(
+            &repo,
+            &question,
+            context.executor.group_resolver(),
+            context.interrupted,
+        )?;
         prompt.untrusted(
             "retrieved",
             "project graph",
@@ -1114,6 +1166,8 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     };
     let live_context = context.with_heartbeat(Some(&heartbeat));
     let mut code = 1;
+    let mut stalled_secs: Option<u64> = None;
+    let mut timeout_secs: Option<u64> = None;
     let mut body = header.into_bytes();
     let mut captured = Vec::new();
     let mut written_patch = Vec::new();
@@ -1138,11 +1192,13 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         }
         crate::check(context.interrupted)?;
         verify_exit_code = None;
+        stalled_secs = None;
+        timeout_secs = None;
         let mut bound_verifier_failed = false;
         worktree.identity(context)?;
         if interactive && round == 0 {
             let mut turn_history = String::new();
-            let timeout = peer::timeout(args, "peer-delegate")?;
+            let timeouts = peer::route_timeouts(args, "peer-delegate", &route)?;
             code = 0;
             let max_turns = args
                 .get("max-turns")
@@ -1175,7 +1231,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                     &full_prompt,
                     &worktree.path,
                     !read,
-                    timeout,
+                    timeouts,
                     &repo,
                     &extra_env,
                     &live_context,
@@ -1199,6 +1255,11 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                         break;
                     }
                 };
+                if let Some(dur) = res.stalled {
+                    stalled_secs = Some(peer::rounded_secs(dur));
+                } else if !res.complete && res.code == 124 {
+                    timeout_secs = Some(timeouts.wall);
+                }
                 let turn_code = if !res.complete && res.code == 0 {
                     1
                 } else {
@@ -1209,6 +1270,20 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 body.extend_from_slice(
                     format!("\n## Turn {}\n\n{clean_str}\n", idx + 1).as_bytes(),
                 );
+                if let Some(secs) = stalled_secs {
+                    body.extend_from_slice(
+                        format!("\n## Diagnostics\n\nerror: {}\n", peer::stall_message(secs))
+                            .as_bytes(),
+                    );
+                } else if let Some(wall) = timeout_secs {
+                    body.extend_from_slice(
+                        format!(
+                            "\n## Diagnostics\n\nerror: {}\n",
+                            peer::timeout_message(wall, 0)
+                        )
+                        .as_bytes(),
+                    );
+                }
                 turn_history.push_str(&format!(
                     "\nTurn {}: {}\nReply: {}\n",
                     idx + 1,
@@ -1238,6 +1313,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 idx += 1;
             }
         } else {
+            let timeouts = peer::route_timeouts(args, "peer-delegate", &route)?;
             let result = plan
                 .as_ref()
                 .map_or(Ok(()), |bound| bound.check(context))
@@ -1248,7 +1324,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                         &prompt,
                         &worktree.path,
                         !read,
-                        peer::timeout(args, "peer-delegate")?,
+                        timeouts,
                         &repo,
                         &extra_env,
                         &live_context,
@@ -1266,6 +1342,11 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 }
             };
             code = result.code;
+            if let Some(dur) = result.stalled {
+                stalled_secs = Some(peer::rounded_secs(dur));
+            } else if !result.complete && result.code == 124 {
+                timeout_secs = Some(timeouts.wall);
+            }
             if !result.complete {
                 if code == 0 {
                     code = 1;
@@ -1284,6 +1365,20 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 )
                 .as_bytes(),
             );
+            if let Some(secs) = stalled_secs {
+                body.extend_from_slice(
+                    format!("\n## Diagnostics\n\nerror: {}\n", peer::stall_message(secs))
+                        .as_bytes(),
+                );
+            } else if let Some(wall) = timeout_secs {
+                body.extend_from_slice(
+                    format!(
+                        "\n## Diagnostics\n\nerror: {}\n",
+                        peer::timeout_message(wall, 0)
+                    )
+                    .as_bytes(),
+                );
+            }
         }
         worktree.identity(context)?;
         process::git(
@@ -1420,7 +1515,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     if no_change && !args.has("allow-no-change") && dispatch.panel.is_some() {
         code = 6;
     }
-    let state = if code == 0 {
+    let attempt_state = if code == 0 {
         "review"
     } else if code == 124 {
         "timed_out"
@@ -1429,17 +1524,25 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     } else {
         "failed"
     };
+    let index_state = if code == 124 && stalled_secs.is_some() {
+        "stalled"
+    } else {
+        attempt_state
+    };
     let mut refs = obj([
         ("artifact", artifact.to_string_lossy().into_owned().into()),
         ("patch", patch.to_string_lossy().into_owned().into()),
         ("verify_status", verified.into()),
         ("admit", "pending".into()),
     ]);
+    if code == 124 && stalled_secs.is_some() {
+        refs.set("termination_reason", "stalled");
+    }
     if !providers::panel_account(&route).is_empty() {
         // An overflow may have moved the run off the account bound at start.
         refs.set("panel_account", V::from(providers::panel_account(&route)));
     }
-    transition(&repo, &attempt, state, refs, context)?;
+    transition(&repo, &attempt, attempt_state, refs, context)?;
     body.extend_from_slice(format!("\n## Exit\n\n{code}\n\n- outcome: {}\n- verification: {verified}\n- admission: pending\n",if no_change{"no_change"}else if code==0{"review"}else{"failed"}).as_bytes());
     let artifact_sha256 = storage::hash(&body);
     let patch_sha256 = storage::hash(&written_patch);
@@ -1477,7 +1580,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             "verify_exit",
             verify_exit_code.map_or(V::Null, |n| V::Num(n.to_string())),
         ),
-        ("state", state.into()),
+        ("state", index_state.into()),
         ("admit", "pending".into()),
         ("no_change", no_change.into()),
     ]);
@@ -1506,6 +1609,13 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         Ok(())
     };
     let mut note = String::new();
+    if code == 124 {
+        if let Some(secs) = stalled_secs {
+            note.push_str(&format!("error: {}\n", peer::stall_message(secs)));
+        } else if let Some(wall) = timeout_secs {
+            note.push_str(&format!("error: {}\n", peer::timeout_message(wall, 0)));
+        }
+    }
     if needs_keep {
         note.push_str(&format!("worktree retained: {}\n", worktree.path.display()));
     } else if let Err(e) = worktree.remove(context) {
@@ -1605,6 +1715,7 @@ mod tests {
 
     #[test]
     fn graph_context_keeps_no_match_coverage_and_does_not_change_discovery() {
+        const NESTED_INNER: &str = "OMS_TEST_GRAPH_NESTED_INNER";
         let repo = repo("graph-context");
         std::fs::write(
             repo.join("lib.rs"),
@@ -1614,7 +1725,7 @@ mod tests {
         git(&repo, &["add", "lib.rs"]);
         git(&repo, &["commit", "-qm", "graph fixture"]);
         let stop = AtomicBool::new(false);
-        let matched = build_graph_context(&repo, "graph_context_probe", &stop).unwrap();
+        let matched = build_graph_context(&repo, "graph_context_probe", None, &stop).unwrap();
         let parsed = V::parse(matched.as_bytes()).unwrap();
         assert_eq!(
             parsed.get("delivery_status").text(),
@@ -1631,18 +1742,26 @@ mod tests {
         assert_eq!(parsed.get("worker_snapshot_bound"), &V::Bool(false));
         let manifest = repo.join(".oms/project-graph/manifest.json");
         let before = std::fs::read(&manifest).unwrap();
-        let missing = build_graph_context(&repo, "unmatchedzzzzfixture", &stop).unwrap();
+        let missing = build_graph_context(&repo, "unmatchedzzzzfixture", None, &stop).unwrap();
         let parsed = V::parse(missing.as_bytes()).unwrap();
         assert_eq!(
             parsed.get("retrieval").get("status").text(),
             Some("no-match")
         );
         assert_eq!(std::fs::read(&manifest).unwrap(), before);
-        let partial = graph_context_projection(0, br#"{"schema":1,"project_graph_revision":"fixture","retrieval":{"status":"matched"},"text":"fn wanted()","truncated":["lib.rs"],"omitted":["more.rs"]}"#);
+        let partial = graph_context_projection(
+            0,
+            br#"{"schema":1,"project_graph_revision":"fixture","retrieval":{"status":"matched"},"text":"fn wanted()","truncated":["lib.rs"],"omitted":["more.rs"]}"#,
+            b"",
+        );
         let parsed = V::parse(partial.as_bytes()).unwrap();
         assert_eq!(parsed.get("delivery_status").text(), Some("partial"));
         assert_eq!(parsed.get("omitted").array()[0].text(), Some("more.rs"));
-        let incomplete = graph_context_projection(0, br#"{"schema":1,"project_graph_revision":"fixture","retrieval":{"status":"matched"},"text":"fn wanted()","files":[{"path":"lib.rs","incomplete_spans":1}],"truncated":[],"omitted":[]}"#);
+        let incomplete = graph_context_projection(
+            0,
+            br#"{"schema":1,"project_graph_revision":"fixture","retrieval":{"status":"matched"},"text":"fn wanted()","files":[{"path":"lib.rs","incomplete_spans":1}],"truncated":[],"omitted":[]}"#,
+            b"",
+        );
         assert_eq!(
             V::parse(incomplete.as_bytes())
                 .unwrap()
@@ -1650,23 +1769,165 @@ mod tests {
                 .text(),
             Some("partial")
         );
-        for (code, bytes) in [
-            (1, b"private diagnostic".as_slice()),
-            (0, b"not-json".as_slice()),
+        for (code, bytes, stderr, expected_reason) in [
+            (
+                1,
+                b"private diagnostic".as_slice(),
+                b"private diagnostic".as_slice(),
+                "graph-command-failed",
+            ),
+            (
+                2,
+                b"".as_slice(),
+                b"graph: file lock: InvalidSettings\n".as_slice(),
+                "graph-command-failed:lock-settings",
+            ),
+            (
+                2,
+                b"".as_slice(),
+                b"graph: plan storage: native private-group account proof service unavailable\n"
+                    .as_slice(),
+                "graph-command-failed:group-proof-unavailable",
+            ),
+            (
+                0,
+                b"not-json".as_slice(),
+                b"".as_slice(),
+                "malformed-graph-result",
+            ),
         ] {
-            let projection = graph_context_projection(code, bytes);
+            let projection = graph_context_projection(code, bytes, stderr);
+            let parsed = V::parse(projection.as_bytes()).unwrap();
+            assert_eq!(parsed.get("retrieval").get("status").text(), Some("error"));
             assert_eq!(
-                V::parse(projection.as_bytes())
-                    .unwrap()
-                    .get("retrieval")
-                    .get("status")
-                    .text(),
-                Some("error")
+                parsed.get("retrieval").get("reason").text(),
+                Some(expected_reason)
             );
             assert!(!projection.contains("private diagnostic"));
         }
+
+        if std::env::var_os(NESTED_INNER).is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            fn private_group(
+                gid: u32,
+            ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+                let uid = rustix::process::getuid().as_raw();
+                Ok(oms_command_plan::services::GroupMembership {
+                    gid,
+                    explicit_member_uids: vec![uid],
+                    primary_member_uids: vec![uid],
+                })
+            }
+
+            let outer = crate::delegate::tests::repo("graph-outer");
+            std::fs::create_dir_all(outer.join(".oms/tmp/group")).unwrap();
+            std::fs::write(outer.join(".oms/.gitignore"), b"*\n").unwrap();
+            let nested = outer.join(".oms/tmp/group/nested");
+            std::fs::create_dir_all(&nested).unwrap();
+            git(&nested, &["init", "-q"]);
+            std::fs::write(
+                nested.join("lib.rs"),
+                "pub fn graph_context_probe() -> usize { 7 }\n",
+            )
+            .unwrap();
+            git(&nested, &["add", "lib.rs"]);
+            git(&nested, &["commit", "-qm", "nested graph fixture"]);
+            let nested_state = nested.join(".oms/project-graph");
+            std::fs::create_dir_all(&nested_state).unwrap();
+            std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o775)).unwrap();
+            std::fs::set_permissions(nested.join(".oms"), std::fs::Permissions::from_mode(0o775))
+                .unwrap();
+            std::fs::set_permissions(&nested_state, std::fs::Permissions::from_mode(0o775))
+                .unwrap();
+
+            let without_resolver =
+                build_graph_context(&nested, "graph_context_probe", None, &stop).unwrap();
+            assert_eq!(
+                V::parse(without_resolver.as_bytes())
+                    .unwrap()
+                    .get("retrieval")
+                    .get("reason")
+                    .text(),
+                Some("graph-command-failed:group-proof-unavailable"),
+                "{without_resolver}"
+            );
+            let with_resolver =
+                build_graph_context(&nested, "graph_context_probe", Some(private_group), &stop)
+                    .unwrap();
+            assert_eq!(
+                V::parse(with_resolver.as_bytes())
+                    .unwrap()
+                    .get("delivery_status")
+                    .text(),
+                Some("matched"),
+                "{with_resolver}"
+            );
+
+            let plain_nested = outer.join(".oms/tmp/plain");
+            std::fs::create_dir_all(&plain_nested).unwrap();
+            std::fs::write(
+                plain_nested.join("lib.rs"),
+                "pub fn plain_nested_probe() -> usize { 9 }\n",
+            )
+            .unwrap();
+            let plain_matched =
+                build_graph_context(&plain_nested, "plain_nested_probe", None, &stop).unwrap();
+            assert_eq!(
+                V::parse(plain_matched.as_bytes())
+                    .unwrap()
+                    .get("delivery_status")
+                    .text(),
+                Some("matched"),
+                "{plain_matched}"
+            );
+            assert!(!outer.join(".oms/project-graph").exists());
+
+            let nested_abs_tmp = outer.join(".oms/tmp/abs");
+            std::fs::create_dir_all(&nested_abs_tmp).unwrap();
+            std::fs::create_dir_all(outer.join(".oms/tmp/rel")).unwrap();
+            let alias_parent = outer.join(".oms/tmp/alias-target");
+            std::fs::create_dir_all(&alias_parent).unwrap();
+            let alias_tmp = outer.join(".oms/tmp/alias-link");
+            std::os::unix::fs::symlink(&alias_parent, &alias_tmp).unwrap();
+
+            for tmp_arg in [
+                nested_abs_tmp.as_os_str(),
+                OsStr::new(".oms/tmp/rel"),
+                alias_tmp.as_os_str(),
+            ] {
+                let out = std::process::Command::new("bash")
+                    .current_dir(&outer)
+                    .args([
+                        "--noprofile",
+                        "--norc",
+                        "-c",
+                        "umask 002; exec \"$@\"",
+                        "--",
+                    ])
+                    .arg(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "delegate::tests::graph_context_keeps_no_match_coverage_and_does_not_change_discovery",
+                        "--nocapture",
+                    ])
+                    .env(NESTED_INNER, "1")
+                    .env("TMPDIR", tmp_arg)
+                    .env_remove("OMS_LOCK_DIR")
+                    .output()
+                    .unwrap();
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                assert!(out.status.success(), "TMPDIR={tmp_arg:?}\n{combined}");
+                assert!(combined.contains("1 passed;"), "{combined}");
+            }
+            let _ = std::fs::remove_dir_all(&outer);
+        }
+
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        assert!(build_graph_context(&repo, "probe", &stop).is_err());
+        assert!(build_graph_context(&repo, "probe", None, &stop).is_err());
         let _ = std::fs::remove_dir_all(&repo);
     }
 
@@ -1828,6 +2089,7 @@ mod tests {
                         stdout: b"Answer:\nok\nTradeoffs:\nnone\nEvidence:\nvictim.txt\nRisks:\nnone\nRecommendation:\nship\nVerification:\ntrue\n".to_vec(),
                         stderr: Vec::new(),
                         complete: true,
+                        stalled: None,
                         cleanup_complete: Some(true),
                         owned_cleanup: None,
                         elapsed: std::time::Duration::from_millis(1),

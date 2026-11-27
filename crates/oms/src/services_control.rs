@@ -69,6 +69,7 @@ pub(crate) struct Child {
     pub(crate) stdout: Vec<u8>,
     pub(crate) stderr: Vec<u8>,
     pub(crate) elapsed: Duration,
+    pub(crate) stalled: Option<Duration>,
     pub(crate) timed_out: bool,
     pub(crate) output_limited: bool,
     pub(crate) cancelled: bool,
@@ -88,6 +89,8 @@ pub(crate) struct Spawn<'a> {
     pub(crate) drain: bool,
     pub(crate) stdin: Vec<u8>,
     pub(crate) wall: Duration,
+    pub(crate) stall: Option<Duration>,
+    pub(crate) track_mcp_output: bool,
     pub(crate) limit: usize,
     pub(crate) terminate_grace: Duration,
 }
@@ -104,6 +107,8 @@ impl<'a> Spawn<'a> {
             drain: false,
             stdin: Vec::new(),
             wall,
+            stall: None,
+            track_mcp_output: false,
             limit,
             terminate_grace: Duration::from_secs(2),
         }
@@ -142,6 +147,8 @@ fn run_child_started(
         drain,
         stdin,
         wall,
+        stall,
+        track_mcp_output,
         limit,
         terminate_grace,
     } = spawn;
@@ -198,6 +205,8 @@ fn run_child_started(
         .start(request)
         .map_err(|e| format!("launch failed: {e}"))?;
     started()?;
+    let mut tracker =
+        oms_command_peer::process::StallTracker::for_execution(stall, track_mcp_output);
     let mut cancelled = false;
     loop {
         if interrupted.load(Ordering::Acquire) && !cancelled {
@@ -210,7 +219,13 @@ fn run_child_started(
             .poll(id, Duration::from_millis(50))
             .map_err(|e| e.to_string())?
         {
-            Progress::Pending(_) => {}
+            Progress::Pending(snapshot) => {
+                if !cancelled && tracker.poll(&snapshot, Instant::now()) {
+                    reactor
+                        .stop(id, StopReason::Deadline)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
             Progress::Complete(done) => {
                 // A stop (deadline, cancel, output limit) deliberately cuts the
                 // stream: the exit code reports it. A natural exit must have
@@ -224,6 +239,7 @@ fn run_child_started(
                     Some(_) => 125,
                     None => done.exit.map_or(125, |e| e.shell_code()),
                 };
+                let stalled = tracker.finish(done.stop);
                 let dropped =
                     done.stdout.dropped_bytes + done.stderr.as_ref().map_or(0, |s| s.dropped_bytes);
                 return Ok(Child {
@@ -231,6 +247,7 @@ fn run_child_started(
                     stdout: done.stdout.bytes,
                     stderr: done.stderr.map_or_else(Vec::new, |s| s.bytes),
                     elapsed: done.duration,
+                    stalled,
                     timed_out: done.stop == Some(StopReason::Deadline),
                     output_limited: done.stop == Some(StopReason::OutputLimit),
                     cancelled: done.stop == Some(StopReason::Cancelled),
@@ -435,6 +452,11 @@ impl<'a> ControlServices<'a> {
     fn whole_tree(mut self) -> Self {
         self.scope = Scope::WholeTree;
         self
+    }
+    /// Configure an explicit supervise worker command in tests.
+    #[cfg(test)]
+    pub(crate) fn set_supervise_worker(&mut self, worker: Vec<OsString>) {
+        self.supervise_worker = worker;
     }
     /// Task-lifecycle producers bound to this adapter's source root.
     pub(crate) fn task(&self) -> ControlTask<'_> {
@@ -3605,6 +3627,12 @@ pub(crate) fn supervise_worker_request(
         .iter()
         .map(|k| hex_encode(k.as_bytes()))
         .collect();
+    let stall_ms = match spawn.stall.filter(|d| !d.is_zero()) {
+        Some(d) => Some(
+            u64::try_from(d.as_millis().max(1)).map_err(|_| "execution stall timeout overflow")?,
+        ),
+        None => None,
+    };
     let payload = serde_json::json!({
         "schema": 1,
         "acknowledge_start": acknowledge_start,
@@ -3617,6 +3645,8 @@ pub(crate) fn supervise_worker_request(
         "drain": spawn.drain,
         "stdin": hex_encode(&spawn.stdin),
         "wall_ms": u64::try_from(spawn.wall.as_millis().max(1)).map_err(|_| "execution deadline overflow")?,
+        "stall_ms": stall_ms,
+        "track_mcp_output": spawn.track_mcp_output,
         "limit": spawn.limit,
         "terminate_grace_ms": u64::try_from(spawn.terminate_grace.as_millis()).map_err(|_| "terminate grace overflow")?,
     });
@@ -3658,6 +3688,7 @@ pub(crate) fn run_via_supervise_worker(
             stdout: Vec::new(),
             stderr: Vec::new(),
             elapsed: done.elapsed,
+            stalled: None,
             timed_out: false,
             output_limited: false,
             cancelled: true,
@@ -3702,11 +3733,19 @@ pub(crate) fn supervise_worker_result(raw: &[u8]) -> Result<Child, String> {
     let elapsed_ms = result["elapsed_ms"]
         .as_u64()
         .ok_or("native supervise worker returned invalid elapsed time")?;
+    let stalled = match result.get("stalled_ms") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(Duration::from_millis(
+            v.as_u64()
+                .ok_or("native supervise worker returned invalid stall duration")?,
+        )),
+    };
     Ok(Child {
         code,
         stdout,
         stderr,
         elapsed: Duration::from_millis(elapsed_ms),
+        stalled,
         timed_out: result["timed_out"] == true,
         output_limited: result["output_limited"] == true,
         cancelled: result["cancelled"] == true,
@@ -3718,11 +3757,35 @@ pub(crate) fn supervise_worker_result(raw: &[u8]) -> Result<Child, String> {
 /// ([`SUPERVISE_WORKER_FLAG`]). Reads one JSON `Spawn` descriptor from stdin,
 /// runs it inside [`Scope::WholeTree`] on Linux, and writes one JSON outcome to stdout.
 pub(crate) fn supervise_worker_main(args: &[OsString], interrupted: &AtomicBool) -> i32 {
-    use std::io::{Read, Write};
-    let report_json = |payload: Value| -> i32 {
+    supervise_worker_main_io(
+        args,
+        interrupted,
+        &mut std::io::stdout(),
+        cfg!(target_os = "linux"),
+        &[],
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn supervise_worker_test_main(
+    out: &mut dyn std::io::Write,
+    interrupted: &AtomicBool,
+    extra_remove_env: &[&str],
+) -> i32 {
+    supervise_worker_main_io(&[], interrupted, out, false, extra_remove_env)
+}
+
+fn supervise_worker_main_io(
+    args: &[OsString],
+    interrupted: &AtomicBool,
+    out: &mut dyn std::io::Write,
+    whole_tree: bool,
+    extra_remove_env: &[&str],
+) -> i32 {
+    use std::io::Read;
+    let report_json = |out: &mut dyn std::io::Write, payload: Value| -> i32 {
         match serde_json::to_vec(&payload) {
             Ok(bytes) => {
-                let mut out = std::io::stdout().lock();
                 if out.write_all(&bytes).is_err() || out.flush().is_err() {
                     return 1;
                 }
@@ -3733,6 +3796,7 @@ pub(crate) fn supervise_worker_main(args: &[OsString], interrupted: &AtomicBool)
     };
     if !args.is_empty() {
         return report_json(
+            out,
             serde_json::json!({"ok": false, "error": "supervise worker takes no arguments"}),
         );
     }
@@ -3741,10 +3805,14 @@ pub(crate) fn supervise_worker_main(args: &[OsString], interrupted: &AtomicBool)
         .take((SUPERVISE_REQUEST_LIMIT + 1) as u64)
         .read_to_end(&mut raw)
     {
-        return report_json(serde_json::json!({"ok": false, "error": e.to_string()}));
+        return report_json(
+            out,
+            serde_json::json!({"ok": false, "error": e.to_string()}),
+        );
     }
     if raw.len() > SUPERVISE_REQUEST_LIMIT {
         return report_json(
+            out,
             serde_json::json!({"ok": false, "error": "supervise request exceeds size limit"}),
         );
     }
@@ -3752,6 +3820,7 @@ pub(crate) fn supervise_worker_main(args: &[OsString], interrupted: &AtomicBool)
         Ok(v) if v["schema"] == 1 => v,
         _ => {
             return report_json(
+                out,
                 serde_json::json!({"ok": false, "error": "invalid supervise request"}),
             );
         }
@@ -3771,12 +3840,12 @@ pub(crate) fn supervise_worker_main(args: &[OsString], interrupted: &AtomicBool)
     };
     let argv = match decode_vec("argv") {
         Ok(v) => v,
-        Err(e) => return report_json(serde_json::json!({"ok": false, "error": e})),
+        Err(e) => return report_json(out, serde_json::json!({"ok": false, "error": e})),
     };
     let cwd = match parsed.get("cwd").and_then(|v| v.as_str()) {
         Some(hex) => match hex_decode(hex) {
             Ok(bytes) => Some(PathBuf::from(OsString::from_vec(bytes))),
-            Err(e) => return report_json(serde_json::json!({"ok": false, "error": e})),
+            Err(e) => return report_json(out, serde_json::json!({"ok": false, "error": e})),
         },
         None => None,
     };
@@ -3801,16 +3870,21 @@ pub(crate) fn supervise_worker_main(args: &[OsString], interrupted: &AtomicBool)
                 .collect::<Result<Vec<_>, String>>()
         }) {
         Ok(v) => v,
-        Err(e) => return report_json(serde_json::json!({"ok": false, "error": e})),
+        Err(e) => return report_json(out, serde_json::json!({"ok": false, "error": e})),
     };
-    let remove_environment = match decode_vec("remove_environment") {
+    let mut remove_environment = match decode_vec("remove_environment") {
         Ok(v) => v,
-        Err(e) => return report_json(serde_json::json!({"ok": false, "error": e})),
+        Err(e) => return report_json(out, serde_json::json!({"ok": false, "error": e})),
     };
+    for key in extra_remove_env {
+        if !remove_environment.iter().any(|v| v == key) {
+            remove_environment.push(OsString::from(key));
+        }
+    }
     let stdin = match parsed.get("stdin").and_then(|v| v.as_str()) {
         Some(hex) => match hex_decode(hex) {
             Ok(bytes) => bytes,
-            Err(e) => return report_json(serde_json::json!({"ok": false, "error": e})),
+            Err(e) => return report_json(out, serde_json::json!({"ok": false, "error": e})),
         },
         None => Vec::new(),
     };
@@ -3822,12 +3896,28 @@ pub(crate) fn supervise_worker_main(args: &[OsString], interrupted: &AtomicBool)
             .and_then(|v| usize::try_from(v).ok()),
         parsed["terminate_grace_ms"].as_u64(),
     ) else {
-        return report_json(serde_json::json!({"ok": false, "error": "invalid supervise bounds"}));
+        return report_json(
+            out,
+            serde_json::json!({"ok": false, "error": "invalid supervise bounds"}),
+        );
     };
-    #[cfg(target_os = "linux")]
-    let scope = Scope::WholeTree;
-    #[cfg(not(target_os = "linux"))]
-    let scope = Scope::ProcessGroup;
+    let stall = match parsed.get("stall_ms") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_u64().filter(|ms| *ms > 0) {
+            Some(ms) => Some(Duration::from_millis(ms)),
+            None => {
+                return report_json(
+                    out,
+                    serde_json::json!({"ok": false, "error": "invalid supervise stall bound"}),
+                );
+            }
+        },
+    };
+    let scope = if whole_tree {
+        Scope::WholeTree
+    } else {
+        Scope::ProcessGroup
+    };
     let mut spawn = Spawn::new(scope, argv, Duration::from_millis(wall_ms), limit)
         .environment(environment)
         .terminate_grace(Duration::from_millis(grace_ms));
@@ -3837,31 +3927,43 @@ pub(crate) fn supervise_worker_main(args: &[OsString], interrupted: &AtomicBool)
     spawn.merged = merged;
     spawn.drain = parsed["drain"] == true;
     spawn.stdin = stdin;
-    let started = || {
-        if parsed["acknowledge_start"] == true {
-            let mut out = std::io::stdout().lock();
-            out.write_all(SUPERVISE_STARTED)
-                .and_then(|()| out.flush())
-                .map_err(|e| e.to_string())?;
-        }
-        Ok(())
+    spawn.stall = stall;
+    spawn.track_mcp_output = parsed["track_mcp_output"] == true;
+    let acknowledge_start = parsed["acknowledge_start"] == true;
+    let res = {
+        let started = || {
+            if acknowledge_start {
+                out.write_all(SUPERVISE_STARTED)
+                    .and_then(|()| out.flush())
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        };
+        run_child_started(spawn, interrupted, started)
     };
-    match run_child_started(spawn, interrupted, started) {
-        Ok(child) => report_json(serde_json::json!({
-            "ok": true,
-            "code": child.code,
-            "stdout": hex_encode(&child.stdout),
-            "stderr": hex_encode(&child.stderr),
-            "elapsed_ms": u64::try_from(child.elapsed.as_millis()).unwrap_or(u64::MAX),
-            "timed_out": child.timed_out,
-            "output_limited": child.output_limited,
-            "cancelled": child.cancelled,
-            "dropped": child.dropped,
-        })),
-        Err(error) => report_json(serde_json::json!({
-            "ok": false,
-            "error": error,
-        })),
+    match res {
+        Ok(child) => report_json(
+            out,
+            serde_json::json!({
+                "ok": true,
+                "code": child.code,
+                "stdout": hex_encode(&child.stdout),
+                "stderr": hex_encode(&child.stderr),
+                "elapsed_ms": u64::try_from(child.elapsed.as_millis()).unwrap_or(u64::MAX),
+                "stalled_ms": child.stalled.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                "timed_out": child.timed_out,
+                "output_limited": child.output_limited,
+                "cancelled": child.cancelled,
+                "dropped": child.dropped,
+            }),
+        ),
+        Err(error) => report_json(
+            out,
+            serde_json::json!({
+                "ok": false,
+                "error": error,
+            }),
+        ),
     }
 }
 
@@ -5557,6 +5659,7 @@ mod tests {
                         environment: vec![],
                         remove_environment: vec![],
                         timeout: Duration::from_secs(5),
+                        stall: None,
                         max_bytes: 1024,
                         merge: false,
                         physical_call: Some(tag.clone()),

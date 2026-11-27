@@ -1,4 +1,12 @@
 //! Native runtime host adapters and shared bounded Unix account-ownership proofs.
+//!
+//! SSH target status and sync share [`oms_runtime::ssh_adapter::ensure_ssh_control_master`]
+//! with `oms_runtime::ssh_adapter`: a persistent master is started via
+//! `-o ControlMaster=yes -fN` outside supervised `Scope::WholeTree` subreapers
+//! under the private state-dir reconnect lock, and target scripts run over that
+//! socket with `-o ControlMaster=no -o ProxyCommand=false`, retrying master
+//! start and the script once on pre-command mux/proxy fallback failure while
+//! keeping connect/auth accounting isolated from remote command exits.
 #[path = "services_apptainer.rs"]
 mod apptainer;
 use oms_command_plan::services::GroupMembership;
@@ -1093,6 +1101,8 @@ pub(crate) struct RuntimeServices<'a> {
     apptainer: Option<PathBuf>,
     #[cfg(test)]
     lock_timeout: Option<Duration>,
+    #[cfg(test)]
+    ssh_clock: Option<Arc<dyn oms_runtime::ssh_adapter::SshClock>>,
 }
 
 impl<'a> RuntimeServices<'a> {
@@ -1126,7 +1136,16 @@ impl<'a> RuntimeServices<'a> {
             scope,
             #[cfg(test)]
             lock_timeout: None,
+            #[cfg(test)]
+            ssh_clock: None,
         })
+    }
+    fn ssh_clock(&self) -> &dyn oms_runtime::ssh_adapter::SshClock {
+        #[cfg(test)]
+        if let Some(clock) = &self.ssh_clock {
+            return clock.as_ref();
+        }
+        &oms_runtime::ssh_adapter::SystemSshClock
     }
     /// Test constructor: `ProcessGroup` scope so multi-threaded harnesses can
     /// run children, and an explicit launcher and helper.
@@ -1147,7 +1166,7 @@ impl<'a> RuntimeServices<'a> {
     fn cancel(&self) -> &AtomicBool {
         self.interrupted.as_ref()
     }
-    fn child(&self, spec: ChildSpec<'_>) -> oms_command_plan::Result<ChildOut> {
+    fn child_raw(&self, spec: ChildSpec<'_>) -> Result<ChildOut, String> {
         #[cfg(target_os = "linux")]
         if self.scope == Scope::WholeTree
             && !self.control.supervise_worker().is_empty()
@@ -1166,8 +1185,7 @@ impl<'a> RuntimeServices<'a> {
                 self.control.supervise_worker(),
                 &spawn,
                 self.cancel(),
-            )
-            .map_err(plan_error)?;
+            )?;
             return Ok(ChildOut {
                 code: child.code,
                 stdout: child.stdout,
@@ -1178,7 +1196,10 @@ impl<'a> RuntimeServices<'a> {
                 dropped: child.dropped,
             });
         }
-        run_child(self.scope, spec, self.cancel()).map_err(plan_error)
+        run_child(self.scope, spec, self.cancel())
+    }
+    fn child(&self, spec: ChildSpec<'_>) -> oms_command_plan::Result<ChildOut> {
+        self.child_raw(spec).map_err(plan_error)
     }
     /// Bounded Git child with no ambient `GIT_*` redirection or prompts.
     fn git(
@@ -2570,6 +2591,14 @@ impl RuntimeServices<'_> {
                 "target workdir must be a same-path relative path",
             ));
         }
+        let state_root = request.state_repo.as_deref().unwrap_or(repo);
+        let control_persist_secs = match request.control_persist {
+            Some(secs) => oms_runtime::targets::validate_control_persist(secs)?,
+            None => oms_runtime::ssh_adapter::resolve_registered_target_persist(
+                state_root,
+                &request.name,
+            )?,
+        };
         let mut result = rvalue::object([
             ("schema", rvalue::number(1)),
             ("target", rvalue::string(&request.name)),
@@ -2677,35 +2706,102 @@ impl RuntimeServices<'_> {
             &branch,
             &seconds.to_string(),
         ];
-        let mut argv: Vec<OsString> = vec![self.ssh.clone()];
-        argv.extend(
-            [
-                "-a",
-                "-o",
-                "ClearAllForwardings=yes",
-                "-o",
-                "BatchMode=yes",
-                "--",
-            ]
-            .iter()
-            .map(OsString::from),
-        );
-        argv.push(request.ssh_alias.clone().into());
-        argv.extend(["sh", "-s", "--"].iter().map(OsString::from));
-        argv.extend(values.iter().map(|v| OsString::from(shell_quote(v))));
-        let mut spec = ChildSpec::new(argv, request.timeout, GIT_LIMIT);
-        spec.stdin = REMOTE_SCRIPT.as_bytes().to_vec();
-        let remote = match run_child(self.scope, spec, self.cancel()) {
-            Ok(out) => out,
-            Err(e) if e.starts_with(LAUNCH_FAILED) => {
-                result.set("reason", rvalue::string("no-network"))?;
-                return Ok(result);
-            }
-            Err(e) => return Err(plan_error(e)),
+        let control = oms_runtime::ssh_adapter::ssh_control_path(&request.ssh_alias, None)?;
+        let deadline = Instant::now() + request.timeout;
+        let master_req = oms_runtime::ssh_adapter::SshMasterRequest {
+            ssh_program: &self.ssh,
+            cwd: repo,
+            target_label: Some(&request.name),
+            host: &request.ssh_alias,
+            port: None,
+            action: if request.sync {
+                "target-sync"
+            } else {
+                "target-status"
+            },
+            control_path: &control,
+            control_persist_secs,
+            deadline,
+            interrupted: self.cancel(),
+            clock: self.ssh_clock(),
         };
-        if remote.timed_out {
-            return timed_out(&mut result);
-        }
+        let remote = 'attempt: {
+            for attempt in 0..2 {
+                match oms_runtime::ssh_adapter::ensure_ssh_control_master(&master_req).map_err(
+                    |mut e| {
+                        e.message =
+                            oms_runtime::ssh_adapter::redact_control_path(&e.message, &control);
+                        e
+                    },
+                )? {
+                    oms_runtime::ssh_adapter::SshMasterOutcome::Ready { .. } => {}
+                    oms_runtime::ssh_adapter::SshMasterOutcome::LaunchFailed { .. } => {
+                        result.set("reason", rvalue::string("no-network"))?;
+                        return Ok(result);
+                    }
+                    oms_runtime::ssh_adapter::SshMasterOutcome::TimedOut => {
+                        return timed_out(&mut result);
+                    }
+                    oms_runtime::ssh_adapter::SshMasterOutcome::ConnectFailed {
+                        stderr, ..
+                    } => {
+                        result.set("reason", rvalue::string(network_reason(&stderr)))?;
+                        return Ok(result);
+                    }
+                }
+                let mut argv = oms_runtime::ssh_adapter::ssh_argv_with_mode(
+                    &self.ssh,
+                    &request.ssh_alias,
+                    None,
+                    &control,
+                    control_persist_secs,
+                    oms_runtime::ssh_adapter::SshControlMode::MultiplexOnly,
+                )
+                .map_err(|mut e| {
+                    e.message = oms_runtime::ssh_adapter::redact_control_path(&e.message, &control);
+                    e
+                })?;
+                argv.extend(["sh", "-s", "--"].iter().map(OsString::from));
+                argv.extend(values.iter().map(|v| OsString::from(shell_quote(v))));
+                let remaining_wall = deadline.saturating_duration_since(Instant::now());
+                if remaining_wall.is_zero() {
+                    return timed_out(&mut result);
+                }
+                let mut spec = ChildSpec::new(argv, remaining_wall, GIT_LIMIT);
+                spec.stdin = REMOTE_SCRIPT.as_bytes().to_vec();
+                let remote = match self.child_raw(spec) {
+                    Ok(out) => out,
+                    Err(e) if e.starts_with(LAUNCH_FAILED) => {
+                        result.set("reason", rvalue::string("no-network"))?;
+                        return Ok(result);
+                    }
+                    Err(e) => {
+                        return Err(plan_error(oms_runtime::ssh_adapter::redact_control_path(
+                            &e, &control,
+                        )));
+                    }
+                };
+                if remote.timed_out {
+                    return timed_out(&mut result);
+                }
+                if oms_runtime::ssh_adapter::is_control_socket_fallback_failure(
+                    remote.code,
+                    &remote.stdout,
+                    &remote.stderr,
+                    &control,
+                ) {
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(oms_command_plan::Error {
+                        code: 75,
+                        message: oms_runtime::ssh_adapter::SHARED_SSH_CLOSED_BEFORE_COMMAND.into(),
+                    });
+                }
+                break 'attempt remote;
+            }
+            unreachable!()
+        };
         let text = String::from_utf8_lossy(&remote.stdout).into_owned();
         let Some(
             [
@@ -3863,6 +3959,35 @@ mod runtime_tests {
             dir.git(&["commit", "-q", "--allow-empty", "-m", "init"]);
             dir
         }
+        fn short_runtime() -> Self {
+            let pid = std::process::id();
+            for raw_base in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+                let Ok(base) = std::fs::canonicalize(&raw_base) else {
+                    continue;
+                };
+                for _ in 0..1000 {
+                    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+                    let cand = base.join(format!("oms-rt-{pid}-{n}"));
+                    let Some(text) = cand.to_str() else {
+                        break;
+                    };
+                    if text.len() > 48
+                        || !text
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"/_.-".contains(&b))
+                    {
+                        break;
+                    }
+                    use std::os::unix::fs::DirBuilderExt;
+                    match std::fs::DirBuilder::new().mode(0o700).create(&cand) {
+                        Ok(()) => return Self(cand),
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                        Err(_) => break,
+                    }
+                }
+            }
+            panic!("cannot allocate short 0700 runtime directory");
+        }
     }
     impl Drop for Dir {
         fn drop(&mut self) {
@@ -3904,7 +4029,7 @@ mod runtime_tests {
         if std::env::var_os("OMS_APPTAINER_TEST_CHILD").as_deref() == Some(OsStr::new(name)) {
             return false;
         }
-        let session = Dir::new();
+        let session = Dir::short_runtime();
         let bus = if needs_session {
             match std::os::unix::net::UnixListener::bind(session.path().join("bus")) {
                 Ok(bus) => Some(bus),
@@ -4999,6 +5124,8 @@ exit 92
             name: "box".into(),
             ssh_alias: "alias".into(),
             workdir: "work/tree".into(),
+            control_persist: None,
+            state_repo: None,
             sync,
             sha: sha.map(str::to_owned),
             timeout: Duration::from_secs(secs),
@@ -5031,6 +5158,25 @@ exit 92
         assert!(
             malformed.is_err(),
             "a short sha is refused before any fetch"
+        );
+        for bad_persist in [0u64, 59, 14401] {
+            let mut bad = request(false, None, 10);
+            bad.control_persist = Some(bad_persist);
+            assert!(
+                rt.target_transport(repo.path(), &bad).is_err(),
+                "invalid control_persist {bad_persist} must refuse before network"
+            );
+        }
+        std::fs::create_dir_all(repo.path().join(".oms/runtime")).unwrap();
+        std::fs::write(
+            repo.path().join(".oms/runtime/targets.json"),
+            br#"{"schema":1,"targets":{"box":{"ssh_alias":"alias","workdir":"~/work/tree","control_persist":30}}}"#,
+        )
+        .unwrap();
+        assert!(
+            rt.target_transport(repo.path(), &request(false, None, 10))
+                .is_err(),
+            "invalid persisted control_persist must refuse before network"
         );
     }
 
@@ -5497,10 +5643,216 @@ exit 92
         assert!(rt.plan_status(repo.path(), repo.path(), b"stale").is_err());
     }
 
+    struct ServicesFakeMasterRig {
+        dir: PathBuf,
+    }
+    impl ServicesFakeMasterRig {
+        fn new(dir: PathBuf) -> Self {
+            std::fs::create_dir_all(&dir).unwrap();
+            Self { dir }
+        }
+        fn shell_preamble(&self) -> String {
+            let exe = std::env::current_exe().unwrap();
+            format!(
+                concat!(
+                    "ctrl=''\n",
+                    "is_master=0\n",
+                    "saw_mux_no=0\n",
+                    "saw_proxy_false=0\n",
+                    "for arg in \"$@\"; do\n",
+                    "  [ \"$arg\" = \"--\" ] && break\n",
+                    "  case \"$arg\" in\n",
+                    "    ControlPath=*) ctrl=${{arg#ControlPath=}} ;;\n",
+                    "    ControlMaster=no) saw_mux_no=1 ;;\n",
+                    "    ProxyCommand=false) saw_proxy_false=1 ;;\n",
+                    "    -fN) is_master=1 ;;\n",
+                    "  esac\n",
+                    "done\n",
+                    "oms_start_services_master() {{\n",
+                    "  OMS_TEST_SVC_MASTER_ACTION=spawn \\\n",
+                    "  OMS_TEST_SVC_MASTER_SOCK=\"$ctrl\" \\\n",
+                    "  OMS_TEST_SVC_MASTER_DIR='{dir}' \\\n",
+                    "  exec '{exe}' --exact services_runtime::runtime_tests::fake_ssh_master_helper --nocapture\n",
+                    "}}\n",
+                ),
+                dir = self.dir.display(),
+                exe = exe.display(),
+            )
+        }
+        fn master_starts(&self) -> usize {
+            std::fs::read_to_string(self.dir.join("master_starts.log"))
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        }
+        fn stop_all(&self) {
+            let stop_file = self.dir.join("stop");
+            let tsv = self.dir.join("masters.tsv");
+            let _ = std::fs::write(&stop_file, b"1");
+            if let Ok(raw) = std::fs::read_to_string(&tsv) {
+                for line in raw.lines() {
+                    let Some((pid_str, sock)) = line.split_once('\t') else {
+                        continue;
+                    };
+                    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(sock) {
+                        let mut ack = Vec::new();
+                        let _ = stream.read_to_end(&mut ack);
+                    }
+                    let _ = std::fs::remove_file(sock);
+                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                        let _ = nix::sys::signal::kill(
+                            nix::unistd::Pid::from_raw(pid),
+                            nix::sys::signal::Signal::SIGKILL,
+                        );
+                    }
+                }
+                let _ = std::fs::remove_file(&tsv);
+            }
+            let _ = std::fs::remove_file(&stop_file);
+        }
+    }
+    impl Drop for ServicesFakeMasterRig {
+        fn drop(&mut self) {
+            self.stop_all();
+        }
+    }
+
+    #[test]
+    fn fake_ssh_master_helper() {
+        use std::io::Write;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let Some(action) = std::env::var_os("OMS_TEST_SVC_MASTER_ACTION") else {
+            return;
+        };
+        let sock = PathBuf::from(std::env::var_os("OMS_TEST_SVC_MASTER_SOCK").unwrap());
+        let dir = PathBuf::from(std::env::var_os("OMS_TEST_SVC_MASTER_DIR").unwrap());
+        if action == "spawn" {
+            use std::ffi::OsStr;
+            use std::os::unix::fs::DirBuilderExt;
+            let ready_dir = PathBuf::from(format!("/tmp/oms-tms-{}", std::process::id()));
+            let _ = std::fs::DirBuilder::new().mode(0o700).create(&ready_dir);
+            let ready_sock = ready_dir.join("r.s");
+            let _ = std::fs::remove_file(&ready_sock);
+            let ready_listener = std::os::unix::net::UnixListener::bind(&ready_sock).unwrap();
+            let exe = std::env::current_exe().unwrap();
+            let status = Command::new("sh")
+                .args([
+                    OsStr::new("-c"),
+                    OsStr::new("\"$1\" --exact \"$2\" --nocapture </dev/null >/dev/null 2>&1 &"),
+                    OsStr::new("sh"),
+                    exe.as_os_str(),
+                    OsStr::new("services_runtime::runtime_tests::fake_ssh_master_helper"),
+                ])
+                .env("OMS_TEST_SVC_MASTER_ACTION", "serve")
+                .env("OMS_TEST_SVC_MASTER_SOCK", &sock)
+                .env("OMS_TEST_SVC_MASTER_DIR", &dir)
+                .env("OMS_TEST_SVC_MASTER_READY", &ready_sock)
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            let mut fds = [rustix::event::PollFd::new(
+                &ready_listener,
+                rustix::event::PollFlags::IN,
+            )];
+            let ts = rustix::event::Timespec {
+                tv_sec: 10,
+                tv_nsec: 0,
+            };
+            let mut ack = [0u8; 1];
+            let ok = status.success()
+                && matches!(rustix::event::poll(&mut fds, Some(&ts)), Ok(n) if n > 0)
+                && ready_listener
+                    .accept()
+                    .ok()
+                    .and_then(|(mut s, _)| s.read_exact(&mut ack).ok())
+                    .is_some()
+                && ack == *b"1";
+            let _ = std::fs::remove_dir_all(&ready_dir);
+            if !ok {
+                std::process::exit(1);
+            }
+            return;
+        }
+        if action == "serve" {
+            use std::os::unix::fs::MetadataExt;
+            let ready_sock = PathBuf::from(std::env::var_os("OMS_TEST_SVC_MASTER_READY").unwrap());
+            let listener = match std::os::unix::net::UnixListener::bind(&sock) {
+                Ok(l) => l,
+                Err(_) => {
+                    if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&ready_sock) {
+                        let _ = s.write_all(b"0");
+                    }
+                    std::process::exit(1);
+                }
+            };
+            let bound_id = std::fs::symlink_metadata(&sock)
+                .ok()
+                .map(|m| (m.dev(), m.ino()));
+            let cleanup_own_sock = |path: &Path| {
+                if let (Some(expected), Ok(cur)) = (bound_id, std::fs::symlink_metadata(path))
+                    && (cur.dev(), cur.ino()) == expected
+                {
+                    let _ = std::fs::remove_file(path);
+                }
+            };
+            let mut starts = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("master_starts.log"))
+                .unwrap();
+            let _ = writeln!(starts, "{}", sock.display());
+            let mut tsv = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("masters.tsv"))
+                .unwrap();
+            let _ = writeln!(tsv, "{}\t{}", std::process::id(), sock.display());
+            if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&ready_sock) {
+                let _ = s.write_all(b"1");
+            }
+            let stop_file = dir.join("stop");
+            loop {
+                let mut fds = [rustix::event::PollFd::new(
+                    &listener,
+                    rustix::event::PollFlags::IN,
+                )];
+                let ts = rustix::event::Timespec {
+                    tv_sec: 30,
+                    tv_nsec: 0,
+                };
+                match rustix::event::poll(&mut fds, Some(&ts)) {
+                    Ok(0) | Err(_) => {
+                        cleanup_own_sock(&sock);
+                        break;
+                    }
+                    Ok(_) => {
+                        if let Ok((mut stream, _)) = listener.accept()
+                            && stop_file.exists()
+                        {
+                            cleanup_own_sock(&sock);
+                            let _ = stream.write_all(b"bye");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn target_transport_status_runs_the_remote_script_through_ssh() {
+        if apptainer_test_process(
+            "services_runtime::runtime_tests::target_transport_status_runs_the_remote_script_through_ssh",
+            true,
+        ) {
+            return;
+        }
         let (flag, repo) = (Arc::new(AtomicBool::new(false)), Dir::repo());
         let home = Dir::new();
+        let _rig = ServicesFakeMasterRig::new(home.path().join("masters"));
         let origin = "https://example.invalid/owner/project.git";
         repo.git(&["remote", "add", "origin", origin]);
         let work = home.path().join("work/tree");
@@ -5509,13 +5861,16 @@ exit 92
         remote.git(&["init", "-q", "-b", "main"]);
         remote.git(&["commit", "-q", "--allow-empty", "-m", "init"]);
         remote.git(&["remote", "add", "origin", origin]);
-        // A fake ssh: drop the options and alias, then run the remote command
-        // locally with the fake remote HOME (stdin carries the script).
+        // A fake ssh: record argv, start stand-in master on -fN, and run the remote
+        // command locally over the socket with the fake remote HOME.
+        let args_log = home.path().join("ssh-args");
         let fake = home.path().join("fake-ssh");
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nshift\nHOME='{}' exec \"$@\"\n",
+                "#!/bin/sh\n{}printf '%s\\n' \"$@\" >> '{}'\nif [ \"$is_master\" = 1 ]; then oms_start_services_master; fi\n[ \"$saw_mux_no\" = 1 ] || exit 96\n[ -S \"$ctrl\" ] || exit 97\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nshift\nHOME='{}' exec \"$@\"\n",
+                _rig.shell_preamble(),
+                args_log.display(),
                 home.path().display()
             ),
         )
@@ -5526,10 +5881,20 @@ exit 92
         }
         let mut rt = services(&flag, repo.path());
         rt.ssh = fake.into_os_string();
+        let alias = format!(
+            "alias-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
         let request = |workdir: &str| TargetRequest {
             name: "box".into(),
-            ssh_alias: "alias".into(),
+            ssh_alias: alias.clone(),
             workdir: workdir.into(),
+            control_persist: None,
+            state_repo: None,
             sync: false,
             sha: None,
             timeout: Duration::from_secs(30),
@@ -5539,6 +5904,34 @@ exit 92
             .target_transport(repo.path(), &request("work/tree"))
             .unwrap();
         assert!(ok.get("ok").truth(), "{ok:?}");
+        assert!(ok.opt("control_path").is_none(), "{ok:?}");
+        let status_ctrl = oms_runtime::ssh_adapter::ssh_control_path(&alias, None).unwrap();
+        assert_eq!(
+            oms_runtime::ssh_adapter::ssh_state_dir(&status_ctrl).unwrap(),
+            PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("oms-ssh-state")
+        );
+        let recorded = std::fs::read_to_string(&args_log).unwrap();
+        let recorded_lines: Vec<&str> = recorded.lines().collect();
+        assert!(recorded_lines.contains(&"-a"), "{recorded}");
+        assert!(recorded_lines.contains(&"-fN"), "{recorded}");
+        for expected_opt in [
+            "ClearAllForwardings=yes",
+            "ForwardAgent=no",
+            "BatchMode=yes",
+            "ConnectTimeout=10",
+            "ServerAliveInterval=30",
+            "ServerAliveCountMax=3",
+            "ControlMaster=yes",
+            "ControlMaster=no",
+            "ProxyCommand=false",
+            "ControlPath=",
+            "ControlPersist=1800",
+        ] {
+            assert!(
+                recorded.contains(expected_opt),
+                "missing {expected_opt} in {recorded}"
+            );
+        }
         assert!(matches!(ok.get("reason"), Value::Null));
         assert_eq!(
             (ok.text("head"), ok.text("branch")),
@@ -5573,5 +5966,557 @@ exit 92
             (down.get("ok").truth(), down.text("reason")),
             (false, "no-network")
         );
+    }
+
+    #[test]
+    fn target_transport_enforces_persist_backoff_hourly_cap_and_interactive_auth() {
+        if apptainer_test_process(
+            "services_runtime::runtime_tests::target_transport_enforces_persist_backoff_hourly_cap_and_interactive_auth",
+            true,
+        ) {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::AtomicU64;
+
+        struct FakeSshClock {
+            now_ms: AtomicU64,
+            jitter: AtomicU64,
+        }
+        impl oms_runtime::ssh_adapter::SshClock for FakeSshClock {
+            fn now_ms(&self) -> u64 {
+                self.now_ms.load(Ordering::SeqCst)
+            }
+            fn jitter_permille(&self, _consecutive_failures: u32) -> u64 {
+                self.jitter.load(Ordering::SeqCst)
+            }
+        }
+
+        let (flag, repo) = (Arc::new(AtomicBool::new(false)), Dir::repo());
+        let hub = Dir::repo();
+        let home = Dir::new();
+        let origin = "https://example.invalid/owner/project.git";
+        repo.git(&["remote", "add", "origin", origin]);
+        let work = home.path().join("work/tree");
+        std::fs::create_dir_all(&work).unwrap();
+        let remote = Dir(work.clone());
+        remote.git(&["init", "-q", "-b", "main"]);
+        remote.git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        remote.git(&["remote", "add", "origin", origin]);
+
+        let args_log = home.path().join("ssh-args");
+        let mode_file = home.path().join("ssh-mode");
+        let calls_log = home.path().join("ssh-calls");
+        let rig = ServicesFakeMasterRig::new(home.path().join("masters"));
+        let fake = home.path().join("fake-ssh");
+        let script = format!(
+            concat!(
+                "#!/bin/sh\n",
+                "{preamble}",
+                "printf '%s\\n' \"$@\" > '{args}'\n",
+                "printf '1\\n' >> '{calls}'\n",
+                "mode=$(cat '{mode}' 2>/dev/null || printf 'ok')\n",
+                "if [ \"$is_master\" = 1 ]; then\n",
+                "  case \"$mode\" in\n",
+                "    otp)\n",
+                "      printf 'Permission denied (publickey,keyboard-interactive).\\n' >&2\n",
+                "      exit 255\n",
+                "      ;;\n",
+                "    refused)\n",
+                "      printf 'ssh: connect to host target-svc-alias port 22: Connection refused\\n' >&2\n",
+                "      exit 255\n",
+                "      ;;\n",
+                "    pubkey)\n",
+                "      printf 'Permission denied (publickey).\\n' >&2\n",
+                "      exit 255\n",
+                "      ;;\n",
+                "  esac\n",
+                "  oms_start_services_master\n",
+                "fi\n",
+                "[ \"$saw_mux_no\" = 1 ] || exit 96\n",
+                "[ -S \"$ctrl\" ] || exit 97\n",
+                "case \"$mode\" in\n",
+                "  remote255)\n",
+                "    printf 'remote script crashed\\n' >&2\n",
+                "    exit 255\n",
+                "    ;;\n",
+                "esac\n",
+                "while [ \"$1\" != -- ]; do shift; done\n",
+                "shift\nshift\n",
+                "HOME='{home}' exec \"$@\"\n",
+            ),
+            preamble = rig.shell_preamble(),
+            args = args_log.display(),
+            calls = calls_log.display(),
+            mode = mode_file.display(),
+            home = home.path().display(),
+        );
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let clock = Arc::new(FakeSshClock {
+            now_ms: AtomicU64::new(1_750_000_000_000),
+            jitter: AtomicU64::new(500),
+        });
+        let mut rt = services(&flag, repo.path());
+        rt.ssh = fake.into_os_string();
+        rt.ssh_clock = Some(clock.clone());
+
+        // 1. Existing target record in hub runtime state without `control_persist` loads,
+        //    retains approval, and defaults to ControlPersist=1800; custom `control_persist`
+        //    updates ControlPersist without changing the approval fingerprint.
+        let alias = format!(
+            "svc-alias-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let identity = rvalue::object([
+            ("ssh_alias", rvalue::string(&alias)),
+            ("workdir", rvalue::string("~/work/tree")),
+            ("scheduler", rvalue::string("none")),
+            ("scratch_root", rvalue::string("")),
+        ]);
+        let fp = oms_runtime::value::sha(oms_runtime::value::canonical(&identity).unwrap());
+        let mut target_row = identity;
+        target_row
+            .set("execution_approved", rvalue::b(true))
+            .unwrap();
+        target_row
+            .set("approved_fingerprint", rvalue::string(&fp))
+            .unwrap();
+        assert!(oms_runtime::targets::approved(&target_row).unwrap());
+
+        std::fs::create_dir_all(hub.path().join(".oms/runtime")).unwrap();
+        let write_hub_targets = |row: &Value| {
+            let broken = rvalue::object([
+                ("ssh_alias", rvalue::string("broken-other")),
+                ("workdir", rvalue::string("/bad/..")),
+                ("control_persist", rvalue::number(5)),
+            ]);
+            let reg = rvalue::object([
+                ("schema", rvalue::number(1)),
+                (
+                    "targets",
+                    rvalue::object([("cluster", row.clone()), ("broken", broken)]),
+                ),
+            ]);
+            std::fs::write(
+                hub.path().join(".oms/runtime/targets.json"),
+                oms_runtime::value::canonical(&reg).unwrap(),
+            )
+            .unwrap();
+        };
+        write_hub_targets(&target_row);
+
+        let req = TargetRequest {
+            name: "cluster".into(),
+            ssh_alias: alias.clone(),
+            workdir: "work/tree".into(),
+            control_persist: None,
+            state_repo: Some(hub.path().to_path_buf()),
+            sync: false,
+            sha: None,
+            timeout: Duration::from_secs(30),
+        };
+        let first_ok = rt.target_transport(repo.path(), &req).unwrap();
+        assert!(first_ok.get("ok").truth());
+        assert!(
+            std::fs::read_to_string(&args_log)
+                .unwrap()
+                .contains("ControlPersist=1800")
+        );
+        assert!(
+            !hub.path()
+                .join(".oms/runtime/ssh-connections.json")
+                .exists()
+                && !repo
+                    .path()
+                    .join(".oms/runtime/ssh-connections.json")
+                    .exists(),
+            "reconnect limits must live in host-private state, not inside a repository"
+        );
+        let ctrl_str = oms_runtime::ssh_adapter::ssh_control_path(&alias, None).unwrap();
+        let host_state_dir = oms_runtime::ssh_adapter::ssh_state_dir(&ctrl_str).unwrap();
+        assert_eq!(
+            host_state_dir,
+            PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("oms-ssh-state")
+        );
+        assert!(
+            host_state_dir
+                .join(oms_runtime::ssh_adapter::RECONNECT_STATE_FILE)
+                .is_file()
+        );
+
+        rig.stop_all();
+        target_row
+            .set("control_persist", rvalue::number(3600))
+            .unwrap();
+        assert!(
+            oms_runtime::targets::approved(&target_row).unwrap(),
+            "approval fingerprint must not change when control_persist is set"
+        );
+        write_hub_targets(&target_row);
+        clock.now_ms.fetch_add(10_000, Ordering::SeqCst);
+        let second_ok = rt.target_transport(repo.path(), &req).unwrap();
+        assert!(second_ok.get("ok").truth());
+        assert!(
+            std::fs::read_to_string(&args_log)
+                .unwrap()
+                .contains("ControlPersist=3600")
+        );
+
+        // 2. Interactive-auth failure fails fast with the specific unsupported message,
+        //    whereas non-interactive publickey failure keeps reason="auth".
+        rig.stop_all();
+        std::fs::write(&mode_file, "otp").unwrap();
+        clock.now_ms.fetch_add(10_000, Ordering::SeqCst);
+        let interactive_err = rt.target_transport(repo.path(), &req).unwrap_err();
+        assert_eq!(
+            interactive_err.message,
+            oms_runtime::ssh_adapter::INTERACTIVE_AUTH_UNSUPPORTED
+        );
+
+        // 3. Exponential backoff after failed connects (failure 1 => 5_500 ms, failure 2 => 11_000 ms
+        //    at jitter=500) and 12/hour new-connection cap in hub runtime state.
+        clock.now_ms.fetch_add(5_499, Ordering::SeqCst);
+        let in_backoff_1 = rt.target_transport(repo.path(), &req).unwrap_err();
+        assert_eq!(in_backoff_1.code, 75);
+        assert!(
+            in_backoff_1.message.contains("cluster")
+                && in_backoff_1.message.contains("retry at 20"),
+            "{}",
+            in_backoff_1.message
+        );
+        clock.now_ms.fetch_add(1, Ordering::SeqCst); // +5_500 ms -> failure 2 allowed
+        std::fs::write(&mode_file, "pubkey").unwrap();
+        let pubkey_res = rt.target_transport(repo.path(), &req).unwrap();
+        assert_eq!(pubkey_res.text("reason"), "auth");
+
+        clock.now_ms.fetch_add(10_999, Ordering::SeqCst);
+        let in_backoff_2 = rt.target_transport(repo.path(), &req).unwrap_err();
+        assert_eq!(in_backoff_2.code, 75);
+        assert!(
+            in_backoff_2.message.contains("cluster")
+                && in_backoff_2.message.contains("retry at 20"),
+            "{}",
+            in_backoff_2.message
+        );
+        clock.now_ms.fetch_add(1, Ordering::SeqCst); // +11_000 ms -> recovery resets failures
+        std::fs::write(&mode_file, "ok").unwrap();
+        assert!(
+            rt.target_transport(repo.path(), &req)
+                .unwrap()
+                .get("ok")
+                .truth()
+        );
+        rig.stop_all();
+
+        // Reset window and open 12 new connections within one hour.
+        clock.now_ms.fetch_add(
+            oms_runtime::ssh_adapter::RECONNECT_WINDOW_MS + 1_000,
+            Ordering::SeqCst,
+        );
+        for _ in 0..12 {
+            clock.now_ms.fetch_add(1_000, Ordering::SeqCst);
+            assert!(
+                rt.target_transport(repo.path(), &req)
+                    .unwrap()
+                    .get("ok")
+                    .truth()
+            );
+            rig.stop_all();
+        }
+        let capped = rt.target_transport(repo.path(), &req).unwrap_err();
+        assert_eq!(capped.code, 75);
+        assert!(
+            capped.message.contains("cluster") && capped.message.contains("retry at 20"),
+            "{}",
+            capped.message
+        );
+
+        // Reusing an open control connection does not count toward the hourly cap,
+        // and a failing remote command over that reused connection leaves state unchanged.
+        let ctrl_path = PathBuf::from(&ctrl_str);
+        let _ = std::fs::remove_file(&ctrl_path);
+        let listener = std::os::unix::net::UnixListener::bind(&ctrl_path).unwrap();
+        let state_file = host_state_dir.join(oms_runtime::ssh_adapter::RECONNECT_STATE_FILE);
+        let state_before_reused = std::fs::read(&state_file).unwrap();
+        let reused = rt.target_transport(repo.path(), &req);
+        std::fs::write(&mode_file, "remote255").unwrap();
+        let reused_fail = rt.target_transport(repo.path(), &req).unwrap();
+        assert!(!reused_fail.get("ok").truth());
+        let state_after_reused_fail = std::fs::read(&state_file).unwrap();
+        drop(listener);
+        let _ = std::fs::remove_file(&ctrl_path);
+        assert!(reused.unwrap().get("ok").truth());
+        assert_eq!(
+            state_after_reused_fail, state_before_reused,
+            "reused connection with failing remote command must leave state unchanged"
+        );
+    }
+
+    #[test]
+    fn target_transport_uses_shared_master_start_and_isolates_command_errors() {
+        if apptainer_test_process(
+            "services_runtime::runtime_tests::target_transport_uses_shared_master_start_and_isolates_command_errors",
+            true,
+        ) {
+            return;
+        }
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        use std::sync::atomic::AtomicU64;
+
+        struct FakeClock(AtomicU64);
+        impl oms_runtime::ssh_adapter::SshClock for FakeClock {
+            fn now_ms(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+            fn jitter_permille(&self, _consecutive_failures: u32) -> u64 {
+                500
+            }
+        }
+
+        let (flag, repo) = (Arc::new(AtomicBool::new(false)), Dir::repo());
+        let home = Dir::new();
+        let rig = ServicesFakeMasterRig::new(home.path().join("masters"));
+        let origin = "https://example.invalid/owner/project.git";
+        repo.git(&["remote", "add", "origin", origin]);
+        let work = home.path().join("work/tree");
+        std::fs::create_dir_all(&work).unwrap();
+        let remote = Dir(work);
+        remote.git(&["init", "-q", "-b", "main"]);
+        remote.git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        remote.git(&["remote", "add", "origin", origin]);
+
+        let mode_file = home.path().join("ssh-mode");
+        let drop_mux_file = home.path().join("drop-mux");
+        let remote_runs_file = home.path().join("remote-runs");
+        let fake = home.path().join("fake-ssh");
+        std::fs::write(
+            &fake,
+            format!(
+                concat!(
+                    "#!/bin/sh\n",
+                    "{preamble}",
+                    "mode=$(cat '{mode}' 2>/dev/null || printf 'ok')\n",
+                    "if [ \"$is_master\" = 1 ]; then\n",
+                    "  [ \"$saw_proxy_false\" = 0 ] || exit 95\n",
+                    "  [ \"$mode\" = 'exit0_no_socket' ] && exit 0\n",
+                    "  if [ \"$mode\" = 'pubkey_pw' ]; then\n",
+                    "    printf 'Permission denied (publickey,pass",
+                    "word).\\n' >&2\n",
+                    "    exit 255\n",
+                    "  fi\n",
+                    "  oms_start_services_master\n",
+                    "fi\n",
+                    "[ \"$saw_mux_no\" = 1 ] || exit 96\n",
+                    "if [ -s '{drop_mux}' ]; then\n",
+                    "  sed '1d' '{drop_mux}' > '{drop_mux}.tmp' && mv '{drop_mux}.tmp' '{drop_mux}'\n",
+                    "  rm -f \"$ctrl\"\n",
+                    "fi\n",
+                    "if [ ! -S \"$ctrl\" ]; then\n",
+                    "  if [ \"$saw_proxy_false\" = 1 ]; then\n",
+                    "    printf 'Control socket connect(%s): No such file or directory\\r\\nConnection closed by UNKNOWN port 65535\\r\\n' \"$ctrl\" >&2\n",
+                    "    exit 255\n",
+                    "  fi\n",
+                    "  exit 98\n",
+                    "fi\n",
+                    "[ \"$saw_proxy_false\" = 1 ] || exit 98\n",
+                    "if [ \"$mode\" = 'cmd_pubkey_255' ]; then\n",
+                    "  printf 'Permission denied (publickey).\\n' >&2\n",
+                    "  exit 255\n",
+                    "fi\n",
+                    "printf '1\\n' >> '{runs}'\n",
+                    "while [ \"$1\" != -- ]; do shift; done\n",
+                    "shift\nshift\n",
+                    "HOME='{home}' exec \"$@\"\n",
+                ),
+                preamble = rig.shell_preamble(),
+                mode = mode_file.display(),
+                drop_mux = drop_mux_file.display(),
+                runs = remote_runs_file.display(),
+                home = home.path().display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let clock = Arc::new(FakeClock(AtomicU64::new(1_880_000_000_000)));
+        let mut rt = services(&flag, repo.path());
+        rt.ssh = fake.into_os_string();
+        rt.ssh_clock = Some(clock.clone());
+
+        let mk_req = |alias: &str| TargetRequest {
+            name: "cluster".into(),
+            ssh_alias: alias.into(),
+            workdir: "work/tree".into(),
+            control_persist: Some(1800),
+            state_repo: None,
+            sync: false,
+            sha: None,
+            timeout: Duration::from_secs(30),
+        };
+
+        // 1. Services path goes through ssh_adapter::ensure_ssh_control_master, cleans up a stale
+        //    socket, starts one master, and reuses it on the next call.
+        let alias = format!("svc-r4-{}", std::process::id());
+        let ctrl_str = oms_runtime::ssh_adapter::ssh_control_path(&alias, None).unwrap();
+        let ctrl_path = PathBuf::from(&ctrl_str);
+        let state_dir = oms_runtime::ssh_adapter::ssh_state_dir(&ctrl_str).unwrap();
+        let state_file = state_dir.join(oms_runtime::ssh_adapter::RECONNECT_STATE_FILE);
+        let log_file = state_dir.join(oms_runtime::ssh_adapter::PRIVATE_CONTROL_LOG_FILE);
+        {
+            let dead = std::os::unix::net::UnixListener::bind(&ctrl_path).unwrap();
+            drop(dead);
+        }
+        assert!(
+            std::fs::symlink_metadata(&ctrl_path)
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+        let starts_before = rig.master_starts();
+        assert!(
+            rt.target_transport(repo.path(), &mk_req(&alias))
+                .unwrap()
+                .get("ok")
+                .truth()
+        );
+        assert!(
+            rt.target_transport(repo.path(), &mk_req(&alias))
+                .unwrap()
+                .get("ok")
+                .truth()
+        );
+        assert_eq!(rig.master_starts(), starts_before + 1);
+        let alias_logs: Vec<serde_json::Value> = std::fs::read_to_string(&log_file)
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v.get("host").and_then(|h| h.as_str()) == Some(alias.as_str()))
+            .collect();
+        assert_eq!(alias_logs.len(), 2);
+
+        // 2. Remote command exit 255 with "Permission denied (publickey)" on stderr over the live
+        //    master records no backoff and no new timestamp.
+        clock.0.fetch_add(2_000, Ordering::SeqCst);
+        std::fs::write(&mode_file, "cmd_pubkey_255").unwrap();
+        let cmd_fail = rt.target_transport(repo.path(), &mk_req(&alias)).unwrap();
+        assert!(!cmd_fail.get("ok").truth());
+        let st: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        let key = format!("{alias}:22");
+        assert_eq!(
+            st["targets"][&key]["connect_timestamps_ms"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(st["targets"][&key]["consecutive_failures"], 0);
+        assert_eq!(st["targets"][&key]["backoff_until_ms"], 0);
+
+        // 3. Non-socket path at socket is refused, redacts control path, and starts nothing.
+        std::fs::write(&mode_file, "ok").unwrap();
+        let bad_alias = format!("svc-r4-file-{}", std::process::id());
+        let bad_ctrl_str = oms_runtime::ssh_adapter::ssh_control_path(&bad_alias, None).unwrap();
+        let bad_ctrl = PathBuf::from(&bad_ctrl_str);
+        std::fs::write(&bad_ctrl, b"not-a-socket").unwrap();
+        let starts_pre = rig.master_starts();
+        let refused = rt
+            .target_transport(repo.path(), &mk_req(&bad_alias))
+            .unwrap_err();
+        assert!(
+            refused.message.contains("non-socket")
+                && refused
+                    .message
+                    .contains(oms_runtime::ssh_adapter::CONTROL_SOCKET_PLACEHOLDER)
+                && !refused.message.contains(&bad_ctrl_str),
+            "{}",
+            refused.message
+        );
+        assert_eq!(rig.master_starts(), starts_pre);
+        std::fs::remove_file(&bad_ctrl).unwrap();
+
+        // 4. Master exits 0 without creating socket -> counted as connect failure with backoff.
+        std::fs::write(&mode_file, "exit0_no_socket").unwrap();
+        let nosock_alias = format!("svc-r4-nosock-{}", std::process::id());
+        let nosock_res = rt
+            .target_transport(repo.path(), &mk_req(&nosock_alias))
+            .unwrap();
+        assert!(!nosock_res.get("ok").truth());
+        assert_eq!(nosock_res.text("reason"), "no-network");
+        let st2: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        let ns_key = format!("{nosock_alias}:22");
+        assert_eq!(st2["targets"][&ns_key]["consecutive_failures"], 1);
+        assert_eq!(
+            st2["targets"][&ns_key]["backoff_until_ms"],
+            clock.0.load(Ordering::SeqCst) + 5_500
+        );
+
+        // 5. Permission denied (publickey,password) without keyboard-interactive or prompt line
+        //    reports reason="auth" in services target status (not interactive-auth error).
+        std::fs::write(&mode_file, "pubkey_pw").unwrap();
+        let pkpw_alias = format!("svc-r5-pkpw-{}", std::process::id());
+        let pkpw_res = rt
+            .target_transport(repo.path(), &mk_req(&pkpw_alias))
+            .unwrap();
+        assert!(!pkpw_res.get("ok").truth());
+        assert_eq!(pkpw_res.text("reason"), "auth");
+
+        // 6. Fallback simulation: one socket drop retries master start once and succeeds; two
+        //    socket drops fail with exit 75, no extra backoff, and never leak the control path.
+        std::fs::write(&mode_file, "ok").unwrap();
+        let retry_alias = format!("svc-r5-retry-{}", std::process::id());
+        std::fs::write(&drop_mux_file, "1\n").unwrap();
+        let runs_before = std::fs::read_to_string(&remote_runs_file)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        let starts_r5_1 = rig.master_starts();
+        let retry_ok = rt
+            .target_transport(repo.path(), &mk_req(&retry_alias))
+            .unwrap();
+        assert!(retry_ok.get("ok").truth(), "{retry_ok:?}");
+        assert_eq!(rig.master_starts(), starts_r5_1 + 2);
+        assert_eq!(
+            std::fs::read_to_string(&remote_runs_file)
+                .unwrap()
+                .lines()
+                .count(),
+            runs_before + 1
+        );
+
+        let fail2_alias = format!("svc-r5-fail2-{}", std::process::id());
+        let fail2_ctrl = oms_runtime::ssh_adapter::ssh_control_path(&fail2_alias, None).unwrap();
+        std::fs::write(&drop_mux_file, "1\n1\n").unwrap();
+        let runs_pre_f2 = std::fs::read_to_string(&remote_runs_file)
+            .unwrap()
+            .lines()
+            .count();
+        let fail2_err = rt
+            .target_transport(repo.path(), &mk_req(&fail2_alias))
+            .unwrap_err();
+        assert_eq!(fail2_err.code, 75);
+        assert_eq!(
+            fail2_err.message,
+            oms_runtime::ssh_adapter::SHARED_SSH_CLOSED_BEFORE_COMMAND
+        );
+        assert!(!fail2_err.message.contains(&fail2_ctrl));
+        assert_eq!(
+            std::fs::read_to_string(&remote_runs_file)
+                .unwrap()
+                .lines()
+                .count(),
+            runs_pre_f2
+        );
+        let st_f2: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        let f2_key = format!("{fail2_alias}:22");
+        assert_eq!(st_f2["targets"][&f2_key]["consecutive_failures"], 0);
+        assert_eq!(st_f2["targets"][&f2_key]["backoff_until_ms"], 0);
     }
 }

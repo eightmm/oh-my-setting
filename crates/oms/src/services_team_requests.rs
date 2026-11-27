@@ -1168,6 +1168,7 @@ impl CollabServices<'_> {
                 .into_bytes()
             },
             complete,
+            stalled: None,
             cleanup_complete: Some(done.cleanup_complete()),
             owned_cleanup: done.owned_cleanup().cloned(),
             elapsed: done.duration,

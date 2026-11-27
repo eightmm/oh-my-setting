@@ -378,28 +378,131 @@ pub(crate) fn directory(args: &Args, repo: &Path, kind: &str) -> Result<PathBuf>
     storage::relative(&path)?;
     Ok(path)
 }
-pub(crate) fn timeout(args: &Args, tool: &str) -> Result<u64> {
-    let fallback = if tool == "peer-ask" { 900 } else { 1200 };
+pub(crate) const MAX_WALL_SECS: u64 = 86_400;
+pub(crate) const DEFAULT_ASK_WALL_SECS: u64 = 900;
+pub(crate) const DEFAULT_WALL_SECS: u64 = 1_200;
+pub(crate) const DEFAULT_STALL_SECS: u64 = 1_200;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Timeouts {
+    pub wall: u64,
+    pub stall: Option<u64>,
+}
+impl From<u64> for Timeouts {
+    fn from(wall: u64) -> Self {
+        Self { wall, stall: None }
+    }
+}
+
+fn parse_duration(raw: &str, allow_zero: bool, label: &str) -> Result<u64> {
+    let (digits, scale) = if let Some(s) = raw.strip_suffix('m') {
+        (s, 60.0)
+    } else if let Some(s) = raw.strip_suffix('h') {
+        (s, 3600.0)
+    } else {
+        (raw.strip_suffix('s').unwrap_or(raw), 1.0)
+    };
+    let value = digits
+        .parse::<f64>()
+        .ok()
+        .filter(|v| {
+            v.is_finite()
+                && (if allow_zero { *v >= 0.0 } else { *v > 0.0 })
+                && *v * scale <= 31_536_000.0
+        })
+        .ok_or_else(|| {
+            Error::new(
+                2,
+                if allow_zero {
+                    format!("{label} must be 0 or a positive bounded duration")
+                } else {
+                    format!("{label} must be a positive bounded duration")
+                },
+            )
+        })?;
+    Ok((value * scale).ceil() as u64)
+}
+
+fn explicit_wall(args: &Args) -> Result<Option<u64>> {
     let raw = std::env::var("OMS_PEER_TIMEOUT").ok();
     let raw = if args.has("print-timeout") {
         Some(args.get("print-timeout").to_owned())
     } else {
         raw
     };
-    let Some(raw) = raw else { return Ok(fallback) };
-    let (digits, scale) = if let Some(s) = raw.strip_suffix('m') {
-        (s, 60.0)
-    } else if let Some(s) = raw.strip_suffix('h') {
-        (s, 3600.0)
+    raw.map(|raw| parse_duration(&raw, false, "timeout"))
+        .transpose()
+}
+
+fn configured_stall() -> Result<Option<u64>> {
+    match std::env::var("OMS_PEER_STALL") {
+        Ok(raw) => {
+            let secs = parse_duration(&raw, true, "stall timeout")?;
+            Ok((secs > 0).then_some(secs))
+        }
+        Err(_) => Ok(Some(DEFAULT_STALL_SECS)),
+    }
+}
+
+pub(crate) fn validate_timeouts(args: &Args) -> Result<()> {
+    if explicit_wall(args)?.is_none() {
+        configured_stall()?;
+    }
+    Ok(())
+}
+
+pub(crate) fn route_timeouts(
+    args: &Args,
+    tool: &str,
+    route: &providers::Route,
+) -> Result<Timeouts> {
+    route_timeouts_with(
+        args,
+        tool,
+        &route.provider,
+        std::env::var("OMS_PEER_TIMEOUT").ok().as_deref(),
+        std::env::var("OMS_PEER_STALL").ok().as_deref(),
+    )
+}
+
+fn route_timeouts_with(
+    args: &Args,
+    tool: &str,
+    provider: &str,
+    env_timeout: Option<&str>,
+    env_stall: Option<&str>,
+) -> Result<Timeouts> {
+    let raw_wall = if args.has("print-timeout") {
+        Some(args.get("print-timeout"))
     } else {
-        (raw.strip_suffix('s').unwrap_or(&raw), 1.0)
+        env_timeout
     };
-    let value = digits
-        .parse::<f64>()
-        .ok()
-        .filter(|v| v.is_finite() && *v > 0.0 && *v * scale <= 31_536_000.0)
-        .ok_or_else(|| Error::new(2, "timeout must be a positive bounded duration"))?;
-    Ok((value * scale).ceil() as u64)
+    if let Some(raw) = raw_wall {
+        return Ok(Timeouts {
+            wall: parse_duration(raw, false, "timeout")?,
+            stall: None,
+        });
+    }
+    let stall = match env_stall {
+        Some(raw) => {
+            let secs = parse_duration(raw, true, "stall timeout")?;
+            (secs > 0).then_some(secs)
+        }
+        None => Some(DEFAULT_STALL_SECS),
+    };
+    if providers::streams_output(provider) {
+        Ok(Timeouts {
+            wall: MAX_WALL_SECS,
+            stall,
+        })
+    } else {
+        let wall = if tool == "peer-ask" {
+            DEFAULT_ASK_WALL_SECS
+        } else {
+            DEFAULT_WALL_SECS
+        };
+        Ok(Timeouts { wall, stall: None })
+    }
 }
 pub(crate) const LARGE_DIFF_BYTES: usize = 16 * 1024;
 pub(crate) fn diff_budget() -> usize {
@@ -421,9 +524,15 @@ pub(crate) fn format_duration(secs: u64) -> String {
 pub(crate) fn rounded_secs(duration: std::time::Duration) -> u64 {
     duration.as_secs() + u64::from(duration.subsec_millis() >= 500)
 }
+pub(crate) fn stall_message(stall_secs: u64) -> String {
+    format!(
+        "no output for {}; the run was stopped",
+        format_duration(stall_secs)
+    )
+}
 pub(crate) fn timeout_message(timeout_secs: u64, diff_bytes: usize) -> String {
     let duration = format_duration(timeout_secs);
-    if diff_bytes >= LARGE_DIFF_BYTES {
+    if diff_bytes >= LARGE_DIFF_BYTES && timeout_secs < MAX_WALL_SECS {
         format!(
             "timed out after {duration} (diff is {diff_bytes} bytes; consider raising OMS_PEER_TIMEOUT)"
         )
@@ -777,6 +886,7 @@ pub(crate) struct Seat {
     pub round: usize,
     pub elapsed: std::time::Duration,
     pub timeout_secs: u64,
+    pub stalled_secs: Option<u64>,
     pub diff_bytes: usize,
     pub artifact_sha256: String,
     pub output_start: usize,
@@ -996,6 +1106,7 @@ fn call_routed(
     .map_err(publication_error("artifact write"))?;
     let diff_bytes = args.get("_review-diff-bytes").parse::<usize>().unwrap_or(0);
     if dry(args, tool) || args.has("export-only") {
+        let timeout_secs = route_timeouts(args, tool, &route).map_or(0, |t| t.wall);
         return Ok(Seat {
             target: target.clone(),
             route,
@@ -1014,7 +1125,8 @@ fn call_routed(
             output_start: 0,
             requested_model,
             elapsed: std::time::Duration::ZERO,
-            timeout_secs: timeout(args, tool).unwrap_or(0),
+            timeout_secs,
+            stalled_secs: None,
             diff_bytes,
         });
     }
@@ -1116,7 +1228,8 @@ fn call_routed(
         .1
         .to_string_lossy()
         .into_owned();
-    let timeout_secs = timeout(args, tool)?;
+    let timeouts = route_timeouts(args, tool, &route)?;
+    let timeout_secs = timeouts.wall;
     let call_started = std::time::Instant::now();
     let scope = (tool == "peer-ask"
         && round == 0
@@ -1157,7 +1270,7 @@ fn call_routed(
         body,
         workdir,
         false,
-        timeout_secs,
+        timeouts,
         repo,
         &usage_env,
         if scope.is_some() {
@@ -1175,22 +1288,27 @@ fn call_routed(
             stdout: Vec::new(),
             stderr: error.message.into_bytes(),
             complete: false,
+            stalled: None,
             cleanup_complete: None,
             owned_cleanup: None,
             elapsed: call_started.elapsed(),
         },
     };
+    let stalled_secs = result.stalled.map(rounded_secs);
     if let Some(id) = live_attempt {
         // Re-recorded because a capacity overflow can move the call to another account.
         let account = providers::panel_account(&route);
         let retry_transition = |state: &str| {
             let mut last_err = None;
             for attempt_idx in 0..3 {
-                let refs = if account.is_empty() {
+                let mut refs = if account.is_empty() {
                     obj([])
                 } else {
                     obj([("panel_account", account.clone().into())])
                 };
+                if stalled_secs.is_some() {
+                    refs.set("termination_reason", "stalled");
+                }
                 let transitioned = if args.has("team-requests") {
                     // Cleanup/terminal bookkeeping has an independent finite
                     // budget; cancellation never authorizes a new provider call.
@@ -1299,16 +1417,32 @@ fn call_routed(
     } else {
         "truncated".into()
     };
-    let timed_out = !result.complete && result.code == 124;
+    let timed_out = !result.complete && result.code == 124 && stalled_secs.is_none();
     let interrupted_seat = !result.complete && result.code == 130;
     let redact_stderr = |raw: &[u8]| {
         safety::redact(raw).unwrap_or_else(|_| b"[oms-redacted:scan-failed]\n".to_vec())
     };
     let mut diagnostics = Vec::new();
-    if timed_out {
-        diagnostics.extend_from_slice(
-            format!("error: {}\n", timeout_message(timeout_secs, diff_bytes)).as_bytes(),
-        );
+    if let Some(secs) = stalled_secs {
+        let message = stall_message(secs);
+        if tool != "peer-review" {
+            warnings.extend_from_slice(format!("{}: {message}\n", target.provider).as_bytes());
+        }
+        diagnostics.extend_from_slice(format!("error: {message}\n").as_bytes());
+        let redacted = redact_stderr(&result.stderr);
+        for line in String::from_utf8_lossy(&redacted).lines() {
+            if line.trim().is_empty() || is_interrupted_line(line) {
+                continue;
+            }
+            diagnostics.extend_from_slice(line.as_bytes());
+            diagnostics.push(b'\n');
+        }
+    } else if timed_out {
+        let message = timeout_message(timeout_secs, diff_bytes);
+        if tool != "peer-review" {
+            warnings.extend_from_slice(format!("{}: {message}\n", target.provider).as_bytes());
+        }
+        diagnostics.extend_from_slice(format!("error: {message}\n").as_bytes());
         // Strip bare interruption lines emitted when a timed-out child handles SIGTERM/SIGINT.
         let redacted = redact_stderr(&result.stderr);
         for line in String::from_utf8_lossy(&redacted).lines() {
@@ -1366,29 +1500,30 @@ fn call_routed(
     let artifact_sha256 = storage::hash(&bytes);
     storage::write(repo, &artifact, bytes, true, context.interrupted)
         .map_err(publication_error("artifact write"))?;
-    index(
-        repo,
-        &obj([
-            ("schema", 1usize.into()),
-            ("event_id", crate::id("evt_")?.into()),
-            ("ts", now().into()),
-            ("artifact_id", crate::id("art_")?.into()),
-            ("kind", tool.trim_start_matches("peer-").into()),
-            ("run", run.into()),
-            ("operation_id", operation_id.into()),
-            ("provider", target.provider.clone().into()),
-            ("model", route.model.clone().into()),
-            (
-                "model_family",
-                providers::family(&route.provider, &route.model).into(),
-            ),
-            ("artifact", artifact.to_string_lossy().into_owned().into()),
-            ("exit", V::Num(result.code.to_string())),
-            ("quality", quality.clone().into()),
-        ]),
-        context,
-    )
-    .map_err(publication_error("artifact index write"))?;
+    let mut index_row = obj([
+        ("schema", 1usize.into()),
+        ("event_id", crate::id("evt_")?.into()),
+        ("ts", now().into()),
+        ("artifact_id", crate::id("art_")?.into()),
+        ("kind", tool.trim_start_matches("peer-").into()),
+        ("run", run.into()),
+        ("operation_id", operation_id.into()),
+        ("provider", target.provider.clone().into()),
+        ("model", route.model.clone().into()),
+        (
+            "model_family",
+            providers::family(&route.provider, &route.model).into(),
+        ),
+        ("artifact", artifact.to_string_lossy().into_owned().into()),
+        ("exit", V::Num(result.code.to_string())),
+        ("quality", quality.clone().into()),
+    ]);
+    if stalled_secs.is_some() {
+        index_row.set("state", "stalled");
+    } else if timed_out {
+        index_row.set("state", "timed_out");
+    }
+    index(repo, &index_row, context).map_err(publication_error("artifact index write"))?;
     let (shown_answer, redacted_lines, answer_withheld) =
         match safety::redact_outbound(&result.stdout) {
             Ok((redacted, count)) => (
@@ -1460,6 +1595,7 @@ fn call_routed(
         requested_model,
         elapsed: result.elapsed,
         timeout_secs,
+        stalled_secs,
         diff_bytes,
     })
 }
@@ -2043,10 +2179,22 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     let complete = seats
         .iter()
         .all(|s| s.target.optional || s.complete && s.code == 0 && s.quality == "ok");
+    let failed =
+        usable == 0 || (args.has("require-complete") || args.has("deliberation")) && !complete;
+    let deadline_stop = failed
+        && seats
+            .iter()
+            .filter(|s| !s.target.optional && !(s.complete && s.code == 0 && s.quality == "ok"))
+            .all(|s| !s.complete && s.code == 124)
+        && seats
+            .iter()
+            .any(|s| !s.target.optional && !s.complete && s.code == 124);
     Ok((
-        i32::from(
-            usable == 0 || (args.has("require-complete") || args.has("deliberation")) && !complete,
-        ),
+        if deadline_stop {
+            124
+        } else {
+            i32::from(failed)
+        },
         output.into_bytes(),
         warnings,
     ))
@@ -2074,8 +2222,86 @@ fn agree(seats: &[Seat]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::mcp_operation_id;
+    use super::{
+        DEFAULT_ASK_WALL_SECS, DEFAULT_STALL_SECS, DEFAULT_WALL_SECS, MAX_WALL_SECS, Timeouts,
+        mcp_operation_id, parse, route_timeouts_with,
+    };
+    use std::ffi::OsString;
     use std::path::Path;
+
+    #[test]
+    fn route_timeouts_distinguish_streaming_and_non_streaming_providers() {
+        let empty = parse(&[]).unwrap();
+        for streaming in ["codex", "claude", "pi"] {
+            assert_eq!(
+                route_timeouts_with(&empty, "peer-ask", streaming, None, None).unwrap(),
+                Timeouts {
+                    wall: MAX_WALL_SECS,
+                    stall: Some(DEFAULT_STALL_SECS),
+                }
+            );
+            assert_eq!(
+                route_timeouts_with(&empty, "peer-review", streaming, None, Some("45s")).unwrap(),
+                Timeouts {
+                    wall: MAX_WALL_SECS,
+                    stall: Some(45),
+                }
+            );
+            assert_eq!(
+                route_timeouts_with(&empty, "peer-delegate", streaming, None, Some("0")).unwrap(),
+                Timeouts {
+                    wall: MAX_WALL_SECS,
+                    stall: None,
+                }
+            );
+        }
+        for non_streaming in ["antigravity", "aider", "cursor", "fixture"] {
+            assert_eq!(
+                route_timeouts_with(&empty, "peer-ask", non_streaming, None, Some("30s")).unwrap(),
+                Timeouts {
+                    wall: DEFAULT_ASK_WALL_SECS,
+                    stall: None,
+                }
+            );
+            for tool in [
+                "peer-review",
+                "peer-delegate",
+                "agent-call",
+                "advise",
+                "consult",
+            ] {
+                assert_eq!(
+                    route_timeouts_with(&empty, tool, non_streaming, None, Some("30s")).unwrap(),
+                    Timeouts {
+                        wall: DEFAULT_WALL_SECS,
+                        stall: None,
+                    }
+                );
+            }
+            assert!(
+                route_timeouts_with(&empty, "peer-ask", non_streaming, None, Some("bad")).is_err()
+            );
+        }
+        let with_flag = parse(&[OsString::from("--print-timeout"), OsString::from("5m")]).unwrap();
+        for provider in ["codex", "antigravity"] {
+            assert_eq!(
+                route_timeouts_with(&empty, "peer-ask", provider, Some("10m"), Some("30s"))
+                    .unwrap(),
+                Timeouts {
+                    wall: 600,
+                    stall: None,
+                }
+            );
+            assert_eq!(
+                route_timeouts_with(&with_flag, "peer-ask", provider, Some("10m"), Some("30s"))
+                    .unwrap(),
+                Timeouts {
+                    wall: 300,
+                    stall: None,
+                }
+            );
+        }
+    }
 
     #[test]
     fn mcp_operation_id_links_downstream_consultation_artifact_dirs() {

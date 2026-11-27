@@ -32,10 +32,21 @@ Options:
   --no-ml-context      Disable --ml-context (compatibility).
   --export-only        Write the provider prompt artifact and do not call CLI.
                        Import the answer later with `oms artifact-index import`.
-  --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
+  --print-timeout DUR  Pin a fixed wall-clock timeout (also passed to agy print
+                       mode). Unset default: streaming providers (codex, claude,
+                       pi) use a 20m stall check + 24h cap; non-streaming
+                       providers (agy print mode, aider, others) use a 20m wall.
   --dry-run            Write prompt artifact without calling the CLI.
   -h, --help           Show help.
 
 Environment:
   OH_MY_SETTING_CALL_DRY_RUN=1    Same as --dry-run.
-  OMS_PEER_TIMEOUT         Provider wall-clock timeout (default: 20m).
+  OMS_PEER_TIMEOUT         Pin a fixed provider wall-clock timeout. Unset by
+                           default: streaming providers (codex, claude, pi) use
+                           OMS_PEER_STALL + a 24h cap; non-streaming providers
+                           (agy print mode, aider, others) use a 20m wall.
+  OMS_PEER_STALL           Stop a streaming provider (codex, claude, pi) after
+                           DUR with no stdout/stderr output (default: 20m; 0
+                           disables). Also covers one silent turn or long silent
+                           tool call; raise OMS_PEER_STALL for quiet steps or
+                           set OMS_PEER_TIMEOUT to pin a fixed wall instead.

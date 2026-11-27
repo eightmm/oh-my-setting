@@ -132,128 +132,185 @@ pub(super) fn collect(
     file: &mut impl Write,
 ) -> Result<(u64, String)> {
     resumable::check_request(req)?;
-    let mut command = build_ssh(req.host, req.port, req.control);
-    command.arg(format!("sh -lc {}", quote(script)));
-    let argv = std::iter::once(command.get_program())
-        .chain(command.get_args())
-        .map(OsStr::to_os_string)
-        .collect();
-    let mut request = Request::new(argv);
-    request.cwd = Some(req.cwd.into());
-    request.streams = Streams::Separate;
-    request.deadline = Some(req.deadline);
-    request.terminate_grace = Duration::from_millis(250);
-    // The disk sink receives every byte via bounded events. Keeping a second
-    // in-memory artifact capture would defeat streaming at the 512 MiB limit.
-    request.capture = CaptureOptions {
-        max_bytes: 0,
-        on_limit: LimitAction::Drain,
-        lines: None,
-    };
-    request.stderr_capture = Some(CaptureOptions {
-        max_bytes: MAX_STDERR_BYTES as usize,
-        on_limit: LimitAction::Drain,
-        lines: None,
-    });
-    request.duplex = Some(DuplexOptions {
-        max_frame_bytes: 1,
-        max_input_bytes: 1,
-        max_input_frames: 1,
-        max_output_bytes: 64 * 1024,
-        max_output_events: 8,
-        max_read_bytes_per_turn: 64 * 1024,
-        max_write_bytes_per_turn: 1,
-    });
-    let mut reactor = Reactor::new();
-    let job = reactor.start(request).map_err(error)?;
-    reactor.close_input(job).map_err(error)?;
-    let mut total = 0;
-    let mut hasher = Sha256::new();
-    let mut failure = None;
-    let mut stopping = None;
-    loop {
-        while let Some(event) = reactor.receive(job).map_err(error)? {
-            if failure.is_none()
-                && let Err(e) = consume(&event, file, &mut total, &mut hasher, req.max_bytes)
-            {
-                failure = Some(e);
-                reactor
-                    .stop(job, StopReason::ConsumerCutoff)
-                    .map_err(error)?;
-                stopping.get_or_insert_with(Instant::now);
+    let ssh_bin = ssh_program();
+    'attempt: for attempt in 0..2 {
+        match ensure_ssh_control_master(&SshMasterRequest {
+            ssh_program: &ssh_bin,
+            cwd: req.cwd,
+            target_label: req.target,
+            host: req.host,
+            port: req.port,
+            action: "collect",
+            control_path: req.control,
+            control_persist_secs: req.control_persist,
+            deadline: req.deadline,
+            interrupted: req.interrupted,
+            clock: req.clock,
+        }) {
+            Ok(SshMasterOutcome::Ready { .. }) => {}
+            Ok(SshMasterOutcome::ConnectFailed { code, stderr, .. }) => {
+                let redacted = redact_control_path(&String::from_utf8_lossy(&stderr), req.control);
+                return Err(status(
+                    code,
+                    format!("remote collect failed (exit {code}): {}", redacted.trim()),
+                ));
             }
+            Ok(SshMasterOutcome::LaunchFailed { message }) => {
+                return Err(error(redact_control_path(&message, req.control)));
+            }
+            Ok(SshMasterOutcome::TimedOut) => {
+                return Err(status(
+                    124,
+                    "collection request timed out; destination unchanged",
+                ));
+            }
+            Err(e) if e.code == 130 => {
+                return Err(status(130, "collection interrupted; destination unchanged"));
+            }
+            Err(e) => return Err(redact_error_control_path(e, req.control)),
         }
-        if req.interrupted.load(Ordering::Relaxed) {
-            reactor.stop(job, StopReason::Cancelled).map_err(error)?;
-            stopping.get_or_insert_with(Instant::now);
-        }
-        match reactor
-            .poll(job, Duration::from_millis(10))
-            .map_err(error)?
-        {
-            Progress::Pending(snapshot) => {
-                if snapshot.stop.is_some() {
+        let mut command = build_ssh(
+            &ssh_bin,
+            req.host,
+            req.port,
+            req.control,
+            req.control_persist,
+        )?;
+        command.arg(format!("sh -lc {}", quote(script)));
+        let argv = std::iter::once(command.get_program())
+            .chain(command.get_args())
+            .map(OsStr::to_os_string)
+            .collect();
+        let mut request = Request::new(argv);
+        request.cwd = Some(req.cwd.into());
+        request.streams = Streams::Separate;
+        request.deadline = Some(req.deadline);
+        request.terminate_grace = Duration::from_millis(250);
+        // The disk sink receives every byte via bounded events. Keeping a second
+        // in-memory artifact capture would defeat streaming at the 512 MiB limit.
+        request.capture = CaptureOptions {
+            max_bytes: 0,
+            on_limit: LimitAction::Drain,
+            lines: None,
+        };
+        request.stderr_capture = Some(CaptureOptions {
+            max_bytes: MAX_STDERR_BYTES as usize,
+            on_limit: LimitAction::Drain,
+            lines: None,
+        });
+        request.duplex = Some(DuplexOptions {
+            max_frame_bytes: 1,
+            max_input_bytes: 1,
+            max_input_frames: 1,
+            max_output_bytes: 64 * 1024,
+            max_output_events: 8,
+            max_read_bytes_per_turn: 64 * 1024,
+            max_write_bytes_per_turn: 1,
+        });
+        let mut reactor = Reactor::new();
+        let job = reactor.start(request).map_err(error)?;
+        reactor.close_input(job).map_err(error)?;
+        let mut total = 0;
+        let mut hasher = Sha256::new();
+        let mut failure = None;
+        let mut stopping = None;
+        loop {
+            while let Some(event) = reactor.receive(job).map_err(error)? {
+                if failure.is_none()
+                    && let Err(e) = consume(&event, file, &mut total, &mut hasher, req.max_bytes)
+                {
+                    failure = Some(e);
+                    reactor
+                        .stop(job, StopReason::ConsumerCutoff)
+                        .map_err(error)?;
                     stopping.get_or_insert_with(Instant::now);
                 }
-                if stopping.is_some_and(|at| at.elapsed() >= Duration::from_secs(2)) {
-                    // Drop makes a bounded final cleanup attempt; a stuck kernel
-                    // child is never reported as confirmed cleanup or delivery.
-                    return Err(status(
-                        75,
-                        "collection stopped; local SSH cleanup is unknown",
-                    ));
-                }
             }
-            Progress::Complete(done) => {
-                if let Some(duplex) = &done.duplex {
-                    for event in &duplex.output {
-                        if failure.is_none()
-                            && let Err(e) =
-                                consume(event, file, &mut total, &mut hasher, req.max_bytes)
-                        {
-                            failure = Some(e);
-                        }
+            if req.interrupted.load(Ordering::Relaxed) {
+                reactor.stop(job, StopReason::Cancelled).map_err(error)?;
+                stopping.get_or_insert_with(Instant::now);
+            }
+            match reactor
+                .poll(job, Duration::from_millis(10))
+                .map_err(error)?
+            {
+                Progress::Pending(snapshot) => {
+                    if snapshot.stop.is_some() {
+                        stopping.get_or_insert_with(Instant::now);
                     }
-                }
-                if !done.cleanup_complete() {
-                    return Err(status(
-                        75,
-                        "collection stopped; local SSH cleanup is unknown",
-                    ));
-                }
-                if let Some(e) = failure {
-                    return Err(e);
-                }
-                match done.stop {
-                    Some(StopReason::Cancelled | StopReason::Signal(_)) => {
-                        return Err(status(130, "collection interrupted; destination unchanged"));
-                    }
-                    Some(StopReason::Deadline) => {
+                    if stopping.is_some_and(|at| at.elapsed() >= Duration::from_secs(2)) {
+                        // Drop makes a bounded final cleanup attempt; a stuck kernel
+                        // child is never reported as confirmed cleanup or delivery.
                         return Err(status(
-                            124,
-                            "collection request timed out; destination unchanged",
+                            75,
+                            "collection stopped; local SSH cleanup is unknown",
                         ));
                     }
-                    Some(_) => return Err(status(75, "collection stopped before complete output")),
-                    None => {}
                 }
-                require(done.output_complete(), "collection output is incomplete")?;
-                let exit = done.exit.map_or(1, |exit| exit.shell_code());
-                if exit != 0 {
+                Progress::Complete(done) => {
+                    if let Some(duplex) = &done.duplex {
+                        for event in &duplex.output {
+                            if failure.is_none()
+                                && let Err(e) =
+                                    consume(event, file, &mut total, &mut hasher, req.max_bytes)
+                            {
+                                failure = Some(e);
+                            }
+                        }
+                    }
+                    if !done.cleanup_complete() {
+                        return Err(status(
+                            75,
+                            "collection stopped; local SSH cleanup is unknown",
+                        ));
+                    }
+                    if let Some(e) = failure {
+                        return Err(e);
+                    }
+                    match done.stop {
+                        Some(StopReason::Cancelled | StopReason::Signal(_)) => {
+                            return Err(status(
+                                130,
+                                "collection interrupted; destination unchanged",
+                            ));
+                        }
+                        Some(StopReason::Deadline) => {
+                            return Err(status(
+                                124,
+                                "collection request timed out; destination unchanged",
+                            ));
+                        }
+                        Some(_) => {
+                            return Err(status(75, "collection stopped before complete output"));
+                        }
+                        None => {}
+                    }
+                    require(done.output_complete(), "collection output is incomplete")?;
+                    let exit = done.exit.map_or(1, |exit| exit.shell_code());
                     let stderr = done
                         .stderr
                         .as_ref()
                         .map_or(&[][..], |capture| capture.bytes.as_slice());
-                    return Err(status(
-                        exit,
-                        format!(
-                            "remote collect failed (exit {exit}): {}",
-                            String::from_utf8_lossy(stderr).trim()
-                        ),
-                    ));
+                    if total == 0
+                        && is_control_socket_fallback_failure(exit, b"", stderr, req.control)
+                    {
+                        if attempt == 0 {
+                            continue 'attempt;
+                        }
+                        return Err(status(75, SHARED_SSH_CLOSED_BEFORE_COMMAND));
+                    }
+                    if exit != 0 {
+                        let redacted =
+                            redact_control_path(&String::from_utf8_lossy(stderr), req.control);
+                        return Err(status(
+                            exit,
+                            format!("remote collect failed (exit {exit}): {}", redacted.trim()),
+                        ));
+                    }
+                    return Ok((total, hasher.finish()));
                 }
-                return Ok((total, hasher.finish()));
             }
         }
     }
+    Err(status(75, SHARED_SSH_CLOSED_BEFORE_COMMAND))
 }

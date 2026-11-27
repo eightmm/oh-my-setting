@@ -75,6 +75,8 @@ pub struct TargetRequest {
     pub name: String,
     pub ssh_alias: String,
     pub workdir: String,
+    pub control_persist: Option<u64>,
+    pub state_repo: Option<PathBuf>,
     pub sync: bool,
     pub sha: Option<String>,
     pub timeout: Duration,
