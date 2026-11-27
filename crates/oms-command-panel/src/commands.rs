@@ -834,6 +834,12 @@ pub(crate) fn run_mode(
     services: &dyn Services,
     stop: &AtomicBool,
 ) -> Result<Output> {
+    if options.has("register-project")
+        || options.has("unregister-project")
+        || options.has("projects")
+    {
+        return crate::desktop_projects::run(options, cwd, stop);
+    }
     if options.has("desktop-view") {
         // The desktop connection selects the checkout independently of process-wide Room variables.
         let (state, execution) = resolve_repositories(options, cwd, None, false)?;

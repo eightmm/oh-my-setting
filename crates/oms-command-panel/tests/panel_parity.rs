@@ -3127,7 +3127,418 @@ impl Drop for RootGuard {
     }
 }
 
+fn verify_reader_accepts_map(path: &Path) -> std::collections::BTreeMap<String, PathBuf> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    assert!(
+        path.is_absolute(),
+        "map path must be absolute: {}",
+        path.display()
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            rustix::fs::OFlags::NOFOLLOW.bits() as i32 | rustix::fs::OFlags::NONBLOCK.bits() as i32,
+        )
+        .open(path)
+        .unwrap_or_else(|e| panic!("reader failed to open {}: {e}", path.display()));
+    let meta = file.metadata().unwrap();
+    assert!(meta.is_file());
+    assert_eq!(meta.nlink(), 1);
+    assert_eq!(meta.uid(), rustix::process::geteuid().as_raw());
+    assert_eq!(
+        meta.mode() & 0o7777,
+        0o600,
+        "expected mode 0600, got {:o}",
+        meta.mode() & 0o7777
+    );
+    assert_eq!(meta.mode() & 0o022, 0);
+    let mut raw = String::new();
+    (&mut file).take(16385).read_to_string(&mut raw).unwrap();
+    assert!(
+        raw.len() <= 16384,
+        "map exceeded 16 KiB: {} bytes",
+        raw.len()
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(parsed.is_object(), "expected JSON object");
+    let map: std::collections::BTreeMap<String, PathBuf> = serde_json::from_str(&raw).unwrap();
+    assert!(!map.is_empty() && map.len() <= 128);
+    for (alias, target) in &map {
+        assert!((1..=80).contains(&alias.len()));
+        assert!(alias.as_bytes()[0].is_ascii_alphanumeric());
+        assert!(
+            alias
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+        );
+        assert!(target.is_absolute());
+    }
+    map
+}
+
+fn desktop_projects_registry_and_reader_parity() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let root = TempDir::new("oms-panel-projects");
+    let base = root.path();
+    let xdg = base.join("xdg-config");
+    let home_dir = base.join("runtime-home");
+    let locks = base.join("locks");
+    ensure_private_dir(&locks);
+    ensure_private_dir(&home_dir);
+
+    let exe = std::env::current_exe().unwrap();
+    let run_cli = |cwd: &Path, args: &[&str], envs: &[(&str, &Path)], extra: &[(&str, &str)]| {
+        let mut cmd = Command::new(&exe);
+        cmd.env_clear()
+            .env("OMS_PANEL_PARITY_CLI", "1")
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("TMPDIR", base)
+            .env("OMS_LOCK_DIR", &locks)
+            .current_dir(cwd)
+            .args(args);
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        (
+            out.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let default_map = xdg.join("oh-my-setting/desktop-projects.json");
+    let xdg_env = [
+        ("XDG_CONFIG_HOME", xdg.as_path()),
+        ("HOME", home_dir.as_path()),
+    ];
+
+    // Empty state before map file exists.
+    let (code, stdout, stderr) = run_cli(base, &["--projects"], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("no desktop projects"), "{stdout}");
+    let (code, stdout, _) = run_cli(base, &["--projects", "--json"], &xdg_env, &[]);
+    assert_eq!(code, 0);
+    let initial_json: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(initial_json["projects"], json!([]));
+
+    // Non-checkout directory is refused without creating map file.
+    let plain_dir = base.join("plain-folder");
+    std::fs::create_dir_all(&plain_dir).unwrap();
+    let (code, _, stderr) = run_cli(&plain_dir, &["--register-project"], &xdg_env, &[]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("Git checkout") || stderr.contains("adopted OMS project"),
+        "{stderr}"
+    );
+    assert!(!default_map.exists());
+
+    // 1. Register default alias from current directory (creates directory & mode 0600 file).
+    let alpha = base.join("checkouts/alpha-service");
+    std::fs::create_dir_all(&alpha).unwrap();
+    init_git_repo(&alpha);
+    let alpha_canon = alpha.canonicalize().unwrap();
+    let (code, stdout, stderr) = run_cli(&alpha, &["--register-project"], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("alpha-service"), "{stdout}");
+
+    // 7. Written file passes the exact reader rules (mode 0600, object of aliases to absolute paths).
+    let parsed_map = verify_reader_accepts_map(&default_map);
+    assert_eq!(parsed_map.len(), 1);
+    assert_eq!(parsed_map.get("alpha-service"), Some(&alpha_canon));
+
+    // 2. Idempotent re-register (via symlinked path too) succeeds and changes nothing.
+    let alpha_link = base.join("alpha-link");
+    std::os::unix::fs::symlink(&alpha, &alpha_link).unwrap();
+    let meta_before = std::fs::symlink_metadata(&default_map).unwrap();
+    let bytes_before = std::fs::read(&default_map).unwrap();
+    let (code, _, stderr) = run_cli(
+        base,
+        &["--register-project", &alpha_link.to_string_lossy()],
+        &xdg_env,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let meta_after = std::fs::symlink_metadata(&default_map).unwrap();
+    assert_eq!(meta_before.ino(), meta_after.ino());
+    assert_eq!(
+        (meta_before.mtime(), meta_before.mtime_nsec()),
+        (meta_after.mtime(), meta_after.mtime_nsec())
+    );
+    assert_eq!(bytes_before, std::fs::read(&default_map).unwrap());
+
+    // 3. Alias conflict refusal: different path with colliding default or explicit alias refuses
+    //    and names an alternative --alias to choose instead.
+    let alpha_other = base.join("other/alpha-service");
+    std::fs::create_dir_all(alpha_other.join(".oms")).unwrap();
+    let alpha_other_canon = alpha_other.canonicalize().unwrap();
+    let (code, _, stderr) = run_cli(&alpha_other, &["--register-project"], &xdg_env, &[]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("--alias alpha-service-2"),
+        "expected suggested alias in stderr: {stderr}"
+    );
+    assert_eq!(verify_reader_accepts_map(&default_map).len(), 1);
+
+    // Registering the adopted OMS project with the suggested alias succeeds and preserves alpha-service.
+    let (code, _, stderr) = run_cli(
+        base,
+        &[
+            "--register-project",
+            &alpha_other.to_string_lossy(),
+            "--alias",
+            "alpha-service-2",
+        ],
+        &xdg_env,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let two_map = verify_reader_accepts_map(&default_map);
+    assert_eq!(two_map.len(), 2);
+    assert_eq!(two_map.get("alpha-service"), Some(&alpha_canon));
+    assert_eq!(two_map.get("alpha-service-2"), Some(&alpha_other_canon));
+
+    // Invalid aliases are refused.
+    let overlong = "a".repeat(81);
+    for bad_alias in ["-bad", ".bad", "bad/alias", "bad space", &overlong] {
+        let (code, _, _) = run_cli(
+            &alpha,
+            &["--register-project", "--alias", bad_alias],
+            &xdg_env,
+            &[],
+        );
+        assert_ne!(code, 0, "accepted invalid alias {bad_alias}");
+    }
+
+    // --projects and --projects --json list aliases, paths, and report when a path no longer exists.
+    std::fs::remove_dir_all(&alpha_other).unwrap();
+    let (code, plain_list, stderr) = run_cli(base, &["--projects"], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(plain_list.contains("alpha-service\t"), "{plain_list}");
+    assert!(
+        plain_list.contains("alpha-service-2") && plain_list.contains("no longer exists"),
+        "{plain_list}"
+    );
+    let (code, json_list, stderr) = run_cli(base, &["--projects", "--json"], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let listed: Value = serde_json::from_str(&json_list).unwrap();
+    assert_eq!(
+        listed["projects"],
+        json!([
+            {"alias": "alpha-service", "path": alpha_canon, "exists": true},
+            {"alias": "alpha-service-2", "path": alpha_other_canon, "exists": false},
+        ])
+    );
+
+    // 4. Unregister preserves remaining entries, refuses unknown aliases, and removes empty map cleanly.
+    let (code, _, _) = run_cli(
+        base,
+        &["--unregister-project", "unknown-alias"],
+        &xdg_env,
+        &[],
+    );
+    assert_ne!(code, 0);
+    let (code, _, stderr) = run_cli(
+        base,
+        &["--unregister-project", "alpha-service-2"],
+        &xdg_env,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let remaining = verify_reader_accepts_map(&default_map);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining.get("alpha-service"), Some(&alpha_canon));
+
+    let (code, _, stderr) = run_cli(
+        base,
+        &["--unregister-project", "alpha-service"],
+        &xdg_env,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !default_map.exists(),
+        "empty map file should not remain as invalid {{}}"
+    );
+    let (code, after_empty, _) = run_cli(base, &["--projects", "--json"], &xdg_env, &[]);
+    assert_eq!(code, 0);
+    let empty_val: Value = serde_json::from_str(&after_empty).unwrap();
+    assert_eq!(empty_val["projects"], json!([]));
+
+    // HOME fallback when XDG_CONFIG_HOME is unset, plus OMS_PANEL_PROJECTS inline refusal.
+    let (code, _, stderr) = run_cli(&alpha, &["--register-project"], &[("HOME", &home_dir)], &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let fallback_map = home_dir.join(".config/oh-my-setting/desktop-projects.json");
+    assert_eq!(
+        verify_reader_accepts_map(&fallback_map).get("alpha-service"),
+        Some(&alpha_canon)
+    );
+    let inline_json = json!({"inline": alpha_canon}).to_string();
+    for args in [
+        &["--register-project"][..],
+        &["--unregister-project", "inline"],
+    ] {
+        let (code, _, stderr) = run_cli(
+            &alpha,
+            args,
+            &[("HOME", &home_dir)],
+            &[("OMS_PANEL_PROJECTS", &inline_json)],
+        );
+        assert_ne!(code, 0, "OMS_PANEL_PROJECTS must refuse writer {args:?}");
+        assert!(stderr.contains("OMS_PANEL_PROJECTS"), "{stderr}");
+    }
+
+    // 8. Child guard refuses delegated workers on mutations.
+    let guarded_file = base.join("child-guard-projects.json");
+    for child_env in [
+        ("OMS_HARNESS_CHILD", "1"),
+        ("OMS_HARNESS_DELEGATE_DEPTH", "1"),
+    ] {
+        let (code, _, stderr) = run_cli(
+            &alpha,
+            &["--register-project"],
+            &[("OMS_PANEL_PROJECTS_FILE", &guarded_file)],
+            &[child_env],
+        );
+        assert_ne!(code, 0, "child guard failed for {child_env:?}");
+        assert!(stderr.contains("owning parent"), "{stderr}");
+        assert!(!guarded_file.exists());
+
+        let (code, _, stderr) = run_cli(
+            &alpha,
+            &["--unregister-project", "alpha-service"],
+            &[("OMS_PANEL_PROJECTS_FILE", &fallback_map)],
+            &[child_env],
+        );
+        assert_ne!(
+            code, 0,
+            "child guard failed on unregister for {child_env:?}"
+        );
+        assert!(stderr.contains("owning parent"), "{stderr}");
+        assert!(fallback_map.exists());
+    }
+
+    // 5. 129th entry refusal via OMS_PANEL_PROJECTS_FILE (preserving all 128 entries).
+    let full_file = base.join("full-projects.json");
+    let mut seed_map = std::collections::BTreeMap::new();
+    for i in 1..=127usize {
+        let p = base.join(format!("p/{i}"));
+        std::fs::create_dir_all(p.join(".oms")).unwrap();
+        seed_map.insert(format!("p{i}"), p.canonicalize().unwrap());
+    }
+    write_private_file(&full_file, &serde_json::to_vec(&seed_map).unwrap());
+    let p128 = base.join("p/128");
+    std::fs::create_dir_all(p128.join(".oms")).unwrap();
+    let (code, _, stderr) = run_cli(
+        &p128,
+        &["--register-project", "--alias", "p128"],
+        &[("OMS_PANEL_PROJECTS_FILE", &full_file)],
+        &[],
+    );
+    assert_eq!(code, 0, "128th entry should succeed: {stderr}");
+    assert_eq!(verify_reader_accepts_map(&full_file).len(), 128);
+
+    // Re-registering an existing entry at 128 still succeeds idempotently.
+    let (code, _, stderr) = run_cli(
+        &p128,
+        &["--register-project", "--alias", "p128"],
+        &[("OMS_PANEL_PROJECTS_FILE", &full_file)],
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+
+    let p129 = base.join("p/129");
+    std::fs::create_dir_all(p129.join(".oms")).unwrap();
+    let (code, _, stderr) = run_cli(
+        &p129,
+        &["--register-project", "--alias", "p129"],
+        &[("OMS_PANEL_PROJECTS_FILE", &full_file)],
+        &[],
+    );
+    assert_ne!(code, 0, "129th entry must be refused");
+    assert!(stderr.contains("128"), "{stderr}");
+    assert_eq!(verify_reader_accepts_map(&full_file).len(), 128);
+
+    // 6. Symlinked map refusal (live symlink, dangling symlink) and reader-rejected files
+    //    (group/world writable, hard link) are refused without rewriting targets.
+    let real_target = base.join("real-target.json");
+    let target_body = serde_json::to_vec(&json!({"keep": alpha_canon})).unwrap();
+    write_private_file(&real_target, &target_body);
+    let sym_map = base.join("symlink-map.json");
+    std::os::unix::fs::symlink(&real_target, &sym_map).unwrap();
+    for args in [
+        &["--register-project", "--alias", "new-entry"][..],
+        &["--unregister-project", "keep"],
+        &["--projects"],
+    ] {
+        let (code, _, stderr) =
+            run_cli(&alpha, args, &[("OMS_PANEL_PROJECTS_FILE", &sym_map)], &[]);
+        assert_ne!(code, 0, "symlinked map must be refused for {args:?}");
+        assert!(stderr.contains("symlink"), "{stderr}");
+    }
+    assert!(
+        std::fs::symlink_metadata(&sym_map)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(&real_target).unwrap(), target_body);
+
+    let dangling_map = base.join("dangling-map.json");
+    std::os::unix::fs::symlink(base.join("nonexistent-target.json"), &dangling_map).unwrap();
+    let (code, _, stderr) = run_cli(
+        &alpha,
+        &["--register-project"],
+        &[("OMS_PANEL_PROJECTS_FILE", &dangling_map)],
+        &[],
+    );
+    assert_ne!(code, 0, "dangling symlink map must be refused");
+    assert!(stderr.contains("symlink"), "{stderr}");
+    assert!(!base.join("nonexistent-target.json").exists());
+
+    // Group-writable (0620) and hard-linked (nlink == 2) files are refused without rewrite.
+    let writable_map = base.join("group-writable.json");
+    write_private_file(&writable_map, &target_body);
+    std::fs::set_permissions(&writable_map, std::fs::Permissions::from_mode(0o620)).unwrap();
+    let (code, _, _) = run_cli(
+        &alpha,
+        &["--register-project", "--alias", "another"],
+        &[("OMS_PANEL_PROJECTS_FILE", &writable_map)],
+        &[],
+    );
+    assert_ne!(code, 0, "group-writable map must be refused");
+    assert_eq!(std::fs::read(&writable_map).unwrap(), target_body);
+
+    let hard_src = base.join("hard-src.json");
+    let hard_dst = base.join("hard-dst.json");
+    write_private_file(&hard_src, &target_body);
+    std::fs::hard_link(&hard_src, &hard_dst).unwrap();
+    let (code, _, _) = run_cli(
+        &alpha,
+        &["--register-project", "--alias", "another"],
+        &[("OMS_PANEL_PROJECTS_FILE", &hard_dst)],
+        &[],
+    );
+    assert_ne!(code, 0, "hard-linked map must be refused");
+    assert_eq!(std::fs::read(&hard_src).unwrap(), target_body);
+}
+
 fn main() {
+    if std::env::var_os("OMS_PANEL_PARITY_CLI").is_some() {
+        use std::io::Write;
+        let cwd = std::env::current_dir().unwrap();
+        let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+        let services = Fake::default();
+        let (code, out, err) = run_with_services("panel", &args, &cwd, &cwd, &STOP, &services);
+        std::io::stdout().write_all(&out).unwrap();
+        std::io::stderr().write_all(&err).unwrap();
+        std::process::exit(code);
+    }
     if std::env::var_os("OMS_PANEL_PARITY_ROOT").is_none() {
         let base = std::env::temp_dir().join(format!("oms-ppr-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -3177,10 +3588,14 @@ fn main() {
         .skip(1)
         .filter(|arg| !arg.starts_with('-') && arg != "panel_parity")
         .collect();
-    let cases: [(&str, fn()); 12] = [
+    let cases: [(&str, fn()); 13] = [
         (
             "chats_native_identity_binding",
             chats_native_identity_binding,
+        ),
+        (
+            "desktop_projects_registry_and_reader_parity",
+            desktop_projects_registry_and_reader_parity,
         ),
         (
             "missing_entry_refuses_before_mutation",
