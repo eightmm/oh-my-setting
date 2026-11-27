@@ -722,7 +722,8 @@ pub fn post_json_bearer(
     let cfg_path = req_dir.cfg_path();
     let mut cmd = Command::new("curl");
     cmd.args([
-        std::ffi::OsString::from("-sS"),
+        std::ffi::OsString::from("-q"),
+        "-sS".into(),
         "--max-time".into(),
         format!("{secs:.2}").into(),
         "--proto".into(),

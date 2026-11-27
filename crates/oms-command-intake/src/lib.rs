@@ -17,7 +17,7 @@ pub mod serve;
 pub mod source;
 pub mod transport;
 
-pub use cli::{HELP, run_streaming_with_services};
+pub use cli::{help_text, run_streaming_with_services};
 pub use crypto::{
     SecretStore, SecretValue, TIMESTAMP_WINDOW_MS, ct_eq_32, current_unix_ms, hex_lower,
     hmac_sha256, hmac_sha256_hex, verify_hmac_sha256_hex, within_timestamp_window_ms,
@@ -41,7 +41,7 @@ pub use serve::{
 pub use source::{
     BindingDecision, BindingFlagSpec, CreateDeliveryOutcome, EnvVarSpec, OutboundAck,
     OutboundReply, PayloadDecision, RequestHeaders, RoomDelivery, SignatureInput, Source,
-    TransportError, compiled_sources, find_source, find_source_arc,
+    TransportError, compiled_sources, find_source_arc,
 };
 pub use transport::{EndpointUrl, post_json_bearer};
 

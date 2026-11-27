@@ -1,7 +1,7 @@
 //! Adapter contract (`trait Source`) and compiled adapter registry for `oms intake`.
 
 use crate::crypto::SecretStore;
-use crate::linear::{LINEAR_SOURCE, LinearSource};
+use crate::linear::LinearSource;
 use crate::model::WorkRequest;
 use serde_json::{Map, Value};
 use std::borrow::Cow;
@@ -191,19 +191,17 @@ pub trait Source: Send + Sync {
     ) -> Result<CreateDeliveryOutcome, TransportError>;
 }
 
-static COMPILED: &[&dyn Source] = &[&LINEAR_SOURCE];
+type SourceFactory = fn() -> Arc<dyn Source>;
 
-pub fn compiled_sources() -> &'static [&'static dyn Source] {
-    COMPILED
-}
+static SOURCE_FACTORIES: &[SourceFactory] = &[|| Arc::new(LinearSource::new())];
 
-pub fn find_source(name: &str) -> Option<&'static dyn Source> {
-    COMPILED.iter().copied().find(|s| s.name() == name)
+pub fn compiled_sources() -> Vec<Arc<dyn Source>> {
+    SOURCE_FACTORIES.iter().map(|make| make()).collect()
 }
 
 pub fn find_source_arc(name: &str) -> Option<Arc<dyn Source>> {
-    match name {
-        "linear" => Some(Arc::new(LinearSource::new())),
-        _ => None,
-    }
+    SOURCE_FACTORIES
+        .iter()
+        .map(|make| make())
+        .find(|s| s.name() == name)
 }

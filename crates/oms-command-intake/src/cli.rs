@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-pub const HELP: &str = "\
+const HELP_HEADER: &str = "\
 OMS external tracker intake: receive signed webhooks into an OMS Room and send outbound-scanned replies.
 
 Usage:
@@ -32,17 +32,14 @@ Subcommands:
                           delivery with a deterministic ID, and record the Room status receipt
   sources                 List compiled source adapters, environment variables, and binding flags
 
-Common options (serve):
+Options (serve):
   --source SOURCE         Compiled intake adapter name (see `oms intake sources`)
   --repo PATH             Repository owning the existing OMS Room
   --room ROOM             Target OMS Room id
   --participant PART      Enrolled Room participant acting as the intake sender
   --to MAIN               Enrolled Main participant receiving addressed Room questions
   --listen ADDR           Loopback bind address (default 127.0.0.1:8787; port 0 selects ephemeral)
-
-Adapter binding options (linear):
-  --organization ORG      Expected Linear organizationId (foreign installations get 403)
-  --app-user APPUSER      Expected Linear appUserId for this OAuth app installation
+  [source binding flags]  Adapter-required binding flags (inspect with `oms intake sources`)
 
 Options (reply):
   --source SOURCE         Compiled intake adapter name
@@ -50,21 +47,29 @@ Options (reply):
   --room ROOM             Target OMS Room id where the delivery status receipt is recorded
   --participant PART      Enrolled Room participant recording the receipt
   --session ID            External session identifier
-  --kind KIND             Adapter reply kind (linear: thought | response | elicitation | error)
+  --kind KIND             Adapter reply kind (inspect with `oms intake sources`)
   --text-file FILE        UTF-8 body file scanned by oms-scrub before network egress
-  --reply-to MSG          Optional Room message id used as the deterministic caller key
+  --reply-to MSG          Optional Room message id included in the deterministic caller key
   --json                  Emit structured JSON receipt output
   -h, --help              Show this help message and exit
 
-Environment variables (linear; validated at startup, non-empty, no whitespace; never put on argv):
-  OMS_LINEAR_WEBHOOK_SECRET   Signing value verifying the raw body Linear-Signature header (serve)
-  OMS_LINEAR_ACCESS_TOKEN     OAuth access value sent via exclusive 0600 curl config (serve, reply)
-  OMS_LINEAR_API_URL          Optional GraphQL endpoint override (https or loopback http only)
+Notes:
+  - Adapter secrets are read from validated environment variables only (non-empty, no whitespace
+    or control characters; never passed on argv).
+  - Terminate public HTTPS in a user-owned tunnel or reverse proxy forwarding to loopback
+    POST /intake/<source>.
 
-User-owned external prerequisites (linear):
-  - A public HTTPS tunnel terminating TLS and forwarding to loopback POST /intake/linear.
-  - A Linear OAuth app installed with actor=app and scopes app:assignable, app:mentionable.
+Compiled sources (run `oms intake sources` for adapter env vars, binding flags, and reply kinds):
 ";
+
+pub fn help_text() -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from(HELP_HEADER);
+    for source in compiled_sources() {
+        let _ = writeln!(out, "  {:<22}  {}", source.name(), source.description());
+    }
+    out
+}
 
 const CORE_SERVE_VALUES: &[&str] = &[
     "--source",
@@ -183,23 +188,29 @@ fn collect_options(
         let Ok(name) = std::str::from_utf8(name_bytes) else {
             return Err("invalid option encoding".into());
         };
+        let safe_name = sanitize_option_name(name.as_bytes());
         if allowed_flags.contains(&name) {
             if eq_pos.is_some() {
-                return Err(format!("{name} does not accept a value"));
+                return Err(format!("{safe_name} does not accept a value"));
             }
-            flags.insert(name.to_owned());
+            if !flags.insert(name.to_owned()) {
+                return Err(format!("duplicate option {safe_name}"));
+            }
             i += 1;
             continue;
+        }
+        if values.contains_key(name) {
+            return Err(format!("duplicate option {safe_name}"));
         }
         let val = if let Some(at) = eq_pos {
             OsString::from_vec(raw[at + 1..].to_vec())
         } else {
             i += 1;
             let Some(next) = args.get(i) else {
-                return Err(format!("{name} requires a value"));
+                return Err(format!("{safe_name} requires a value"));
             };
             if next.as_bytes().starts_with(b"-") {
-                return Err(format!("{name} requires a value"));
+                return Err(format!("{safe_name} requires a value"));
             }
             next.clone()
         };
@@ -445,7 +456,8 @@ pub fn run_streaming_with_services(
 
     match parsed {
         ParsedCommand::Help => {
-            let _ = stdout.write_all(HELP.as_bytes());
+            let rendered = help_text();
+            let _ = stdout.write_all(rendered.as_bytes());
             let _ = stdout.flush();
             0
         }

@@ -79,11 +79,17 @@ fn read_text_file_bounded(path: &Path) -> Result<String, String> {
     Ok(text)
 }
 
-fn check_outbound_reply(body: &[u8], secrets: &SecretStore) -> Result<(), ()> {
+enum OutboundScanError {
+    BodyRefused,
+    EnvironmentTooLarge,
+    ScanFailed,
+}
+
+fn check_outbound_reply(body: &[u8], secrets: &SecretStore) -> Result<(), OutboundScanError> {
     for (_, secret) in secrets.entries() {
         let raw = secret.as_bytes();
         if !raw.is_empty() && body.windows(raw.len()).any(|w| w == raw) {
-            return Err(());
+            return Err(OutboundScanError::BodyRefused);
         }
     }
     let mut pairs = Vec::new();
@@ -92,14 +98,14 @@ fn check_outbound_reply(body: &[u8], secrets: &SecretStore) -> Result<(), ()> {
         total = total
             .saturating_add(key.as_bytes().len())
             .saturating_add(value.as_bytes().len());
-        if pairs.len() + 1 >= oms_scrub::MAX_ENV_ENTRIES || total > oms_scrub::MAX_ENV_BYTES {
-            return Err(());
+        if pairs.len() + 1 > oms_scrub::MAX_ENV_ENTRIES || total > oms_scrub::MAX_ENV_BYTES {
+            return Err(OutboundScanError::EnvironmentTooLarge);
         }
         pairs.push((key, value));
     }
     let extra_count = secrets.entries().count();
-    if pairs.len().saturating_add(extra_count) >= oms_scrub::MAX_ENV_ENTRIES {
-        return Err(());
+    if pairs.len().saturating_add(extra_count) > oms_scrub::MAX_ENV_ENTRIES {
+        return Err(OutboundScanError::EnvironmentTooLarge);
     }
     let mut refs: Vec<(&[u8], &[u8])> = pairs
         .iter()
@@ -110,11 +116,16 @@ fn check_outbound_reply(body: &[u8], secrets: &SecretStore) -> Result<(), ()> {
             .saturating_add(name.len())
             .saturating_add(secret.as_bytes().len());
         if total > oms_scrub::MAX_ENV_BYTES {
-            return Err(());
+            return Err(OutboundScanError::EnvironmentTooLarge);
         }
         refs.push((name.as_bytes(), secret.as_bytes()));
     }
-    oms_scrub::check_outbound_with_env(body, &refs).map_err(|_| ())
+    match oms_scrub::scan(body, &refs) {
+        Ok(hits) if hits.is_empty() => Ok(()),
+        Ok(_) | Err(oms_scrub::Error::TooManyHits) => Err(OutboundScanError::BodyRefused),
+        Err(oms_scrub::Error::EnvironmentTooLarge) => Err(OutboundScanError::EnvironmentTooLarge),
+        Err(_) => Err(OutboundScanError::ScanFailed),
+    }
 }
 
 fn record_status_receipt(
@@ -276,12 +287,19 @@ pub fn execute_reply(
         Err(msg) => return (2, vec![], format!("error: intake: {msg}\n").into_bytes()),
     };
 
-    if check_outbound_reply(body.as_bytes(), &cfg.secrets).is_err() {
-        return (
-            3,
-            vec![],
-            b"error: intake: reply body refused by outbound scan; nothing sent\n".to_vec(),
-        );
+    if let Err(scan_err) = check_outbound_reply(body.as_bytes(), &cfg.secrets) {
+        let msg: &[u8] = match scan_err {
+            OutboundScanError::BodyRefused => {
+                b"error: intake: reply body refused by outbound scan; nothing sent\n"
+            }
+            OutboundScanError::EnvironmentTooLarge => {
+                b"error: intake: process environment exceeds outbound scan limits; nothing sent\n"
+            }
+            OutboundScanError::ScanFailed => {
+                b"error: intake: outbound scan failed to verify reply; nothing sent\n"
+            }
+        };
+        return (3, vec![], msg.to_vec());
     }
 
     let room = match Room::open(

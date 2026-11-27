@@ -15,7 +15,7 @@ use oms_command_room::{Join, LocalServices, Room, Send as RoomSend, Session};
 use serde_json::{Map, Value, json};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder};
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -38,7 +38,39 @@ fn runtime_acc_val() -> String {
     ["lin", "app", "fixture", "abcdef0123456789"].join("_")
 }
 
-fn clean_child_cmd(cmd: &mut Command, home: &Path, path_env: &OsString) {
+fn os_args(items: &[&str]) -> Vec<OsString> {
+    items.iter().map(OsString::from).collect()
+}
+
+fn split_args(spec: &str) -> Vec<OsString> {
+    spec.split_whitespace().map(OsString::from).collect()
+}
+
+fn make_secrets(entries: &[(&str, &str)]) -> SecretStore {
+    let mut store = SecretStore::new();
+    for &(k, v) in entries {
+        store.insert(k, SecretValue::parse_checked(k, v.to_owned()).unwrap());
+    }
+    store
+}
+
+fn assert_curl_spy_clean(redacted: &[&str]) {
+    let argv_log_path = std::env::var("OMS_TEST_CURL_LOG").expect("curl log env");
+    let logged = fs::read_to_string(argv_log_path).expect("read curl argv log");
+    let call_count = logged.matches("CALL\n").count();
+    assert!(call_count >= 1, "curl spy must observe child calls");
+    assert_eq!(
+        call_count,
+        logged.matches("CALL\nARG:-q\n").count(),
+        "every curl call must pass -q as its first argument:\n{logged}"
+    );
+    assert!(logged.contains("ARG:-K\n"));
+    for secret in redacted {
+        assert!(!logged.contains(secret), "secret leaked into curl argv");
+    }
+}
+
+fn clean_child_cmd(cmd: &mut Command, home: &Path, path_env: &OsStr) {
     cmd.env_clear()
         .env("PATH", path_env)
         .env("HOME", home)
@@ -47,20 +79,62 @@ fn clean_child_cmd(cmd: &mut Command, home: &Path, path_env: &OsString) {
         .env("GIT_CONFIG_GLOBAL", "/dev/null");
 }
 
+fn child_test_cmd(
+    home: &Path,
+    path_env: &OsStr,
+    target_test: &str,
+    ignored: bool,
+    vars: &[(&str, &OsStr)],
+) -> Command {
+    let exe = std::env::current_exe().expect("test executable");
+    let mut cmd = Command::new(exe);
+    clean_child_cmd(&mut cmd, home, path_env);
+    for &(k, v) in vars {
+        cmd.env(k, v);
+    }
+    cmd.args(["--exact", target_test, "--nocapture"]);
+    if ignored {
+        cmd.arg("--ignored");
+    }
+    cmd
+}
+
 fn isolated(test_name: &str, body: impl FnOnce(&TempWorkspace)) {
+    isolated_with(test_name, false, &[], body);
+}
+
+fn isolated_with(
+    test_name: &str,
+    with_curl_spy: bool,
+    extra_vars: &[(&str, &str)],
+    body: impl FnOnce(&TempWorkspace),
+) {
     if std::env::var(CHILD_TEST_ENV).as_deref() == Ok(test_name) {
         let ws = TempWorkspace::new("oms-intake-inner");
         body(&ws);
         return;
     }
     let outer = TempWorkspace::new("oms-intake-outer");
-    let exe = std::env::current_exe().expect("test executable");
-    let path_env = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
-    let mut cmd = Command::new(exe);
-    clean_child_cmd(&mut cmd, &outer.home, &path_env);
-    cmd.env(CHILD_TEST_ENV, test_name)
-        .args(["--exact", test_name, "--nocapture"]);
-    let out = cmd.output().expect("spawn isolated child test");
+    fs::write(outer.home.join(".curlrc"), "max-filesize = 1\n").expect("write poison .curlrc");
+    let (argv_log, path_env) = if with_curl_spy {
+        let (log, p) = outer.install_curl_argv_spy();
+        (Some(log), p)
+    } else {
+        (
+            None,
+            std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+        )
+    };
+    let mut vars: Vec<(&str, &OsStr)> = vec![(CHILD_TEST_ENV, OsStr::new(test_name))];
+    if let Some(log) = &argv_log {
+        vars.push(("OMS_TEST_CURL_LOG", log.as_os_str()));
+    }
+    for &(k, v) in extra_vars {
+        vars.push((k, OsStr::new(v)));
+    }
+    let out = child_test_cmd(&outer.home, &path_env, test_name, false, &vars)
+        .output()
+        .expect("spawn isolated child test");
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -525,17 +599,17 @@ fn cli_help_sources_loopback_and_secret_startup_validation() {
                 "oms intake reply",
                 "oms intake sources",
                 "/intake/<source>",
-                ENV_WEBHOOK_CRED,
-                ENV_ACCESS_CRED,
-                ENV_LINEAR_API_URL,
-                "--organization",
-                "--app-user",
-                "actor=app",
-                "app:assignable",
-                "app:mentionable",
-                "HTTPS tunnel",
+                "HTTPS",
+                "Compiled sources",
+                "linear",
             ] {
-                assert!(help.contains(needle), "help missing {needle:?}");
+                assert!(help.contains(needle), "help missing {needle:?}:\n{help}");
+            }
+            for specific in ["actor=app", "--organization", ENV_WEBHOOK_CRED] {
+                assert!(
+                    !help.contains(specific),
+                    "CLI help should stay source-neutral without {specific:?}:\n{help}"
+                );
             }
 
             let (code, out, err) =
@@ -571,51 +645,44 @@ fn cli_help_sources_loopback_and_secret_startup_validation() {
             assert_eq!(arr[0]["source"], "linear");
             assert_eq!(arr[0]["route"], "POST /intake/linear");
 
+            let repo_s = ws.repo.to_str().unwrap();
+
             // Unknown --source fails cleanly.
-            let (code, _, err) = oms_command_intake::run(
-                &[
-                    "serve",
-                    "--source",
-                    "jira",
-                    "--repo",
-                    ws.repo.to_str().unwrap(),
-                    "--room",
-                    "r1",
-                    "--participant",
-                    "linear",
-                    "--to",
-                    "main",
-                ]
-                .map(OsString::from),
-                &ws.repo,
-                &stop,
-            );
+            let mut jira_args =
+                split_args("serve --source jira --room r1 --participant linear --to main");
+            jira_args.extend(os_args(&["--repo", repo_s]));
+            let (code, _, err) = oms_command_intake::run(&jira_args, &ws.repo, &stop);
             assert_eq!(code, 2);
             assert!(String::from_utf8_lossy(&err).contains("unknown --source 'jira'"));
 
-            let serve_args = |listen: &str| -> Vec<OsString> {
-                [
-                    "serve",
-                    "--source",
-                    "linear",
-                    "--repo",
-                    ws.repo.to_str().unwrap(),
-                    "--room",
-                    "r1",
-                    "--participant",
-                    "linear",
-                    "--to",
-                    "main",
+            // Repeated options are rejected (exit 2) and name the duplicated flag.
+            for (spec, flag_name) in [
+                ("sources --json --json", "--json"),
+                ("serve --source linear --room r1 --room r2", "--room"),
+                (
+                    "serve --source linear --organization=o1 --organization=o2",
                     "--organization",
-                    "org-1",
-                    "--app-user",
-                    "app-1",
-                    "--listen",
-                    listen,
-                ]
-                .into_iter()
-                .map(OsString::from)
-                .collect()
+                ),
+                (
+                    "reply --source linear --kind thought --kind response",
+                    "--kind",
+                ),
+            ] {
+                let (code, _, err) = oms_command_intake::run(&split_args(spec), &ws.repo, &stop);
+                let err_s = String::from_utf8_lossy(&err);
+                assert_eq!(code, 2, "expected exit 2 for {flag_name}: {err_s}");
+                assert!(
+                    err_s.contains(flag_name),
+                    "expected {flag_name} in: {err_s}"
+                );
+            }
+
+            let serve_args = |listen: &str| {
+                let mut a = split_args(
+                    "serve --source linear --room r1 --participant linear --to main --organization org-1 --app-user app-1",
+                );
+                a.extend(os_args(&["--repo", repo_s, "--listen", listen]));
+                a
             };
             let (code, _, err) =
                 oms_command_intake::run(&serve_args("127.0.0.1:0"), &ws.repo, &stop);
@@ -623,76 +690,94 @@ fn cli_help_sources_loopback_and_secret_startup_validation() {
             assert!(String::from_utf8_lossy(&err).contains(ENV_WEBHOOK_CRED));
 
             let bad_val = format!("bad {}", runtime_sig_val());
-            unsafe_free_set_env(
+            let (c, _o, e) = run_intake_subproc(
                 &ws.home,
                 &serve_args("127.0.0.1:0"),
                 &[
                     (ENV_WEBHOOK_CRED, &bad_val),
                     (ENV_ACCESS_CRED, &runtime_acc_val()),
                 ],
-                |c, _o, e| {
-                    assert_ne!(c, 0);
-                    assert!(!e.contains(&bad_val));
-                },
             );
+            assert_ne!(c, 0);
+            assert!(!e.contains(&bad_val));
 
-            unsafe_free_set_env(
+            let (c, _o, e) = run_intake_subproc(
                 &ws.home,
                 &serve_args("0.0.0.0:0"),
                 &[
                     (ENV_WEBHOOK_CRED, &runtime_sig_val()),
                     (ENV_ACCESS_CRED, &runtime_acc_val()),
                 ],
-                |c, _o, e| {
-                    assert_ne!(c, 0);
-                    assert!(e.contains("loopback"), "stderr: {e}");
-                },
+            );
+            assert_ne!(c, 0);
+            assert!(e.contains("loopback"), "stderr: {e}");
+
+            // Oversized environment for outbound scan reports that cause (exit 3), not body refusal.
+            let clean_env_body = ws.root.join("env-limit-reply.md");
+            fs::write(&clean_env_body, "Clean body under oversized env.\n").unwrap();
+            let acc_hold = runtime_acc_val();
+            let pad_keys: Vec<String> = (0..4100).map(|i| format!("OMS_PAD_{i}")).collect();
+            let mut big_env: Vec<(&str, &str)> =
+                pad_keys.iter().map(|k| (k.as_str(), "1")).collect();
+            big_env.push((ENV_ACCESS_CRED, &acc_hold));
+            let mut env_reply_args = split_args(
+                "reply --source linear --room r1 --participant main --session sess-env --kind thought",
+            );
+            env_reply_args.extend(os_args(&[
+                "--repo",
+                repo_s,
+                "--text-file",
+                clean_env_body.to_str().unwrap(),
+            ]));
+            let (c, o, e) = run_intake_subproc(&ws.home, &env_reply_args, &big_env);
+            assert_eq!(c, 3, "stderr: {e}");
+            assert!(o.is_empty());
+            assert!(
+                e.contains("environment") && !e.contains("reply body refused by outbound scan"),
+                "stderr: {e}"
             );
         },
     );
 }
 
-fn unsafe_free_set_env(
+fn run_intake_subproc(
     home: &Path,
     intake_args: &[OsString],
     vars: &[(&str, &str)],
-    check: impl FnOnce(i32, String, String),
-) {
-    const SUB_ENV: &str = "OMS_INTAKE_ENV_SUB";
-    let exe = std::env::current_exe().expect("test exe");
+) -> (i32, String, String) {
     let path_env = std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into());
-    let mut cmd = Command::new(exe);
-    clean_child_cmd(&mut cmd, home, &path_env);
-    cmd.env(SUB_ENV, "1")
-        .env(
-            "OMS_INTAKE_SUB_ARGS",
-            serde_json::to_string(
-                &intake_args
-                    .iter()
-                    .map(|a| a.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap(),
-        )
-        .args(["--exact", "env_validation_subhelper", "--nocapture"]);
+    let serialized = serde_json::to_string(
+        &intake_args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let mut all_vars: Vec<(&str, &OsStr)> = vec![
+        ("OMS_INTAKE_ENV_SUB", OsStr::new("1")),
+        ("OMS_INTAKE_SUB_ARGS", OsStr::new(&serialized)),
+    ];
     for &(k, v) in vars {
-        cmd.env(k, v);
+        all_vars.push((k, OsStr::new(v)));
     }
-    let out = cmd.output().expect("run subhelper");
+    let out = child_test_cmd(home, &path_env, "env_validation_subhelper", true, &all_vars)
+        .output()
+        .expect("run subhelper");
     let marker = String::from_utf8_lossy(&out.stdout);
     let line = marker
         .lines()
         .find_map(|l| l.strip_prefix("SUBRESULT:"))
         .expect("subhelper output marker");
     let parsed: Value = serde_json::from_str(line).unwrap();
-    check(
+    (
         parsed["code"].as_i64().unwrap() as i32,
         parsed["stdout"].as_str().unwrap().to_owned(),
         parsed["stderr"].as_str().unwrap().to_owned(),
-    );
+    )
 }
 
 #[test]
+#[ignore]
 fn env_validation_subhelper() {
     if std::env::var("OMS_INTAKE_ENV_SUB").as_deref() != Ok("1") {
         return;
@@ -715,58 +800,31 @@ fn env_validation_subhelper() {
 
 #[test]
 fn serve_webhook_security_mapping_dedup_and_first_thought() {
-    if std::env::var(CHILD_TEST_ENV).as_deref()
-        != Ok("serve_webhook_security_mapping_dedup_and_first_thought")
-    {
-        let ws = TempWorkspace::new("oms-intake-serve-host");
-        let (argv_log, spy_path) = ws.install_curl_argv_spy();
-        let exe = std::env::current_exe().expect("test exe");
-        let mut cmd = Command::new(exe);
-        clean_child_cmd(&mut cmd, &ws.home, &spy_path);
-        cmd.env(
-            CHILD_TEST_ENV,
-            "serve_webhook_security_mapping_dedup_and_first_thought",
-        )
-        .env("OMS_TEST_CURL_LOG", &argv_log)
-        .args([
-            "--exact",
-            "serve_webhook_security_mapping_dedup_and_first_thought",
-            "--nocapture",
-        ]);
-        let out = cmd.output().expect("spawn serve test child");
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(out.status.success(), "serve test failed:\n{combined}");
-        return;
-    }
+    isolated_with(
+        "serve_webhook_security_mapping_dedup_and_first_thought",
+        true,
+        &[],
+        |ws| {
+            serve_webhook_contract_inner(ws);
+        },
+    );
+}
 
-    let ws = TempWorkspace::new("oms-intake-serve-inner");
+fn serve_webhook_contract_inner(ws: &TempWorkspace) {
     ws.setup_room("r1", "main", "linear");
     let api = FakeGraphqlServer::start();
 
     let sig_val = runtime_sig_val();
     let acc_val = runtime_acc_val();
-
-    let mut secrets = SecretStore::new();
-    secrets.insert(
-        ENV_WEBHOOK_CRED,
-        SecretValue::parse_checked("sig", sig_val.clone()).unwrap(),
-    );
-    secrets.insert(
-        ENV_ACCESS_CRED,
-        SecretValue::parse_checked("acc", acc_val.clone()).unwrap(),
-    );
-    let mut binding_flags = BTreeMap::new();
-    binding_flags.insert("--organization".into(), "org-expected".into());
-    binding_flags.insert("--app-user".into(), "app-user-expected".into());
-
+    let secrets = make_secrets(&[(ENV_WEBHOOK_CRED, &sig_val), (ENV_ACCESS_CRED, &acc_val)]);
+    let binding_flags = BTreeMap::from([
+        ("--organization".into(), "org-expected".into()),
+        ("--app-user".into(), "app-user-expected".into()),
+    ]);
     let source = Arc::new(LinearSource::with_endpoint(
         EndpointUrl::parse(&api.url()).unwrap(),
     ));
-    let cfg = ServeConfig {
+    let server = ServerHandle::spawn(ServeConfig {
         source,
         repo: ws.repo.clone(),
         room: "r1".into(),
@@ -775,53 +833,34 @@ fn serve_webhook_security_mapping_dedup_and_first_thought() {
         binding_flags,
         listen: "127.0.0.1:0".parse().unwrap(),
         secrets,
-    };
-    let server = ServerHandle::spawn(cfg).expect("spawn ServerHandle on port 0");
+    })
+    .expect("spawn ServerHandle on port 0");
     let addr = server.local_addr();
 
     // 1. Wrong path (including legacy /linear/webhook or other source) -> 404; wrong method -> 405.
-    assert_eq!(
-        post_raw_http(addr, "POST", "/wrong", &[("Content-Length", "2")], b"{}"),
-        404
-    );
-    assert_eq!(
-        post_raw_http(
-            addr,
-            "POST",
-            "/linear/webhook",
-            &[("Content-Length", "2")],
-            b"{}",
-        ),
-        404
-    );
-    assert_eq!(
-        post_raw_http(
-            addr,
-            "POST",
-            "/intake/jira",
-            &[("Content-Length", "2")],
-            b"{}",
-        ),
-        404
-    );
+    for bad_path in ["/wrong", "/linear/webhook", "/intake/jira"] {
+        assert_eq!(
+            post_raw_http(addr, "POST", bad_path, &[("Content-Length", "2")], b"{}"),
+            404
+        );
+    }
     assert_eq!(
         post_raw_http(
             addr,
             "GET",
             LINEAR_INTAKE_PATH,
             &[("Content-Length", "0")],
-            b"",
+            b""
         ),
         405
     );
-    // Chunked transfer encoding rejected -> 400.
     assert_eq!(
         post_raw_http(
             addr,
             "POST",
             LINEAR_INTAKE_PATH,
             &[("Transfer-Encoding", "chunked")],
-            b"0\r\n\r\n",
+            b"0\r\n\r\n"
         ),
         400
     );
@@ -981,24 +1020,39 @@ fn serve_webhook_security_mapping_dedup_and_first_thought() {
     assert_eq!(ws.room_messages("r1").len(), 1);
     assert_eq!(api.snapshot().2, 1);
 
+    let make_prompted = |act_id: &str, signal: Option<&str>, body: &str| {
+        json!({
+            "type": "AgentSessionEvent",
+            "action": "prompted",
+            "organizationId": "org-expected",
+            "appUserId": "app-user-expected",
+            "webhookTimestamp": now_ms(),
+            "agentSession": { "id": "sess-100" },
+            "agentActivity": {
+                "id": act_id,
+                "agentSessionId": "sess-100",
+                "userId": "user-1",
+                "signal": signal,
+                "content": { "type": "prompt", "body": body }
+            }
+        })
+    };
+    let make_created = |sess_id: &str, ctx: &str| {
+        json!({
+            "type": "AgentSessionEvent",
+            "action": "created",
+            "organizationId": "org-expected",
+            "appUserId": "app-user-expected",
+            "webhookTimestamp": now_ms(),
+            "agentSession": { "id": sess_id, "issue": { "identifier": "ENG-99" } },
+            "promptContext": ctx,
+        })
+    };
+
     // 9. `prompted` follow-up from the same session is NOT sent with Room `--reply-to`;
     //    it is sent as a new `question` whose fixed header names the source, session id,
     //    and message id of the original `created` question so Main can thread it.
-    let prompted_ev = json!({
-        "type": "AgentSessionEvent",
-        "action": "prompted",
-        "organizationId": "org-expected",
-        "appUserId": "app-user-expected",
-        "webhookTimestamp": now_ms(),
-        "agentSession": { "id": "sess-100" },
-        "agentActivity": {
-            "id": "act-201",
-            "agentSessionId": "sess-100",
-            "userId": "user-1",
-            "signal": null,
-            "content": { "type": "prompt", "body": "Follow-up detail from Linear user." }
-        }
-    });
+    let prompted_ev = make_prompted("act-201", None, "Follow-up detail from Linear user.");
     assert_eq!(
         post_signed_linear_webhook(addr, &sig_val, &prompted_ev),
         200
@@ -1022,8 +1076,7 @@ fn serve_webhook_security_mapping_dedup_and_first_thought() {
     assert!(followup_text.contains(&format!("reply_to: {expected_created_mid}")));
     assert!(followup_text.contains("Follow-up detail from Linear user."));
 
-    // Confirm Room's unmodified reply rule remains enforced on `main` (same-sender question
-    // with --reply-to is rejected, while Main answering the bridge sender succeeds).
+    // Confirm Room's unmodified reply rule remains enforced on `main`.
     {
         let stop = AtomicBool::new(false);
         let room = Room::open(
@@ -1048,29 +1101,12 @@ fn serve_webhook_security_mapping_dedup_and_first_thought() {
                 quiet: false,
             },
         );
-        assert!(
-            rejected.is_err(),
-            "Room reply rule must reject same-sender --reply-to"
-        );
+        assert!(rejected.is_err());
     }
 
     // 10. `prompted` with `signal == "stop"` -> kind `question`, no Room `--reply-to`,
     //     first line `stop requested`, and fixed header naming source, session, and created msg id.
-    let stop_ev = json!({
-        "type": "AgentSessionEvent",
-        "action": "prompted",
-        "organizationId": "org-expected",
-        "appUserId": "app-user-expected",
-        "webhookTimestamp": now_ms(),
-        "agentSession": { "id": "sess-100" },
-        "agentActivity": {
-            "id": "act-202",
-            "agentSessionId": "sess-100",
-            "userId": "user-1",
-            "signal": "stop",
-            "content": { "type": "prompt", "body": "Please pause." }
-        }
-    });
+    let stop_ev = make_prompted("act-202", Some("stop"), "Please pause.");
     assert_eq!(post_signed_linear_webhook(addr, &sig_val, &stop_ev), 200);
     let msgs = ws.room_messages("r1");
     assert_eq!(msgs.len(), 3);
@@ -1085,17 +1121,8 @@ fn serve_webhook_security_mapping_dedup_and_first_thought() {
     // 11. Oversized `promptContext` (> 4000 bytes) is truncated to <= 4000 bytes with "truncated" note.
     let long_ctx = format!("{}끝", "가나다라마바사abcdef".repeat(300));
     assert!(long_ctx.len() > ROOM_TEXT_LIMIT);
-    let long_created = json!({
-        "type": "AgentSessionEvent",
-        "action": "created",
-        "organizationId": "org-expected",
-        "appUserId": "app-user-expected",
-        "webhookTimestamp": now_ms(),
-        "agentSession": { "id": "sess-long", "issue": { "identifier": "ENG-99" } },
-        "promptContext": long_ctx,
-    });
     assert_eq!(
-        post_signed_linear_webhook(addr, &sig_val, &long_created),
+        post_signed_linear_webhook(addr, &sig_val, &make_created("sess-long", &long_ctx)),
         200
     );
     let msgs = ws.room_messages("r1");
@@ -1106,15 +1133,8 @@ fn serve_webhook_security_mapping_dedup_and_first_thought() {
 
     // 12. Room refuses sensitive inbound text -> still returns 200, appends nothing, queues error activity.
     let sensitive_turn = ["gh", "p_0123456789abcdefghij0123456789ab"].concat();
-    let refused_created = json!({
-        "type": "AgentSessionEvent",
-        "action": "created",
-        "organizationId": "org-expected",
-        "appUserId": "app-user-expected",
-        "webhookTimestamp": now_ms(),
-        "agentSession": { "id": "sess-refused" },
-        "promptContext": format!("Please use {sensitive_turn} here"),
-    });
+    let refused_created =
+        make_created("sess-refused", &format!("Please use {sensitive_turn} here"));
     assert_eq!(
         post_signed_linear_webhook(addr, &sig_val, &refused_created),
         200
@@ -1131,65 +1151,63 @@ fn serve_webhook_security_mapping_dedup_and_first_thought() {
         Some(REFUSED_CONTENT_ERROR_BODY)
     );
 
+    // 12b. Room open/read failure is NOT a content refusal: returns 503 with no first ack,
+    //      and succeeds cleanly when the Room becomes readable again.
+    let room_log = ws.repo.join(".oms/threads/r1.jsonl");
+    let room_log_offline = ws.repo.join(".oms/threads/r1.jsonl.offline");
+    fs::rename(&room_log, &room_log_offline).expect("take room log offline");
+    let retryable_created = make_created("sess-503", "Retry when Room I/O recovers");
+    assert_eq!(
+        post_signed_linear_webhook(addr, &sig_val, &retryable_created),
+        503
+    );
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        api.snapshot().0.len(),
+        3,
+        "503 Room failure must not emit a refusal or thought ack"
+    );
+    fs::rename(&room_log_offline, &room_log).expect("restore room log");
+    assert_eq!(
+        post_signed_linear_webhook(addr, &sig_val, &retryable_created),
+        200
+    );
+    assert_eq!(ws.room_messages("r1").len(), 5);
+    let calls = api.wait_for_calls(4, Duration::from_secs(5));
+    assert_eq!(calls.len(), 4);
+    assert_eq!(
+        calls[3].body["variables"]["input"]["content"]["type"].as_str(),
+        Some("thought")
+    );
+
     // 13. Shutdown server & verify log lines never contain body text or credentials,
-    //     and child curl argv never contained the access credential.
+    //     and child curl argv passed `-q` first and never contained credentials.
     let server_logs = String::from_utf8(server.shutdown()).expect("UTF-8 server logs");
     assert!(server_logs.contains("source=linear status=200 session=sess-100"));
+    assert!(server_logs.contains("source=linear status=503 session=sess-503"));
     assert!(!server_logs.contains("SECRET_MARKER_BODY"));
     assert!(!server_logs.contains(&sig_val));
     assert!(!server_logs.contains(&acc_val));
 
-    if let Ok(argv_log_path) = std::env::var("OMS_TEST_CURL_LOG") {
-        let logged = fs::read_to_string(argv_log_path).expect("read curl argv log");
-        assert!(
-            logged.contains("CALL\n"),
-            "curl spy must observe child calls"
-        );
-        assert!(logged.contains("ARG:-K\n"));
-        assert!(
-            !logged.contains(&acc_val),
-            "credential leaked into curl argv"
-        );
-        assert!(
-            !logged.contains(&sig_val),
-            "signing value leaked into curl argv"
-        );
+    if std::env::var("OMS_TEST_CURL_LOG").is_ok() {
+        assert_curl_spy_clean(&[&acc_val, &sig_val]);
     }
 }
 
 #[test]
 fn reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal() {
-    if std::env::var(CHILD_TEST_ENV).as_deref()
-        != Ok("reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal")
-    {
-        let ws = TempWorkspace::new("oms-intake-reply-host");
-        let (argv_log, spy_path) = ws.install_curl_argv_spy();
-        let acc_val = runtime_acc_val();
-        let exe = std::env::current_exe().expect("test exe");
-        let mut cmd = Command::new(exe);
-        clean_child_cmd(&mut cmd, &ws.home, &spy_path);
-        cmd.env(
-            CHILD_TEST_ENV,
-            "reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal",
-        )
-        .env(ENV_ACCESS_CRED, &acc_val)
-        .env("OMS_TEST_CURL_LOG", &argv_log)
-        .args([
-            "--exact",
-            "reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal",
-            "--nocapture",
-        ]);
-        let out = cmd.output().expect("spawn reply test child");
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(out.status.success(), "reply test failed:\n{combined}");
-        return;
-    }
+    let acc_val = runtime_acc_val();
+    isolated_with(
+        "reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal",
+        true,
+        &[(ENV_ACCESS_CRED, &acc_val)],
+        |ws| {
+            reply_contract_inner(ws);
+        },
+    );
+}
 
-    let ws = TempWorkspace::new("oms-intake-reply-inner");
+fn reply_contract_inner(ws: &TempWorkspace) {
     ws.setup_room("r1", "main", "linear");
     let api = FakeGraphqlServer::start();
     let acc_val = std::env::var(ENV_ACCESS_CRED).expect("access cred in child env");
@@ -1229,13 +1247,15 @@ fn reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal() {
         oms_command_intake::execute_reply(&cfg, &LocalServices, &AtomicBool::new(false))
     };
 
+    let origin_mid = Some("linear-created-sess-reply-1");
+    let run_reply_ok = |api_url: &str, kind: &str, file: &Path, reply_to: Option<&str>| -> Value {
+        let (code, out, err) = run_reply_with_url(api_url, kind, file, reply_to);
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&err));
+        serde_json::from_slice(&out).expect("reply JSON")
+    };
+
     // 1. Outbound scan refusal -> exit 3, nothing sent to API, no Room receipt.
-    let (code, out, err) = run_reply_with_url(
-        &api.url(),
-        "response",
-        &sensitive_file,
-        Some("linear-created-sess-reply-1"),
-    );
+    let (code, out, err) = run_reply_with_url(&api.url(), "response", &sensitive_file, origin_mid);
     assert_eq!(code, 3, "stderr: {}", String::from_utf8_lossy(&err));
     assert!(out.is_empty());
     assert_eq!(api.snapshot().0.len(), 0);
@@ -1246,12 +1266,7 @@ fn reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal() {
     let closed_port = closed_listener.local_addr().unwrap().port();
     drop(closed_listener);
     let closed_url = format!("http://127.0.0.1:{closed_port}/graphql");
-    let (code, out, _err) = run_reply_with_url(
-        &closed_url,
-        "response",
-        &clean_file,
-        Some("linear-created-sess-reply-1"),
-    );
+    let (code, out, _err) = run_reply_with_url(&closed_url, "response", &clean_file, origin_mid);
     assert_eq!(code, 75);
     let unknown_json: Value = serde_json::from_slice(&out).expect("outcome_unknown JSON");
     assert_eq!(unknown_json["source"], "linear");
@@ -1259,14 +1274,7 @@ fn reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal() {
     let derived_id = unknown_json["delivery_id"].as_str().unwrap().to_owned();
 
     // 3. Retry with identical inputs against live fake API -> query (absent) -> create -> confirmed!
-    let (code, out, err) = run_reply_with_url(
-        &api.url(),
-        "response",
-        &clean_file,
-        Some("linear-created-sess-reply-1"),
-    );
-    assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&err));
-    let confirmed_json: Value = serde_json::from_slice(&out).expect("confirmed JSON");
+    let confirmed_json = run_reply_ok(&api.url(), "response", &clean_file, origin_mid);
     assert_eq!(confirmed_json["state"], "confirmed");
     assert_eq!(confirmed_json["delivery_id"], derived_id);
     assert_eq!(
@@ -1289,31 +1297,44 @@ fn reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal() {
         .find(|m| m.text("id") == format!("linear-delivery-{derived_id}"))
         .expect("confirmed Room status receipt");
     assert_eq!(confirmed_receipt.text("message_kind"), "status");
-    assert!(confirmed_receipt.text("text").contains("source=linear"));
-    assert!(
-        confirmed_receipt
-            .text("text")
-            .contains("session=sess-reply-1")
-    );
-    assert!(confirmed_receipt.text("text").contains("kind=response"));
-    assert!(confirmed_receipt.text("text").contains(&derived_id));
-    assert!(confirmed_receipt.text("text").contains("state=confirmed"));
+    for field in [
+        "source=linear",
+        "session=sess-reply-1",
+        "kind=response",
+        &derived_id,
+        "state=confirmed",
+    ] {
+        assert!(confirmed_receipt.text("text").contains(field));
+    }
 
     // 4. Replay (fake API reports id exists) -> confirmed (replayed), NO second create, idempotent Room receipt!
     let msg_count_before = ws.room_messages("r1").len();
-    let (code, out, err) = run_reply_with_url(
-        &api.url(),
-        "response",
-        &clean_file,
-        Some("linear-created-sess-reply-1"),
-    );
-    assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&err));
-    let replayed_json: Value = serde_json::from_slice(&out).expect("replayed JSON");
+    let replayed_json = run_reply_ok(&api.url(), "response", &clean_file, origin_mid);
     assert_eq!(replayed_json["state"], "confirmed (replayed)");
     assert_eq!(replayed_json["delivery_id"], derived_id);
-    let (_calls, queries, creates) = api.snapshot();
-    assert_eq!((queries, creates), (2, 1), "must not send second create");
+    assert_eq!((api.snapshot().1, api.snapshot().2), (2, 1));
     assert_eq!(ws.room_messages("r1").len(), msg_count_before);
+
+    // 4b. Second distinct reply text with the SAME --kind and SAME --reply-to derives a
+    //     distinct delivery_id and sends a new create; identical rerun replays.
+    let second_clean_file = ws.root.join("clean-reply-2.md");
+    let second_body = "Follow-up response with distinct text to the same message.\n";
+    fs::write(&second_clean_file, second_body).unwrap();
+    let second_json = run_reply_ok(&api.url(), "response", &second_clean_file, origin_mid);
+    assert_eq!(second_json["state"], "confirmed");
+    let second_id = second_json["delivery_id"].as_str().unwrap().to_owned();
+    assert_ne!(second_id, derived_id);
+    let (calls, queries, creates) = api.snapshot();
+    assert_eq!((queries, creates), (3, 2));
+    assert_eq!(
+        calls.last().unwrap().body["variables"]["input"]["content"]["body"].as_str(),
+        Some(second_body)
+    );
+
+    let second_replay = run_reply_ok(&api.url(), "response", &second_clean_file, origin_mid);
+    assert_eq!(second_replay["state"], "confirmed (replayed)");
+    assert_eq!(second_replay["delivery_id"], second_id);
+    assert_eq!(api.snapshot().2, 2);
 
     // 5. Pre-existing activity on Linear with no prior local Room receipt -> records state=confirmed (replayed).
     let thought_file = ws.root.join("thought.md");
@@ -1322,11 +1343,9 @@ fn reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal() {
     let thought_key = reply_caller_key("thought", None, thought_body.as_bytes());
     let pre_id = derive_delivery_id(SOURCE_LINEAR, "sess-reply-1", "r1", &thought_key);
     api.insert_existing(&pre_id);
-    let (code, out, err) = run_reply_with_url(&api.url(), "thought", &thought_file, None);
-    assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&err));
-    let pre_json: Value = serde_json::from_slice(&out).unwrap();
+    let pre_json = run_reply_ok(&api.url(), "thought", &thought_file, None);
     assert_eq!(pre_json["state"], "confirmed (replayed)");
-    assert_eq!(api.snapshot().2, 1, "still only one create");
+    assert_eq!(api.snapshot().2, 2);
     let msgs = ws.room_messages("r1");
     let pre_receipt = msgs
         .iter()
@@ -1338,77 +1357,52 @@ fn reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal() {
             .contains("state=confirmed (replayed)")
     );
 
-    // 6. Verify child curl argv never held the access credential.
-    let argv_log_path = std::env::var("OMS_TEST_CURL_LOG").expect("curl log env");
-    let logged = fs::read_to_string(argv_log_path).expect("read curl argv log");
-    assert!(logged.contains("CALL\n"));
-    assert!(
-        !logged.contains(&acc_val),
-        "access credential leaked into curl argv"
-    );
+    // 6. Verify child curl argv passed `-q` first and never held the access credential.
+    assert_curl_spy_clean(&[&acc_val]);
 
     // 7. Full CLI parser round-trip for `oms intake serve` (port 0) and `oms intake reply`.
     let cli_sig = runtime_sig_val();
     let cli_reply_file = ws.root.join("cli-reply.md");
     fs::write(&cli_reply_file, "CLI end-to-end reply body.\n").unwrap();
+    let api_url = api.url();
 
-    let exe = std::env::current_exe().expect("test exe");
-    let path_env = std::env::var_os("PATH").unwrap();
-    let mut cli_cmd = Command::new(&exe);
-    clean_child_cmd(&mut cli_cmd, &ws.home, &path_env);
-    cli_cmd
-        .env("OMS_INTAKE_ENV_SUB", "1")
-        .env(ENV_ACCESS_CRED, &acc_val)
-        .env(ENV_LINEAR_API_URL, api.url())
-        .env(
-            "OMS_INTAKE_SUB_ARGS",
-            serde_json::to_string(&vec![
-                "reply",
-                "--source",
-                "linear",
-                "--repo",
-                ws.repo.to_str().unwrap(),
-                "--room",
-                "r1",
-                "--participant",
-                "main",
-                "--session",
-                "sess-cli-rt",
-                "--kind",
-                "elicitation",
-                "--text-file",
-                cli_reply_file.to_str().unwrap(),
-                "--json",
-            ])
-            .unwrap(),
-        )
-        .args(["--exact", "env_validation_subhelper", "--nocapture"]);
-    let cli_out = cli_cmd.output().expect("run CLI reply subhelper");
-    let cli_marker = String::from_utf8_lossy(&cli_out.stdout);
-    let cli_line = cli_marker
-        .lines()
-        .find_map(|l| l.strip_prefix("SUBRESULT:"))
-        .expect("CLI reply subresult");
-    let cli_parsed: Value = serde_json::from_str(cli_line).unwrap();
-    assert_eq!(cli_parsed["code"], 0, "stderr: {}", cli_parsed["stderr"]);
-    let cli_stdout_json: Value =
-        serde_json::from_str(cli_parsed["stdout"].as_str().unwrap()).unwrap();
+    let mut cli_reply_args = split_args(
+        "reply --source linear --room r1 --participant main --session sess-cli-rt --kind elicitation --json",
+    );
+    cli_reply_args.extend(os_args(&[
+        "--repo",
+        ws.repo.to_str().unwrap(),
+        "--text-file",
+        cli_reply_file.to_str().unwrap(),
+    ]));
+    let (cli_code, cli_stdout, cli_stderr) = run_intake_subproc(
+        &ws.home,
+        &cli_reply_args,
+        &[(ENV_ACCESS_CRED, &acc_val), (ENV_LINEAR_API_URL, &api_url)],
+    );
+    assert_eq!(cli_code, 0, "stderr: {cli_stderr}");
+    let cli_stdout_json: Value = serde_json::from_str(&cli_stdout).unwrap();
     assert_eq!(cli_stdout_json["source"], "linear");
     assert_eq!(cli_stdout_json["state"], "confirmed");
     assert_eq!(cli_stdout_json["kind"], "elicitation");
 
     let serve_ready_file = ws.root.join("serve-stdout.log");
-    let mut serve_proc = Command::new(&exe);
-    clean_child_cmd(&mut serve_proc, &ws.home, &path_env);
+    let path_env = std::env::var_os("PATH").unwrap();
     let stdout_file = fs::File::create(&serve_ready_file).unwrap();
-    serve_proc
-        .env("OMS_INTAKE_SERVE_SUB", "1")
-        .env(ENV_WEBHOOK_CRED, &cli_sig)
-        .env(ENV_ACCESS_CRED, &acc_val)
-        .env(ENV_LINEAR_API_URL, api.url())
-        .env("OMS_INTAKE_SERVE_REPO", &ws.repo)
-        .stdout(stdout_file)
-        .args(["--exact", "serve_cli_subhelper", "--nocapture"]);
+    let mut serve_proc = child_test_cmd(
+        &ws.home,
+        &path_env,
+        "serve_cli_subhelper",
+        true,
+        &[
+            ("OMS_INTAKE_SERVE_SUB", OsStr::new("1")),
+            (ENV_WEBHOOK_CRED, OsStr::new(&cli_sig)),
+            (ENV_ACCESS_CRED, OsStr::new(&acc_val)),
+            (ENV_LINEAR_API_URL, OsStr::new(&api_url)),
+            ("OMS_INTAKE_SERVE_REPO", ws.repo.as_os_str()),
+        ],
+    );
+    serve_proc.stdout(stdout_file);
     let mut child = serve_proc.spawn().expect("spawn serve cli child");
     let deadline = Instant::now() + Duration::from_secs(5);
     let bound_addr: SocketAddr = loop {
@@ -1445,33 +1439,16 @@ fn reply_confirmed_replayed_outcome_unknown_and_outbound_scan_refusal() {
 }
 
 #[test]
+#[ignore]
 fn serve_cli_subhelper() {
     if std::env::var("OMS_INTAKE_SERVE_SUB").as_deref() != Ok("1") {
         return;
     }
     let repo = PathBuf::from(std::env::var_os("OMS_INTAKE_SERVE_REPO").unwrap());
-    let args: Vec<OsString> = [
-        "serve",
-        "--source",
-        "linear",
-        "--repo",
-        repo.to_str().unwrap(),
-        "--room",
-        "r1",
-        "--participant",
-        "linear",
-        "--to",
-        "main",
-        "--organization",
-        "org-cli",
-        "--app-user",
-        "app-cli",
-        "--listen",
-        "127.0.0.1:0",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect();
+    let mut args = split_args(
+        "serve --source linear --room r1 --participant linear --to main --organization org-cli --app-user app-cli --listen 127.0.0.1:0",
+    );
+    args.extend(os_args(&["--repo", repo.to_str().unwrap()]));
     let stop = AtomicBool::new(false);
     let mut out = std::io::stdout();
     let mut err = std::io::stderr();
@@ -1527,6 +1504,7 @@ struct FakeTrackerBackend {
 #[derive(Clone, Default)]
 struct FakeTrackerSource {
     backend: Arc<Mutex<FakeTrackerBackend>>,
+    hold_acks: Arc<AtomicBool>,
 }
 
 impl Source for FakeTrackerSource {
@@ -1672,8 +1650,14 @@ impl Source for FakeTrackerSource {
         _secrets: &SecretStore,
         ack: &OutboundAck,
         _timeout: Duration,
-        _interrupted: &AtomicBool,
+        interrupted: &AtomicBool,
     ) -> Result<(), TransportError> {
+        while self.hold_acks.load(Ordering::Acquire) && !interrupted.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        if interrupted.load(Ordering::Acquire) {
+            return Err(TransportError::OutcomeUnknown("interrupted".into()));
+        }
         self.backend.lock().unwrap().acks.push(ack.clone());
         Ok(())
     }
@@ -1790,29 +1774,25 @@ fn second_fake_adapter_reuses_listener_idempotency_and_receipt_without_linear_co
                 404
             );
 
+            let fake_ev = |proj: &str, ticket: &str, ev_id: &str, kind: &str, body: &str| json!({ "project": proj, "ticket": ticket, "event_id": ev_id, "kind": kind, "body": body });
+
             // Foreign project binding -> 403.
             assert_eq!(
                 post_fake(
                     now_ms(),
-                    &json!({
-                        "project": "OTHER",
-                        "ticket": "T-7",
-                        "event_id": "ev-1",
-                        "kind": "created",
-                        "body": "Initial ticket context"
-                    }),
+                    &fake_ev("OTHER", "T-7", "ev-1", "created", "Initial ticket context")
                 ),
                 403
             );
 
             // Created event -> 200, Room question, and first acknowledgement.
-            let created_payload = json!({
-                "project": "ACME",
-                "ticket": "T-7",
-                "event_id": "ev-1",
-                "kind": "created",
-                "body": "Investigate flaky CI job on ACME"
-            });
+            let created_payload = fake_ev(
+                "ACME",
+                "T-7",
+                "ev-1",
+                "created",
+                "Investigate flaky CI job on ACME",
+            );
             assert_eq!(post_fake(now_ms(), &created_payload), 200);
             // Duplicate created event -> 200, idempotent Room message, no second ack.
             assert_eq!(post_fake(now_ms(), &created_payload), 200);
@@ -1829,27 +1809,18 @@ fn second_fake_adapter_reuses_listener_idempotency_and_receipt_without_linear_co
             assert_eq!(
                 post_fake(
                     now_ms(),
-                    &json!({
-                        "project": "ACME",
-                        "ticket": "T-7",
-                        "event_id": "ev-2",
-                        "kind": "prompted",
-                        "body": "Logs attached in tracker"
-                    }),
+                    &fake_ev(
+                        "ACME",
+                        "T-7",
+                        "ev-2",
+                        "prompted",
+                        "Logs attached in tracker"
+                    )
                 ),
                 200
             );
             assert_eq!(
-                post_fake(
-                    now_ms(),
-                    &json!({
-                        "project": "ACME",
-                        "ticket": "T-7",
-                        "event_id": "ev-3",
-                        "kind": "stop",
-                        "body": ""
-                    }),
-                ),
+                post_fake(now_ms(), &fake_ev("ACME", "T-7", "ev-3", "stop", "")),
                 200
             );
 
@@ -1866,7 +1837,38 @@ fn second_fake_adapter_reuses_listener_idempotency_and_receipt_without_linear_co
             assert_eq!(msgs[2].text("text").lines().next(), Some("stop requested"));
             assert!(msgs[2].text("text").contains("reply_to: fake-created-T-7"));
 
-            let _ = server.shutdown();
+            // Ack queue overflow logs a clean stderr line, and shutdown interrupts the worker
+            // immediately without draining queued acknowledgements.
+            fake.hold_acks.store(true, Ordering::Release);
+            for i in 0..66 {
+                let ev = fake_ev(
+                    "ACME",
+                    &format!("T-burst-{i}"),
+                    &format!("ev-burst-{i}"),
+                    "created",
+                    "MARKER_BURST_BODY",
+                );
+                assert_eq!(post_fake(now_ms(), &ev), 200);
+            }
+            let stop_started = Instant::now();
+            let fake_logs = String::from_utf8(server.shutdown()).expect("UTF-8 fake server logs");
+            assert!(
+                stop_started.elapsed() < Duration::from_secs(2),
+                "shutdown waited behind queued acks: {:?}",
+                stop_started.elapsed()
+            );
+            assert_eq!(
+                fake.backend.lock().unwrap().acks.len(),
+                1,
+                "ack worker must stop on interruption instead of draining queued acks"
+            );
+            assert!(
+                fake_logs.contains("ack queue full"),
+                "expected queue-full stderr line, got:\n{fake_logs}"
+            );
+            assert!(!fake_logs.contains("MARKER_BURST_BODY"));
+            assert!(!fake_logs.contains(&sign_val));
+            assert!(!fake_logs.contains(&reply_val));
 
             // Outbound reply path reuse: outbound scan refusal ( including explicit adapter secret ),
             // outcome_unknown (exit 75), confirmed (exit 0), and confirmed (replayed) (exit 0).

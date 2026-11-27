@@ -42,13 +42,25 @@ under `POST /intake/<source>` without adding new top-level verbs or aliases.
   (preserving Room's sender-addressed reply rule); instead, they arrive as new `question` messages
   whose fixed header names `source`, `session`, `request`, and `reply_to: <created message id>` so
   Main can thread them. `stop` events place `stop requested` on the first line. External text is
-  truncated to fit the 4000-byte Room limit with a `truncated` note.
+  truncated to fit the 4000-byte Room limit with a `truncated` note. When Room content validation
+  (`oms-scrub` or message bounds) refuses the inbound text, `oms intake serve` returns HTTP `200`
+  without appending to the Room and queues the adapter's refusal acknowledgement (`Refused`). When
+  the Room cannot be opened, read, or locked (for example lock contention, I/O failure, or a closed
+  Room), `oms intake serve` returns HTTP `503` with no first acknowledgement so the external source
+  retries.
 - **Outbound scan, retry safety, and receipts**: `oms intake reply` scans `--text-file` with
-  `oms-scrub` (including loaded adapter credentials) before any network call and exits `3` on a
-  hit. Otherwise it derives a deterministic UUID v4 `delivery_id` from SHA-256 of
-  `(source, session, room, caller_key)`, queries the external adapter before creating, and records a
-  Room `status` receipt (`<source>-delivery-<delivery_id>` on `confirmed` / `confirmed (replayed)`,
-  or `<source>-delivery-<delivery_id>-unknown` with exit `75` on `outcome_unknown`).
+  `oms-scrub` against the bounded process environment (plus loaded adapter credentials) before any
+  network call and exits `3` on a scan hit or if the environment exceeds outbound scan limits.
+  Otherwise it derives a deterministic UUID v4 `delivery_id` from SHA-256 of
+  `(source, session, room, caller_key)`, where `caller_key` always includes `--kind` and the
+  lowercase hex SHA-256 digest of the exact outbound-scanned reply text
+  (`<kind>:sha256:<text_sha256>`, or `<kind>:reply-to:<msg_id>:sha256:<text_sha256>` when
+  `--reply-to` is supplied as an extra input). Two distinct reply texts of the same `--kind` to the
+  same `--reply-to` message therefore produce distinct deliveries, while rerunning the identical
+  command replays safely. `oms intake reply` queries the external adapter before creating and
+  records a Room `status` receipt (`<source>-delivery-<delivery_id>` on `confirmed` /
+  `confirmed (replayed)`, or `<source>-delivery-<delivery_id>-unknown` with exit `75` on
+  `outcome_unknown`).
 - **Environment-only secrets**: Secrets are read from process environment variables only, validated
   at startup (non-empty, no whitespace or control characters), redacted in diagnostics, and never
   accepted on `argv` or logged. Subprocess `curl` calls receive HTTP auth headers via an exclusive
@@ -81,8 +93,9 @@ under `POST /intake/<source>` without adding new top-level verbs or aliases.
 | Inbound | `AgentSessionEvent` `action="created"` | `question` from `--participant` to `--to` | `linear-created-<session id>` (SHA-256 fallback if outside Room ID charset/length) | Fixed header with untrusted banner, `source: linear`, `session`, `request`; body carries `issue`, `url`, and `promptContext` fitted to 4000 UTF-8 bytes. Queues initial `thought` (`Received by OMS; waiting for Main`) within Linear's 10 s window after HTTP `200` ACK. |
 | Inbound | `AgentSessionEvent` `action="prompted"` | New `question` from `--participant` to `--to` (no Room `--reply-to`) | `linear-prompted-<activity id>` | Fixed header names `source: linear`, `session: <session id>`, `request: <activity id>`, and `reply_to: linear-created-<session id>`. Duplicate deliveries return HTTP `200` without appending a second turn. |
 | Inbound | `AgentSessionEvent` `action="prompted"` with `agentActivity.signal="stop"` | New `question` with first line `stop requested` (no Room `--reply-to`) | `linear-prompted-<activity id>` | Fixed header includes `reply_to: linear-created-<session id>`. Main decides how to act; `oms intake serve` never cancels processes or plans itself. |
-| Inbound (refused) | Room validation or `oms-scrub` refuses inbound text | No Room message appended | — | Returns HTTP `200` and queues an `error` activity (`OMS could not accept the request content.`). |
-| Outbound | `oms intake reply --source linear --kind thought\|response\|elicitation\|error` | `status` message from `--participant` to `all` | `linear-delivery-<delivery uuid>` (`linear-delivery-<delivery uuid>-unknown` on exit `75`) | Scans `--text-file` with `oms-scrub` first (exit `3` on hit). Queries `agentActivity(id)` before `agentActivityCreate` using deterministic UUID v4 `delivery_id`. |
+| Inbound (refused) | Room content validation (`oms-scrub` or message bounds) refuses inbound text | No Room message appended | — | Returns HTTP `200` and queues an `error` activity (`OMS could not accept the request content.`). |
+| Inbound (Room unavailable) | Room open, read, or lock/I/O failure | No Room message appended | — | Returns HTTP `503` with no acknowledgement activity so Linear retries. |
+| Outbound | `oms intake reply --source linear --kind thought\|response\|elicitation\|error` | `status` message from `--participant` to `all` | `linear-delivery-<delivery uuid>` (`linear-delivery-<delivery uuid>-unknown` on exit `75`) | Scans `--text-file` with `oms-scrub` first (exit `3` on hit or oversized environment). Queries `agentActivity(id)` before `agentActivityCreate` using deterministic UUID v4 `delivery_id` derived from `(source, session, room, caller_key)` with `--kind`, optional `--reply-to`, and SHA-256 of the scanned reply text. |
 
 ### Non-goals
 

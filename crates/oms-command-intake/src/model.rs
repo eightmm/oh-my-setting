@@ -175,14 +175,13 @@ pub fn derive_delivery_id(
     )
 }
 
-/// Build the caller key for `oms intake reply` from `--reply-to` or the text SHA-256 digest.
+/// Build the caller key for `oms intake reply` from `--kind`, the SHA-256 digest of the exact
+/// outbound-scanned reply text, and optional `--reply-to` as an extra input.
 pub fn reply_caller_key(kind: &str, reply_to: Option<&str>, text: &[u8]) -> String {
+    let text_digest = hex_lower(&Sha256::digest(text));
     match reply_to {
-        Some(msg_id) => format!("{kind}:reply-to:{msg_id}"),
-        None => {
-            let text_digest = hex_lower(&Sha256::digest(text));
-            format!("{kind}:sha256:{text_digest}")
-        }
+        Some(msg_id) => format!("{kind}:reply-to:{msg_id}:sha256:{text_digest}"),
+        None => format!("{kind}:sha256:{text_digest}"),
     }
 }
 

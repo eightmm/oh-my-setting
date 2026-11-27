@@ -20,7 +20,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, SyncSender};
+use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -104,46 +104,6 @@ pub fn validate_serve_room(
     Ok(())
 }
 
-struct AckDispatcher {
-    tx: Option<SyncSender<OutboundAck>>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl AckDispatcher {
-    fn spawn(source: Arc<dyn Source>, secrets: SecretStore) -> Self {
-        let (tx, rx) = mpsc::sync_channel::<OutboundAck>(BG_QUEUE_CAP);
-        let worker = thread::spawn(move || {
-            let never_stop = AtomicBool::new(false);
-            while let Ok(ack) = rx.recv() {
-                let _ = source.deliver_ack(&secrets, &ack, BG_ACK_TIMEOUT, &never_stop);
-            }
-        });
-        Self {
-            tx: Some(tx),
-            worker: Some(worker),
-        }
-    }
-
-    fn enqueue(&self, item: OutboundAck) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.try_send(item);
-        }
-    }
-
-    fn shutdown(&mut self) {
-        self.tx.take();
-        if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-impl Drop for AckDispatcher {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
 pub struct PreparedServer {
     listener: TcpListener,
     local_addr: SocketAddr,
@@ -192,54 +152,82 @@ impl PreparedServer {
         interrupted: &AtomicBool,
         stderr: &mut dyn Write,
     ) -> Result<(), String> {
-        let mut bg = AckDispatcher::spawn(Arc::clone(&self.cfg.source), self.cfg.secrets.clone());
         let poll_ts =
             Timespec::try_from(Duration::from_millis(50)).expect("valid fixed poll duration");
         let source_name = self.cfg.source.name();
+        let worker_stop = AtomicBool::new(false);
 
-        while !interrupted.load(Ordering::Acquire) {
-            let mut fds = [PollFd::new(&self.listener, PollFlags::IN)];
-            match poll(&mut fds, Some(&poll_ts)) {
-                Ok(0) => continue,
-                Ok(_) => {}
-                Err(Errno::INTR) => continue,
-                Err(e) => {
-                    bg.shutdown();
-                    return Err(format!("poll on intake listener failed: {e}"));
-                }
-            }
+        thread::scope(|scope| {
+            let (tx, rx) = mpsc::sync_channel::<OutboundAck>(BG_QUEUE_CAP);
+            let source = Arc::clone(&self.cfg.source);
+            let secrets = self.cfg.secrets.clone();
+            let stop_ref = &worker_stop;
 
-            loop {
-                if interrupted.load(Ordering::Acquire) {
-                    break;
-                }
-                match self.listener.accept() {
-                    Ok((stream, _peer)) => {
-                        let outcome = handle_connection(
-                            stream,
-                            &self.route_path,
-                            &self.cfg,
-                            room_services,
-                            interrupted,
-                            &bg,
-                        );
-                        let _ = writeln!(
-                            stderr,
-                            "intake serve: source={source_name} status={} session={}",
-                            outcome.status,
-                            sanitize_log_id(outcome.session_id.as_deref())
-                        );
-                        let _ = stderr.flush();
+            scope.spawn(move || {
+                while !interrupted.load(Ordering::Acquire) && !stop_ref.load(Ordering::Acquire) {
+                    let Ok(ack) = rx.recv() else {
+                        break;
+                    };
+                    if interrupted.load(Ordering::Acquire) || stop_ref.load(Ordering::Acquire) {
+                        break;
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(_) => break,
+                    let _ = source.deliver_ack(&secrets, &ack, BG_ACK_TIMEOUT, interrupted);
+                }
+            });
+
+            let mut loop_res = Ok(());
+            while !interrupted.load(Ordering::Acquire) {
+                let mut fds = [PollFd::new(&self.listener, PollFlags::IN)];
+                match poll(&mut fds, Some(&poll_ts)) {
+                    Ok(0) => continue,
+                    Ok(_) => {}
+                    Err(Errno::INTR) => continue,
+                    Err(e) => {
+                        loop_res = Err(format!("poll on intake listener failed: {e}"));
+                        break;
+                    }
+                }
+
+                loop {
+                    if interrupted.load(Ordering::Acquire) {
+                        break;
+                    }
+                    match self.listener.accept() {
+                        Ok((stream, _peer)) => {
+                            let outcome = handle_connection(
+                                stream,
+                                &self.route_path,
+                                &self.cfg,
+                                room_services,
+                                interrupted,
+                            );
+                            let _ = writeln!(
+                                stderr,
+                                "intake serve: source={source_name} status={} session={}",
+                                outcome.status,
+                                sanitize_log_id(outcome.session_id.as_deref())
+                            );
+                            if let Some(ack) = outcome.post_response_ack
+                                && matches!(tx.try_send(ack), Err(mpsc::TrySendError::Full(_)))
+                            {
+                                let _ = writeln!(
+                                    stderr,
+                                    "intake serve: ack queue full; dropped outbound acknowledgement (source={source_name})"
+                                );
+                            }
+                            let _ = stderr.flush();
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
                 }
             }
-        }
 
-        bg.shutdown();
-        Ok(())
+            worker_stop.store(true, Ordering::Release);
+            drop(tx);
+            loop_res
+        })
     }
 }
 
@@ -328,6 +316,7 @@ fn write_http_response(stream: &mut TcpStream, status: u16, allow_post: bool) {
         405 => "Method Not Allowed",
         408 => "Request Timeout",
         413 => "Payload Too Large",
+        503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
     let extra = if allow_post { "Allow: POST\r\n" } else { "" };
@@ -558,7 +547,6 @@ fn handle_connection(
     cfg: &ServeConfig,
     room_services: &dyn RoomServices,
     interrupted: &AtomicBool,
-    bg: &AckDispatcher,
 ) -> RequestOutcome {
     let (headers, raw_body) = match read_bounded_http(&mut stream, expected_path) {
         ParsedHttp::Reject { status, allow_post } => {
@@ -574,11 +562,6 @@ fn handle_connection(
 
     let outcome = process_verified_intake(&headers, &raw_body, cfg, room_services, interrupted);
     write_http_response(&mut stream, outcome.status, false);
-    drop(stream);
-
-    if let Some(ack) = outcome.post_response_ack.clone() {
-        bg.enqueue(ack);
-    }
     outcome
 }
 
@@ -691,7 +674,13 @@ fn process_verified_intake(
         }
     };
 
-    let delivery = deliver_to_room(cfg, room_services, interrupted, &req);
+    let Ok(delivery) = deliver_to_room(cfg, room_services, interrupted, &req) else {
+        return RequestOutcome {
+            status: 503,
+            session_id: Some(req.session_ref),
+            post_response_ack: None,
+        };
+    };
     let post_response_ack = cfg.source.first_ack(&req, &cfg.room, delivery);
 
     RequestOutcome {
@@ -701,27 +690,38 @@ fn process_verified_intake(
     }
 }
 
+fn is_room_content_refusal(msg: &str) -> bool {
+    matches!(
+        msg,
+        "turn looks sensitive; it would be replayed into other agents' prompts"
+            | "room metadata contains sensitive-looking content or could not be checked"
+            | "message needs 1..4000 UTF-8 bytes"
+            | "--text or --text-file is required"
+            | "room metadata cannot be encoded as UTF-8"
+            | "room metadata is oversized"
+    )
+}
+
 fn deliver_to_room(
     cfg: &ServeConfig,
     room_services: &dyn RoomServices,
     interrupted: &AtomicBool,
     req: &WorkRequest,
-) -> RoomDelivery {
-    let Ok(room) = Room::open(
+) -> Result<RoomDelivery, ()> {
+    let room = Room::open(
         &cfg.repo,
         RoomSession::from_env(),
         room_services,
         interrupted,
         false,
         false,
-    ) else {
-        return RoomDelivery::Refused;
-    };
-    let Ok(existing) = room.messages(&cfg.room) else {
-        return RoomDelivery::Refused;
-    };
+    )
+    .map_err(|_| ())?;
+    let existing = room.messages(&cfg.room).map_err(|_| ())?;
     let msg_id = &req.idempotency_key;
-    let already_exists = existing.iter().any(|m| m.text("id") == msg_id);
+    if existing.iter().any(|m| m.text("id") == msg_id) {
+        return Ok(RoomDelivery::Duplicate);
+    }
     let text = format_work_request_room_text(req);
 
     match room.send(
@@ -737,9 +737,11 @@ fn deliver_to_room(
             quiet: false,
         },
     ) {
-        Ok(_) if already_exists => RoomDelivery::Duplicate,
-        Ok(_) => RoomDelivery::AppendedNew,
-        Err(_) if already_exists => RoomDelivery::Duplicate,
-        Err(_) => RoomDelivery::Refused,
+        Ok(_) => Ok(RoomDelivery::AppendedNew),
+        Err(e) if e.message == "message id conflicts with its existing content" => {
+            Ok(RoomDelivery::Duplicate)
+        }
+        Err(e) if is_room_content_refusal(&e.message) => Ok(RoomDelivery::Refused),
+        Err(_) => Err(()),
     }
 }
