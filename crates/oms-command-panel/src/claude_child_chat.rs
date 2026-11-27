@@ -122,10 +122,13 @@ pub(crate) fn claude_board_children(
     None
 }
 
+pub(crate) fn agent_id(id: &str) -> bool {
+    (8..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{
-    agent_id, claude_board_children, claude_child_chat, claude_current_children,
-    verified_session_record,
+    claude_board_children, claude_child_chat, claude_current_children, verified_session_record,
 };
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) use linux::{
@@ -137,7 +140,7 @@ pub(crate) use linux::{
 mod linux {
     use super::{
         ClaudeBoardChildren, ClaudeChild, ClaudeChildLocator, ClaudeChildVersion, ClaudeResponse,
-        ClaudeSelection, USAGE_KEYS,
+        ClaudeSelection, USAGE_KEYS, agent_id,
     };
     use crate::claude_lead_usage::linux::{
         DIR, FILE, config_root, environ, open_dir, start_time, unchanged,
@@ -644,10 +647,6 @@ mod linux {
                     b.is_ascii_hexdigit()
                 }
             })
-    }
-
-    pub(crate) fn agent_id(id: &str) -> bool {
-        (8..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())
     }
 
     /// Verify a Claude Code `sessions/<pid>.json` record against the process
