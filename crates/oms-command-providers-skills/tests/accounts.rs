@@ -1977,20 +1977,22 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
             fs::write(cfg_dir.join("provider-accounts.json"), "{not-json").unwrap();
             let cfg_before = snapshot(&cfg_dir);
 
-            // Refusals: PROVIDER:ID, bad provider, bad flags, non-TTY menu.
-            for spec in [
-                "codex:work",
-                "codex:unknown",
-                "claude:work",
-                "claude:unknown",
-                "antigravity:work",
-                "antigravity:default",
-                "codex:Bad",
-            ] {
+            // Refusals: bad specs, bad providers, bad flags, non-TTY menu, and :ID when registry is corrupt.
+            for spec in ["codex:work", "claude:work"] {
+                refused(root, &["--login", spec], "invalid JSON");
+            }
+            for spec in ["antigravity:work", "antigravity:default", "antigravity:"] {
                 refused(
                     root,
                     &["--login", spec],
-                    "per-account sign-in is not available",
+                    "per-account sign-in is only supported for codex and claude",
+                );
+            }
+            for spec in ["codex:Bad", "codex:default", "claude:default", "codex:"] {
+                refused(
+                    root,
+                    &["--login", spec],
+                    "invalid provider account id; default is reserved",
                 );
             }
             refused(root, &["--login", "agy"], "unsupported login provider");
@@ -2182,8 +2184,200 @@ fn login_spawns_provider_strips_overrides_and_refuses_invalid() {
 
             // Login never writes new state files or modifies registries.
             assert_eq!(snapshot(&cfg_dir), cfg_before);
+
+            // Per-account sign-in through the shared validator (`--login codex:ID` / `claude:ID`).
+            let _ = fs::remove_file(root.join("home/skip-ok"));
+            write_login_stubs(root);
+            fs::remove_file(cfg_dir.join("provider-accounts.json")).unwrap();
+            let work_codex = root.join("homes/codex-work");
+            let work_claude = root.join("homes/claude-work");
+            ok(
+                root,
+                &[
+                    "--account",
+                    "codex:work",
+                    "--home",
+                    work_codex.to_str().unwrap(),
+                ],
+            );
+            ok(
+                root,
+                &[
+                    "--account",
+                    "claude:work",
+                    "--home",
+                    work_claude.to_str().unwrap(),
+                ],
+            );
+            refused(root, &["--login", "codex:unknown"], "is not registered");
+            refused(root, &["--login", "claude:unknown"], "is not registered");
+
+            let reg_before = snapshot(&cfg_dir);
+            let codex_work_canon = fs::canonicalize(&work_codex).unwrap();
+            let claude_work_canon = fs::canonicalize(&work_claude).unwrap();
+            fs::remove_file(root.join("home/login-trace.log")).unwrap();
+            let mut cmd = Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "--exact",
+                "login_per_account_shared_validator_child",
+                "--nocapture",
+            ])
+            .env(ROOT, root)
+            .env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("home/.config"))
+            .env("PATH", root.join("bin"))
+            .env(concat!("CODEX_API_", "KEY"), "fixture-override")
+            .env(concat!("ANTHROPIC_API_", "KEY"), "fixture-override");
+            let acct_out = cmd.output().unwrap();
+            let acct_stdout = String::from_utf8_lossy(&acct_out.stdout);
+            let acct_stderr = String::from_utf8_lossy(&acct_out.stderr);
+            assert!(acct_out.status.success(), "{acct_stdout}{acct_stderr}");
+            let acct_trace = fs::read_to_string(root.join("home/login-trace.log")).unwrap();
+            let acct_lines: Vec<&str> = acct_trace.lines().collect();
+            let cwd = root.display();
+            assert!(
+                acct_lines.contains(
+                    &format!("codex-login|login|{}||{cwd}", codex_work_canon.display()).as_str()
+                ),
+                "{acct_trace}"
+            );
+            assert!(
+                acct_lines.contains(
+                    &format!(
+                        "codex-status|login status|{}||{cwd}",
+                        codex_work_canon.display()
+                    )
+                    .as_str()
+                ),
+                "{acct_trace}"
+            );
+            assert!(
+                acct_lines.contains(
+                    &format!(
+                        "claude-login|auth login|{}||{cwd}",
+                        claude_work_canon.display()
+                    )
+                    .as_str()
+                ),
+                "{acct_trace}"
+            );
+            assert!(
+                acct_lines.contains(
+                    &format!(
+                        "claude-status|auth status|{}||{cwd}",
+                        claude_work_canon.display()
+                    )
+                    .as_str()
+                ),
+                "{acct_trace}"
+            );
+            assert_eq!(snapshot(&cfg_dir), reg_before);
+
+            // Direct per-account status probe failure yields unknown (exit 3), never exit 2.
+            fs::write(root.join("home/status-code"), "2\n").unwrap();
+            let res = connect(root, &["--login", "codex:work"]);
+            assert_eq!(res.0, 3, "{res:?}");
+            assert!(res.1.contains("codex:work: unknown:"), "{res:?}");
+            fs::remove_file(root.join("home/status-code")).unwrap();
+
+            // Receipt inode mismatch refuses per-account sign-in without invoking the CLI.
+            let links_path = cfg_dir.join("codex-account-links.json");
+            let links_orig = fs::read(&links_path).unwrap();
+            let mut links_doc: Value = serde_json::from_slice(&links_orig).unwrap();
+            links_doc[0]["st_ino"] = json!(links_doc[0]["st_ino"].as_u64().unwrap() + 1);
+            fs::write(&links_path, serde_json::to_vec(&links_doc).unwrap()).unwrap();
+            refused(root, &["--login", "codex:work"], "identity changed");
+            fs::write(&links_path, &links_orig).unwrap();
+
+            // Corrupt Claude or AGY registry refuses per-account login via shared cross-check.
+            let claude_reg_path = cfg_dir.join("provider-accounts.claude.json");
+            let claude_reg_orig = fs::read(&claude_reg_path).unwrap();
+            fs::write(&claude_reg_path, "{broken-claude").unwrap();
+            refused(root, &["--login", "codex:work"], "invalid JSON");
+            fs::write(&claude_reg_path, &claude_reg_orig).unwrap();
+
+            let agy_reg_path = cfg_dir.join("provider-accounts.antigravity.json");
+            fs::write(&agy_reg_path, "{broken-agy").unwrap();
+            refused(
+                root,
+                &["--login", "codex:work"],
+                "provider-accounts.antigravity.json",
+            );
+            fs::remove_file(&agy_reg_path).unwrap();
+
+            // Unsafe homes (group-writable, symlinked, inside git repo, main home) refuse before CLI launch.
+            let perm_orig = fs::metadata(&work_codex).unwrap().permissions();
+            fs::set_permissions(&work_codex, fs::Permissions::from_mode(0o770)).unwrap();
+            refused(root, &["--login", "codex:work"], "group/other-writable");
+            fs::set_permissions(&work_codex, perm_orig).unwrap();
+
+            let reg_path = cfg_dir.join("provider-accounts.json");
+            let reg_orig = fs::read(&reg_path).unwrap();
+
+            let symlink_home = root.join("homes/codex-sym");
+            let target_dir = root.join("homes/real-target");
+            mk(&target_dir).unwrap();
+            std::os::unix::fs::symlink(&target_dir, &symlink_home).unwrap();
+            let mut sym_doc: Value = serde_json::from_slice(&reg_orig).unwrap();
+            sym_doc["providers"]["codex"]["accounts"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id":"sym","home":symlink_home}));
+            fs::write(&reg_path, serde_json::to_vec(&sym_doc).unwrap()).unwrap();
+            refused(
+                root,
+                &["--login", "codex:sym"],
+                "user-owned and not group/other-writable",
+            );
+
+            let mut main_only_doc: Value = serde_json::from_slice(&reg_orig).unwrap();
+            main_only_doc["providers"]["codex"]["accounts"] =
+                json!([{"id":"mainhit","home":fs::canonicalize(&codex_main).unwrap()}]);
+            fs::write(&reg_path, serde_json::to_vec(&main_only_doc).unwrap()).unwrap();
+            refused(
+                root,
+                &["--login", "codex:mainhit"],
+                "differ from the main home",
+            );
+
+            let repo_dir = root.join("repo-bad");
+            mk(repo_dir.join(".git")).unwrap();
+            fs::write(repo_dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+            mk(repo_dir.join("inside")).unwrap();
+            let mut inrepo_doc: Value = serde_json::from_slice(&reg_orig).unwrap();
+            inrepo_doc["providers"]["codex"]["accounts"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id":"inrepo","home":repo_dir.join("inside")}));
+            fs::write(&reg_path, serde_json::to_vec(&inrepo_doc).unwrap()).unwrap();
+            refused(root, &["--login", "codex:inrepo"], "inside a repository");
+            fs::write(&reg_path, &reg_orig).unwrap();
         },
     );
+}
+
+#[test]
+fn login_per_account_shared_validator_child() {
+    if std::env::var_os(ROOT).is_none() {
+        return;
+    }
+    let root = fixture_root(
+        TEMP_PARENT,
+        "login_spawns_provider_strips_overrides_and_refuses_invalid",
+        None,
+        None,
+        None,
+    );
+    let codex_out = ok(&root, &["--login", "codex:work"]);
+    assert!(codex_out.contains("codex:work: signed in"), "{codex_out}");
+    assert!(!codex_out.contains("STUB_CODEX_OUT"), "{codex_out}");
+
+    let claude_out = ok(&root, &["--login", "claude:work"]);
+    assert!(
+        claude_out.contains("claude:work: signed in"),
+        "{claude_out}"
+    );
+    assert!(!claude_out.contains("STUB_CLAUDE_OUT"), "{claude_out}");
 }
 
 #[test]
