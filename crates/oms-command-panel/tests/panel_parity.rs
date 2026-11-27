@@ -5099,7 +5099,80 @@ fn project_panels_claude_lifecycle_parity() {
     std::fs::remove_file(&panels_sidecar).unwrap();
     let _ = take_calls();
 
-    // 13. Checkout tree and all Claude/Codex/Antigravity config sentinels remain untouched.
+    // 20. Claude panels still accept aliases containing `.` and work with OMS_PANEL_PROJECTS_FILE.
+    let dotted = base.join("checkouts/dotted-service");
+    std::fs::create_dir_all(dotted.join(".oms")).unwrap();
+    assert_eq!(
+        run_panel(
+            &dotted,
+            &["--register-project", "--alias", "app.v1"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "claude", "--project", "app.v1"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "claude", "--project", "app.v1"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run_panel(base, &["--unregister-project", "app.v1"], true, &[]).0,
+        0
+    );
+
+    let alt_map = base.join("alt-map/custom-projects.json");
+    let alt_map_str = alt_map.to_str().unwrap();
+    assert_eq!(
+        run_panel(
+            &alpha,
+            &["--register-project"],
+            true,
+            &[("OMS_PANEL_PROJECTS_FILE", alt_map_str)],
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "claude", "--project", "alpha-service"],
+            true,
+            &[("OMS_PANEL_PROJECTS_FILE", alt_map_str)],
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "claude", "--project", "alpha-service"],
+            true,
+            &[("OMS_PANEL_PROJECTS_FILE", alt_map_str)],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+    write_private_file(&entries_file, b"{}");
+
+    // 21. Checkout tree and all Claude/Codex/Antigravity config sentinels remain untouched.
     assert_eq!(snapshot_tree(&alpha_canon), alpha_tree_before);
     for ((path, expected_bytes), expected_ino) in sentinel_files.iter().zip(sentinel_inodes.iter())
     {
@@ -5295,6 +5368,10 @@ fn stub_codex_main(state_dir: &Path) -> ! {
             if let Some(conflict) = control["touchOnPluginAdd"].as_str() {
                 write_private_file(Path::new(conflict), b"{}\n");
             }
+            if control["installThenFailPluginAdd"] == true {
+                eprintln!("simulated post-install failure in codex plugin add");
+                std::process::exit(1);
+            }
             if control["writeThenHangPluginAdd"] == true {
                 std::thread::sleep(std::time::Duration::from_secs(30));
             }
@@ -5318,12 +5395,17 @@ fn stub_codex_main(state_dir: &Path) -> ! {
                 eprintln!("simulated plugin remove failure");
                 std::process::exit(1);
             }
-            state["installed"]
+            let existed = state["installed"]
                 .as_object_mut()
                 .unwrap()
-                .remove(*plugin_id);
+                .remove(*plugin_id)
+                .is_some();
             save_state(&state);
-            std::process::exit(0);
+            if existed {
+                std::process::exit(0);
+            }
+            eprintln!("Error: plugin `{plugin_id}` is not installed");
+            std::process::exit(1);
         }
         _ => {
             eprintln!("unexpected codex stub invocation: {argv:?}");
@@ -5486,6 +5568,8 @@ fn project_panels_codex_lifecycle_parity() {
     for bad_alias in [
         "UpperAlias",
         "snake_alias",
+        "app.v1",
+        "v1.2.3-rc1",
         "double--dash",
         "double..dot",
         "mixed.-sep",
@@ -5503,23 +5587,90 @@ fn project_panels_codex_lifecycle_parity() {
             .0,
             0
         );
-        let (code, _, stderr) = run_panel(
-            base,
-            &["--install-panel", "codex", "--project", bad_alias],
-            true,
-            &[],
-        );
-        assert_ne!(code, 0, "accepted invalid plugin alias {bad_alias:?}");
-        assert!(
-            stderr.contains("valid Codex plugin name"),
-            "missing clear plugin name message for {bad_alias:?}: {stderr}"
-        );
-        assert!(take_calls().is_empty());
-        assert!(!mp_root.exists() && !panels_sidecar.exists());
+        for mode in ["--install-panel", "--uninstall-panel"] {
+            let (code, _, stderr) =
+                run_panel(base, &[mode, "codex", "--project", bad_alias], true, &[]);
+            assert_ne!(
+                code, 0,
+                "accepted invalid plugin alias {bad_alias:?} on {mode}"
+            );
+            assert!(
+                stderr.contains("valid Codex plugin name") && stderr.contains(bad_alias),
+                "missing clear plugin name message naming {bad_alias:?}: {stderr}"
+            );
+            assert!(take_calls().is_empty());
+            assert!(!mp_root.exists() && !panels_sidecar.exists());
+        }
         assert_eq!(
             run_panel(base, &["--unregister-project", bad_alias], true, &[]).0,
             0
         );
+    }
+
+    // 1b. Non-default project map (`OMS_PANEL_PROJECTS_FILE` pointing to any other file) is refused
+    //     for both `--install-panel codex` and `--uninstall-panel codex` (normal, --dry-run, --json),
+    //     running nothing and changing nothing on disk.
+    let alt_dir = base.join("alt-projects");
+    let alt_map = alt_dir.join("desktop-projects.json");
+    let alt_map_str = alt_map.to_str().unwrap();
+    assert_eq!(
+        run_panel(
+            &alpha,
+            &["--register-project"],
+            true,
+            &[("OMS_PANEL_PROJECTS_FILE", alt_map_str)],
+        )
+        .0,
+        0
+    );
+    let alt_before = snapshot_tree(&alt_dir);
+    let xdg_before_alt = snapshot_tree(&xdg);
+    for args in [
+        &["--install-panel", "codex", "--project", "alpha-service"][..],
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--dry-run",
+        ],
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        &["--uninstall-panel", "codex", "--project", "alpha-service"],
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--dry-run",
+        ],
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+    ] {
+        let (code, _, stderr) = run_panel(
+            base,
+            args,
+            true,
+            &[("OMS_PANEL_PROJECTS_FILE", alt_map_str)],
+        );
+        assert_ne!(code, 0, "expected refusal for non-default map on {args:?}");
+        assert!(
+            stderr.contains("default user-config project map"),
+            "unexpected message for {args:?}: {stderr}"
+        );
+        assert!(take_calls().is_empty());
+        assert_eq!(snapshot_tree(&alt_dir), alt_before);
+        assert_eq!(snapshot_tree(&xdg), xdg_before_alt);
     }
 
     // 2. Dry-run (plain and --json) writes nothing and runs nothing.
@@ -5955,6 +6106,7 @@ fn project_panels_codex_lifecycle_parity() {
             json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
             json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "add", mp_root]}),
             json!({"cwd": alpha_canon, "argv": ["plugin", "add", "oms-alpha-service@oms-host-panels"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "remove", "oms-alpha-service@oms-host-panels"]}),
             json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "remove", "oms-host-panels"]}),
         ]
     );
@@ -6178,7 +6330,450 @@ fn project_panels_codex_lifecycle_parity() {
         0
     );
 
-    // 12. Checkout trees and Codex config sentinels remain completely untouched.
+    // 12. Leftover bundle on disk from an earlier failed run + `plugin add` that installs then
+    //     exits non-zero MUST still run `codex plugin remove` on rollback (decided from `plugin list`
+    //     inventory before the run, not whether bundle files existed on disk), and if that remove
+    //     also fails, report `uncertain: true` while keeping the bundle + marketplace entry so a
+    //     later uninstall cleans up.
+    reset_codex_state();
+    ensure_private_dir(&mp_root);
+    ensure_private_dir(&mp_root.join(".agents"));
+    ensure_private_dir(&mp_root.join(".agents/plugins"));
+    ensure_private_dir(&mp_root.join("plugins"));
+    ensure_private_dir(&alpha_bundle_dir);
+    write_private_file(&mp_marker, &saved_marker);
+    write_private_file(
+        &mp_manifest_path,
+        serde_json::to_string_pretty(&json!({
+            "name": "oms-host-panels",
+            "interface": { "displayName": "OMS project panels" },
+            "plugins": [{
+                "name": "oms-alpha-service",
+                "source": { "source": "local", "path": "./plugins/oms-alpha-service" },
+                "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+                "category": "Developer Tools",
+            }]
+        }))
+        .unwrap()
+        .as_bytes(),
+    );
+    write_private_file(
+        &alpha_plugin_path,
+        &serde_json::to_vec_pretty(&alpha_plugin_val).unwrap(),
+    );
+    write_private_file(
+        &alpha_mcp_path,
+        &serde_json::to_vec_pretty(&alpha_mcp_val).unwrap(),
+    );
+
+    set_control(json!({"installThenFailPluginAdd": true}));
+    let (code, rb_out, rb_err) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(rb_out.is_empty(), "{rb_out}");
+    assert!(rb_err.contains("rolled back"), "{rb_err}");
+    assert!(!rb_err.contains("uncertain"), "{rb_err}");
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "add", mp_root]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "add", "oms-alpha-service@oms-host-panels"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "remove", "oms-alpha-service@oms-host-panels"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "remove", "oms-host-panels"]}),
+        ],
+        "rollback must run `codex plugin remove` even when bundle files already existed on disk"
+    );
+    assert!(
+        read_codex_state()["installed"]
+            .get("oms-alpha-service@oms-host-panels")
+            .is_none(),
+        "rollback remove must clean up plugin installed before non-zero exit"
+    );
+    assert!(!mp_root.exists() && !panels_sidecar.exists());
+
+    // Same leftover-bundle scenario when `codex plugin remove` ALSO fails -> `uncertain: true`,
+    // bundle + marketplace entry kept on disk, and a subsequent uninstall cleans them up.
+    ensure_private_dir(&mp_root);
+    ensure_private_dir(&mp_root.join(".agents"));
+    ensure_private_dir(&mp_root.join(".agents/plugins"));
+    ensure_private_dir(&mp_root.join("plugins"));
+    ensure_private_dir(&alpha_bundle_dir);
+    write_private_file(&mp_marker, &saved_marker);
+    write_private_file(
+        &mp_manifest_path,
+        b"{\n  \"name\": \"oms-host-panels\",\n  \"interface\": {\"displayName\": \"OMS project panels\"},\n  \"plugins\": []\n}\n",
+    );
+    write_private_file(
+        &alpha_plugin_path,
+        &serde_json::to_vec_pretty(&alpha_plugin_val).unwrap(),
+    );
+    write_private_file(
+        &alpha_mcp_path,
+        &serde_json::to_vec_pretty(&alpha_mcp_val).unwrap(),
+    );
+    set_control(json!({
+        "installThenFailPluginAdd": true,
+        "failPluginRemove": true,
+    }));
+    let (code, unc2_raw, unc2_err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0);
+    let unc2_json: Value = serde_json::from_str(&unc2_raw).unwrap();
+    assert_eq!(unc2_json["uncertain"], true, "{unc2_json}");
+    assert_eq!(unc2_json["changed"], false);
+    assert!(unc2_err.contains("uncertain"), "{unc2_err}");
+    let unc2_calls = take_calls();
+    assert!(
+        unc2_calls
+            .iter()
+            .any(|c| c["argv"] == json!(["plugin", "remove", "oms-alpha-service@oms-host-panels"])),
+        "expected plugin remove attempt: {unc2_calls:?}"
+    );
+    assert!(
+        alpha_plugin_path.exists() && alpha_mcp_path.exists() && mp_manifest_path.exists(),
+        "failed remove must keep bundle and marketplace manifest so later uninstall can clean up"
+    );
+    let kept_mp: Value =
+        serde_json::from_slice(&std::fs::read(&mp_manifest_path).unwrap()).unwrap();
+    assert_eq!(kept_mp["plugins"][0]["name"], "oms-alpha-service");
+
+    set_control(json!({}));
+    let (code, cleanup_raw, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let cleanup_json: Value = serde_json::from_str(&cleanup_raw).unwrap();
+    assert_eq!(cleanup_json["changed"], true);
+    assert!(!mp_root.exists() && !panels_sidecar.exists());
+    assert!(
+        read_codex_state()["installed"]
+            .get("oms-alpha-service@oms-host-panels")
+            .is_none()
+    );
+    let _ = take_calls();
+
+    // 13. Stale sidecar record cannot drop a marked bundle on disk from `marketplace.json` or
+    //     delete `mp_root` while another marked bundle remains on disk.
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+    // Simulate a stale sidecar: drop `alpha-service` and record a stale `ghost-service` that has no
+    // bundle on disk.
+    write_private_file(
+        &panels_sidecar,
+        serde_json::to_string_pretty(&json!({
+            "ghost-service": [{
+                "app": "codex",
+                "scope": "user",
+                "name": "oms-ghost-service@oms-host-panels",
+                "path": alpha_canon,
+            }]
+        }))
+        .unwrap()
+        .as_bytes(),
+    );
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "beta-service"],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let _ = take_calls();
+    let stale_mp: Value =
+        serde_json::from_slice(&std::fs::read(&mp_manifest_path).unwrap()).unwrap();
+    let stale_mp_names: Vec<&str> = stale_mp["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        stale_mp_names,
+        vec!["oms-alpha-service", "oms-beta-service"],
+        "marketplace.json must be built from marked bundles on disk + installed alias"
+    );
+    // Clean up both alpha-service (unrecorded on-disk bundle) and beta-service, plus drop stale sidecar.
+    std::fs::remove_file(&panels_sidecar).unwrap();
+    write_private_file(
+        &panels_sidecar,
+        serde_json::to_string_pretty(&json!({
+            "beta-service": [{
+                "app": "codex",
+                "scope": "user",
+                "name": "oms-beta-service@oms-host-panels",
+                "path": beta_canon,
+            }]
+        }))
+        .unwrap()
+        .as_bytes(),
+    );
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "beta-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert!(
+        mp_root.exists() && alpha_bundle_dir.exists(),
+        "uninstalling beta must not delete marketplace while alpha's marked bundle remains on disk"
+    );
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert!(!mp_root.exists() && !panels_sidecar.exists());
+    let _ = take_calls();
+
+    // 14. Marker removed last: with an extra unknown file in `mp_root`, uninstall reports the
+    //     leftover, restores/keeps the ownership marker and keeps the row; after removing the
+    //     extra file, a second uninstall succeeds.
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+    let extra_unknown = mp_root.join("extra-unknown.txt");
+    std::fs::write(&extra_unknown, b"unknown\n").unwrap();
+    let (code, _, leftover_err) = run_panel(
+        base,
+        &["--uninstall-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0, "extra file in root must fail rmdir");
+    assert!(
+        leftover_err.contains("extra-unknown.txt"),
+        "expected leftover filename in error: {leftover_err}"
+    );
+    assert!(
+        mp_marker.exists(),
+        "ownership marker must still exist when removing marketplace root fails"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&mp_marker).unwrap().mode() & 0o7777,
+        0o600
+    );
+    assert!(
+        panels_sidecar.exists(),
+        "panel ownership row must be kept when removing marketplace root fails"
+    );
+    let _ = take_calls();
+
+    std::fs::remove_file(&extra_unknown).unwrap();
+    let (code, retry_un_out, retry_un_err) = run_panel(
+        base,
+        &["--uninstall-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "second uninstall after removing unknown file failed: {retry_un_err}"
+    );
+    assert!(retry_un_out.contains("alpha-service"), "{retry_un_out}");
+    assert!(!mp_root.exists() && !panels_sidecar.exists());
+    let _ = take_calls();
+
+    // 15. Advisory 4: if no rows remain but Codex still lists another plugin from `oms-host-panels`,
+    //     do not run `marketplace remove`, do not delete `mp_root`, and report what is still installed.
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+    let mut seeded = read_codex_state();
+    seeded["installed"].as_object_mut().unwrap().insert(
+        "oms-external@oms-host-panels".into(),
+        json!({
+            "pluginId": "oms-external@oms-host-panels",
+            "installed": true,
+            "enabled": true,
+        }),
+    );
+    write_private_file(&state_file, &serde_json::to_vec(&seeded).unwrap());
+    let (code, keep_mp_out, keep_mp_err) = run_panel(
+        base,
+        &["--uninstall-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{keep_mp_err}");
+    assert!(
+        keep_mp_out.contains("oms-external@oms-host-panels"),
+        "expected remaining plugin reported: {keep_mp_out}"
+    );
+    let keep_mp_calls = take_calls();
+    assert!(
+        !keep_mp_calls
+            .iter()
+            .any(|c| c["argv"][1] == "marketplace" && c["argv"][2] == "remove"),
+        "must not run marketplace remove while another oms-host-panels plugin is installed: {keep_mp_calls:?}"
+    );
+    assert!(
+        mp_root.exists() && mp_marker.exists() && !panels_sidecar.exists(),
+        "must keep marked marketplace root while another oms-host-panels plugin is installed"
+    );
+    std::fs::remove_dir_all(&mp_root).unwrap();
+    reset_codex_state();
+
+    // 16. Advisory 6: user-edited `mcp.json` or `plugin.json` is never deleted on uninstall:
+    //     (a) edited `mcp.json` with OMS-installed plugin still in Codex -> runs `codex plugin remove`,
+    //         keeps bundle + marketplace, drops row, and reports the edited file;
+    //     (b) edited `plugin.json` with modified plugin version in Codex -> skips `codex plugin remove`,
+    //         keeps bundle + marketplace + modified plugin, drops row, and reports the edited file.
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+    let mut edited_mcp = alpha_mcp_val.clone();
+    edited_mcp["mcpServers"]["oms-panel"]["env"]["USER_CUSTOM_OPT"] = json!("keep");
+    let edited_mcp_bytes = serde_json::to_vec_pretty(&edited_mcp).unwrap();
+    write_private_file(&alpha_mcp_path, &edited_mcp_bytes);
+
+    let (code, ed1_out, ed1_err) = run_panel(
+        base,
+        &["--uninstall-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{ed1_err}");
+    assert!(
+        ed1_out.contains("mcp.json") && ed1_out.contains("changed outside OMS"),
+        "expected edited file report: {ed1_out}"
+    );
+    let ed1_calls = take_calls();
+    assert_eq!(
+        ed1_calls,
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "remove", "oms-alpha-service@oms-host-panels"]}),
+        ],
+        "must still run `codex plugin remove` for the OMS-installed plugin and skip `marketplace remove`"
+    );
+    assert_eq!(std::fs::read(&alpha_mcp_path).unwrap(), edited_mcp_bytes);
+    assert!(alpha_plugin_path.exists() && mp_manifest_path.exists() && mp_marker.exists());
+    assert!(!panels_sidecar.exists());
+    std::fs::remove_dir_all(&mp_root).unwrap();
+    reset_codex_state();
+
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "beta-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+    let beta_plugin_path = mp_root.join("plugins/oms-beta-service/plugin.json");
+    let mut edited_plugin: Value =
+        serde_json::from_slice(&std::fs::read(&beta_plugin_path).unwrap()).unwrap();
+    edited_plugin["version"] = json!("9.9.9-custom");
+    let edited_plugin_bytes = serde_json::to_vec_pretty(&edited_plugin).unwrap();
+    write_private_file(&beta_plugin_path, &edited_plugin_bytes);
+    let mut custom_state = read_codex_state();
+    custom_state["installed"]["oms-beta-service@oms-host-panels"]["version"] =
+        json!("9.9.9-custom");
+    write_private_file(&state_file, &serde_json::to_vec(&custom_state).unwrap());
+
+    let (code, ed2_out, ed2_err) = run_panel(
+        base,
+        &["--uninstall-panel", "codex", "--project", "beta-service"],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{ed2_err}");
+    assert!(
+        ed2_out.contains("plugin.json") && ed2_out.contains("changed outside OMS"),
+        "expected edited plugin.json report: {ed2_out}"
+    );
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": beta_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": beta_canon, "argv": ["plugin", "marketplace", "list"]}),
+        ],
+        "must NOT run `codex plugin remove` when installed plugin is no longer the one OMS installed"
+    );
+    assert_eq!(
+        std::fs::read(&beta_plugin_path).unwrap(),
+        edited_plugin_bytes
+    );
+    assert_eq!(
+        read_codex_state()["installed"]["oms-beta-service@oms-host-panels"]["version"],
+        "9.9.9-custom"
+    );
+    assert!(!panels_sidecar.exists());
+    std::fs::remove_dir_all(&mp_root).unwrap();
+    reset_codex_state();
+
+    // 17. Checkout trees and Codex config sentinels remain completely untouched.
     assert_eq!(snapshot_tree(&alpha_canon), alpha_tree_before);
     assert_eq!(snapshot_tree(&beta_canon), beta_tree_before);
     for ((path, expected_bytes), expected_ino) in sentinel_files.iter().zip(sentinel_inodes.iter())
