@@ -359,9 +359,27 @@ fn card_top_styled(
     colored: bool,
     title_style: &'static str,
 ) -> String {
+    card_top_split(title, "", tag, columns, colored, title_style)
+}
+
+/// A card top whose title ends in a muted `tail` after the styled `head`.
+fn card_top_split(
+    head: &str,
+    tail: &str,
+    tag: Option<&str>,
+    columns: usize,
+    colored: bool,
+    title_style: &'static str,
+) -> String {
+    let title = format!("{head}{tail}");
+    let title = title.as_str();
     let inner = columns.saturating_sub(4);
     if columns < 44 {
-        let mut left = vec![Span::raw(title, inner, Some(title_style))];
+        let mut left = vec![Span::raw(head, inner, Some(title_style))];
+        let rest = inner.saturating_sub(width(head));
+        if !tail.is_empty() && rest > 0 {
+            left.push(Span::raw(tail, rest, Some(SGR_MUTED)));
+        }
         if let Some(t) = tag.filter(|v| !v.is_empty()) {
             left.push(Span::literal(" · ", Some(SGR_MUTED)));
             left.push(Span::raw(t, inner, Some(SGR_MUTED)));
@@ -381,11 +399,19 @@ fn card_top_styled(
     let end_cap = 1usize; // "╮"
     let used = prefix_len + title_w + title_space + right_len + end_cap;
     let fill = columns.saturating_sub(used);
+    let (shown_head, shown_tail) = match clean_title.strip_prefix(head) {
+        Some(rest) if !head.is_empty() => (head.to_owned(), rest.to_owned()),
+        _ => (clean_title, String::new()),
+    };
     let mut spans = vec![
         Span::literal("╭─ ", Some(SGR_BORDER)),
         Span {
-            plain: clean_title,
+            plain: shown_head,
             sgr: Some(title_style),
+        },
+        Span {
+            plain: shown_tail,
+            sgr: Some(SGR_MUTED),
         },
         Span::literal(" ", None),
         Span {
@@ -2113,6 +2139,20 @@ fn token_field(call: &Value, columns: usize) -> (String, String, &'static str) {
     )
 }
 
+/// True when the row would only print the `—` placeholder: no total, no
+/// response counters and no `not loaded` native child.
+fn token_placeholder_only(call: &Value) -> bool {
+    !call["attention_kind"].is_string()
+        && token_field(call, 80).1.starts_with('—')
+        && native_response(call).is_none_or(|counts| counts.iter().all(Option::is_none))
+        && !(call["native_child"] == true && call.get("native_response_usage").is_none())
+}
+
+/// A board drops the token column when every listed row is placeholder-only.
+fn quiet_tokens(calls: &[TreeEntry<'_>]) -> bool {
+    !calls.is_empty() && calls.iter().all(|entry| token_placeholder_only(entry.call))
+}
+
 fn token_span(call: &Value, limit: usize, columns: usize, boxed: bool) -> Vec<Span> {
     token_span_with(call, limit, columns, boxed, true)
 }
@@ -2308,6 +2348,17 @@ fn attention_item_age(
     item: &attention::Item,
     now: f64,
 ) -> Option<String> {
+    attention_item_stamp(report, calls, item, now)
+        .map(|ts| crate::usage::format_age((now - ts).max(0.0)))
+}
+
+/// The item's recorded wait start; none when absent, invalid or in the future.
+fn attention_item_stamp(
+    report: &Value,
+    calls: &[Value],
+    item: &attention::Item,
+    now: f64,
+) -> Option<f64> {
     let parse_str = |raw: &str| {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -2354,10 +2405,7 @@ fn attention_item_age(
         },
         _ => None,
     })?;
-    if !ts.is_finite() || ts <= 0.0 || ts > now {
-        return None;
-    }
-    Some(crate::usage::format_age((now - ts).max(0.0)))
+    (ts.is_finite() && ts > 0.0 && ts <= now).then_some(ts)
 }
 
 fn attention_extra_rows(report: &Value, all: &[Value], items: &[attention::Item]) -> Vec<Value> {
@@ -2634,18 +2682,53 @@ fn render_attention_band(
         }
     }
     let total = items.len();
-    let format_header = |labels: [&str; 6]| {
-        let mut parts = vec![format!("Attention {total}")];
-        for (count, label) in counts.into_iter().zip(labels) {
+    let now = oms_panel_core::metrics::stamp(&report["generated_at"])
+        .unwrap_or_else(|| oms_panel_core::timestamp() as f64);
+    // The oldest recorded wait across every needs-you item, not only the rows shown.
+    let oldest = items
+        .iter()
+        .filter(|item| attention_bucket(&item.cls) == 0)
+        .filter_map(|item| attention_item_stamp(report, all, item, now))
+        .reduce(f64::min)
+        .map(|ts| format!("oldest {}", crate::usage::format_age(now - ts)));
+    // What a person acts on leads in the title style; Main-handled classes follow muted.
+    let format_header = |labels: [&str; 6], oldest: Option<&str>| {
+        let mut head = vec!["Attention".to_owned()];
+        let mut tail = Vec::new();
+        for (bucket, (count, label)) in counts.into_iter().zip(labels).enumerate() {
             if count > 0 {
-                parts.push(format!("{count} {label}"));
+                let part = format!("{count} {label}");
+                if bucket < 2 {
+                    head.push(part)
+                } else {
+                    tail.push(part)
+                }
+            }
+            if bucket == 0 && count > 0 {
+                head.extend(oldest.map(str::to_owned));
             }
         }
-        parts.join(" · ")
+        let head = head.join(" · ");
+        let tail = if tail.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", tail.join(" · "))
+        };
+        (head, tail)
     };
-    let wide_title = format_header(["needs you", "failed", "decide", "stale", "mail", "info"]);
-    let short_title = format_header(["you", "fail", "dec", "stale", "mail", "info"]);
-    let bare_title = format!("Attention {total}");
+    let wide = ["needs you", "failed", "decide", "stale", "mail", "info"];
+    let titles = [
+        format_header(wide, oldest.as_deref()),
+        format_header(wide, None),
+        format_header(["you", "fail", "dec", "stale", "mail", "info"], None),
+        (format!("Attention {total}"), String::new()),
+    ];
+    let pick = |budget: usize| {
+        titles
+            .iter()
+            .find(|(head, tail)| width(head) + width(tail) <= budget)
+            .unwrap_or(&titles[3])
+    };
     let tag_wide = format!("{unread} new / {total}");
     let tag_compact = format!("{unread} new/{total}");
 
@@ -2669,55 +2752,41 @@ fn render_attention_band(
             tag_compact.as_str()
         };
         let right_len = width(tag) + 3;
-        let title_budget = columns.saturating_sub(5 + right_len);
-        let title = if width(&wide_title) <= title_budget {
-            wide_title.as_str()
-        } else if width(&short_title) <= title_budget {
-            short_title.as_str()
-        } else {
-            bare_title.as_str()
-        };
-        out.push(card_top_styled(
-            title,
+        let (head, tail) = pick(columns.saturating_sub(5 + right_len));
+        out.push(card_top_split(
+            head,
+            tail,
             Some(tag),
             columns,
             colored,
             SGR_GOLD_BOLD,
         ));
     } else {
-        let tag = if columns >= 36 && width(&bare_title) + 2 + width(&tag_wide) <= columns {
+        let bare = width(&titles[3].0);
+        let tag = if columns >= 36 && bare + 2 + width(&tag_wide) <= columns {
             tag_wide.as_str()
-        } else if width(&bare_title) + 1 + width(&tag_compact) <= columns {
+        } else if bare + 1 + width(&tag_compact) <= columns {
             tag_compact.as_str()
         } else {
             ""
         };
         let right_w = width(tag);
         let title_budget = left_budget(columns, right_w);
-        let title = if width(&wide_title) <= title_budget {
-            wide_title.as_str()
-        } else if width(&short_title) <= title_budget {
-            short_title.as_str()
-        } else {
-            bare_title.as_str()
-        };
+        let (head, tail) = pick(title_budget);
         let right = if tag.is_empty() {
             vec![]
         } else {
             vec![Span::raw(tag, columns, Some(SGR_AMBER_BOLD))]
         };
-        out.push(render_lr(
-            vec![Span::raw(title, title_budget.max(1), Some(SGR_GOLD_BOLD))],
-            right,
-            columns,
-            false,
-            None,
-            colored,
-        ));
+        let head_budget = title_budget.max(1);
+        let mut left = vec![Span::raw(head, head_budget, Some(SGR_GOLD_BOLD))];
+        let tail_budget = head_budget.saturating_sub(width(head));
+        if !tail.is_empty() && tail_budget > 0 {
+            left.push(Span::raw(tail, tail_budget, Some(SGR_MUTED)));
+        }
+        out.push(render_lr(left, right, columns, false, None, colored));
     }
 
-    let now = oms_panel_core::metrics::stamp(&report["generated_at"])
-        .unwrap_or_else(|| oms_panel_core::timestamp() as f64);
     let inner = columns.saturating_sub(if boxed { 4 } else { 0 });
     for item in items.iter().take(item_limit) {
         let (badge, badge_sgr) = attention_item_badge(&item.cls, columns < 44);
@@ -3575,6 +3644,7 @@ fn frame_with_capacity(
                     ));
                 }
                 _ => {
+                    let quiet = quiet_tokens(&calls);
                     for (index, entry) in calls.iter().enumerate().skip(offset).take(capacity) {
                         let call = entry.call;
                         let selected = Some(index) == selected_worker;
@@ -3589,6 +3659,7 @@ fn frame_with_capacity(
                             use_cards,
                             colored,
                             false,
+                            quiet,
                         ));
                         if detail_rows {
                             lines.push(card_row_lr(
@@ -3815,7 +3886,7 @@ fn render_call_row(
     colored: bool,
 ) -> String {
     render_card_row(
-        call, prefix, suffix, selected, columns, use_cards, colored, false,
+        call, prefix, suffix, selected, columns, use_cards, colored, false, false,
     )
 }
 
@@ -3829,8 +3900,10 @@ fn render_card_row(
     use_cards: bool,
     colored: bool,
     align_roles: bool,
+    quiet_tokens: bool,
 ) -> String {
     count_row_render();
+    let placeholder = !quiet_tokens;
     let inner = columns - if use_cards { 4 } else { 0 };
     let display = call_display(call);
     let child = uses_observed_model(call);
@@ -3936,9 +4009,9 @@ fn render_card_row(
         let spans =
             |limit, placeholder| token_span_with(call, limit, columns, use_cards, placeholder);
         right = [
-            spans(roomy, true),
+            spans(roomy, placeholder),
             spans(roomy, false),
-            spans(limit, true),
+            spans(limit, placeholder),
             (columns >= 56 && (1..=limit).contains(&width(&elapsed)))
                 .then(|| Span::raw(&elapsed, limit, Some(SGR_MUTED)))
                 .into_iter()
@@ -3953,7 +4026,7 @@ fn render_card_row(
             metadata_limit.saturating_sub(spans_width(&right) + 2 * usize::from(shows(&right)))
         };
     } else {
-        right = token_span(call, roomy, columns, use_cards);
+        right = token_span_with(call, roomy, columns, use_cards, placeholder);
         available = metadata_limit.saturating_sub(spans_width(&right) + 2);
     }
     let badge_width = width(&badge);
@@ -4646,6 +4719,7 @@ fn render_provider_rows(
     base: usize,
 ) -> Vec<String> {
     count_row_render();
+    let quiet = quiet_tokens(calls);
     let mut lines = Vec::new();
     let direct_page = calls
         .iter()
@@ -4674,6 +4748,7 @@ fn render_provider_rows(
                 true,
                 colored,
                 false,
+                quiet,
             ));
         }
         lines.extend(card_bottom(columns, true, colored));
@@ -4782,10 +4857,11 @@ fn render_provider_rows(
             .map(|model| formatted_model(model).to_owned())
             .or_else(|| lead.map(model_label))
             .unwrap_or_else(|| "model —".to_owned());
+        // Without a Lead chat the card is plainly the provider's activity.
         let full_title = if connected {
             format!("{label} · {session} · {model}")
         } else {
-            format!("{label} · {session}")
+            label.to_owned()
         };
         let mut title = if connected && width(&full_title) + 6 > columns {
             let label = ["Codex", "Claude", "Antigravity"][group];
@@ -4887,7 +4963,7 @@ fn render_provider_rows(
                 "board_elapsed": if elapsed.is_empty() { "—" } else { elapsed }
             });
             lines.push(render_card_row(
-                &card, "", "", false, columns, true, colored, true,
+                &card, "", "", false, columns, true, colored, true, quiet,
             ));
         }
         for &(index, call) in on_page {
@@ -4905,6 +4981,7 @@ fn render_provider_rows(
                 true,
                 colored,
                 group == 2,
+                quiet,
             ));
         }
     }
@@ -8453,7 +8530,7 @@ mod tests {
         );
         // The folded review item surfaces in the Attention band while staying out of provider rows.
         assert!(
-            overview.contains("Attention 1 · 1 decide") && overview.contains("Pending decision"),
+            overview.contains("Attention · 1 decide") && overview.contains("Pending decision"),
             "{overview}"
         );
         let provider_section = overview
@@ -9200,7 +9277,7 @@ mod tests {
             .unwrap();
         let work = overview
             .iter()
-            .rposition(|line| line.contains("Activity"))
+            .rposition(|line| line.starts_with("╭─ Codex") || line.starts_with("├─ Codex"))
             .unwrap();
         assert!(status < goal && goal < main_top, "{overview:?}");
         assert!(
@@ -9766,11 +9843,7 @@ mod tests {
                 );
                 if columns >= 56 {
                     let joined = plain.join("\n");
-                    for required in [
-                        "Codex · Activity",
-                        "Claude · Activity",
-                        "Antigravity · Activity",
-                    ] {
+                    for required in ["Codex ", "Claude ", "Antigravity "] {
                         assert!(
                             joined
                                 .lines()
@@ -9941,7 +10014,7 @@ mod tests {
         );
         let out = hint(&editing, 40);
         assert!(!out.contains("b all"), "{out}");
-        assert!(filtered.contains("Claude · Activity"), "{filtered}");
+        assert!(filtered.contains("╭─ Claude ─"), "{filtered}");
     }
 
     #[test]
@@ -10180,7 +10253,7 @@ mod tests {
             }
             if columns >= 160 {
                 assert!(board.lines[hit].contains("Claude"));
-                assert!(board.lines[hit + 2].starts_with("╭─ Codex · Activity"));
+                assert!(board.lines[hit + 2].starts_with("╭─ Codex ─"));
                 for (row, (participant, _)) in &board.worker_rows {
                     assert!(["M", "direct"].contains(&participant.as_str()) || *row > hit + 2);
                 }
@@ -10745,12 +10818,9 @@ mod tests {
                 researcher.contains("[⟳ searching]") && researcher.contains("53m17s"),
                 "{researcher}"
             );
-            assert_eq!(researcher.contains("— tok"), columns >= 80, "{researcher}");
-            assert_eq!(
-                researcher.matches('—').count(),
-                usize::from(columns >= 80),
-                "{researcher}"
-            );
+            // Every row is unreported, so the token column is dropped rather than padded.
+            assert!(!researcher.contains("tok"), "{researcher}");
+            assert!(!researcher.contains('—'), "{researcher}");
             assert!(advisor.contains("A1 · Weigh options"), "{advisor}");
             assert_eq!(
                 width(&researcher[..researcher.find("Inspect custody").unwrap()]),
@@ -11047,7 +11117,7 @@ mod tests {
             let heading = frame
                 .lines
                 .iter()
-                .position(|line| line.contains("Antigravity · "))
+                .position(|line| line.contains("─ Antigravity "))
                 .unwrap();
             (heading + 1..frame.lines.len())
                 .take_while(|row| frame.lines[*row].starts_with('│'))
@@ -12314,6 +12384,35 @@ mod tests {
         assert_eq!(narrow(12_500, 56), "  12.5K tok");
         assert_eq!(narrow(0, 20), "0 ");
         assert_eq!(narrow(999_950, 20), "1.0M");
+        // The column is dropped only while every listed row is placeholder-only.
+        let unknown = json!({"role":"worker","title":"Unknown","state":"working"});
+        let zero =
+            json!({"role":"worker","title":"Zero","state":"working","receipt_tokens":{"total":0}});
+        let entries = |calls: &[&Value]| -> Vec<String> {
+            let tree: Vec<_> = calls
+                .iter()
+                .map(|call| TreeEntry {
+                    prefix: String::new(),
+                    call,
+                })
+                .collect();
+            let quiet = quiet_tokens(&tree);
+            calls
+                .iter()
+                .map(|call| render_card_row(call, "", "", false, 100, true, false, false, quiet))
+                .collect()
+        };
+        let all_unknown = entries(&[&unknown, &unknown]);
+        assert!(
+            all_unknown.iter().all(|line| !line.contains("tok")),
+            "{all_unknown:?}"
+        );
+        let mixed = entries(&[&unknown, &zero]);
+        assert!(
+            mixed[0].contains("— tok") && mixed[1].contains("0 tok"),
+            "{mixed:?}"
+        );
+        assert!(!quiet_tokens(&[]));
     }
 
     #[test]
@@ -14871,9 +14970,10 @@ mod tests {
                 .find(|line| line.contains(expected))
                 .unwrap_or_else(|| panic!("missing {expected}: {output}"));
             assert!(line.contains("[· -]"), "{expected}: {line}");
-            assert!(line.contains("— tok"), "{expected}: {line}");
+            // All rows are unreported: no token value is invented and no empty column is kept.
+            assert!(!line.contains("tok"), "{expected}: {line}");
             assert!(
-                line.trim_end_matches(" │").ends_with("— tok"),
+                line.trim_end_matches(" │").trim_end().ends_with("[· -]"),
                 "{expected}: {line}"
             );
         }
@@ -15395,7 +15495,7 @@ mod tests {
             &read,
         )
         .join("\n");
-        assert!(compact.contains("Attention 3 · 3 failed"), "{compact}");
+        assert!(compact.contains("Attention · 3 failed"), "{compact}");
         let tasks_section = compact
             .split_once("╭─ Tasks · ")
             .map(|(_, rest)| rest)
@@ -15859,12 +15959,16 @@ mod tests {
                 assert_eq!(*p, strip_sgr(c), "{columns}: sgr geometry mismatch");
             }
             let joined = plain.join("\n");
-            assert!(joined.contains("Attention 5"), "{columns}: {joined}");
+            assert!(joined.contains("Attention"), "{columns}: {joined}");
             assert!(
                 joined.contains("4 new / 5") || joined.contains("4 new/5"),
                 "{columns}: missing unread ratio: {joined}"
             );
             if columns >= 120 {
+                assert!(
+                    joined.contains("Attention · 1 needs you · oldest 7m · 1 failed · 1 decide"),
+                    "{columns}: needs-you and its oldest wait lead\n{joined}"
+                );
                 for fragment in ["1 needs you", "1 failed", "1 decide", "1 stale", "1 mail"] {
                     assert!(
                         joined.contains(fragment),
@@ -15903,7 +16007,7 @@ mod tests {
             }
             let attn_start = plain
                 .iter()
-                .position(|line| line.contains("Attention 5"))
+                .position(|line| line.contains("Attention"))
                 .expect("Attention band start");
             let band_last_line = &plain[attn_start + 4];
             assert!(
@@ -15947,14 +16051,18 @@ mod tests {
         )
         .join("\n");
         assert!(
-            four_joined.contains("Attention 4 · 1 needs you · 1 failed · 1 decide · 1 stale"),
+            four_joined.contains("Attention · 1 needs you · 1 failed · 1 decide · 1 stale"),
             "{four_joined}"
         );
 
         // Undated attention item never fabricates an age.
         let mut undated = report.clone();
         undated["room"]["messages"][0]["ts"] = Value::Null;
-        let undated_lines = frame(&undated, &navigation::Navigation::default(), 80, 30, &read);
+        let undated_lines = frame(&undated, &navigation::Navigation::default(), 120, 30, &read);
+        assert!(
+            !undated_lines.iter().any(|line| line.contains("oldest")),
+            "{undated_lines:?}"
+        );
         let q_line = undated_lines
             .iter()
             .find(|line| line.contains("Ship option A or B?"))
@@ -16650,7 +16758,7 @@ mod tests {
                 goal_body_lines[1]
             );
             // Attention band keeps its items (not shrunk to header only) on 24-row board.
-            assert!(joined.contains("Attention 4"), "{columns}: {joined}");
+            assert!(joined.contains("Attention"), "{columns}: {joined}");
             assert!(
                 joined.contains("main-1"),
                 "{columns}: attention item 1 missing\n{joined}"
@@ -16912,7 +17020,7 @@ mod tests {
             rendered.contains("No panel Main · work from external Main"),
             "{rendered}"
         );
-        assert!(rendered.contains("Codex · Activity"), "{rendered}");
+        assert!(rendered.contains("╭─ Codex ─"), "{rendered}");
         assert!(rendered.contains("wt-465-check"), "{rendered}");
         assert!(rendered.contains("codex peer-delegate"), "{rendered}");
         assert!(rendered.contains("[⟳ run]"), "{rendered}");
