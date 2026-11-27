@@ -266,6 +266,67 @@ fn adapter_store_dedupe_sqlite_and_cold_replay_keep_exact_decimal_numbers() {
 }
 
 #[test]
+fn storage_health_and_cold_count_preserve_pending_seals_and_degraded_reads() {
+    use oms_command_journal::cold::{
+        PendingSeal, journal_storage, journal_storage_with_cold_count, load_cold_manifest,
+        save_cold_manifest,
+    };
+    use oms_command_journal::sanitize::sha256_hex;
+
+    let scratch = Scratch::new();
+    let check = |month, expected, healthy| {
+        let before = disk_snapshot(&scratch.0);
+        let previous_health = journal_storage(&scratch.0);
+        let (health, count) = journal_storage_with_cold_count(&scratch.0, month);
+        assert_eq!(count, expected);
+        assert_eq!(health.healthy, healthy);
+        assert_eq!(health.error, previous_health.error);
+        assert!(oms_json::ordered_values_equal(
+            &health.to_json(),
+            &previous_health.to_json()
+        ));
+        assert_eq!(disk_snapshot(&scratch.0), before);
+    };
+    check("2026-08", 0, true);
+
+    let now = parse_rfc3339_utc("2026-08-01T03:00:00Z").unwrap();
+    let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+    store.record_event(&event("1"), now).unwrap();
+    let live = store.root.join("events.jsonl");
+    let before_seal = fs::read(&live).unwrap();
+    assert_eq!(store.seal(true, now).unwrap(), 1);
+    let after_seal = fs::read(&live).unwrap();
+    check("2026-08", 1, true);
+    check("2026-07", 0, true);
+
+    let mut manifest = load_cold_manifest(&store.root).unwrap();
+    manifest.pending = Some(PendingSeal {
+        before: sha256_hex(&before_seal),
+        after: sha256_hex(&after_seal),
+        cutoff: "2026-08".into(),
+    });
+    save_cold_manifest(&store.root, &manifest).unwrap();
+    for bytes in [&before_seal, &after_seal] {
+        fs::write(&live, bytes).unwrap();
+        check("2026-08", 1, true);
+    }
+    fs::write(&live, b"unexpected live digest\n").unwrap();
+    check("2026-08", 0, false);
+
+    manifest.pending = None;
+    save_cold_manifest(&store.root, &manifest).unwrap();
+    fs::write(&live, b"incomplete live line").unwrap();
+    check("2026-08", 1, false);
+    fs::write(&live, &after_seal).unwrap();
+    fs::write(
+        store.root.join("cold").join(&manifest.segments[0].file),
+        b"invalid cold segment\n",
+    )
+    .unwrap();
+    check("2026-08", 0, false);
+}
+
+#[test]
 fn cold_manifest_validation_keeps_null_and_numeric_bounds_explicit() {
     use oms_command_journal::cold::{cold_manifest_path, load_cold_manifest, save_cold_manifest};
     let scratch = Scratch::new();
