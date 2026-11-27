@@ -1431,6 +1431,30 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
     }
 }
 
+fn catalog_unbound_message(alias_name: &str) -> String {
+    format!(
+        "This conversation is not bound to project {alias_name}. Open the OMS panel in that project's conversation to act on it."
+    )
+}
+
+fn matched_room_session(dashboard: &Value) -> bool {
+    let main = &dashboard["conversationMain"];
+    let room_id = |v: &Value| {
+        v.as_str().is_some_and(|s| {
+            (1..=160).contains(&s.len())
+                && !s.starts_with(['-', '.'])
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
+    };
+    dashboard["conversationBinding"] == "matched"
+        && main["source"] == "room-session"
+        && main["provider"] == "codex"
+        && main["state"] == "joined"
+        && room_id(&main["room"])
+        && room_id(&main["participant"])
+}
+
 impl Server<'_> {
     fn panel_repo(&self, args: &Value) -> PanelResult<PathBuf> {
         let map = configured_projects()?;
@@ -1987,114 +2011,158 @@ impl Server<'_> {
         )
     }
 
-    fn panel_call(&self, name: &str, args: &Value, meta: &Value) -> PanelResult<Value> {
-        if name == PROJECTS {
-            if crate::delegated() {
-                return Err("A delegated worker cannot enumerate desktop projects.".into());
-            }
-            let include_cards = match args.get("cards") {
-                None => false,
-                Some(v) => v.as_bool().ok_or("cards must be a boolean.")?,
-            };
-            if include_cards {
-                return self.list_projects_with_cards(args);
-            }
-            let projects = configured_projects()?;
-            let binding = if !projects.is_empty() {
-                "catalog"
-            } else if std::env::var_os("OMS_PANEL_REPO").is_some() {
-                self.panel_repo(args)?;
-                "pinned"
-            } else if self.panel_repo(args).is_ok() {
-                "cwd"
-            } else {
-                "unbound"
-            };
-            let mut keys = json!({});
-            for alias in projects.keys() {
-                let selection = json!({"project":alias});
-                if let Ok(repo) = self.panel_repo(&selection)
-                    && let Ok(key) = self.project_key(&repo, &selection)
-                {
-                    keys[alias.as_str()] = json!(key);
-                }
-            }
-            let key = if matches!(binding, "pinned" | "cwd") {
-                self.panel_repo(args)
-                    .and_then(|repo| self.project_key(&repo, args))
-                    .ok()
-            } else {
-                None
-            };
-            return Ok(json!({
-                "projects": projects.into_keys().collect::<Vec<_>>(),
-                "projectKeys":keys,"projectKey":key,
-                "binding": binding,
-                "readOnly": self.config.profile == ToolProfile::McpApp,
-            }));
+    fn is_panel_write_tool(&self, name: &str) -> bool {
+        !self.definitions.as_array().is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool["name"].as_str() == Some(name) && tool["annotations"]["readOnlyHint"] == true
+            })
+        })
+    }
+
+    fn check_catalog_write_binding(
+        &self,
+        repo: &Path,
+        args: &Value,
+        meta: &Value,
+    ) -> PanelResult<()> {
+        let projects = configured_projects()?;
+        if projects.is_empty() {
+            return Ok(());
         }
-        if name == OPEN_HOME {
-            if crate::delegated() {
-                return Err("A delegated worker cannot enumerate desktop projects.".into());
+        let target_alias = args["project"].as_str().ok_or(BINDING)?;
+        if !projects.contains_key(target_alias) || self.panel_repo(args)? != repo {
+            return Err(BINDING.into());
+        }
+        if meta["threadId"].as_str().filter(|v| uuid(v)).is_none() {
+            return Err(catalog_unbound_message(target_alias));
+        }
+        let Ok(dashboard) = self.panel_snapshot_projection(repo, meta) else {
+            return Err(catalog_unbound_message(target_alias));
+        };
+        if !matched_room_session(&dashboard) {
+            return Err(catalog_unbound_message(target_alias));
+        }
+        if self.panel_repo(args)? != repo {
+            return Err(BINDING.into());
+        }
+        Ok(())
+    }
+
+    fn panel_call(&self, name: &str, args: &Value, meta: &Value) -> PanelResult<Value> {
+        let write = self.is_panel_write_tool(name);
+        if !write {
+            if name == PROJECTS {
+                if crate::delegated() {
+                    return Err("A delegated worker cannot enumerate desktop projects.".into());
+                }
+                let include_cards = match args.get("cards") {
+                    None => false,
+                    Some(v) => v.as_bool().ok_or("cards must be a boolean.")?,
+                };
+                if include_cards {
+                    return self.list_projects_with_cards(args);
+                }
+                let projects = configured_projects()?;
+                let binding = if !projects.is_empty() {
+                    "catalog"
+                } else if std::env::var_os("OMS_PANEL_REPO").is_some() {
+                    self.panel_repo(args)?;
+                    "pinned"
+                } else if self.panel_repo(args).is_ok() {
+                    "cwd"
+                } else {
+                    "unbound"
+                };
+                let mut keys = json!({});
+                for alias in projects.keys() {
+                    let selection = json!({"project":alias});
+                    if let Ok(repo) = self.panel_repo(&selection)
+                        && let Ok(key) = self.project_key(&repo, &selection)
+                    {
+                        keys[alias.as_str()] = json!(key);
+                    }
+                }
+                let key = if matches!(binding, "pinned" | "cwd") {
+                    self.panel_repo(args)
+                        .and_then(|repo| self.project_key(&repo, args))
+                        .ok()
+                } else {
+                    None
+                };
+                return Ok(json!({
+                    "projects": projects.into_keys().collect::<Vec<_>>(),
+                    "projectKeys":keys,"projectKey":key,
+                    "binding": binding,
+                    "readOnly": self.config.profile == ToolProfile::McpApp,
+                }));
             }
-            let projects = self.configured_projects_for_cards()?;
-            if projects.is_empty() {
-                if std::env::var_os("OMS_PANEL_REPO").is_some() {
+            if name == OPEN_HOME {
+                if crate::delegated() {
+                    return Err("A delegated worker cannot enumerate desktop projects.".into());
+                }
+                let projects = self.configured_projects_for_cards()?;
+                if projects.is_empty() {
+                    if std::env::var_os("OMS_PANEL_REPO").is_some() {
+                        return Err(
+                            "This connection is bound to one project and the all-projects home is not available here."
+                                .into(),
+                        );
+                    }
                     return Err(
-                        "This connection is bound to one project and the all-projects home is not available here."
+                        "The all-projects home is not available because no host project map is configured for this connection."
                             .into(),
                     );
                 }
-                return Err(
-                    "The all-projects home is not available because no host project map is configured for this connection."
-                        .into(),
-                );
+                return Ok(json!({"panel": "OMS home", "readOnly": true}));
             }
-            return Ok(json!({"panel": "OMS home", "readOnly": true}));
-        }
-        if name == OPEN {
-            let resolved = if args.get("project").is_some() {
-                Some(self.panel_repo(args)?)
-            } else {
-                None
-            };
-            let mut result = json!({"panel":"OMS","project":args["project"]});
-            if let Some(flag) = args.get("leadConversations") {
-                let requested = flag
-                    .as_bool()
-                    .ok_or("leadConversations must be a boolean.")?;
-                if requested {
-                    result["leadConversations"] = json!(true);
-                }
-            }
-            if self.config.profile == ToolProfile::McpApp {
-                result["readOnly"] = json!(true);
-            }
-            if !self.open_snapshot {
-                result["snapshotOmitted"] = json!("busy");
-            } else if let Some(repo) = resolved.or_else(|| self.panel_repo(args).ok()) {
-                if let Ok(dashboard) = self.panel_snapshot_projection(&repo, meta) {
-                    let encoded = dashboard.to_string();
-                    if encoded.len() > crate::OUTPUT_LIMIT {
-                        result["snapshotOmitted"] = json!("size");
-                    } else if crate::output::outbound(encoded.as_bytes(), &Value::Null).is_ok() {
-                        result["dashboard"] = dashboard;
+            if name == OPEN {
+                let resolved = if args.get("project").is_some() {
+                    Some(self.panel_repo(args)?)
+                } else {
+                    None
+                };
+                let mut result = json!({"panel":"OMS","project":args["project"]});
+                if let Some(flag) = args.get("leadConversations") {
+                    let requested = flag
+                        .as_bool()
+                        .ok_or("leadConversations must be a boolean.")?;
+                    if requested {
+                        result["leadConversations"] = json!(true);
                     }
                 }
-            } else {
-                result["snapshotOmitted"] = json!("project");
+                if self.config.profile == ToolProfile::McpApp {
+                    result["readOnly"] = json!(true);
+                }
+                if !self.open_snapshot {
+                    result["snapshotOmitted"] = json!("busy");
+                } else if let Some(repo) = resolved.or_else(|| self.panel_repo(args).ok()) {
+                    if let Ok(dashboard) = self.panel_snapshot_projection(&repo, meta) {
+                        let encoded = dashboard.to_string();
+                        if encoded.len() > crate::OUTPUT_LIMIT {
+                            result["snapshotOmitted"] = json!("size");
+                        } else if crate::output::outbound(encoded.as_bytes(), &Value::Null).is_ok()
+                        {
+                            result["dashboard"] = dashboard;
+                        }
+                    }
+                } else {
+                    result["snapshotOmitted"] = json!("project");
+                }
+                return Ok(result);
             }
-            return Ok(result);
         }
         let repo = self.panel_repo(args)?;
         let path = repo.as_os_str().to_owned();
-        if name == SNAPSHOT {
+        if !write && name == SNAPSHOT {
             return Ok(json!({"dashboard":self.panel_snapshot(&repo, meta)?}));
         }
         if crate::delegated()
             || std::env::var_os("OMS_ROOM_PARTICIPANT").is_some_and(|v| !v.is_empty())
         {
             return Err("This desktop control requires the parent app connection.".into());
+        }
+        if write {
+            self.check_catalog_write_binding(&repo, args, meta)?;
         }
         if name == WORKER_OUTPUT {
             return self.worker_output(&repo, args, meta);
@@ -4137,22 +4205,9 @@ fn execute_panel_snapshot(
     }
     let mut dashboard = report["dashboard"].clone();
     let main = &dashboard["conversationMain"];
-    let room_id = |v: &Value| {
-        v.as_str().is_some_and(|s| {
-            (1..=160).contains(&s.len())
-                && !s.starts_with(['-', '.'])
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-        })
-    };
     let harness_unverified = !main["harness"].is_null()
         && !(thread.is_some()
-            && dashboard["conversationBinding"] == "matched"
-            && main["source"] == "room-session"
-            && main["provider"] == "codex"
-            && main["state"] == "joined"
-            && room_id(&main["room"])
-            && room_id(&main["participant"])
+            && matched_room_session(&dashboard)
             && matches!(main["harness"].as_str(), Some("codex" | "pi")));
     if harness_unverified {
         dashboard["conversationMain"]["harness"] = Value::Null;
