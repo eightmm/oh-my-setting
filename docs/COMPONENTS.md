@@ -484,6 +484,7 @@ Doctor also projects the saved tool capability selection. It reports missing,
 invalid and unreadable receipts explicitly and includes only bounded selection
 fields, never the receipt path or extra contents. This selection is separate
 from the installation component profile and repository runtime configuration.
+On Linux, the `mcp servers` section inspects the current user's running `oms mcp-server` processes in `/proc` read-only and warns when any still serves an older native build than the installed revision (other platforms report an `info` row).
 
 
 ### Workspace and installation status

@@ -449,6 +449,14 @@ fn partition_live(content: &[u8], cutoff: &str) -> (BTreeMap<String, Vec<u8>>, V
     (months, recent)
 }
 
+fn seal_cutoff(tz: &TimeZoneSpec, now: chrono::DateTime<chrono::Utc>) -> String {
+    tz.local_date_and_week(now).1[..7].to_owned()
+}
+
+fn eligible_count(months: &BTreeMap<String, Vec<u8>>) -> usize {
+    months.values().map(|raw| byte_lines(raw).count()).sum()
+}
+
 pub fn journal_live(journal_dir: &Path, manifest: &ColdManifest) -> Result<Vec<u8>, String> {
     let mut content =
         read_regular_no_symlink_bytes(&journal_dir.join("events.jsonl"))?.unwrap_or_default();
@@ -515,14 +523,14 @@ pub fn journal_storage(repo_root: &Path) -> StorageHealth {
     storage_health(repo_root, false, None)
 }
 
-/// State also reports older cold rows. The storage measurement may fail before
-/// replay, so preserve its independent fallback without repeating a successful replay.
+/// Reports verified archived events in months strictly before `before_month`.
+/// The archive count can still succeed when the storage measurement fails.
 pub fn journal_storage_with_cold_count(
     repo_root: &Path,
     before_month: &str,
 ) -> (StorageHealth, usize) {
-    let (health, manifest) = measure_storage_health(repo_root, false, None);
-    let manifest = manifest.or_else(|| {
+    let (health, observed) = measure_storage_health(repo_root, false, None);
+    let manifest = observed.map(|observed| observed.manifest).or_else(|| {
         replay_snapshot(&repo_root.join(".oms/work-journal"))
             .ok()
             .map(|(manifest, _, _)| manifest)
@@ -531,11 +539,39 @@ pub fn journal_storage_with_cold_count(
         // Replay verifies that each segment contains exactly this count and month.
         manifest
             .segments
-            .into_iter()
+            .iter()
             .filter(|entry| entry.month.as_str() < before_month)
             .map(|entry| entry.count)
             .sum()
     });
+    (health, count)
+}
+
+/// State also reports how many live rows a seal dry-run at `now` would move. The
+/// storage measurement may fail independently of replay, so its fallback applies
+/// seal's storage gate before counting, without repeating a successful replay.
+pub fn journal_storage_with_unsealed_count(
+    repo_root: &Path,
+    timezone_name: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (StorageHealth, usize) {
+    let (health, observed) = measure_storage_health(repo_root, false, None);
+    let count = crate::tz::checked_timezone(timezone_name)
+        .ok()
+        .and_then(|tz| {
+            let live = observed.and_then(|observed| observed.live).or_else(|| {
+                let (manifest, _, live) =
+                    replay_snapshot(&repo_root.join(".oms/work-journal")).ok()?;
+                // Seal tolerates an incomplete tail, but no other unhealthy storage.
+                storage_health(repo_root, true, Some(&manifest))
+                    .healthy
+                    .then_some(live)
+            })?;
+            Some(eligible_count(
+                &partition_live(&live, &seal_cutoff(&tz, now)).0,
+            ))
+        })
+        .unwrap_or(0);
     (health, count)
 }
 
@@ -547,14 +583,19 @@ pub(crate) fn storage_health(
     measure_storage_health(repo_root, allow_incomplete, verified).0
 }
 
+struct StorageObservation {
+    manifest: ColdManifest,
+    live: Option<Vec<u8>>,
+}
+
 fn measure_storage_health(
     repo_root: &Path,
     allow_incomplete: bool,
     verified: Option<&ColdManifest>,
-) -> (StorageHealth, Option<ColdManifest>) {
+) -> (StorageHealth, Option<StorageObservation>) {
     let root = repo_root.join(".oms/work-journal");
     let mut health=StorageHealth{healthy:true,threshold_note:"Review prior-month sealing with `oms journal seal` (dry-run); run `oms journal seal --apply` to seal.".into(),..Default::default()};
-    let result = (|| -> Result<Option<ColdManifest>, String> {
+    let result = (|| -> Result<Option<StorageObservation>, String> {
         health.present = match fs::symlink_metadata(&root) {
             Ok(_) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
@@ -643,19 +684,19 @@ fn measure_storage_health(
                 }
             }
         }
-        let manifest = if let Some(verified) = verified {
-            verified.clone()
+        let (manifest, live) = if let Some(verified) = verified {
+            (verified.clone(), None)
         } else {
-            let (manifest, _, _) = replay_snapshot(&root)?;
-            manifest
+            let (manifest, _, live) = replay_snapshot(&root)?;
+            (manifest, Some(live))
         };
         health.cold_segments = manifest.segments.len();
         health.cold_events = manifest.segments.iter().map(|s| s.count).sum();
         health.has_cold_segments = !manifest.segments.is_empty();
-        Ok(Some(manifest))
+        Ok(Some(StorageObservation { manifest, live }))
     })();
     let observed = match result {
-        Ok(manifest) => manifest,
+        Ok(observed) => observed,
         Err(error) => {
             health.healthy = false;
             health.error = Some(error);
@@ -715,10 +756,9 @@ pub(crate) fn seal_verified(
         finish_seal(&journal_dir, &mut manifest)?;
     }
     let content = journal_live(&journal_dir, &manifest)?;
-    let (_, today, _) = tz.local_date_and_week(now);
-    let cutoff = &today[..7];
-    let (months, recent) = partition_live(&content, cutoff);
-    let count = months.values().map(|raw| byte_lines(raw).count()).sum();
+    let cutoff = seal_cutoff(tz, now);
+    let (months, recent) = partition_live(&content, &cutoff);
+    let count = eligible_count(&months);
     if !apply || months.is_empty() {
         return Ok(count);
     }
@@ -750,7 +790,7 @@ pub(crate) fn seal_verified(
     manifest.pending = Some(PendingSeal {
         before: sha256_hex(&content),
         after: sha256_hex(&recent),
-        cutoff: cutoff.into(),
+        cutoff,
     });
     save_cold_manifest(&journal_dir, &manifest)?;
     finish_seal(&journal_dir, &mut manifest)?;

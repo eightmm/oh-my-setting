@@ -5536,6 +5536,7 @@ mod tests {
                         merge: false,
                         physical_call: Some(tag.clone()),
                         launch_fence: Some(call.launch_fence()),
+                        heartbeat: None,
                     },
                     &stop,
                 )

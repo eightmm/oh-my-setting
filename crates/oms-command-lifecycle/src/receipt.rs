@@ -101,6 +101,11 @@ pub(crate) fn owner(row: &Value) -> Result<PathBuf> {
         .ok_or_else(|| r::Error(2, "invalid install owner".into()))?;
     r::physical(Path::new(source))
 }
+pub(crate) fn native_revision(row: &Value) -> Option<&str> {
+    row["native"]["revision"]
+        .as_str()
+        .filter(|rev| crate::payload::valid_revision(rev).is_ok())
+}
 pub(crate) fn validate(v: &Value) -> Result<()> {
     if !matches!(v.get("schema").and_then(Value::as_u64), Some(1 | 2)) {
         return r::fail("invalid install receipt schema");

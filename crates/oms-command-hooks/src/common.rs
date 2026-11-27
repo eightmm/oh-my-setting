@@ -861,6 +861,7 @@ pub fn invocation(
                 merge: false,
                 physical_call: None,
                 launch_fence: None,
+                heartbeat: None,
             },
             ctx.interrupted,
         )
