@@ -43,6 +43,7 @@ const FLAGS: &[&str] = &[
     "spread-accounts",
     "archived",
     "unbound",
+    "projects",
 ];
 const VALUES: &[&str] = &[
     "context-pack",
@@ -139,6 +140,7 @@ const VALUES: &[&str] = &[
     "maximum",
     "generation",
     "id",
+    "unregister-project",
 ];
 const REPEATED: &[&str] = &["scope", "attempt", "evidence", "from-task"];
 
@@ -260,9 +262,17 @@ impl Options {
                         .is_none_or(|v| v.to_str().is_none_or(|v| v.starts_with("--")))
                 {
                     out.count_rows = true;
+                } else if key == "register-project"
+                    && inline.is_none()
+                    && args
+                        .get(i)
+                        .is_none_or(|v| v.to_str().is_none_or(|v| v == "-h" || v.starts_with("--")))
+                {
+                    require(!out.has("register-project"), "choose one panel operation")?;
+                    out.flags.insert("register-project".into());
                 } else {
                     require(
-                        VALUES.contains(&key) || key == "count",
+                        VALUES.contains(&key) || matches!(key, "count" | "register-project"),
                         &format!("unrecognized argument: --{key}"),
                     )?;
                     let value = match inline {
@@ -279,6 +289,10 @@ impl Options {
                             v
                         }
                     };
+                    if key == "register-project" {
+                        require(!out.has("register-project"), "choose one panel operation")?;
+                        require(!value.is_empty(), "--register-project requires a path")?;
+                    }
                     let values = out.values.entry(key.into()).or_default();
                     if matches!(key, "launch" | "spawn-main") {
                         require(values.is_empty(), "choose one Main provider")?;
@@ -557,6 +571,9 @@ impl Options {
             "salvage",
             "release-main",
             "settle-review",
+            "register-project",
+            "unregister-project",
+            "projects",
         ];
         require(
             modes.iter().filter(|v| self.has(v)).count() <= 1,
@@ -632,9 +649,40 @@ impl Options {
             &["reasoning-effort"],
             &["dispatch", "continue", "recommend", "orchestrator"],
         )?;
+        if self.has("register-project") {
+            require(
+                !self.count_rows
+                    && self.flags.iter().all(|s| s == "register-project")
+                    && self
+                        .values
+                        .keys()
+                        .all(|s| matches!(s.as_str(), "register-project" | "alias")),
+                "--register-project accepts only an optional path and --alias",
+            )?;
+        }
+        if self.has("unregister-project") {
+            self.required("unregister-project")?;
+            require(
+                !self.count_rows
+                    && self.flags.is_empty()
+                    && self.values.keys().all(|s| s == "unregister-project"),
+                "--unregister-project accepts only ALIAS",
+            )?;
+        }
+        if self.has("projects") {
+            require(
+                !self.count_rows
+                    && self
+                        .flags
+                        .iter()
+                        .all(|s| matches!(s.as_str(), "projects" | "json"))
+                    && self.values.is_empty(),
+                "--projects accepts only --json",
+            )?;
+        }
+        self.needs(&["alias"], &["dispatch", "continue", "register-project"])?;
         self.needs(
             &[
-                "alias",
                 "main",
                 "to",
                 "brief-file",
@@ -1114,6 +1162,7 @@ pub fn usage() -> String {
     text.push_str("Fresh Claude account spread: --orchestrator claude --spread-accounts\n\n");
     text.push_str("After a canonical Main swap: --native-adopt ATTEMPT --assignment-sha256 SHA [--result-sha256 SHA]\nResults supplies the exact adoption command. Omit result SHA only when no current result exists.\nAdoption preserves the frozen claim, attempt, account and round; it never resends input or grants acceptance.\nSettled tasks permit retirement-only adoption even after the checkout advances.\n\n");
     text.push_str("Managed native Main: --launch codex|claude [--account ID] [--task TEXT]\n\n");
+    text.push_str("Desktop projects: --register-project [PATH] [--alias NAME] | --unregister-project ALIAS | --projects [--json]\n\n");
     text.push_str("Read: --teams [--json] | --results [--task-id ID] [--page N] [--json] [--export FILE]\nWatch: --watch [--view auto|summary|compact|detail|graph|tree] [--count N]\nWork: --dispatch ROLE --prompt TEXT | --brief-file FILE [--dry-run]\nContinue: --continue TASK --brief-file FILE [--dispatch ROLE]\nCouncil: --council --prompt TEXT [--lenses NAMES | --rounds N] [--dry-run]\nAccept: --accept TASK --repo PATH --message TEXT --verify COMMAND\nFinalize: --finalize --owner OWNER --task-id ID --summary-file FILE --outcome OUTCOME\nRecovery: --salvage TASK [--attempt ID]; --retry-delivery --task-id ID\n\nOptions:\n");
     for key in FLAGS {
         text.push_str(&format!("  --{key}\n"));
@@ -1121,7 +1170,7 @@ pub fn usage() -> String {
     for key in VALUES {
         text.push_str(&format!("  --{key} VALUE\n"));
     }
-    text.push_str("  --count [N]\n  -h, --help\n\nTerminal actions: open list focus read controls forget archive restore workspaces workspace-forget workspace-archive workspace-restore\nJob actions: run list logs interrupt stop restart forget archive restore\nJob recipes follow -- as explicit argv. Publication remains an explicit owner action.\n");
+    text.push_str("  --register-project [PATH]\n  --count [N]\n  -h, --help\n\nTerminal actions: open list focus read controls forget archive restore workspaces workspace-forget workspace-archive workspace-restore\nJob actions: run list logs interrupt stop restart forget archive restore\nJob recipes follow -- as explicit argv. Publication remains an explicit owner action.\n");
     text
 }
 
@@ -1709,5 +1758,77 @@ mod tests {
             assert!(parse(&["--dispatch", "worker", "--reasoning-effort", effort]).is_ok());
         }
         assert!(parse(&["--dispatch", "worker", "--reasoning-effort", "unknown"]).is_err());
+    }
+
+    #[test]
+    fn desktop_project_registry_cli_grammar_and_usage() {
+        let parse = |args: &[&str]| Options::parse(&crate::commands::strings(args));
+
+        let bare = parse(&["--register-project"]).unwrap();
+        assert!(bare.has("register-project"));
+        assert_eq!(bare.get("register-project"), None);
+        assert!(!bare.selects_main());
+
+        let with_alias = parse(&["--register-project", "--alias", "engine"]).unwrap();
+        assert!(with_alias.has("register-project"));
+        assert_eq!(with_alias.get("register-project"), None);
+        assert_eq!(with_alias.get("alias"), Some("engine"));
+
+        let alias_first = parse(&["--alias", "engine", "--register-project"]).unwrap();
+        assert!(alias_first.has("register-project"));
+        assert_eq!(alias_first.get("register-project"), None);
+        assert_eq!(alias_first.get("alias"), Some("engine"));
+
+        let with_path = parse(&[
+            "--register-project",
+            "/srv/projects/engine",
+            "--alias",
+            "eng",
+        ])
+        .unwrap();
+        assert_eq!(
+            with_path.get("register-project"),
+            Some("/srv/projects/engine")
+        );
+        assert_eq!(with_path.get("alias"), Some("eng"));
+
+        let inline = parse(&["--register-project=/srv/projects/docs"]).unwrap();
+        assert_eq!(inline.get("register-project"), Some("/srv/projects/docs"));
+
+        let unreg = parse(&["--unregister-project", "engine"]).unwrap();
+        assert_eq!(unreg.get("unregister-project"), Some("engine"));
+        assert!(!unreg.selects_main());
+
+        for list_args in [&["--projects"][..], &["--projects", "--json"]] {
+            let listed = parse(list_args).unwrap();
+            assert!(listed.has("projects"));
+            assert!(!listed.selects_main());
+        }
+
+        for invalid in [
+            &["--register-project", ""][..],
+            &["--register-project="],
+            &["--register-project", "--json"],
+            &["--register-project", "--repo", "."],
+            &["--register-project", "a", "--register-project", "b"],
+            &["--register-project", "--register-project"],
+            &["--register-project", "--projects"],
+            &["--unregister-project"],
+            &["--unregister-project="],
+            &["--unregister-project", "engine", "--json"],
+            &["--unregister-project", "engine", "--alias", "other"],
+            &["--projects", "--alias", "engine"],
+            &["--projects", "--repo", "."],
+            &["--projects", "--dry-run"],
+            &["--alias", "engine"],
+            &["terminal", "list", "--repo", ".", "--projects"],
+        ] {
+            assert!(parse(invalid).is_err(), "accepted {invalid:?}");
+        }
+
+        let help = usage();
+        assert!(help.contains("--register-project [PATH]"));
+        assert!(help.contains("--unregister-project VALUE"));
+        assert!(help.contains("--projects"));
     }
 }

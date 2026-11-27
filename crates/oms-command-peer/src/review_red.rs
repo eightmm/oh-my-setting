@@ -92,6 +92,7 @@ fn command(
             physical_call: None,
             launch_fence: None,
             heartbeat: None,
+            stream: None,
             merge: true,
         },
         context.interrupted,

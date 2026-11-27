@@ -73,6 +73,10 @@ pub fn replace_locked(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub fn rows(root: &Path, path: &Path) -> Result<(Vec<Value>, usize)> {
     let bytes = read(root, path, MAX_STREAM, true)?;
+    Ok(parse_rows(&bytes))
+}
+
+pub fn parse_rows(bytes: &[u8]) -> (Vec<Value>, usize) {
     let mut rows = Vec::new();
     let mut bad = 0;
     for line in bytes
@@ -84,7 +88,7 @@ pub fn rows(root: &Path, path: &Path) -> Result<(Vec<Value>, usize)> {
             _ => bad += 1,
         }
     }
-    Ok((rows, bad))
+    (rows, bad)
 }
 
 /// The caller holds the canonical stream lock, including newline recovery.

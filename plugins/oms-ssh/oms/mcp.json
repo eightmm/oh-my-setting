@@ -18,7 +18,7 @@
         "oms-runtime",
         "exec env OMS_MCP_TOOL_PROFILE=chatgpt-panel OMS_PANEL_PROJECTS_FILE=\"${XDG_CONFIG_HOME:-$HOME/.config}/oh-my-setting/desktop-projects.json\" \"$HOME/.local/bin/oms\" mcp-server"
       ],
-      "env": { "OMS_MCP_PANEL_RESOURCE_VERSION": "v37" }
+      "env": { "OMS_MCP_PANEL_RESOURCE_VERSION": "v38" }
     }
   }
 }

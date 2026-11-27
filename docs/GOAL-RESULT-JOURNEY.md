@@ -31,7 +31,7 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 
 ## 기존 API와 연결
 
-패널 리소스와 두 플러그인 manifest는 `ui://oms/conversation-panel/v37.html`을 사용하며,
+패널 리소스와 두 플러그인 manifest는 `ui://oms/conversation-panel/v38.html`을 사용하며,
 이전 버전의 리소스 읽기 별칭을 유지한다.
 
 | 경로 | 추가 입력·출력 | UI 사용 |
@@ -41,6 +41,7 @@ Plan 선택 조건은 최대 8개다. 생략이 있으면 일부만 표시한 �
 | `oms_open_lead_conversations` | 선택적인 `providers` 배열; 생략하면 세 provider | 개별 연결과 전체 연결에 같은 endpoint를 쓴다. 반환된 subset만 검증하여 병합한다. |
 | `oms_lead_conversation_status` | 공개 `latestTurn`; 명시적인 `answerPage` private read | 마지막 turn 상태와 답변 페이지를 분리한다. full read는 projectKey·Room·provider·leadRequestId·turnId를 고정한다. |
 | `oms_stop_lead_message` | exact `projectKey`·`room`·`provider`·`leadRequestId`·`turnId` | 실행 중인 최신 turn에 취소 요청 receipt를 남기고, 이미 끝난 turn에는 아무것도 하지 않는다. 앱 전용 도구다. |
+| `oms_read_lead_stream` | exact `projectKey`·`room`·`provider`·`leadRequestId`·`turnId`와 줄 시작 `cursor` | 최신 turn의 owner가 줄 단위로 검사해 남긴 부분 답변(`text`)과 마지막 도구 활동(`tool`), 다음 `cursor`, turn `status`를 private으로 돌려준다. status와 같은 검증을 거치는 앱 전용 읽기 도구다. |
 | `oms_lead_settings` / `oms_update_lead_settings` | `scope`, `catalogAgeSeconds`, selection과 lastServed | 다음 메시지 설정과 실제 답변 증거를 구분하고 기존 revision-checked 저장을 유지한다. |
 | `oms_panel_chat` | transcript/diff·attempt에 `evidenceCursor`; 이 모드는 exact `projectKey` 필수 | 선택한 Room 결과를 읽는다. public/private projectKey와 Room·participant·attempt·section이 모두 일치해야 표시한다. 기존 메시지·legacy page 읽기는 유지한다. |
 | `oms_worker_output` | `answerPage`, private `page` metadata | 확인된 projectKey·Room·Lead attempt·worker attempt 쌍의 원문만 읽는다. |
@@ -119,17 +120,22 @@ PR은 실패 › 진행 › 통과 순으로 정렬하고 실패한 check 이름
 결과 기록은 단계 네 칸을 그리고 화면 읽기용 문장을 함께 붙이며, 제목은 작업 목록에서 가져오고 없으면 ID를 쓴다.
 작업의 결과 메모는 상태와 섞이지 않게 "결과 · 검증 통과"로 쓴다.
 패널 HTML 크기 예산(`native.rs`의 `PANEL_BUDGET`)은 256 KiB다. 호스트 제한이 아니라, 서버가 들여쓰기를 지워 보내던 시절의
-240 KiB 예산을 원문 그대로 보내는 지금에 맞춰 한 번 올린 값이다. v37은 이 중 약 254 KB를 쓰므로,
+240 KiB 예산을 원문 그대로 보내는 지금에 맞춰 한 번 올린 값이다. v38은 이 중 약 256 KB를 쓰므로,
 #631의 새 목표 창은 기존 화면에서 공간을 먼저 줄인 뒤에 넣는다.
 
 v37은 Lead 대화를 native 대화창처럼 바꾼다. 답변을 Markdown으로 그리고, 답하는 동안 "답하는 중" 줄과 중지 버튼을 보이며,
 Enter로 보낸다. Claude·AGY Lead는 확인된 native 세션을 이어 쓰고, 설정 메뉴가 다음 메시지가 이어질 세션을 보여 준다.
-세션을 이어 쓸 때도 OMS 대화 기록을 프롬프트 앞에 다시 붙이므로 같은 문맥이 중복된다. 이어 쓰는 turn에는 새 메시지만 보내는 것은 후속 작업이다.
+
+v38은 Claude Lead의 답을 쓰는 중에 보여 준다. owner가 `--include-partial-messages` stream을 줄 단위로 outbound 검사해
+`lead-stream.jsonl`에 남기고, 패널은 답하는 동안 약 1.2초마다 `oms_read_lead_stream`으로 이어 읽어 "답하는 중" 줄 위에 Markdown으로 그린다.
+도구를 쓰면 그 줄에 "Claude · Read AGENTS.md"처럼 마지막 활동을 보인다. 검사에 걸린 줄부터는 더 내보내지 않으며,
+turn이 끝나면 부분 답을 지우고 확인된 답변으로 바꾼다. AGY는 한 번에 답을 내므로 "답하는 중" 줄만 보인다.
+확인된 native 세션을 이어 쓰는 turn에는 OMS 대화 기록을 다시 붙이지 않고 새 메시지만 보낸다. 새 세션(Codex, 첫 turn, 중지·실패 뒤)은 기록을 붙인다.
 
 ## 검증과 남은 확인
 
 프런트엔드의 기존 `node:test` + VM/DOM fixture를 확장했다.
-다음 명령으로 87개 테스트를 실행한다(목표·결과 흐름의 70개를 확장하고 선택 공유·더 살펴보기·첫 화면 12개, v33 화면 정리 2개, v34 더 보기·v35 사용량 한 줄 2개, v37 Lead 대화 1개 시나리오 추가).
+다음 명령으로 88개 테스트를 실행한다(목표·결과 흐름의 70개를 확장하고 선택 공유·더 살펴보기·첫 화면 12개, v33 화면 정리 2개, v34 더 보기·v35 사용량 한 줄 2개, v37 Lead 대화 1개, v38 Lead 스트리밍 1개 시나리오 추가).
 
 ```sh
 node --test crates/oms-mcp-server/tests/conversation-panel.test.mjs

@@ -1271,7 +1271,10 @@ fn incomplete_stop(reason: &str) -> bool {
 #[derive(Clone, Copy)]
 pub(crate) enum OutputMode<'a> {
     Legacy,
-    Observed(&'a std::cell::Cell<Option<crate::lead_observation::Observation>>),
+    Observed(
+        &'a std::cell::Cell<Option<crate::lead_observation::Observation>>,
+        Option<&'a crate::process::StreamTap>,
+    ),
     Native,
 }
 
@@ -1379,6 +1382,8 @@ pub(crate) fn native_result_footer(provider: &str, kind: &str, row: &V) -> bool 
             text(row, "subtype") == "hook_response"
                 && matches!(text(row, "hook_event"), "Stop" | "SessionEnd")
                 && text(row, "outcome") == "success"
+                // Emitted after `result` once a turn used tools.
+                || text(row, "subtype") == "task_summary"
         }
         _ => false,
     }
@@ -2332,7 +2337,19 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
     {
         return fail("provider does not support read access through this transport");
     }
-    let transport = transport(route, prompt.bytes(), cwd, write, timeout)?;
+    let mut transport = transport(route, prompt.bytes(), cwd, write, timeout)?;
+    let stream = match output_mode {
+        OutputMode::Observed(_, Some(tap)) if route.provider == "claude" && !write => {
+            // Partial events precede `-p`; completion still comes from `result`.
+            transport.argv.iter().rposition(|a| a == "-p").map(|at| {
+                transport
+                    .argv
+                    .insert(at, "--include-partial-messages".into());
+                tap.clone()
+            })
+        }
+        _ => None,
+    };
     let team_protocol = if extra_env
         .iter()
         .any(|(k, v)| k == "OMS_TEAM_REQUEST_PROTOCOL" && v == "oms-team-request-v1")
@@ -2366,6 +2383,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                     || s.starts_with("OMS_LANDING_")
                     || s.starts_with("OMS_LEASE_")
                     || s == "OMS_PEER_LEAD_OBSERVATION"
+                    || s == "SSH_AUTH_SOCK"
             })
         })
         .collect();
@@ -2436,6 +2454,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                 .map(|(_, value)| value.as_os_str()),
         );
         let mut exec_argv = transport.argv.clone();
+        let mut sandbox_backend = None;
         let sandbox_mode = match std::env::var("OMS_WORKER_SANDBOX").as_deref() {
             Ok("strict") => Some(oms_supervisor::sandbox::SandboxMode::Strict),
             Ok("auto") => Some(oms_supervisor::sandbox::SandboxMode::Auto),
@@ -2445,6 +2464,18 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
             && !(mode == oms_supervisor::sandbox::SandboxMode::Auto && route.provider == "codex")
             && let Some((program, rest)) = exec_argv.split_first()
         {
+            if let Some(runtime) = nonempty_env("XDG_RUNTIME_DIR")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                && let Ok(meta) = std::fs::symlink_metadata(&runtime)
+                && meta.is_dir()
+                && !meta.file_type().is_symlink()
+                && meta.uid() == rustix::process::geteuid().as_raw()
+            {
+                let _ = std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(runtime.join("oms-ssh"));
+            }
             let mut view = environment.clone();
             if let Some(spec) = isolated(&route.provider)
                 && !view.iter().any(|(key, _)| key == spec.env)
@@ -2476,10 +2507,17 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                 extra_rw_dirs,
                 allow_network: true,
             };
-            let (wrapped_prog, wrapped_args, _) =
-                oms_supervisor::sandbox::wrap_command(program, rest, &spec, mode)
-                    .map_err(|e| Error::new(2, e))?;
-            exec_argv = std::iter::once(wrapped_prog).chain(wrapped_args).collect();
+            let wrapped = oms_supervisor::sandbox::wrap_command(program, rest, &spec, mode)
+                .map_err(|e| Error::new(2, e))?;
+            sandbox_backend = Some(wrapped.backend);
+            for key in wrapped.remove_env {
+                if !remove_environment.contains(&key) {
+                    remove_environment.push(key);
+                }
+            }
+            exec_argv = std::iter::once(wrapped.program)
+                .chain(wrapped.args)
+                .collect();
         }
         let deadline = std::time::Instant::now() + crate::process::NATIVE_ADMISSION_BUDGET;
         let team = crate::process::TeamLocator::from_extra(&extra_env)?;
@@ -2565,6 +2603,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                     .map_err(|e| Error::new(2, e))?,
             ),
             heartbeat: context.heartbeat.cloned(),
+            stream: stream.clone(),
         };
         let result = crate::plan_delegate::check_launch(&extra_env, &route.provider, cwd, context)
             .and_then(|plan| {
@@ -2688,7 +2727,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
         if !account_observed {
             result.stderr.extend_from_slice(b"\nwarning: account-home continuity unavailable; usage attribution remains unknown\n");
         }
-        if let OutputMode::Observed(slot) = output_mode {
+        if let OutputMode::Observed(slot, _) = output_mode {
             let observation = (result.code == 0
                 && result.complete
                 && terminal
@@ -2739,6 +2778,11 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
         if context_record.is_err() {
             result.stderr.extend_from_slice(
                 b"\nwarning: context request evidence unavailable; delivery remains unknown\n",
+            );
+        }
+        if sandbox_backend == Some("unsandboxed-fallback") {
+            result.stderr.extend_from_slice(
+                b"\nwarning: worker ran without OS isolation (unsandboxed-fallback)\n",
             );
         }
         return Ok(result);
@@ -4807,9 +4851,16 @@ mod bridge_route_tests {
     }
     #[test]
     fn adaptive_routing_enforces_strict_sandbox_without_backend() {
-        if std::env::var_os("SANDBOX_STRICT_PROBE").as_deref() == Some(OsStr::new("1")) {
+        if let Some(mode) = std::env::var_os("SANDBOX_STRICT_PROBE") {
             let dir = std::env::temp_dir().join(format!("oms-sbx-{}", std::process::id()));
-            let _ = fs::create_dir_all(&dir);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let init = Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(init.success());
             let route = Route {
                 provider: "claude".into(),
                 model: "provider-default".into(),
@@ -4820,6 +4871,16 @@ mod bridge_route_tests {
                 public_research: false,
             };
             let capture = Capture::default();
+            if mode == "auto" {
+                assert!(std::env::var_os("SSH_AUTH_SOCK").is_some());
+                let res = direct(&route, b"probe", true, &dir, &dir, &capture).unwrap();
+                let _ = fs::remove_dir_all(&dir);
+                assert_eq!(res.code, 0, "{}", String::from_utf8_lossy(&res.stderr));
+                let stderr = String::from_utf8_lossy(&res.stderr);
+                assert!(stderr.contains("unsandboxed-fallback"), "{stderr}");
+                assert!(stderr.contains("without OS isolation"), "{stderr}");
+                return;
+            }
             let err = direct(&route, b"probe", true, &dir, &dir, &capture).unwrap_err();
             let _ = fs::remove_dir_all(&dir);
             assert!(err.message.contains("sandbox backend"), "{}", err.message);
@@ -4829,29 +4890,41 @@ mod bridge_route_tests {
         let _ = fs::remove_dir_all(&probe_bin);
         fs::create_dir_all(&probe_bin).unwrap();
         let claude_stub = probe_bin.join("claude");
-        fs::write(&claude_stub, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(
+            &claude_stub,
+            "#!/bin/sh\nif [ -n \"${SSH_AUTH_SOCK+x}\" ]; then echo leaked >&2; exit 9; fi\nprintf '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\"}\\n'\n",
+        )
+        .unwrap();
         fs::set_permissions(&claude_stub, fs::Permissions::from_mode(0o755)).unwrap();
-        let out = Command::new(std::env::current_exe().unwrap())
-            .env_clear()
-            .args([
-                "--exact",
-                "providers::bridge_route_tests::adaptive_routing_enforces_strict_sandbox_without_backend",
-            ])
-            .env("HOME", &probe_bin)
-            .env("PATH", &probe_bin)
-            .env("TMPDIR", std::env::temp_dir())
-            .env("SANDBOX_STRICT_PROBE", "1")
-            .env("OMS_WORKER_SANDBOX", "strict")
-            .env("OMS_BWRAP_BIN", "/nonexistent-oms-bwrap-bin")
-            .env("OMS_SANDBOX_EXEC_BIN", "/nonexistent-oms-sandbox-exec")
-            .output()
-            .unwrap();
-        let _ = fs::remove_dir_all(&probe_bin);
-        assert!(
-            out.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+        let path_env = format!(
+            "{}:{}",
+            probe_bin.display(),
+            std::env::var("PATH").unwrap_or_default()
         );
+        for (probe, sandbox_env) in [("1", "strict"), ("auto", "auto")] {
+            let out = Command::new(std::env::current_exe().unwrap())
+                .env_clear()
+                .args([
+                    "--exact",
+                    "providers::bridge_route_tests::adaptive_routing_enforces_strict_sandbox_without_backend",
+                ])
+                .env("HOME", &probe_bin)
+                .env("PATH", &path_env)
+                .env("TMPDIR", std::env::temp_dir())
+                .env("SSH_AUTH_SOCK", probe_bin.join("agent.sock"))
+                .env("SANDBOX_STRICT_PROBE", probe)
+                .env("OMS_WORKER_SANDBOX", sandbox_env)
+                .env("OMS_BWRAP_BIN", "/nonexistent-oms-bwrap-bin")
+                .env("OMS_SANDBOX_EXEC_BIN", "/nonexistent-oms-sandbox-exec")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "mode={sandbox_env}\n{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let _ = fs::remove_dir_all(&probe_bin);
     }
 }

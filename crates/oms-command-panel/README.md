@@ -309,3 +309,25 @@ Click a Codex, Claude or AGY native child row, or select it and press Enter.
 The Board opens available recent replies after verifying the Room, Main,
 provider pane, assignment turn and child identity. A recorded parent summary
 may be available without the child chat. `Esc` closes the reader.
+
+Host-side desktop project map operations manage `oh-my-setting/desktop-projects.json`
+under `XDG_CONFIG_HOME` (else `~/.config`), or `OMS_PANEL_PROJECTS_FILE` when set:
+
+```sh
+oms panel --register-project [PATH] [--alias NAME]
+oms panel --unregister-project ALIAS
+oms panel --projects [--json]
+```
+
+`--register-project` resolves `PATH` (defaulting to the current directory) to its
+physical absolute path, requires a Git checkout or adopted OMS project, and defaults
+`--alias` to the checkout directory name. Re-registering the same alias and path is
+a no-op; a duplicate alias pointing to another path is refused with a suggested
+`--alias` alternative. Writes create missing parent directories, stage a mode `0600`
+temporary file in the target directory and rename it atomically, preserving existing
+entries (at most 128 aliases and 16 KiB) while refusing symlinks, hard links,
+foreign or group/world-writable files, `OMS_PANEL_PROJECTS` inline maps, and harness
+child callers. `--unregister-project` removes one alias (and unlinks the map when the
+last entry is removed so an empty object is never left behind). `--projects [--json]`
+lists registered aliases and paths and marks entries whose checkout path no longer
+exists.

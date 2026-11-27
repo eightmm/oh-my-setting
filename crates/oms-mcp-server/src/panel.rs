@@ -18,7 +18,8 @@ mod lead_plan_context;
 mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
-const URI: &str = "ui://oms/conversation-panel/v37.html";
+const URI: &str = "ui://oms/conversation-panel/v38.html";
+const V37: &str = "ui://oms/conversation-panel/v37.html";
 const V33: &str = "ui://oms/conversation-panel/v33.html";
 const V34: &str = "ui://oms/conversation-panel/v34.html";
 const V35: &str = "ui://oms/conversation-panel/v35.html";
@@ -98,6 +99,7 @@ const SETTINGS: &str = "oms_lead_settings";
 const UPDATE_SETTINGS: &str = "oms_update_lead_settings";
 const SEND_LEAD: &str = "oms_send_lead_message";
 const STOP_LEAD: &str = "oms_stop_lead_message";
+const READ_STREAM: &str = "oms_read_lead_stream";
 const LEAD_STATUS: &str = "oms_lead_conversation_status";
 const PREPARE_LEAD_CONTEXT: &str = "oms_prepare_lead_plan_context";
 const LEAD_PROVIDERS: [&str; 3] = ["codex", "claude", "agy"];
@@ -351,6 +353,7 @@ pub(super) fn runtime_request(request: &Value) -> bool {
                     | LEAD_STATUS
                     | SEND_LEAD
                     | STOP_LEAD
+                    | READ_STREAM
                     | SETTINGS
                     | UPDATE_SETTINGS
                     | PREPARE_LEAD_CONTEXT
@@ -473,6 +476,21 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     );
     stop["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false});
     stop["_meta"]["ui"]["visibility"] = json!(["app"]);
+    let mut stream = make(
+        READ_STREAM,
+        "Read the scanned partial reply of this Lead's latest running message after a cursor. Starts at 0; use the returned cursor.",
+        json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"},"turnId":{"type":"string","format":"uuid"},"cursor":{"type":"integer","minimum":0,"maximum":131072}}),
+        &[
+            "projectKey",
+            "room",
+            "provider",
+            "leadRequestId",
+            "turnId",
+            "cursor",
+        ],
+        false,
+    );
+    stream["_meta"]["ui"]["visibility"] = json!(["app"]);
     let settings_scope = json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"}});
     let mut settings = make(
         SETTINGS,
@@ -537,6 +555,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         open_leads,
         send,
         stop,
+        stream,
         settings,
         update,
         prepare,
@@ -1422,6 +1441,7 @@ impl Server<'_> {
                             | V34
                             | V35
                             | V36
+                            | V37
                     )
                 ) =>
             {
@@ -1495,6 +1515,15 @@ impl Server<'_> {
                         "leadRequestId",
                         "turnId",
                     ],
+                    READ_STREAM => &[
+                        "project",
+                        "projectKey",
+                        "room",
+                        "provider",
+                        "leadRequestId",
+                        "turnId",
+                        "cursor",
+                    ],
                     APPROVALS | SNAPSHOT | WORK_ITEMS | USAGE => &["project"],
                     GIT => &[
                         "project",
@@ -1566,7 +1595,7 @@ impl Server<'_> {
                 }
                 if matches!(
                     name,
-                    LEAD_STATUS | SEND_LEAD | STOP_LEAD | SETTINGS | UPDATE_SETTINGS
+                    LEAD_STATUS | SEND_LEAD | STOP_LEAD | READ_STREAM | SETTINGS | UPDATE_SETTINGS
                 ) {
                     let field = if matches!(name, SETTINGS | UPDATE_SETTINGS) {
                         "leadSettings"
@@ -1952,7 +1981,13 @@ impl Server<'_> {
         };
         if matches!(
             name,
-            OPEN_LEADS | LEAD_STATUS | SEND_LEAD | STOP_LEAD | SETTINGS | UPDATE_SETTINGS
+            OPEN_LEADS
+                | LEAD_STATUS
+                | SEND_LEAD
+                | STOP_LEAD
+                | READ_STREAM
+                | SETTINGS
+                | UPDATE_SETTINGS
         ) {
             return self.lead_conversations(&repo, name, args, meta);
         }
@@ -2832,7 +2867,8 @@ impl Server<'_> {
                 Ok(providers)
             })
             .transpose()?;
-        let full_answer = args.get("answerPage").is_some();
+        let stream = name == READ_STREAM;
+        let full_answer = args.get("answerPage").is_some() || stream;
         let settings = matches!(name, SETTINGS | UPDATE_SETTINGS);
         if settings
             && (selected.is_none()
@@ -3101,7 +3137,12 @@ impl Server<'_> {
                         bound()?;
                         return Ok(summary);
                     }
-                    if full_answer {
+                    if stream {
+                        let stream = conversation.stream_page(self, args, current)?;
+                        private = Some(
+                            json!({"room":room,"provider":provider,"requestId":request,"status":status,"stream":stream}),
+                        );
+                    } else if full_answer {
                         let answer = conversation.answer_page(self, args, current)?;
                         transcript = json!({"turns":[],"cursor":Value::Null,"hasMore":false});
                         private = Some(
@@ -3111,9 +3152,11 @@ impl Server<'_> {
                     } else {
                         turn = conversation.exchange(self, name, args, &mut transcript, current)?;
                     }
-                    match conversation.latest(self, true, bound) {
-                        Ok(latest) => row["latestTurn"] = latest,
-                        Err(err) => {
+                    // A stream page carries its own turn status; skip the second lookup.
+                    match (!stream).then(|| conversation.latest(self, true, bound)) {
+                        None => {}
+                        Some(Ok(latest)) => row["latestTurn"] = latest,
+                        Some(Err(err)) => {
                             row["latestTurn"] = Value::Null;
                             row["turnState"] = err.marker();
                         }
