@@ -390,11 +390,56 @@ fn conversation_task_titles(state: &Value, raw: &[u8], plan: &Value) -> Option<V
         .then_some(titles)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_THREAD_REUSE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_THREAD_FALLBACK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_test_thread_io_counters() {
+    TEST_THREAD_REUSE.with(|c| c.set(0));
+    TEST_THREAD_FALLBACK.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn test_thread_io_counts() -> (usize, usize) {
+    (
+        TEST_THREAD_REUSE.with(std::cell::Cell::get),
+        TEST_THREAD_FALLBACK.with(std::cell::Cell::get),
+    )
+}
+
+fn thread_rows(
+    repo: &Path,
+    threads_dir: &Path,
+    path: &Path,
+    room: Option<&oms_command_room::Room<'_>>,
+) -> Result<(Vec<Value>, usize)> {
+    if let Some(room) = room
+        && path.parent() == Some(threads_dir)
+        && let Some(id) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".jsonl"))
+        && let Some(snapshot) = room.reusable_snapshot(id)
+        && snapshot.bytes.len() <= storage::MAX_STREAM
+    {
+        #[cfg(test)]
+        TEST_THREAD_REUSE.with(|c| c.set(c.get() + 1));
+        return Ok(storage::parse_rows(&snapshot.bytes));
+    }
+    #[cfg(test)]
+    TEST_THREAD_FALLBACK.with(|c| c.set(c.get() + 1));
+    storage::rows(repo, path)
+}
+
 pub(super) fn enrich(
     ctx: &Context<'_>,
     host: &dyn HostServices,
     state: &mut Value,
     include_dashboard: bool,
+    room: Option<&oms_command_room::Room<'_>>,
 ) -> Result<Option<DashboardArtifacts>> {
     let task_read = storage::read(
         &ctx.repo,
@@ -663,8 +708,14 @@ pub(super) fn enrich(
         .ok()
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(86400);
-    for path in helpers::shallow_files(ctx, &ctx.repo.join(".oms/threads"), ".jsonl", 50000)? {
-        let (rows, bad) = storage::rows(&ctx.repo, &path)?;
+    let threads_dir = ctx.repo.join(".oms/threads");
+    let thread_paths = helpers::shallow_files(ctx, &threads_dir, ".jsonl", 50000)?;
+    let canonical_repo = room.and_then(|_| std::fs::canonicalize(&ctx.repo).ok());
+    let reusable_room = room.filter(|r| {
+        ctx.repo == r.repository() && canonical_repo.as_deref() == Some(r.repository())
+    });
+    for path in thread_paths {
+        let (rows, bad) = thread_rows(&ctx.repo, &threads_dir, &path, reusable_room)?;
         if bad > 0 {
             continue;
         }

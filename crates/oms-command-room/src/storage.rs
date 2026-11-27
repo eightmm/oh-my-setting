@@ -69,7 +69,7 @@ pub fn stable(a: &Stat, b: &Stat) -> bool {
         && a.st_ctime == b.st_ctime
         && a.st_ctime_nsec == b.st_ctime_nsec
 }
-fn regular(s: &Stat) -> bool {
+pub(crate) fn regular(s: &Stat) -> bool {
     FileType::from_raw_mode(s.st_mode) == FileType::RegularFile
         && s.st_nlink == 1
         && s.st_uid == rustix::process::geteuid().as_raw()
