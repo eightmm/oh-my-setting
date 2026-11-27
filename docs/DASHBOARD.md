@@ -444,7 +444,10 @@ origins, and unavailable GitHub access. Opening or refreshing the dashboard
 uses local Git alone. This action does not fetch refs or change the checkout.
 
 In the panel, **Usage** shows the provider and attempt counters that OMS
-actually recorded. **Chat** reads messages shared with the enrolled Main and
+actually recorded. Without a proved Claude Main or Lead reading, the desktop usage
+strip shows the newest still-open window Claude Code itself recorded on this host
+(its statusline HUD cache or its `/usage` cache), marked stale by age; it is
+display-only and never feeds routing. **Chat** reads messages shared with the enrolled Main and
 the selected participant. Inspect its linked result or evidence when available.
 The TUI views read the native Board, plan, teams, routing policy, metrics,
 results, and workspaces on demand. Sessions, Attention, Past, Council and
