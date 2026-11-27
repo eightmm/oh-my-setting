@@ -122,6 +122,9 @@ pub fn in_worktree(dir: &Path, worktree: &Path) -> bool {
         _ => dir.starts_with(worktree),
     }
 }
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
+}
 fn push_hidden_dir(hidden: &mut Vec<PathBuf>, dir: PathBuf) {
     let tmp_canon = Path::new("/tmp").canonicalize().ok();
     let canon = dir.canonicalize().ok();
@@ -177,17 +180,38 @@ pub fn bwrap_args(program: &OsStr, args: &[OsString], spec: &SandboxSpec) -> Vec
     {
         push_hidden_dir(&mut hidden, runtime.join("oms-ssh"));
     }
+    let mut masked_socket = None;
     if let Some(sock) = nonempty_env("SSH_AUTH_SOCK")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         && let Some(agent_dir) = sock.parent()
         && !in_worktree(agent_dir, &spec.worktree)
     {
-        push_hidden_dir(&mut hidden, agent_dir.to_path_buf());
+        // A socket placed directly in a shared directory (home, the runtime dir, an ancestor of a
+        // writable bind) is masked on its own; an empty tmpfs there would hide unrelated state.
+        let shared = ["HOME", "XDG_RUNTIME_DIR"]
+            .into_iter()
+            .filter_map(nonempty_env)
+            .map(PathBuf::from)
+            .any(|dir| same_dir(&dir, agent_dir))
+            || std::iter::once(&spec.worktree)
+                .chain(spec.extra_rw_dirs.iter())
+                .any(|dir| in_worktree(dir, agent_dir));
+        if !shared {
+            push_hidden_dir(&mut hidden, agent_dir.to_path_buf());
+        } else if !in_worktree(&sock, Path::new("/tmp")) && std::fs::symlink_metadata(&sock).is_ok()
+        {
+            masked_socket = Some(sock);
+        }
     }
     for dir in hidden {
         wrapped.push("--tmpfs".into());
         wrapped.push(dir.into_os_string());
+    }
+    if let Some(sock) = masked_socket {
+        wrapped.push("--ro-bind".into());
+        wrapped.push("/dev/null".into());
+        wrapped.push(sock.into_os_string());
     }
     wrapped.extend([
         OsString::from("--unsetenv"),
@@ -437,6 +461,15 @@ mod tests {
             if case == "present" {
                 expected.extend([OsString::from("--tmpfs"), outside_agent.as_os_str().into()]);
             }
+            // A socket directly in the runtime dir is masked alone; /tmp is already an empty tmpfs.
+            let runtime_sock = runtime.join("agent.sock");
+            if case == "runtime" && !in_worktree(&runtime_sock, Path::new("/tmp")) {
+                expected.extend([
+                    OsString::from("--ro-bind"),
+                    "/dev/null".into(),
+                    runtime_sock.as_os_str().into(),
+                ]);
+            }
             expected.extend([
                 OsString::from("--unsetenv"),
                 "SSH_AUTH_SOCK".into(),
@@ -499,11 +532,14 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&capture_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let outside_sock = root.join("agent").join("agent.sock");
+        let runtime_sock = root.join("runtime").join("agent.sock");
+        std::fs::write(&runtime_sock, b"").unwrap();
         let inside_root_sock = root.join("wt").join("agent.sock");
         let inside_sub_sock = root.join("wt").join("sub").join("agent.sock");
         let missing_bin = root.join("not-a-real-oms-bin");
         for (case, binary, sock) in [
             ("present", &capture_bin, &outside_sock),
+            ("runtime", &capture_bin, &runtime_sock),
             ("inside", &capture_bin, &inside_root_sock),
             ("inside-sub", &capture_bin, &inside_sub_sock),
             ("missing", &missing_bin, &outside_sock),
