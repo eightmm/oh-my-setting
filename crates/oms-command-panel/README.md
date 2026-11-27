@@ -320,6 +320,8 @@ alias to path:
 oms panel --register-project [PATH] [--alias NAME] [--area NAME]
 oms panel --unregister-project ALIAS
 oms panel --projects [--json]
+oms panel --install-panel claude --project ALIAS [--dry-run] [--json]
+oms panel --uninstall-panel claude --project ALIAS [--dry-run] [--json]
 ```
 
 `--register-project` resolves `PATH` (defaulting to the current directory) to its
@@ -340,4 +342,16 @@ unlinking the default map (and empty sidecar) when the last entry is removed whi
 refusing to remove the last alias from an explicit `OMS_PANEL_PROJECTS_FILE` map.
 `--projects [--json]` refuses delegated workers and missing explicit
 `OMS_PANEL_PROJECTS_FILE` paths, shows any registered area next to each alias, and
-marks entries whose checkout path no longer exists.
+marks entries whose checkout path no longer exists. `--install-panel claude --project ALIAS`
+resolves `ALIAS` from the host project map and runs `claude` (`OMS_CLAUDE_BIN`, else on `PATH`)
+in the physical checkout to register a local-scope `oms-panel` MCP entry pinned via
+`OMS_PANEL_REPO` with `OMS_MCP_TOOL_PROFILE=chatgpt-panel` and `~/.local/bin/oms mcp-server`,
+adopting an exact-match unrecorded local entry (`action: "adopted"`), refusing differing local
+`oms-panel` entries, recording ownership in the sibling mode `0600`
+`desktop-project-panels.json` sidecar (rolling back once on `add-json` timeout/interrupt or
+record-write failure and reporting `uncertain: true` when rollback fails), and treating
+identical reinstalls as no-ops; `--uninstall-panel claude --project ALIAS` forgets the ownership
+row without running `claude` when the recorded checkout is gone (`action: "forgotten"`), probes
+`claude mcp get` first to leave user-modified local entries in place while dropping the row, and
+removes only matching entries, while `--unregister-project` refuses aliases that still have a
+recorded panel.
