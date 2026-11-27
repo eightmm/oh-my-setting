@@ -313,7 +313,7 @@ fn cross_host_project_reads() {
         );
         let listed = c.call("tools/list", json!({}));
         let tools = listed["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 10);
         assert!(tools.iter().any(
             |t| t["name"] == "oms_panel_work_items" && t["annotations"]["readOnlyHint"] == true
         ));
@@ -747,6 +747,203 @@ fn cross_host_project_reads() {
         "Project graph available in structuredContent."
     );
     project_cards_catalog();
+}
+
+fn home_panel_opener() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const HOME_URI: &str = "ui://oms/home/v1.html";
+    let home_html = include_str!("../src/home-panel.html");
+    assert!(
+        home_html.len() <= 128 * 1024,
+        "home-panel.html exceeds 128 KiB budget: {} bytes",
+        home_html.len()
+    );
+    assert_eq!(oms_scrub::scan(home_html.as_bytes(), &[]), Ok(Vec::new()));
+
+    let tmp = Temp::new();
+    let source = tmp.source();
+    let repo = tmp.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+
+    // Derive all non-read-only tool names from definitions() across panel and full profiles.
+    let mut panel_client =
+        Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    let mut full_client = Client::new(&source, &repo, true, false, false);
+    let mut write_tools = std::collections::BTreeSet::new();
+    for listed in [
+        panel_client.call("tools/list", json!({})),
+        full_client.call("tools/list", json!({})),
+    ] {
+        for tool in listed["result"]["tools"].as_array().unwrap() {
+            if tool["annotations"]["readOnlyHint"] == false {
+                write_tools.insert(tool["name"].as_str().unwrap().to_owned());
+            }
+        }
+    }
+    assert!(!write_tools.is_empty());
+    for tool_name in &write_tools {
+        assert!(
+            !home_html.contains(tool_name.as_str()),
+            "home-panel.html must not contain non-readOnly tool {tool_name}"
+        );
+    }
+
+    // Core and Full profiles do not list or serve oms_open_home.
+    for full in [false, true] {
+        let mut regular = Client::new(&source, &repo, full, false, false);
+        assert!(
+            !regular.call("tools/list", json!({}))["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "oms_open_home")
+        );
+        assert_eq!(
+            regular.tool("oms_open_home", json!({}))["error"]["code"],
+            -32602
+        );
+    }
+
+    // Check definitions, resources/list, resources/read, and non-catalog refusal on both panel profiles.
+    for (profile, expected_entrypoint) in [("mcp-app", "global"), ("chatgpt-panel", "thread")] {
+        let mut c = Client::with_depth(&source, &repo, profile, false, false, "0".as_ref());
+        let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
+        let home_tool = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "oms_open_home")
+            .unwrap();
+        assert_eq!(home_tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(home_tool["annotations"]["destructiveHint"], false);
+        assert_eq!(home_tool["annotations"]["idempotentHint"], true);
+        assert_eq!(home_tool["annotations"]["openWorldHint"], false);
+        assert_eq!(
+            home_tool["inputSchema"],
+            json!({"type":"object","properties":{},"required":[],"additionalProperties":false})
+        );
+        assert_eq!(home_tool["_meta"]["ui"]["resourceUri"], HOME_URI);
+        assert_eq!(home_tool["_meta"]["openai/outputTemplate"], HOME_URI);
+        assert_eq!(
+            home_tool["_meta"]["openai/ui"]["entrypoints"],
+            json!([{"type": expected_entrypoint}])
+        );
+        assert_eq!(
+            home_tool["_meta"]["com.google.antigravity/ui"]["entrypoints"],
+            json!([
+                {"type":"aux_pane","title":"OMS Home"},
+                {"type":"global","title":"OMS Home"}
+            ])
+        );
+
+        let resources = c.call("resources/list", json!({}))["result"]["resources"].clone();
+        assert!(
+            resources
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["uri"] == HOME_URI && r["mimeType"] == "text/html;profile=mcp-app"),
+            "{profile}: {resources}"
+        );
+        let read = c.call("resources/read", json!({"uri": HOME_URI}));
+        let content = &read["result"]["contents"][0];
+        assert_eq!(content["uri"], HOME_URI);
+        assert_eq!(content["mimeType"], "text/html;profile=mcp-app");
+        assert_eq!(content["text"].as_str().unwrap(), home_html);
+        assert_eq!(
+            content["_meta"]["ui"]["csp"],
+            json!({
+                "connectDomains": [],
+                "resourceDomains": [
+                    "https://fonts.googleapis.com",
+                    "https://fonts.gstatic.com"
+                ]
+            })
+        );
+
+        // No project map (unbound in mcp-app, cwd in chatgpt-panel): refused with no page.
+        let non_catalog = c.tool("oms_open_home", json!({}));
+        bad(&non_catalog, "bound to one project");
+        bad(&non_catalog, "not available");
+        assert!(non_catalog["result"].get("structuredContent").is_none());
+        assert!(non_catalog["result"].get("_meta").is_none());
+
+        // Rejects unknown arguments on the opener path.
+        assert_eq!(
+            c.tool("oms_open_home", json!({"project": "fixture"}))["error"]["code"],
+            -32602
+        );
+    }
+
+    // Configure a project catalog and verify oms_open_home returns readOnly: true without a snapshot.
+    let dir = source.join("test-config/oh-my-setting");
+    std::fs::create_dir_all(&dir).unwrap();
+    let map = dir.join("desktop-projects.json");
+    std::fs::write(&map, json!({"fixture": &repo}).to_string()).unwrap();
+    std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    for profile in ["mcp-app", "chatgpt-panel"] {
+        let mut c = Client::with_depth(&source, &repo, profile, false, false, "0".as_ref());
+        let opened = c.tool("oms_open_home", json!({}));
+        good(&opened);
+        let expected = json!({"panel": "OMS home", "readOnly": true});
+        assert_eq!(opened["result"]["structuredContent"], expected, "{profile}");
+        assert_eq!(payload(&opened), expected, "{profile}");
+        assert!(opened["result"].get("_meta").is_none(), "{profile}");
+        assert!(
+            !source.join("last-call.json").exists(),
+            "{profile}: oms_open_home must never run a project snapshot"
+        );
+    }
+
+    // Delegated workers (both OMS_HARNESS_CHILD=1 and OMS_HARNESS_DELEGATE_DEPTH=1) are refused.
+    for (child, depth) in [(true, "0"), (false, "1")] {
+        let mut worker =
+            Client::with_depth(&source, &repo, "mcp-app", false, child, depth.as_ref());
+        let refused = worker.tool("oms_open_home", json!({}));
+        bad(&refused, "delegated");
+        assert!(refused["result"].get("structuredContent").is_none());
+        assert!(refused["result"].get("_meta").is_none());
+    }
+
+    // Under OMS_PANEL_REPO (pinned binding, even with desktop-projects.json absent or present on disk):
+    // returns an error and no page. Note: setting both OMS_PANEL_REPO and explicit map is invalid map,
+    // whereas OMS_PANEL_REPO with XDG_CONFIG_HOME desktop-projects.json pins the connection.
+    for profile in ["mcp-app", "chatgpt-panel"] {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .env_remove("PYTHONUTF8")
+            .env_remove("PYTHONIOENCODING")
+            .arg("--stdio")
+            .arg(&source)
+            .arg(&repo)
+            .arg(profile)
+            .arg("0")
+            .env("OMS_PANEL_REPO", &repo)
+            .env_remove("OMS_PANEL_PROJECTS")
+            .env_remove("OMS_PANEL_PROJECTS_FILE")
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .env("XDG_CACHE_HOME", source.join("test-cache"))
+            .env("OMS_HARNESS_CHILD", "0")
+            .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let mut pinned_client = Client::from_child(child);
+        assert_eq!(
+            registry_summary(&pinned_client.tool("oms_list_projects", json!({})))["binding"],
+            "pinned",
+            "{profile}"
+        );
+        let pinned_home = pinned_client.tool("oms_open_home", json!({}));
+        bad(&pinned_home, "bound to one project");
+        bad(&pinned_home, "not available");
+        assert!(pinned_home["result"].get("structuredContent").is_none());
+        assert!(pinned_home["result"].get("_meta").is_none());
+    }
 }
 
 fn project_cards_catalog() {
@@ -3814,8 +4011,9 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 27);
+    assert_eq!(tools.as_array().unwrap().len(), 28);
     assert_eq!(tools[0]["name"], "oms_open_panel");
+    assert_eq!(tools[1]["name"], "oms_open_home");
     assert_eq!(
         tools[0]["description"],
         "Open the OMS panel (expands beside or over the conversation when the host allows it)."
@@ -3858,8 +4056,9 @@ fn conversation_panel() {
         json!([])
     );
     let resources = c.call("resources/list", json!({}))["result"]["resources"].clone();
-    assert_eq!(resources.as_array().unwrap().len(), 1);
+    assert_eq!(resources.as_array().unwrap().len(), 2);
     assert_eq!(resources[0]["uri"], *uri);
+    assert_eq!(resources[1]["uri"], "ui://oms/home/v1.html");
     let read = |c: &mut Client, uri: &Value| {
         c.call("resources/read", json!({"uri":uri}))["result"]["contents"][0].clone()
     };
@@ -8984,13 +9183,14 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 38] = [
+    let cases: [(&str, fn()); 39] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
         ("owner_validation", owner_validation),
         ("environment_profile", environment_profile),
         ("cross_host_project_reads", cross_host_project_reads),
+        ("home_panel_opener", home_panel_opener),
         ("desktop_reviewed_issue", desktop_reviewed_issue),
         ("mcp_app_binding_boundaries", mcp_app_binding_boundaries),
         ("conversation_panel", conversation_panel),
