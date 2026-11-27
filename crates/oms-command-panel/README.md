@@ -311,23 +311,33 @@ provider pane, assignment turn and child identity. A recorded parent summary
 may be available without the child chat. `Esc` closes the reader.
 
 Host-side desktop project map operations manage `oh-my-setting/desktop-projects.json`
-under `XDG_CONFIG_HOME` (else `~/.config`), or `OMS_PANEL_PROJECTS_FILE` when set:
+under `XDG_CONFIG_HOME` (else `~/.config`), or `OMS_PANEL_PROJECTS_FILE` when set,
+with optional per-alias areas stored in a sibling mode `0600`
+`desktop-project-areas.json` sidecar so the project map stays a strict object of
+alias to path:
 
 ```sh
-oms panel --register-project [PATH] [--alias NAME]
+oms panel --register-project [PATH] [--alias NAME] [--area NAME]
 oms panel --unregister-project ALIAS
 oms panel --projects [--json]
 ```
 
 `--register-project` resolves `PATH` (defaulting to the current directory) to its
 physical absolute path, requires a Git checkout or adopted OMS project, and defaults
-`--alias` to the checkout directory name. Re-registering the same alias and path is
-a no-op; a duplicate alias pointing to another path is refused with a suggested
-`--alias` alternative. Writes create missing parent directories, stage a mode `0600`
-temporary file in the target directory and rename it atomically, preserving existing
-entries (at most 128 aliases and 16 KiB) while refusing symlinks, hard links,
-foreign or group/world-writable files, `OMS_PANEL_PROJECTS` inline maps, and harness
-child callers. `--unregister-project` removes one alias (and unlinks the map when the
-last entry is removed so an empty object is never left behind). `--projects [--json]`
-lists registered aliases and paths and marks entries whose checkout path no longer
-exists.
+`--alias` to the checkout directory name. `--area NAME` sets the alias's area (1 to 24
+bytes after trimming surrounding spaces, allowing letters, digits, space, `-`, `_`,
+`.` and Hangul); omitting `--area` keeps any existing area for that alias, and
+`--area ""` clears it. Re-registering the same alias and path without changing its
+area is a no-op; a duplicate alias pointing to another path is refused with a
+suggested `--alias` alternative. Writes create missing parent directories, hold the
+map lock across both files, stage mode `0600` temporary files in the target directory
+and rename them atomically, preserving existing entries (at most 128 aliases and 16
+KiB) while refusing symlinks, hard links, foreign or group/world-writable map files,
+non-private sidecar files, `OMS_PANEL_PROJECTS` inline maps (which have no sidecar),
+`OMS_PANEL_REPO` pinned sessions (which block map edits and `--projects`), and
+delegated worker callers. `--unregister-project` removes one alias and its area,
+unlinking the default map (and empty sidecar) when the last entry is removed while
+refusing to remove the last alias from an explicit `OMS_PANEL_PROJECTS_FILE` map.
+`--projects [--json]` refuses delegated workers and missing explicit
+`OMS_PANEL_PROJECTS_FILE` paths, shows any registered area next to each alias, and
+marks entries whose checkout path no longer exists.

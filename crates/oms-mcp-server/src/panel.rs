@@ -1181,7 +1181,86 @@ fn valid_graph_node_id(value: &str) -> bool {
         && path.split('/').all(|c| !matches!(c,""|"."|".."))
 }
 
-fn configured_projects() -> PanelResult<BTreeMap<String, PathBuf>> {
+const DESKTOP_AREAS_FILE: &str = "desktop-project-areas.json";
+const CARD_AREA_MAX_BYTES: usize = 24;
+const AREA_GUESS_READ_CAP: usize = 64 * 1024;
+
+fn is_hangul_area_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{1100}'..='\u{11FF}'
+            | '\u{3130}'..='\u{318F}'
+            | '\u{A960}'..='\u{A97F}'
+            | '\u{AC00}'..='\u{D7A3}'
+            | '\u{D7B0}'..='\u{D7FF}'
+    )
+}
+
+fn normalize_project_area(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_matches(|c| matches!(c, ' ' | '\t'));
+    ((1..=CARD_AREA_MAX_BYTES).contains(&trimmed.len())
+        && trimmed.chars().all(|c| {
+            c.is_ascii_alphabetic()
+                || c.is_ascii_digit()
+                || matches!(c, ' ' | '-' | '_' | '.')
+                || is_hangul_area_char(c)
+        }))
+    .then(|| trimmed.to_owned())
+}
+
+fn read_project_areas_sidecar(map_path: &Path) -> PanelResult<BTreeMap<String, String>> {
+    let invalid_areas = "Invalid OMS project area map.";
+    let sidecar = map_path.with_file_name(DESKTOP_AREAS_FILE);
+    if !sidecar.is_absolute() || sidecar == map_path {
+        return Err(invalid_areas.into());
+    }
+    let mut f = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            rustix::fs::OFlags::NOFOLLOW.bits() as i32 | rustix::fs::OFlags::NONBLOCK.bits() as i32,
+        )
+        .open(&sidecar)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(_) => return Err(invalid_areas.into()),
+    };
+    let meta = f.metadata().map_err(|_| invalid_areas)?;
+    if !meta.is_file()
+        || meta.nlink() != 1
+        || meta.uid() != rustix::process::geteuid().as_raw()
+        || meta.mode() & 0o077 != 0
+    {
+        return Err(invalid_areas.into());
+    }
+    let mut raw = String::new();
+    (&mut f)
+        .take(16385)
+        .read_to_string(&mut raw)
+        .map_err(|_| invalid_areas)?;
+    if raw.len() > 16384 {
+        return Err(invalid_areas.into());
+    }
+    oms_context::parse_json_bounded(raw.as_bytes(), 16384).map_err(|_| invalid_areas)?;
+    let parsed: BTreeMap<String, String> = serde_json::from_str(&raw).map_err(|_| invalid_areas)?;
+    if parsed.len() > 128 {
+        return Err(invalid_areas.into());
+    }
+    let mut areas = BTreeMap::new();
+    for (id, raw_area) in parsed {
+        let Some(clean) = alias(&id)
+            .then(|| normalize_project_area(&raw_area))
+            .flatten()
+        else {
+            return Err(invalid_areas.into());
+        };
+        areas.insert(id, clean);
+    }
+    Ok(areas)
+}
+
+fn configured_projects_with_map_path() -> PanelResult<(BTreeMap<String, PathBuf>, Option<PathBuf>)>
+{
     let invalid = "Invalid OMS project map. Configure a nonempty object of project aliases and absolute checkout paths on the host.";
     let map_file = std::env::var_os("OMS_PANEL_PROJECTS_FILE");
     let inline = std::env::var_os("OMS_PANEL_PROJECTS");
@@ -1194,10 +1273,10 @@ fn configured_projects() -> PanelResult<BTreeMap<String, PathBuf>> {
     {
         return Err(invalid.into());
     }
-    let raw = if let Some(v) = inline {
-        v.into_string().map_err(|_| invalid)?
+    let (raw, sidecar_parent_map) = if let Some(v) = inline {
+        (v.into_string().map_err(|_| invalid)?, None)
     } else if pin.is_some() {
-        return Ok(BTreeMap::new());
+        return Ok((BTreeMap::new(), None));
     } else {
         let explicit = map_file.is_some();
         let path = if let Some(path) = map_file {
@@ -1207,9 +1286,10 @@ fn configured_projects() -> PanelResult<BTreeMap<String, PathBuf>> {
         } else if let Some(home) = std::env::var_os("HOME") {
             PathBuf::from(home).join(".config/oh-my-setting/desktop-projects.json")
         } else {
-            return Ok(BTreeMap::new());
+            return Ok((BTreeMap::new(), None));
         };
-        if !path.is_absolute() {
+        if !path.is_absolute() || path.file_name() == Some(std::ffi::OsStr::new(DESKTOP_AREAS_FILE))
+        {
             return Err(invalid.into());
         }
         let mut f = match fs::OpenOptions::new()
@@ -1222,7 +1302,7 @@ fn configured_projects() -> PanelResult<BTreeMap<String, PathBuf>> {
         {
             Ok(f) => f,
             Err(e) if !explicit && e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(BTreeMap::new());
+                return Ok((BTreeMap::new(), None));
             }
             Err(_) => return Err(invalid.into()),
         };
@@ -1239,7 +1319,7 @@ fn configured_projects() -> PanelResult<BTreeMap<String, PathBuf>> {
             .take(16385)
             .read_to_string(&mut raw)
             .map_err(|_| invalid)?;
-        raw
+        (raw, Some(path))
     };
     if raw.len() > 16384 {
         return Err(invalid.into());
@@ -1249,7 +1329,11 @@ fn configured_projects() -> PanelResult<BTreeMap<String, PathBuf>> {
     {
         return Err(invalid.into());
     }
-    Ok(map)
+    Ok((map, sidecar_parent_map))
+}
+
+fn configured_projects() -> PanelResult<BTreeMap<String, PathBuf>> {
+    configured_projects_with_map_path().map(|(map, _)| map)
 }
 
 fn checkout(dir: &Path) -> PanelResult<bool> {
@@ -1955,8 +2039,14 @@ impl Server<'_> {
             }
             let projects = self.configured_projects_for_cards()?;
             if projects.is_empty() {
+                if std::env::var_os("OMS_PANEL_REPO").is_some() {
+                    return Err(
+                        "This connection is bound to one project and the all-projects home is not available here."
+                            .into(),
+                    );
+                }
                 return Err(
-                    "This connection is bound to one project and the all-projects home is not available here."
+                    "The all-projects home is not available because no host project map is configured for this connection."
                         .into(),
                 );
             }
@@ -3684,6 +3774,28 @@ impl Server<'_> {
         configured_projects()
     }
 
+    fn configured_projects_and_areas_for_cards(
+        &self,
+    ) -> PanelResult<(BTreeMap<String, PathBuf>, BTreeMap<String, String>)> {
+        #[cfg(test)]
+        if let Some(projects) = &self.project_cards.0.inner.projects_override {
+            let areas = self
+                .project_cards
+                .0
+                .inner
+                .areas_override
+                .clone()
+                .unwrap_or_default();
+            return Ok((projects.clone(), areas));
+        }
+        let (projects, map_path) = configured_projects_with_map_path()?;
+        let areas = match map_path {
+            Some(path) if !projects.is_empty() => read_project_areas_sidecar(&path)?,
+            _ => BTreeMap::new(),
+        };
+        Ok((projects, areas))
+    }
+
     fn card_cache_dir(&self) -> Option<PathBuf> {
         #[cfg(test)]
         if let Some(dir) = &self.project_cards.0.inner.cache_override {
@@ -3773,7 +3885,7 @@ impl Server<'_> {
     }
 
     fn list_projects_with_cards(&self, args: &Value) -> PanelResult<Value> {
-        let projects = self.configured_projects_for_cards()?;
+        let (projects, sidecar_areas) = self.configured_projects_and_areas_for_cards()?;
         let binding = if !projects.is_empty() {
             "catalog"
         } else if std::env::var_os("OMS_PANEL_REPO").is_some() {
@@ -3818,7 +3930,7 @@ impl Server<'_> {
         }
         let cache_dir = self.card_cache_dir();
         let now = std::time::SystemTime::now();
-        let observed = std::time::Instant::now();
+        let observed = self.project_cards.now_instant();
         let base_bytes = out.to_string().len();
         let count = projects.len().max(1);
         let available_for_cards = crate::OUTPUT_LIMIT
@@ -3831,15 +3943,23 @@ impl Server<'_> {
         let mut cards = Vec::with_capacity(projects.len());
         let mut to_refresh = Vec::new();
         for alias_name in projects.keys() {
+            let explicit_area = sidecar_areas.get(alias_name).map(String::as_str);
             let Some(Some(repo)) = resolved_repos.get(alias_name) else {
                 cards.push(render_project_card(
                     alias_name,
                     "unavailable",
+                    explicit_area,
                     None,
                     per_card_cap,
                 ));
                 continue;
             };
+            let guessed_area = if explicit_area.is_none() {
+                guess_project_area(repo)
+            } else {
+                None
+            };
+            let card_area = explicit_area.or(guessed_area.as_deref());
             match cache_dir
                 .as_deref()
                 .and_then(|dir| read_cached_card(dir, repo))
@@ -3853,6 +3973,7 @@ impl Server<'_> {
                     cards.push(render_project_card(
                         alias_name,
                         state,
+                        card_area,
                         Some(&stored),
                         per_card_cap,
                     ));
@@ -3862,6 +3983,7 @@ impl Server<'_> {
                     cards.push(render_project_card(
                         alias_name,
                         "missing",
+                        card_area,
                         None,
                         per_card_cap,
                     ));
@@ -3886,6 +4008,7 @@ const CARD_CACHE_MAX_BYTES: usize = 4096;
 const CARD_FRESH_WINDOW: Duration = Duration::from_secs(10 * 60);
 const CARD_REFRESH_DEADLINE: Duration = Duration::from_secs(15);
 const MAX_CONCURRENT_CARD_REFRESHES: usize = 2;
+const CARD_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(60);
 const CARD_REFRESH_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
 fn execute_panel_output(
@@ -4719,9 +4842,348 @@ fn card_is_stale(
     false
 }
 
+fn read_capped_regular_nofollow(
+    dir_fd: &std::os::fd::OwnedFd,
+    name: &str,
+    max_bytes: usize,
+) -> Option<(String, bool)> {
+    use rustix::fs::{FileType, Mode, OFlags};
+
+    let fd = rustix::fs::openat(
+        dir_fd,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    let st = rustix::fs::fstat(&fd).ok()?;
+    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile || st.st_size < 0 {
+        return None;
+    }
+    let mut file = std::fs::File::from(fd);
+    let mut buf = Vec::with_capacity((st.st_size as usize).min(max_bytes));
+    (&mut file)
+        .take(max_bytes as u64)
+        .read_to_end(&mut buf)
+        .ok()?;
+    let truncated = (st.st_size as usize) > buf.len();
+    if truncated {
+        let nl = buf.iter().rposition(|&b| b == b'\n')?;
+        buf.truncate(nl + 1);
+    }
+    String::from_utf8(buf).ok().map(|s| (s, truncated))
+}
+
+fn normalize_lexical_abs(base: &Path, target: &Path) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+
+    if target.as_os_str().as_bytes().contains(&0) {
+        return None;
+    }
+    let mut parts: Vec<OsString> = Vec::new();
+    if !target.is_absolute() {
+        if !base.is_absolute() {
+            return None;
+        }
+        for comp in base.components() {
+            if let Component::Normal(p) = comp {
+                parts.push(p.to_owned());
+            }
+        }
+    }
+    for comp in target.components() {
+        match comp {
+            Component::RootDir | Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::Normal(p) => parts.push(p.to_owned()),
+            Component::Prefix(_) => return None,
+        }
+    }
+    let mut out = PathBuf::from("/");
+    for part in parts {
+        out.push(part);
+    }
+    Some(out)
+}
+
+fn walk_dir_nofollow(
+    base_dir: &Path,
+    base_fd: &std::os::fd::OwnedFd,
+    target: &Path,
+) -> Option<(PathBuf, std::os::fd::OwnedFd)> {
+    use rustix::fs::{Mode, OFlags};
+    use std::path::Component;
+
+    let resolved = normalize_lexical_abs(base_dir, target)?;
+    let base_parts: Vec<_> = base_dir
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    let target_parts: Vec<_> = resolved
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    let common = base_parts
+        .iter()
+        .zip(&target_parts)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut cur = if common == 0 {
+        rustix::fs::open(
+            "/",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?
+    } else {
+        let mut fd = base_fd.try_clone().ok()?;
+        for _ in common..base_parts.len() {
+            fd = rustix::fs::openat(
+                &fd,
+                "..",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .ok()?;
+        }
+        fd
+    };
+    for part in &target_parts[common..] {
+        cur = rustix::fs::openat(
+            &cur,
+            *part,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?;
+    }
+    Some((resolved, cur))
+}
+
+fn parse_git_config_value(rhs: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for ch in rhs.trim_start().chars() {
+        if escaped {
+            match ch {
+                '\\' | '"' => out.push(ch),
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'b' => out.push('\u{0008}'),
+                _ => return None,
+            }
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            continue;
+        }
+        if !in_quotes && (ch == '#' || ch == ';') {
+            break;
+        }
+        out.push(ch);
+    }
+    if in_quotes || escaped {
+        return None;
+    }
+    Some(out.trim_end().to_owned())
+}
+
+fn origin_url_from_git_config(config_text: &str) -> Option<String> {
+    let mut in_origin = false;
+    for raw_line in config_text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(after_open) = line.strip_prefix('[') {
+            in_origin = false;
+            let Some((header, rest)) = after_open.split_once(']') else {
+                continue;
+            };
+            let trailing = rest.trim_start();
+            if !trailing.is_empty() && !trailing.starts_with('#') && !trailing.starts_with(';') {
+                continue;
+            }
+            let header = header.trim();
+            if let Some((section, quoted_sub)) = header.split_once('"')
+                && section.trim().eq_ignore_ascii_case("remote")
+                && quoted_sub == "origin\""
+            {
+                in_origin = true;
+            }
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        if let Some((key, rhs)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("url")
+            && let Some(val) = parse_git_config_value(rhs).filter(|v| !v.is_empty())
+        {
+            return Some(val);
+        }
+    }
+    None
+}
+
+fn extract_owner_from_repo_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_matches('/');
+    let (owner, rest) = trimmed.split_once('/')?;
+    let repo_part = rest.trim_matches('/');
+    if owner.is_empty() || matches!(owner, "." | "..") || repo_part.is_empty() {
+        return None;
+    }
+    normalize_project_area(owner)
+}
+
+fn owner_from_remote_url(raw_url: &str) -> Option<String> {
+    let url = raw_url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    if let Some((scheme, rest)) = url.split_once("://") {
+        if scheme.is_empty()
+            || scheme.eq_ignore_ascii_case("file")
+            || !scheme
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        {
+            return None;
+        }
+        let (authority, path) = rest.split_once('/')?;
+        let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        if host.is_empty() {
+            return None;
+        }
+        return extract_owner_from_repo_path(path);
+    }
+    if url.starts_with(['/', '.', '~']) {
+        return None;
+    }
+    if let Some((before_colon, after_colon)) = url.split_once(':')
+        && !before_colon.contains('/')
+    {
+        let host = before_colon
+            .rsplit_once('@')
+            .map_or(before_colon, |(_, h)| h);
+        if host.is_empty() || after_colon.starts_with('/') {
+            return None;
+        }
+        return extract_owner_from_repo_path(after_colon);
+    }
+    if let Some((host, path)) = url.split_once('/')
+        && host.contains('.')
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+    {
+        return extract_owner_from_repo_path(path);
+    }
+    None
+}
+
+fn read_git_config_for_area(repo_fd: &std::os::fd::OwnedFd, repo: &Path) -> Option<String> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+
+    let dot_stat = rustix::fs::statat(repo_fd, ".git", AtFlags::SYMLINK_NOFOLLOW).ok()?;
+    match FileType::from_raw_mode(dot_stat.st_mode) {
+        FileType::Directory => {
+            let git_fd = rustix::fs::openat(
+                repo_fd,
+                ".git",
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .ok()?;
+            read_capped_regular_nofollow(&git_fd, "config", AREA_GUESS_READ_CAP).map(|(s, _)| s)
+        }
+        FileType::RegularFile => {
+            let (pointer, truncated) =
+                read_capped_regular_nofollow(repo_fd, ".git", AREA_GUESS_READ_CAP)?;
+            if truncated {
+                return None;
+            }
+            let single = pointer.trim_end_matches(['\r', '\n']);
+            if single.contains('\n') || single.contains('\0') {
+                return None;
+            }
+            let gitdir_raw = single.strip_prefix("gitdir:")?.trim();
+            if gitdir_raw.is_empty() {
+                return None;
+            }
+            let (admin_dir, admin_fd) = walk_dir_nofollow(repo, repo_fd, Path::new(gitdir_raw))?;
+            if let Some((common_raw, common_trunc)) =
+                read_capped_regular_nofollow(&admin_fd, "commondir", AREA_GUESS_READ_CAP)
+                && !common_trunc
+            {
+                let common_line = common_raw.trim_end_matches(['\r', '\n']).trim();
+                if !common_line.is_empty()
+                    && !common_line.contains('\n')
+                    && !common_line.contains('\0')
+                    && let Some((_, common_fd)) =
+                        walk_dir_nofollow(&admin_dir, &admin_fd, Path::new(common_line))
+                    && let Some((cfg, _)) =
+                        read_capped_regular_nofollow(&common_fd, "config", AREA_GUESS_READ_CAP)
+                {
+                    return Some(cfg);
+                }
+            }
+            read_capped_regular_nofollow(&admin_fd, "config", AREA_GUESS_READ_CAP).map(|(s, _)| s)
+        }
+        _ => None,
+    }
+}
+
+fn guess_project_area(physical_repo: &Path) -> Option<String> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+
+    let repo_fd = rustix::fs::open(
+        physical_repo,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    if let Some(cfg) = read_git_config_for_area(&repo_fd, physical_repo)
+        && let Some(url) = origin_url_from_git_config(&cfg)
+        && let Some(owner) = owner_from_remote_url(&url)
+    {
+        return Some(owner);
+    }
+    for (marker, label) in [
+        ("Cargo.toml", "rust"),
+        ("package.json", "web"),
+        ("pyproject.toml", "python"),
+        ("setup.py", "python"),
+        ("go.mod", "go"),
+    ] {
+        if rustix::fs::statat(&repo_fd, marker, AtFlags::SYMLINK_NOFOLLOW)
+            .is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::RegularFile)
+        {
+            return Some(label.to_owned());
+        }
+    }
+    None
+}
+
 fn render_project_card(
     alias_name: &str,
     state: &str,
+    area: Option<&str>,
     stored: Option<&StoredProjectCard>,
     max_bytes: usize,
 ) -> Value {
@@ -4730,6 +5192,8 @@ fn render_project_card(
         return withheld();
     }
     let cap = max_bytes.min(CARD_MAX_BYTES);
+    let mut area_val = area.and_then(normalize_project_area);
+    let mut include_area = true;
     let mut observed_at = stored.and_then(|c| c.observed_at.clone());
     let mut branch = stored.and_then(|c| c.branch.clone());
     let dirty = stored.and_then(|c| c.dirty);
@@ -4763,7 +5227,9 @@ fn render_project_card(
     let crew_total = stored.map_or(0, |c| c.crew_total);
     let degraded = stored.is_some_and(|c| c.degraded);
 
-    let assemble = |observed_at: &Option<String>,
+    let assemble = |include_area: bool,
+                    area_val: &Option<String>,
+                    observed_at: &Option<String>,
                     branch: &Option<String>,
                     goal: &str,
                     plan: Option<(u64, u64)>,
@@ -4782,36 +5248,51 @@ fn render_project_card(
                 })
             })
             .collect::<Vec<_>>();
-        json!({
+        let mut card = json!({
             "alias": alias_name,
-            "state": state,
-            "observedAt": observed_at,
-            "branch": branch,
-            "dirty": dirty,
-            "goal": goal,
-            "plan": plan_val,
-            "attention": attention,
-            "next": next,
-            "active": active,
-            "main": main,
-            "crew": crew_val,
-            "crewTotal": crew_total,
-            "degraded": degraded,
-        })
+        });
+        if include_area {
+            card["area"] = json!(area_val);
+        }
+        card["state"] = json!(state);
+        card["observedAt"] = json!(observed_at);
+        card["branch"] = json!(branch);
+        card["dirty"] = json!(dirty);
+        card["goal"] = json!(goal);
+        card["plan"] = plan_val;
+        card["attention"] = json!(attention);
+        card["next"] = json!(next);
+        card["active"] = json!(active);
+        card["main"] = json!(main);
+        card["crew"] = Value::Array(crew_val);
+        card["crewTotal"] = json!(crew_total);
+        card["degraded"] = json!(degraded);
+        card
     };
 
-    let initial = assemble(&observed_at, &branch, &goal, plan, &next, &crew);
+    let initial = assemble(
+        include_area,
+        &area_val,
+        &observed_at,
+        &branch,
+        &goal,
+        plan,
+        &next,
+        &crew,
+    );
     let initial_bytes = initial.to_string();
     if crate::output::outbound(initial_bytes.as_bytes(), &Value::Null).is_err() {
         return withheld();
     }
-    if initial_bytes.len() <= cap {
+    if crate::value::encode(&initial, true, false, false, false).len() <= cap {
         return initial;
     }
 
     loop {
         let branch_len = branch.as_ref().map_or(0, String::len);
-        if goal.len() >= next.len() && goal.len() >= branch_len && !goal.is_empty() {
+        if area_val.is_some() {
+            area_val = None;
+        } else if goal.len() >= next.len() && goal.len() >= branch_len && !goal.is_empty() {
             goal.pop();
         } else if next.len() >= branch_len && !next.is_empty() {
             next.pop();
@@ -4820,6 +5301,8 @@ fn render_project_card(
             if b.is_empty() {
                 branch = None;
             }
+        } else if include_area {
+            include_area = false;
         } else if !crew.is_empty() {
             crew.pop();
         } else if plan.is_some() {
@@ -4829,9 +5312,18 @@ fn render_project_card(
         } else {
             break;
         }
-        let candidate = assemble(&observed_at, &branch, &goal, plan, &next, &crew);
+        let candidate = assemble(
+            include_area,
+            &area_val,
+            &observed_at,
+            &branch,
+            &goal,
+            plan,
+            &next,
+            &crew,
+        );
         let encoded = candidate.to_string();
-        if encoded.len() <= cap {
+        if crate::value::encode(&candidate, true, false, false, false).len() <= cap {
             if crate::output::outbound(encoded.as_bytes(), &Value::Null).is_err() {
                 return withheld();
             }
@@ -4840,7 +5332,7 @@ fn render_project_card(
     }
     // Long aliases can leave no room even for an empty card; keep the response valid instead.
     let minimal = json!({"alias": alias_name, "state": state, "trimmed": true});
-    if minimal.to_string().len() <= cap
+    if crate::value::encode(&minimal, true, false, false, false).len() <= cap
         && crate::output::outbound(minimal.to_string().as_bytes(), &Value::Null).is_ok()
     {
         return minimal;
@@ -4859,10 +5351,13 @@ struct CardRefresherInner {
     executor: std::sync::Arc<dyn crate::CommandExecutor>,
     stopped: std::sync::atomic::AtomicBool,
     deadline: Duration,
+    clock: Box<dyn Fn() -> std::time::Instant + Send + Sync>,
     #[cfg(test)]
     cache_override: Option<PathBuf>,
     #[cfg(test)]
     projects_override: Option<BTreeMap<String, PathBuf>>,
+    #[cfg(test)]
+    areas_override: Option<BTreeMap<String, String>>,
     state: std::sync::Mutex<CardRefresherState>,
 }
 
@@ -4899,13 +5394,20 @@ impl ProjectCardRefresher {
                 executor,
                 stopped: std::sync::atomic::AtomicBool::new(false),
                 deadline: CARD_REFRESH_DEADLINE,
+                clock: Box::new(std::time::Instant::now),
                 #[cfg(test)]
                 cache_override: None,
                 #[cfg(test)]
                 projects_override: None,
+                #[cfg(test)]
+                areas_override: None,
                 state: std::sync::Mutex::new(CardRefresherState::default()),
             }),
         }))
+    }
+
+    fn now_instant(&self) -> std::time::Instant {
+        (self.0.inner.clock)()
     }
 
     #[cfg(test)]
@@ -4914,14 +5416,18 @@ impl ProjectCardRefresher {
         deadline: Duration,
         cache_override: PathBuf,
         projects_override: BTreeMap<String, PathBuf>,
+        areas_override: Option<BTreeMap<String, String>>,
+        clock: Box<dyn Fn() -> std::time::Instant + Send + Sync>,
     ) -> Self {
         Self(std::sync::Arc::new(CardRefresherOwner {
             inner: std::sync::Arc::new(CardRefresherInner {
                 executor,
                 stopped: std::sync::atomic::AtomicBool::new(false),
                 deadline,
+                clock,
                 cache_override: Some(cache_override),
                 projects_override: Some(projects_override),
+                areas_override,
                 state: std::sync::Mutex::new(CardRefresherState::default()),
             }),
         }))
@@ -4936,7 +5442,7 @@ impl ProjectCardRefresher {
     }
 
     /// `observed` is when the caller read the caches: an alias refreshed after it was seen stale
-    /// is already current and is not queued again.
+    /// or within `CARD_REFRESH_MIN_INTERVAL` of its last successful refresh is not queued again.
     fn enqueue_batch(
         &self,
         items: Vec<(String, PathBuf, Option<PathBuf>)>,
@@ -4953,16 +5459,19 @@ impl ProjectCardRefresher {
             if self.0.inner.stopped.load(Ordering::Acquire) {
                 return;
             }
+            let now = (self.0.inner.clock)();
             for (alias_name, repo, cache_dir) in items {
                 if state.in_flight.contains(&alias_name)
-                    || state
-                        .refreshed
-                        .get(&alias_name)
-                        .is_some_and(|at| *at > observed)
-                    || state
-                        .failed
-                        .get(&alias_name)
-                        .is_some_and(|at| at.elapsed() < CARD_REFRESH_BACKOFF)
+                    || state.refreshed.get(&alias_name).is_some_and(|at| {
+                        *at > observed
+                            || now
+                                .checked_duration_since(*at)
+                                .is_none_or(|elapsed| elapsed < CARD_REFRESH_MIN_INTERVAL)
+                    })
+                    || state.failed.get(&alias_name).is_some_and(|at| {
+                        now.checked_duration_since(*at)
+                            .is_none_or(|elapsed| elapsed < CARD_REFRESH_BACKOFF)
+                    })
                 {
                     continue;
                 }
@@ -5030,16 +5539,13 @@ fn run_card_refresh_worker(
         }
         let mut state = inner.state.lock().expect("card refresher lock");
         state.in_flight.remove(&alias_name);
-        // A failing project waits out a backoff instead of rerunning on every poll.
+        let stamp = (inner.clock)();
+        // A succeeding project waits at least 60 s; a failing one waits out its 5 min backoff.
         if refreshed {
             state.failed.remove(&alias_name);
-            state
-                .refreshed
-                .insert(alias_name.clone(), std::time::Instant::now());
+            state.refreshed.insert(alias_name.clone(), stamp);
         } else {
-            state
-                .failed
-                .insert(alias_name.clone(), std::time::Instant::now());
+            state.failed.insert(alias_name.clone(), stamp);
         }
         if inner.stopped.load(Ordering::Acquire) {
             state.pending.clear();
@@ -5246,10 +5752,174 @@ mod work_items_tests {
         assert_eq!(StoredProjectCard::from_dashboard(&trimmed).crew_total, 4);
 
         let long_alias = format!("a{}", "b".repeat(79));
-        let rendered = render_project_card(&long_alias, "fresh", Some(&card), 150);
+        let rendered = render_project_card(&long_alias, "fresh", Some("infra"), Some(&card), 150);
         assert!(rendered.to_string().len() <= 150, "{rendered}");
         assert_eq!(rendered["alias"], long_alias.as_str());
         assert_eq!(rendered["trimmed"], true);
+    }
+
+    #[test]
+    fn project_card_area_guessing_and_budget_drop() {
+        let tmp = PanelCardTemp::new();
+
+        assert_eq!(
+            normalize_project_area("  코어 infra_1.0-a  ").as_deref(),
+            Some("코어 infra_1.0-a")
+        );
+        assert_eq!(
+            normalize_project_area(&"가".repeat(8)),
+            Some("가".repeat(8))
+        );
+        assert!(normalize_project_area("").is_none());
+        assert!(normalize_project_area("   ").is_none());
+        assert!(normalize_project_area(&"a".repeat(25)).is_none());
+        assert!(normalize_project_area(&"가".repeat(9)).is_none());
+        for bad in ["bad/area", "bad:area", "bad\narea", "emoji🚀"] {
+            assert!(normalize_project_area(bad).is_none(), "{bad}");
+        }
+
+        // Origin URL formats: https, scp host:OWNER/repo, bare host/OWNER/repo, and local paths rejected.
+        let https_repo = tmp.checkout("https-repo");
+        std::fs::write(
+            https_repo.join(".git/config"),
+            "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/acme-org/service.git\n",
+        )
+        .unwrap();
+        std::fs::write(https_repo.join("Cargo.toml"), "[package]\nname = \"s\"\n").unwrap();
+        assert_eq!(guess_project_area(&https_repo).as_deref(), Some("acme-org"));
+
+        let scp_repo = tmp.checkout("scp-repo");
+        std::fs::write(
+            scp_repo.join(".git/config"),
+            "[remote \"upstream\"]\n\turl = git@github.com:wrong-org/r.git\n[remote \"origin\"] # primary\n\turl = \"git@git.example.test:platform_team/tool.git\" ; trailing\n",
+        )
+        .unwrap();
+        assert_eq!(
+            guess_project_area(&scp_repo).as_deref(),
+            Some("platform_team")
+        );
+
+        let host_colon_repo = tmp.checkout("host-colon-repo");
+        std::fs::write(
+            host_colon_repo.join(".git/config"),
+            "[remote \"origin\"]\n\turl = gh-alias:my.owner/repo\n",
+        )
+        .unwrap();
+        assert_eq!(
+            guess_project_area(&host_colon_repo).as_deref(),
+            Some("my.owner")
+        );
+
+        // Linked worktree (.git regular file -> gitdir + commondir -> common config).
+        let common_main = tmp.checkout("common-main");
+        std::fs::write(
+            common_main.join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://github.com/worktree-owner/app.git\n",
+        )
+        .unwrap();
+        let wt_admin = common_main.join(".git/worktrees/linked-wt");
+        std::fs::create_dir_all(&wt_admin).unwrap();
+        std::fs::write(wt_admin.join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+        std::fs::write(wt_admin.join("commondir"), "../..\n").unwrap();
+        let linked_wt = tmp.0.join("linked-wt");
+        std::fs::create_dir_all(&linked_wt).unwrap();
+        std::fs::write(
+            linked_wt.join(".git"),
+            format!("gitdir: {}\n", wt_admin.display()),
+        )
+        .unwrap();
+        assert_eq!(
+            guess_project_area(&linked_wt).as_deref(),
+            Some("worktree-owner")
+        );
+
+        // Symlinked .git/config pointing outside the checkout is never read.
+        let outside_cfg = tmp.0.join("outside-git-config");
+        std::fs::write(
+            &outside_cfg,
+            "[remote \"origin\"]\n\turl = https://github.com/outside-forbidden/repo.git\n",
+        )
+        .unwrap();
+        let sym_cfg_repo = tmp.checkout("sym-cfg-repo");
+        std::os::unix::fs::symlink(&outside_cfg, sym_cfg_repo.join(".git/config")).unwrap();
+        assert_eq!(guess_project_area(&sym_cfg_repo), None);
+        std::fs::write(sym_cfg_repo.join("go.mod"), "module example.test/m\n").unwrap();
+        assert_eq!(guess_project_area(&sym_cfg_repo).as_deref(), Some("go"));
+
+        // Symlinked worktree gitdir hop inside checkout escaping outside is never followed.
+        let escape_wt = tmp.0.join("escape-wt");
+        std::fs::create_dir_all(&escape_wt).unwrap();
+        std::os::unix::fs::symlink(common_main.join(".git"), escape_wt.join("hop")).unwrap();
+        std::fs::write(escape_wt.join(".git"), "gitdir: hop/worktrees/linked-wt\n").unwrap();
+        assert_eq!(guess_project_area(&escape_wt), None);
+
+        // 64 KiB cap: origin past 64 KiB is not read.
+        let huge_cfg_repo = tmp.checkout("huge-cfg-repo");
+        let mut huge = "# comment padding line\n".repeat(3200);
+        assert!(huge.len() > AREA_GUESS_READ_CAP);
+        huge.push_str("[remote \"origin\"]\n\turl = https://github.com/past-cap/repo.git\n");
+        std::fs::write(huge_cfg_repo.join(".git/config"), huge).unwrap();
+        assert_eq!(guess_project_area(&huge_cfg_repo), None);
+
+        // Marker priority: Cargo.toml -> rust, package.json -> web, pyproject.toml/setup.py -> python, go.mod -> go, else None.
+        for (idx, (marker, expected)) in [
+            ("Cargo.toml", Some("rust")),
+            ("package.json", Some("web")),
+            ("pyproject.toml", Some("python")),
+            ("setup.py", Some("python")),
+            ("go.mod", Some("go")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let repo = tmp.checkout(&format!("marker-{idx}"));
+            if !marker.is_empty() {
+                std::fs::write(repo.join(marker), "\n").unwrap();
+            }
+            assert_eq!(guess_project_area(&repo).as_deref(), expected, "{marker}");
+        }
+        let bare_repo = tmp.checkout("marker-none");
+        assert_eq!(guess_project_area(&bare_repo), None);
+
+        // Budget order: area drops to null before goal, next, branch, crew, plan or observedAt shrink.
+        let compact_card = StoredProjectCard::from_dashboard(&json!({
+            "updated": "2026-11-27T06:00:00Z",
+            "branch": "main",
+            "git": {"available": true, "branch": "main", "dirty": false},
+            "goal": "Keep goal intact",
+            "planProgress": {"verified": 1, "total": 2},
+            "nextStep": {"id": "s", "summary": "Keep next intact", "scope": "repository"},
+            "active": 2,
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [
+                {"id": "w1", "tool": "peer-delegate", "provider": "claude", "role": "dev", "created": "2026-11-27T05:50:00Z"}
+            ],
+            "degraded": false,
+        }));
+        let with_area = render_project_card(
+            "p0",
+            "fresh",
+            Some("twenty-four-byte-area-01"),
+            Some(&compact_card),
+            CARD_MAX_BYTES,
+        );
+        assert_eq!(with_area["area"], "twenty-four-byte-area-01");
+        let full_len = with_area.to_string().len();
+        let tight = render_project_card(
+            "p0",
+            "fresh",
+            Some("twenty-four-byte-area-01"),
+            Some(&compact_card),
+            full_len - 5,
+        );
+        assert!(tight.to_string().len() <= full_len - 5);
+        assert_eq!(tight["area"], Value::Null);
+        assert_eq!(tight["goal"], "Keep goal intact");
+        assert_eq!(tight["next"], "Keep next intact");
+        assert_eq!(tight["branch"], "main");
+        assert_eq!(tight["crew"].as_array().unwrap().len(), 1);
+        assert_eq!(tight["plan"], json!({"done": 1, "total": 2}));
+        assert_eq!(tight["observedAt"], "2026-11-27T06:00:00Z");
     }
 
     #[test]
@@ -5348,8 +6018,10 @@ mod work_items_tests {
         }));
         assert_eq!(unknown_conv_main.main, None);
 
-        // Missing/unavailable cards still carry main: null, crew: [], crewTotal: 0 within cap.
-        let missing_rendered = render_project_card("empty", "missing", None, CARD_MAX_BYTES);
+        // Missing/unavailable cards still carry area, main: null, crew: [], crewTotal: 0 within cap.
+        let missing_rendered =
+            render_project_card("empty", "missing", Some("rust"), None, CARD_MAX_BYTES);
+        assert_eq!(missing_rendered["area"], "rust");
         assert_eq!(missing_rendered["main"], Value::Null);
         assert_eq!(missing_rendered["crew"], json!([]));
         assert_eq!(missing_rendered["crewTotal"], 0);
@@ -5372,14 +6044,19 @@ mod work_items_tests {
             ],
             "degraded": false,
         }));
-        let fit_with_all_crew =
-            render_project_card("p0", "fresh", Some(&ascii_crew_stored), CARD_MAX_BYTES);
+        let fit_with_all_crew = render_project_card(
+            "p0",
+            "fresh",
+            None,
+            Some(&ascii_crew_stored),
+            CARD_MAX_BYTES,
+        );
         assert!(fit_with_all_crew.to_string().len() <= CARD_MAX_BYTES);
         assert_eq!(fit_with_all_crew["crew"].as_array().unwrap().len(), 3);
         assert_eq!(fit_with_all_crew["crewTotal"], 3);
         assert_eq!(fit_with_all_crew["main"], "claude");
 
-        let drop_one_crew = render_project_card("p0", "fresh", Some(&ascii_crew_stored), 350);
+        let drop_one_crew = render_project_card("p0", "fresh", None, Some(&ascii_crew_stored), 350);
         assert!(drop_one_crew.to_string().len() <= 350);
         assert_eq!(drop_one_crew["goal"], "");
         assert_eq!(drop_one_crew["next"], "");
@@ -5391,14 +6068,15 @@ mod work_items_tests {
         assert_eq!(drop_one_crew["main"], "claude");
 
         let short_alias_rendered =
-            render_project_card("p0", "fresh", Some(&stored), CARD_MAX_BYTES);
+            render_project_card("p0", "fresh", None, Some(&stored), CARD_MAX_BYTES);
         assert!(short_alias_rendered.to_string().len() <= CARD_MAX_BYTES);
         assert_eq!(short_alias_rendered["crew"].as_array().unwrap().len(), 2);
         assert_eq!(short_alias_rendered["crewTotal"], 4);
         assert_eq!(short_alias_rendered["main"], "antigravity");
 
         let long_alias = "a".repeat(80);
-        let rendered = render_project_card(&long_alias, "fresh", Some(&stored), CARD_MAX_BYTES);
+        let rendered =
+            render_project_card(&long_alias, "fresh", None, Some(&stored), CARD_MAX_BYTES);
         let wire = rendered.to_string();
         assert!(
             wire.len() <= CARD_MAX_BYTES,
@@ -5465,8 +6143,14 @@ mod work_items_tests {
         assert_eq!(legacy_loaded.main, None);
         assert!(legacy_loaded.crew.is_empty());
         assert_eq!(legacy_loaded.crew_total, 0);
-        let legacy_rendered =
-            render_project_card("legacy", "fresh", Some(&legacy_loaded), CARD_MAX_BYTES);
+        let legacy_rendered = render_project_card(
+            "legacy",
+            "fresh",
+            None,
+            Some(&legacy_loaded),
+            CARD_MAX_BYTES,
+        );
+        assert_eq!(legacy_rendered["area"], Value::Null);
         assert_eq!(legacy_rendered["main"], Value::Null);
         assert_eq!(legacy_rendered["crew"], json!([]));
         assert_eq!(legacy_rendered["crewTotal"], 0);
@@ -5497,7 +6181,13 @@ mod work_items_tests {
             "cache bytes must not retain outbound-tripping text"
         );
         assert_eq!(
-            render_project_card("bad", "fresh", Some(&bad_stored), CARD_MAX_BYTES),
+            render_project_card(
+                "bad",
+                "fresh",
+                Some("rust"),
+                Some(&bad_stored),
+                CARD_MAX_BYTES
+            ),
             json!({"alias": "bad", "state": "withheld"})
         );
         let bad_role_dashboard = json!({
@@ -5515,7 +6205,13 @@ mod work_items_tests {
             "cache bytes must not retain truncated secret role prefix"
         );
         assert_eq!(
-            render_project_card("bad", "fresh", Some(&bad_role_stored), CARD_MAX_BYTES),
+            render_project_card(
+                "bad",
+                "fresh",
+                Some("rust"),
+                Some(&bad_role_stored),
+                CARD_MAX_BYTES
+            ),
             json!({"alias": "bad", "state": "withheld"})
         );
         // Also verify read-time per-card scan when raw cached JSON contains tripping text.
@@ -5534,7 +6230,13 @@ mod work_items_tests {
         let parsed_raw_bad =
             StoredProjectCard::from_cache_bytes(raw_bad.to_string().as_bytes()).unwrap();
         assert_eq!(
-            render_project_card("bad", "fresh", Some(&parsed_raw_bad), CARD_MAX_BYTES),
+            render_project_card(
+                "bad",
+                "fresh",
+                Some("rust"),
+                Some(&parsed_raw_bad),
+                CARD_MAX_BYTES
+            ),
             json!({"alias": "bad", "state": "withheld"})
         );
     }
@@ -5639,12 +6341,20 @@ mod work_items_tests {
             Arc::clone(&exec) as Arc<dyn crate::CommandExecutor>,
         )
         .unwrap();
+        use std::sync::atomic::AtomicU64;
+        let base_instant = std::time::Instant::now();
+        let clock_ms = Arc::new(AtomicU64::new(0));
+        let clock_ref = Arc::clone(&clock_ms);
         let custom_deadline = Duration::from_secs(9);
         server.project_cards = ProjectCardRefresher::with_test_overrides(
             Arc::clone(&exec) as Arc<dyn crate::CommandExecutor>,
             custom_deadline,
             cache_dir.clone(),
             projects.clone(),
+            Some(BTreeMap::from([("p0".into(), "explicit-area".into())])),
+            Box::new(move || {
+                base_instant + Duration::from_millis(clock_ref.load(Ordering::Acquire))
+            }),
         );
 
         // Request returns immediately while refreshes are held, with missing + unavailable.
@@ -5680,7 +6390,8 @@ mod work_items_tests {
         assert_eq!(exec.max_active.load(Ordering::Acquire), 2);
 
         // Release workers and wait for all 4 valid aliases to become fresh.
-        let seen_before_refresh = std::time::Instant::now();
+        let seen_before_refresh = base_instant;
+        clock_ms.store(1_000, Ordering::Release);
         *exec.hold.lock().unwrap() = false;
         exec.cv.notify_all();
         let wait_until = std::time::Instant::now() + Duration::from_secs(5);
@@ -5698,6 +6409,7 @@ mod work_items_tests {
                 .unwrap();
             if current[1..].iter().all(|c| c["state"] == "fresh") && server.project_cards.is_idle()
             {
+                assert_eq!(current[1]["area"], "explicit-area");
                 break;
             }
             assert!(std::time::Instant::now() < wait_until, "refresh timed out");
@@ -5736,24 +6448,48 @@ mod work_items_tests {
         assert!(server.project_cards.is_idle());
         assert_eq!(exec.calls.load(Ordering::Acquire), calls_before);
 
-        // Stat-only staleness: 10-minute age, .git/HEAD, .git/index, and .oms/plan.
+        // Stat-only staleness: 10-minute age, .git/HEAD, .git/index (future mtime), and .oms/plan.
         let now = std::time::SystemTime::now();
         let p0_cache = cache_dir.join(card_cache_file_name(&projects["p0"]));
         set_mtime(&p0_cache, now - Duration::from_secs(601));
         set_mtime(
             &projects["p1"].join(".git/HEAD"),
-            now + Duration::from_secs(5),
+            now + Duration::from_secs(3600),
         );
         set_mtime(
             &projects["p2"].join(".git/index"),
-            now + Duration::from_secs(5),
+            now + Duration::from_secs(3600),
         );
         set_mtime(
             &projects["p3"].join(".oms/plan"),
-            now + Duration::from_secs(5),
+            now + Duration::from_secs(3600),
         );
 
-        // Fail refreshes and verify old cards remain intact with nothing secret written.
+        // 60 s success interval (injected clock, zero sleeps): at +0 s and +59.999 s after the
+        // refresh at 1_000 ms, even future marker mtimes do not trigger another refresh.
+        for delta_ms in [1_000u64, 60_999] {
+            clock_ms.store(delta_ms, Ordering::Release);
+            let throttled = server
+                .handle(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 40,
+                    "method": "tools/call",
+                    "params": {"name": "oms_list_projects", "arguments": {"cards": true}}
+                }))
+                .unwrap();
+            let throttled_cards = throttled["result"]["structuredContent"]["cards"]
+                .as_array()
+                .unwrap();
+            for card in &throttled_cards[1..] {
+                assert_eq!(card["state"], "stale");
+            }
+            assert!(server.project_cards.is_idle());
+            assert_eq!(exec.calls.load(Ordering::Acquire), calls_before);
+        }
+
+        // Advance injected clock to exact 60 s elapsed (61_000 ms): refreshes are now permitted.
+        clock_ms.store(61_000, Ordering::Release);
+        // Fail refreshes and verify old cards remain intact with nothing secret written, plus 5 min backoff.
         exec.fail_mode.store(true, Ordering::Release);
         let stale_reply = server
             .handle(&serde_json::json!({
@@ -5782,6 +6518,38 @@ mod work_items_tests {
             let body = std::fs::read_to_string(&file).unwrap();
             assert!(body.contains("Refreshed in background"));
             assert!(!body.contains(&"q".repeat(16)));
+        }
+
+        // Failure keeps the 5 min backoff: at +299.999 s nothing runs; at +300 s it retries.
+        let calls_after_fail = exec.calls.load(Ordering::Acquire);
+        exec.fail_mode.store(false, Ordering::Release);
+        clock_ms.store(61_000 + 299_999, Ordering::Release);
+        let _ = server
+            .handle(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {"name": "oms_list_projects", "arguments": {"cards": true}}
+            }))
+            .unwrap();
+        assert!(server.project_cards.is_idle());
+        assert_eq!(exec.calls.load(Ordering::Acquire), calls_after_fail);
+
+        clock_ms.store(61_000 + 300_000, Ordering::Release);
+        let _ = server
+            .handle(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "oms_list_projects", "arguments": {"cards": true}}
+            }))
+            .unwrap();
+        let retry_wait = std::time::Instant::now() + Duration::from_secs(5);
+        while exec.calls.load(Ordering::Acquire) < calls_after_fail + 4
+            || !server.project_cards.is_idle()
+        {
+            assert!(std::time::Instant::now() < retry_wait);
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 }

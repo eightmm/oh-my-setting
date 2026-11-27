@@ -3330,10 +3330,122 @@ fn desktop_projects_registry_and_reader_parity() {
     assert_eq!(
         listed["projects"],
         json!([
-            {"alias": "alpha-service", "path": alpha_canon, "exists": true},
-            {"alias": "alpha-service-2", "path": alpha_other_canon, "exists": false},
+            {"alias": "alpha-service", "area": null, "path": alpha_canon, "exists": true},
+            {"alias": "alpha-service-2", "area": null, "path": alpha_other_canon, "exists": false},
         ])
     );
+
+    // Sidecar area lifecycle: set (trimming spaces + Hangul), keep without --area, update, clear,
+    // and remove on unregister while keeping desktop-projects.json unchanged in format.
+    let default_areas = xdg.join("oh-my-setting/desktop-project-areas.json");
+    assert!(!default_areas.exists());
+    let overlong_area = "a".repeat(25);
+    let overlong_hangul = "가".repeat(9);
+    for bad_area in [
+        "   ",
+        "\t",
+        "bad/area",
+        "bad:area",
+        "area\n",
+        "emoji🚀",
+        &overlong_area,
+        &overlong_hangul,
+    ] {
+        let (code, _, stderr) = run_cli(
+            &alpha,
+            &["--register-project", "--area", bad_area],
+            &xdg_env,
+            &[],
+        );
+        assert_ne!(code, 0, "accepted invalid area {bad_area:?}");
+        assert!(stderr.contains("invalid project area"), "{stderr}");
+        assert!(!default_areas.exists());
+    }
+
+    let map_before_area = std::fs::read(&default_map).unwrap();
+    let map_ino_before = std::fs::symlink_metadata(&default_map).unwrap().ino();
+    let (code, _, stderr) = run_cli(
+        &alpha,
+        &["--register-project", "--area", "  코어 infra_1.0-a  "],
+        &xdg_env,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    // Updating area on an already-registered project leaves desktop-projects.json untouched.
+    assert_eq!(
+        std::fs::symlink_metadata(&default_map).unwrap().ino(),
+        map_ino_before
+    );
+    assert_eq!(std::fs::read(&default_map).unwrap(), map_before_area);
+    let areas_meta = std::fs::symlink_metadata(&default_areas).unwrap();
+    assert!(areas_meta.is_file());
+    assert_eq!(areas_meta.nlink(), 1);
+    assert_eq!(areas_meta.mode() & 0o7777, 0o600);
+    let parsed_areas: Value =
+        serde_json::from_slice(&std::fs::read(&default_areas).unwrap()).unwrap();
+    assert_eq!(parsed_areas, json!({"alpha-service": "코어 infra_1.0-a"}));
+
+    // Re-registering without --area keeps the existing area without rewriting either file.
+    let areas_ino_before = areas_meta.ino();
+    let (code, _, stderr) = run_cli(&alpha, &["--register-project"], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        std::fs::symlink_metadata(&default_areas).unwrap().ino(),
+        areas_ino_before
+    );
+
+    // --projects and --projects --json display the area next to the alias.
+    let (code, area_plain, stderr) = run_cli(base, &["--projects"], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        area_plain.contains("alpha-service\t코어 infra_1.0-a\t"),
+        "{area_plain}"
+    );
+    let (code, area_json, stderr) = run_cli(base, &["--projects", "--json"], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let listed_with_area: Value = serde_json::from_str(&area_json).unwrap();
+    assert_eq!(
+        listed_with_area["projects"],
+        json!([
+            {"alias": "alpha-service", "area": "코어 infra_1.0-a", "path": alpha_canon, "exists": true},
+            {"alias": "alpha-service-2", "area": null, "path": alpha_other_canon, "exists": false},
+        ])
+    );
+
+    // Inline OMS_PANEL_PROJECTS has no sidecar even when XDG_CONFIG_HOME contains one.
+    let inline_check = json!({"alpha-service": alpha_canon}).to_string();
+    let (code, inline_out, stderr) = run_cli(
+        base,
+        &["--projects", "--json"],
+        &xdg_env,
+        &[("OMS_PANEL_PROJECTS", &inline_check)],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let inline_listed: Value = serde_json::from_str(&inline_out).unwrap();
+    assert_eq!(inline_listed["projects"][0]["area"], Value::Null);
+
+    // Set area on second project, clear alpha-service with --area "", and verify unregister removes area.
+    std::fs::create_dir_all(alpha_other.join(".oms")).unwrap();
+    let (code, _, stderr) = run_cli(
+        base,
+        &[
+            "--register-project",
+            &alpha_other.to_string_lossy(),
+            "--alias",
+            "alpha-service-2",
+            "--area",
+            "platform",
+        ],
+        &xdg_env,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = run_cli(&alpha, &["--register-project", "--area", ""], &xdg_env, &[]);
+    assert_eq!(code, 0, "{stderr}");
+    let after_clear: Value =
+        serde_json::from_slice(&std::fs::read(&default_areas).unwrap()).unwrap();
+    assert_eq!(after_clear, json!({"alpha-service-2": "platform"}));
+    std::fs::remove_dir_all(&alpha_other).unwrap();
 
     // 4. Unregister preserves remaining entries, refuses unknown aliases, and removes empty map cleanly.
     let (code, _, _) = run_cli(
@@ -3350,6 +3462,10 @@ fn desktop_projects_registry_and_reader_parity() {
         &[],
     );
     assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !default_areas.exists(),
+        "unregistering last alias with an area must unlink empty sidecar"
+    );
     let remaining = verify_reader_accepts_map(&default_map);
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining.get("alpha-service"), Some(&alpha_canon));
@@ -3565,6 +3681,91 @@ fn desktop_projects_registry_and_reader_parity() {
     );
     assert_ne!(code, 0, "hard-linked map must be refused");
     assert_eq!(std::fs::read(&hard_src).unwrap(), target_body);
+
+    // Missing explicit OMS_PANEL_PROJECTS_FILE fails on --projects (plain and --json) like the panel reader.
+    for missing_explicit in [
+        base.join("missing-explicit-map.json"),
+        base.join("missing-parent-dir/explicit-map.json"),
+    ] {
+        for list_args in [&["--projects"][..], &["--projects", "--json"]] {
+            let (code, stdout, stderr) = run_cli(
+                base,
+                list_args,
+                &[("OMS_PANEL_PROJECTS_FILE", &missing_explicit)],
+                &[],
+            );
+            assert_ne!(code, 0, "missing explicit map must fail for {list_args:?}");
+            assert!(stdout.is_empty(), "{stdout}");
+            assert!(stderr.contains("Invalid OMS project map"), "{stderr}");
+        }
+    }
+
+    // Sidecar privacy (0600 required; 0644/0620, symlink, hard link refused) and strict parsing.
+    let strict_dir = base.join("strict-sidecar");
+    ensure_private_dir(&strict_dir);
+    let strict_map = strict_dir.join("desktop-projects.json");
+    let strict_areas = strict_dir.join("desktop-project-areas.json");
+    write_private_file(
+        &strict_map,
+        &serde_json::to_vec(&json!({"keep": alpha_canon})).unwrap(),
+    );
+
+    // Non-private (0644) sidecar refused.
+    write_private_file(&strict_areas, br#"{"keep":"rust"}"#);
+    std::fs::set_permissions(&strict_areas, std::fs::Permissions::from_mode(0o644)).unwrap();
+    for args in [
+        &["--projects"][..],
+        &["--register-project", "--area", "web"],
+        &["--unregister-project", "keep"],
+    ] {
+        let (code, _, stderr) = run_cli(
+            &alpha,
+            args,
+            &[("OMS_PANEL_PROJECTS_FILE", &strict_map)],
+            &[],
+        );
+        assert_ne!(code, 0, "0644 sidecar must be refused for {args:?}");
+        assert!(stderr.contains("area map"), "{stderr}");
+    }
+    std::fs::remove_file(&strict_areas).unwrap();
+
+    // Symlinked sidecar refused.
+    let outside_area = base.join("outside-areas.json");
+    write_private_file(&outside_area, br#"{"keep":"rust"}"#);
+    std::os::unix::fs::symlink(&outside_area, &strict_areas).unwrap();
+    let (code, _, stderr) = run_cli(
+        &alpha,
+        &["--projects"],
+        &[("OMS_PANEL_PROJECTS_FILE", &strict_map)],
+        &[],
+    );
+    assert_ne!(code, 0, "symlinked sidecar must be refused");
+    assert!(stderr.contains("symlink"), "{stderr}");
+    std::fs::remove_file(&strict_areas).unwrap();
+
+    // Strict JSON parse: duplicate keys, non-strings, invalid alias/area, and >16 KiB refused.
+    let oversize_areas = format!("{{\"keep\":\"{}\"}}", "a".repeat(16400));
+    for bad_sidecar in [
+        r#"{"keep":"rust","keep":"web"}"#,
+        r#"{"keep":123}"#,
+        r#"{"keep":null}"#,
+        r#"{"keep":""}"#,
+        r#"{"keep":"bad/slash"}"#,
+        r#"{"-bad":"rust"}"#,
+        r#"["rust"]"#,
+        oversize_areas.as_str(),
+    ] {
+        write_private_file(&strict_areas, bad_sidecar.as_bytes());
+        let (code, _, stderr) = run_cli(
+            &alpha,
+            &["--projects"],
+            &[("OMS_PANEL_PROJECTS_FILE", &strict_map)],
+            &[],
+        );
+        assert_ne!(code, 0, "accepted malformed sidecar: {bad_sidecar}");
+        assert!(stderr.contains("area map"), "{stderr}");
+    }
+    std::fs::remove_file(&strict_areas).unwrap();
 }
 
 fn main() {

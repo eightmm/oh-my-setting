@@ -135,6 +135,7 @@ const VALUES: &[&str] = &[
     "from-task",
     "label",
     "alias",
+    "area",
     "session",
     "cwd",
     "maximum",
@@ -656,8 +657,8 @@ impl Options {
                     && self
                         .values
                         .keys()
-                        .all(|s| matches!(s.as_str(), "register-project" | "alias")),
-                "--register-project accepts only an optional path and --alias",
+                        .all(|s| matches!(s.as_str(), "register-project" | "alias" | "area")),
+                "--register-project accepts only an optional path, --alias and --area",
             )?;
         }
         if self.has("unregister-project") {
@@ -681,6 +682,7 @@ impl Options {
             )?;
         }
         self.needs(&["alias"], &["dispatch", "continue", "register-project"])?;
+        self.needs(&["area"], &["register-project"])?;
         self.needs(
             &[
                 "main",
@@ -1162,7 +1164,7 @@ pub fn usage() -> String {
     text.push_str("Fresh Claude account spread: --orchestrator claude --spread-accounts\n\n");
     text.push_str("After a canonical Main swap: --native-adopt ATTEMPT --assignment-sha256 SHA [--result-sha256 SHA]\nResults supplies the exact adoption command. Omit result SHA only when no current result exists.\nAdoption preserves the frozen claim, attempt, account and round; it never resends input or grants acceptance.\nSettled tasks permit retirement-only adoption even after the checkout advances.\n\n");
     text.push_str("Managed native Main: --launch codex|claude [--account ID] [--task TEXT]\n\n");
-    text.push_str("Desktop projects: --register-project [PATH] [--alias NAME] | --unregister-project ALIAS | --projects [--json]\n\n");
+    text.push_str("Desktop projects: --register-project [PATH] [--alias NAME] [--area NAME] | --unregister-project ALIAS | --projects [--json]\n\n");
     text.push_str("Read: --teams [--json] | --results [--task-id ID] [--page N] [--json] [--export FILE]\nWatch: --watch [--view auto|summary|compact|detail|graph|tree] [--count N]\nWork: --dispatch ROLE --prompt TEXT | --brief-file FILE [--dry-run]\nContinue: --continue TASK --brief-file FILE [--dispatch ROLE]\nCouncil: --council --prompt TEXT [--lenses NAMES | --rounds N] [--dry-run]\nAccept: --accept TASK --repo PATH --message TEXT --verify COMMAND\nFinalize: --finalize --owner OWNER --task-id ID --summary-file FILE --outcome OUTCOME\nRecovery: --salvage TASK [--attempt ID]; --retry-delivery --task-id ID\n\nOptions:\n");
     for key in FLAGS {
         text.push_str(&format!("  --{key}\n"));
@@ -1784,6 +1786,8 @@ mod tests {
             "/srv/projects/engine",
             "--alias",
             "eng",
+            "--area",
+            "core infra",
         ])
         .unwrap();
         assert_eq!(
@@ -1791,9 +1795,15 @@ mod tests {
             Some("/srv/projects/engine")
         );
         assert_eq!(with_path.get("alias"), Some("eng"));
+        assert_eq!(with_path.get("area"), Some("core infra"));
 
-        let inline = parse(&["--register-project=/srv/projects/docs"]).unwrap();
+        let clear_area = parse(&["--register-project", "--area", ""]).unwrap();
+        assert!(clear_area.has("register-project"));
+        assert_eq!(clear_area.get("area"), Some(""));
+
+        let inline = parse(&["--register-project=/srv/projects/docs", "--area="]).unwrap();
         assert_eq!(inline.get("register-project"), Some("/srv/projects/docs"));
+        assert_eq!(inline.get("area"), Some(""));
 
         let unreg = parse(&["--unregister-project", "engine"]).unwrap();
         assert_eq!(unreg.get("unregister-project"), Some("engine"));
@@ -1817,10 +1827,14 @@ mod tests {
             &["--unregister-project="],
             &["--unregister-project", "engine", "--json"],
             &["--unregister-project", "engine", "--alias", "other"],
+            &["--unregister-project", "engine", "--area", "core"],
             &["--projects", "--alias", "engine"],
+            &["--projects", "--area", "core"],
             &["--projects", "--repo", "."],
             &["--projects", "--dry-run"],
             &["--alias", "engine"],
+            &["--area", "core"],
+            &["--register-project", "--area"],
             &["terminal", "list", "--repo", ".", "--projects"],
         ] {
             assert!(parse(invalid).is_err(), "accepted {invalid:?}");
@@ -1828,6 +1842,7 @@ mod tests {
 
         let help = usage();
         assert!(help.contains("--register-project [PATH]"));
+        assert!(help.contains("--area VALUE"));
         assert!(help.contains("--unregister-project VALUE"));
         assert!(help.contains("--projects"));
     }
