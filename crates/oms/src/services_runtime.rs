@@ -3,11 +3,10 @@
 //! SSH target status and sync share [`oms_runtime::ssh_adapter::ensure_ssh_control_master`]
 //! with `oms_runtime::ssh_adapter`: a persistent master is started via
 //! `-o ControlMaster=yes -fN` outside supervised `Scope::WholeTree` subreapers
-//! under the host-wide reconnect lock, and target scripts run over that socket
-//! with `-o ControlMaster=no` instead of `-o ControlMaster=auto`, keeping the
-//! `ControlPersist` master alive across calls, removing stale user-owned
-//! sockets safely, and isolating OpenSSH connect/auth accounting from remote
-//! command exits.
+//! under the private state-dir reconnect lock, and target scripts run over that
+//! socket with `-o ControlMaster=no -o ProxyCommand=false`, retrying master
+//! start and the script once on pre-command mux/proxy fallback failure while
+//! keeping connect/auth accounting isolated from remote command exits.
 #[path = "services_apptainer.rs"]
 mod apptainer;
 use oms_command_plan::services::GroupMembership;
@@ -2709,65 +2708,99 @@ impl RuntimeServices<'_> {
         ];
         let control = oms_runtime::ssh_adapter::ssh_control_path(&request.ssh_alias, None)?;
         let deadline = Instant::now() + request.timeout;
-        match oms_runtime::ssh_adapter::ensure_ssh_control_master(
-            &oms_runtime::ssh_adapter::SshMasterRequest {
-                ssh_program: &self.ssh,
-                cwd: repo,
-                target_label: Some(&request.name),
-                host: &request.ssh_alias,
-                port: None,
-                action: if request.sync {
-                    "target-sync"
-                } else {
-                    "target-status"
-                },
-                control_path: &control,
-                control_persist_secs,
-                deadline,
-                interrupted: self.cancel(),
-                clock: self.ssh_clock(),
+        let master_req = oms_runtime::ssh_adapter::SshMasterRequest {
+            ssh_program: &self.ssh,
+            cwd: repo,
+            target_label: Some(&request.name),
+            host: &request.ssh_alias,
+            port: None,
+            action: if request.sync {
+                "target-sync"
+            } else {
+                "target-status"
             },
-        )? {
-            oms_runtime::ssh_adapter::SshMasterOutcome::Ready { .. } => {}
-            oms_runtime::ssh_adapter::SshMasterOutcome::LaunchFailed { .. } => {
-                result.set("reason", rvalue::string("no-network"))?;
-                return Ok(result);
-            }
-            oms_runtime::ssh_adapter::SshMasterOutcome::TimedOut => {
-                return timed_out(&mut result);
-            }
-            oms_runtime::ssh_adapter::SshMasterOutcome::ConnectFailed { stderr, .. } => {
-                result.set("reason", rvalue::string(network_reason(&stderr)))?;
-                return Ok(result);
-            }
-        }
-        let mut argv = oms_runtime::ssh_adapter::ssh_argv_with_mode(
-            &self.ssh,
-            &request.ssh_alias,
-            None,
-            &control,
+            control_path: &control,
             control_persist_secs,
-            oms_runtime::ssh_adapter::SshControlMode::MultiplexOnly,
-        )?;
-        argv.extend(["sh", "-s", "--"].iter().map(OsString::from));
-        argv.extend(values.iter().map(|v| OsString::from(shell_quote(v))));
-        let remaining_wall = deadline.saturating_duration_since(Instant::now());
-        if remaining_wall.is_zero() {
-            return timed_out(&mut result);
-        }
-        let mut spec = ChildSpec::new(argv, remaining_wall, GIT_LIMIT);
-        spec.stdin = REMOTE_SCRIPT.as_bytes().to_vec();
-        let remote = match self.child_raw(spec) {
-            Ok(out) => out,
-            Err(e) if e.starts_with(LAUNCH_FAILED) => {
-                result.set("reason", rvalue::string("no-network"))?;
-                return Ok(result);
-            }
-            Err(e) => return Err(plan_error(e)),
+            deadline,
+            interrupted: self.cancel(),
+            clock: self.ssh_clock(),
         };
-        if remote.timed_out {
-            return timed_out(&mut result);
-        }
+        let remote = 'attempt: {
+            for attempt in 0..2 {
+                match oms_runtime::ssh_adapter::ensure_ssh_control_master(&master_req).map_err(
+                    |mut e| {
+                        e.message =
+                            oms_runtime::ssh_adapter::redact_control_path(&e.message, &control);
+                        e
+                    },
+                )? {
+                    oms_runtime::ssh_adapter::SshMasterOutcome::Ready { .. } => {}
+                    oms_runtime::ssh_adapter::SshMasterOutcome::LaunchFailed { .. } => {
+                        result.set("reason", rvalue::string("no-network"))?;
+                        return Ok(result);
+                    }
+                    oms_runtime::ssh_adapter::SshMasterOutcome::TimedOut => {
+                        return timed_out(&mut result);
+                    }
+                    oms_runtime::ssh_adapter::SshMasterOutcome::ConnectFailed {
+                        stderr, ..
+                    } => {
+                        result.set("reason", rvalue::string(network_reason(&stderr)))?;
+                        return Ok(result);
+                    }
+                }
+                let mut argv = oms_runtime::ssh_adapter::ssh_argv_with_mode(
+                    &self.ssh,
+                    &request.ssh_alias,
+                    None,
+                    &control,
+                    control_persist_secs,
+                    oms_runtime::ssh_adapter::SshControlMode::MultiplexOnly,
+                )
+                .map_err(|mut e| {
+                    e.message = oms_runtime::ssh_adapter::redact_control_path(&e.message, &control);
+                    e
+                })?;
+                argv.extend(["sh", "-s", "--"].iter().map(OsString::from));
+                argv.extend(values.iter().map(|v| OsString::from(shell_quote(v))));
+                let remaining_wall = deadline.saturating_duration_since(Instant::now());
+                if remaining_wall.is_zero() {
+                    return timed_out(&mut result);
+                }
+                let mut spec = ChildSpec::new(argv, remaining_wall, GIT_LIMIT);
+                spec.stdin = REMOTE_SCRIPT.as_bytes().to_vec();
+                let remote = match self.child_raw(spec) {
+                    Ok(out) => out,
+                    Err(e) if e.starts_with(LAUNCH_FAILED) => {
+                        result.set("reason", rvalue::string("no-network"))?;
+                        return Ok(result);
+                    }
+                    Err(e) => {
+                        return Err(plan_error(oms_runtime::ssh_adapter::redact_control_path(
+                            &e, &control,
+                        )));
+                    }
+                };
+                if remote.timed_out {
+                    return timed_out(&mut result);
+                }
+                if oms_runtime::ssh_adapter::is_control_socket_fallback_failure(
+                    remote.code,
+                    &remote.stdout,
+                    &remote.stderr,
+                ) {
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(oms_command_plan::Error {
+                        code: 75,
+                        message: oms_runtime::ssh_adapter::SHARED_SSH_CLOSED_BEFORE_COMMAND.into(),
+                    });
+                }
+                break 'attempt remote;
+            }
+            unreachable!()
+        };
         let text = String::from_utf8_lossy(&remote.stdout).into_owned();
         let Some(
             [
@@ -5624,11 +5657,13 @@ exit 92
                     "ctrl=''\n",
                     "is_master=0\n",
                     "saw_mux_no=0\n",
+                    "saw_proxy_false=0\n",
                     "for arg in \"$@\"; do\n",
                     "  [ \"$arg\" = \"--\" ] && break\n",
                     "  case \"$arg\" in\n",
                     "    ControlPath=*) ctrl=${{arg#ControlPath=}} ;;\n",
                     "    ControlMaster=no) saw_mux_no=1 ;;\n",
+                    "    ProxyCommand=false) saw_proxy_false=1 ;;\n",
                     "    -fN) is_master=1 ;;\n",
                     "  esac\n",
                     "done\n",
@@ -5741,6 +5776,7 @@ exit 92
             return;
         }
         if action == "serve" {
+            use std::os::unix::fs::MetadataExt;
             let ready_sock = PathBuf::from(std::env::var_os("OMS_TEST_SVC_MASTER_READY").unwrap());
             let listener = match std::os::unix::net::UnixListener::bind(&sock) {
                 Ok(l) => l,
@@ -5749,6 +5785,16 @@ exit 92
                         let _ = s.write_all(b"0");
                     }
                     std::process::exit(1);
+                }
+            };
+            let bound_id = std::fs::symlink_metadata(&sock)
+                .ok()
+                .map(|m| (m.dev(), m.ino()));
+            let cleanup_own_sock = |path: &Path| {
+                if let (Some(expected), Ok(cur)) = (bound_id, std::fs::symlink_metadata(path))
+                    && (cur.dev(), cur.ino()) == expected
+                {
+                    let _ = std::fs::remove_file(path);
                 }
             };
             let mut starts = std::fs::OpenOptions::new()
@@ -5778,14 +5824,14 @@ exit 92
                 };
                 match rustix::event::poll(&mut fds, Some(&ts)) {
                     Ok(0) | Err(_) => {
-                        let _ = std::fs::remove_file(&sock);
+                        cleanup_own_sock(&sock);
                         break;
                     }
                     Ok(_) => {
                         if let Ok((mut stream, _)) = listener.accept()
                             && stop_file.exists()
                         {
-                            let _ = std::fs::remove_file(&sock);
+                            cleanup_own_sock(&sock);
                             let _ = stream.write_all(b"bye");
                             break;
                         }
@@ -5876,6 +5922,7 @@ exit 92
             "ServerAliveCountMax=3",
             "ControlMaster=yes",
             "ControlMaster=no",
+            "ProxyCommand=false",
             "ControlPath=",
             "ControlPersist=1800",
         ] {
@@ -6244,6 +6291,8 @@ exit 92
         remote.git(&["remote", "add", "origin", origin]);
 
         let mode_file = home.path().join("ssh-mode");
+        let drop_mux_file = home.path().join("drop-mux");
+        let remote_runs_file = home.path().join("remote-runs");
         let fake = home.path().join("fake-ssh");
         std::fs::write(
             &fake,
@@ -6253,21 +6302,41 @@ exit 92
                     "{preamble}",
                     "mode=$(cat '{mode}' 2>/dev/null || printf 'ok')\n",
                     "if [ \"$is_master\" = 1 ]; then\n",
+                    "  [ \"$saw_proxy_false\" = 0 ] || exit 95\n",
                     "  [ \"$mode\" = 'exit0_no_socket' ] && exit 0\n",
+                    "  if [ \"$mode\" = 'pubkey_pw' ]; then\n",
+                    "    printf 'Permission denied (publickey,pass",
+                    "word).\\n' >&2\n",
+                    "    exit 255\n",
+                    "  fi\n",
                     "  oms_start_services_master\n",
                     "fi\n",
                     "[ \"$saw_mux_no\" = 1 ] || exit 96\n",
-                    "[ -S \"$ctrl\" ] || exit 97\n",
+                    "if [ -s '{drop_mux}' ]; then\n",
+                    "  sed '1d' '{drop_mux}' > '{drop_mux}.tmp' && mv '{drop_mux}.tmp' '{drop_mux}'\n",
+                    "  rm -f \"$ctrl\"\n",
+                    "fi\n",
+                    "if [ ! -S \"$ctrl\" ]; then\n",
+                    "  if [ \"$saw_proxy_false\" = 1 ]; then\n",
+                    "    printf 'Control socket connect(%s): No such file or directory\\r\\nConnection closed by UNKNOWN port 65535\\r\\n' \"$ctrl\" >&2\n",
+                    "    exit 255\n",
+                    "  fi\n",
+                    "  exit 98\n",
+                    "fi\n",
+                    "[ \"$saw_proxy_false\" = 1 ] || exit 98\n",
                     "if [ \"$mode\" = 'cmd_pubkey_255' ]; then\n",
                     "  printf 'Permission denied (publickey).\\n' >&2\n",
                     "  exit 255\n",
                     "fi\n",
+                    "printf '1\\n' >> '{runs}'\n",
                     "while [ \"$1\" != -- ]; do shift; done\n",
                     "shift\nshift\n",
                     "HOME='{home}' exec \"$@\"\n",
                 ),
                 preamble = rig.shell_preamble(),
                 mode = mode_file.display(),
+                drop_mux = drop_mux_file.display(),
+                runs = remote_runs_file.display(),
                 home = home.path().display(),
             ),
         )
@@ -6295,9 +6364,9 @@ exit 92
         let alias = format!("svc-r4-{}", std::process::id());
         let ctrl_str = oms_runtime::ssh_adapter::ssh_control_path(&alias, None).unwrap();
         let ctrl_path = PathBuf::from(&ctrl_str);
-        let state_file = oms_runtime::ssh_adapter::ssh_state_dir(&ctrl_str)
-            .unwrap()
-            .join(oms_runtime::ssh_adapter::RECONNECT_STATE_FILE);
+        let state_dir = oms_runtime::ssh_adapter::ssh_state_dir(&ctrl_str).unwrap();
+        let state_file = state_dir.join(oms_runtime::ssh_adapter::RECONNECT_STATE_FILE);
+        let log_file = state_dir.join(oms_runtime::ssh_adapter::PRIVATE_CONTROL_LOG_FILE);
         {
             let dead = std::os::unix::net::UnixListener::bind(&ctrl_path).unwrap();
             drop(dead);
@@ -6308,7 +6377,6 @@ exit 92
                 .file_type()
                 .is_socket()
         );
-        let calls_before = oms_runtime::ssh_adapter::ssh_master_ensure_calls();
         let starts_before = rig.master_starts();
         assert!(
             rt.target_transport(repo.path(), &mk_req(&alias))
@@ -6322,12 +6390,14 @@ exit 92
                 .get("ok")
                 .truth()
         );
-        assert_eq!(
-            oms_runtime::ssh_adapter::ssh_master_ensure_calls(),
-            calls_before + 2,
-            "services path must invoke shared ensure_ssh_control_master"
-        );
         assert_eq!(rig.master_starts(), starts_before + 1);
+        let alias_logs: Vec<serde_json::Value> = std::fs::read_to_string(&log_file)
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v.get("host").and_then(|h| h.as_str()) == Some(alias.as_str()))
+            .collect();
+        assert_eq!(alias_logs.len(), 2);
 
         // 2. Remote command exit 255 with "Permission denied (publickey)" on stderr over the live
         //    master records no backoff and no new timestamp.
@@ -6348,18 +6418,22 @@ exit 92
         assert_eq!(st["targets"][&key]["consecutive_failures"], 0);
         assert_eq!(st["targets"][&key]["backoff_until_ms"], 0);
 
-        // 3. Non-socket path at socket is refused before starting anything.
+        // 3. Non-socket path at socket is refused, redacts control path, and starts nothing.
         std::fs::write(&mode_file, "ok").unwrap();
         let bad_alias = format!("svc-r4-file-{}", std::process::id());
-        let bad_ctrl =
-            PathBuf::from(oms_runtime::ssh_adapter::ssh_control_path(&bad_alias, None).unwrap());
+        let bad_ctrl_str = oms_runtime::ssh_adapter::ssh_control_path(&bad_alias, None).unwrap();
+        let bad_ctrl = PathBuf::from(&bad_ctrl_str);
         std::fs::write(&bad_ctrl, b"not-a-socket").unwrap();
         let starts_pre = rig.master_starts();
         let refused = rt
             .target_transport(repo.path(), &mk_req(&bad_alias))
             .unwrap_err();
         assert!(
-            refused.message.contains("non-socket"),
+            refused.message.contains("non-socket")
+                && refused
+                    .message
+                    .contains(oms_runtime::ssh_adapter::CONTROL_SOCKET_PLACEHOLDER)
+                && !refused.message.contains(&bad_ctrl_str),
             "{}",
             refused.message
         );
@@ -6382,5 +6456,66 @@ exit 92
             st2["targets"][&ns_key]["backoff_until_ms"],
             clock.0.load(Ordering::SeqCst) + 5_500
         );
+
+        // 5. Permission denied (publickey,password) without keyboard-interactive or prompt line
+        //    reports reason="auth" in services target status (not interactive-auth error).
+        std::fs::write(&mode_file, "pubkey_pw").unwrap();
+        let pkpw_alias = format!("svc-r5-pkpw-{}", std::process::id());
+        let pkpw_res = rt
+            .target_transport(repo.path(), &mk_req(&pkpw_alias))
+            .unwrap();
+        assert!(!pkpw_res.get("ok").truth());
+        assert_eq!(pkpw_res.text("reason"), "auth");
+
+        // 6. Fallback simulation: one socket drop retries master start once and succeeds; two
+        //    socket drops fail with exit 75, no extra backoff, and never leak the control path.
+        std::fs::write(&mode_file, "ok").unwrap();
+        let retry_alias = format!("svc-r5-retry-{}", std::process::id());
+        std::fs::write(&drop_mux_file, "1\n").unwrap();
+        let runs_before = std::fs::read_to_string(&remote_runs_file)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        let starts_r5_1 = rig.master_starts();
+        let retry_ok = rt
+            .target_transport(repo.path(), &mk_req(&retry_alias))
+            .unwrap();
+        assert!(retry_ok.get("ok").truth(), "{retry_ok:?}");
+        assert_eq!(rig.master_starts(), starts_r5_1 + 2);
+        assert_eq!(
+            std::fs::read_to_string(&remote_runs_file)
+                .unwrap()
+                .lines()
+                .count(),
+            runs_before + 1
+        );
+
+        let fail2_alias = format!("svc-r5-fail2-{}", std::process::id());
+        let fail2_ctrl = oms_runtime::ssh_adapter::ssh_control_path(&fail2_alias, None).unwrap();
+        std::fs::write(&drop_mux_file, "1\n1\n").unwrap();
+        let runs_pre_f2 = std::fs::read_to_string(&remote_runs_file)
+            .unwrap()
+            .lines()
+            .count();
+        let fail2_err = rt
+            .target_transport(repo.path(), &mk_req(&fail2_alias))
+            .unwrap_err();
+        assert_eq!(fail2_err.code, 75);
+        assert_eq!(
+            fail2_err.message,
+            oms_runtime::ssh_adapter::SHARED_SSH_CLOSED_BEFORE_COMMAND
+        );
+        assert!(!fail2_err.message.contains(&fail2_ctrl));
+        assert_eq!(
+            std::fs::read_to_string(&remote_runs_file)
+                .unwrap()
+                .lines()
+                .count(),
+            runs_pre_f2
+        );
+        let st_f2: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        let f2_key = format!("{fail2_alias}:22");
+        assert_eq!(st_f2["targets"][&f2_key]["consecutive_failures"], 0);
+        assert_eq!(st_f2["targets"][&f2_key]["backoff_until_ms"], 0);
     }
 }
