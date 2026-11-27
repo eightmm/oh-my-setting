@@ -143,6 +143,8 @@ fn git_output_path(bytes: &[u8]) -> Result<&Path> {
     }
     Ok(Path::new(OsStr::from_bytes(name)))
 }
+const WORKTREE_ADMIN_LOCK: &str = ".oms/tmp/worktree-admin.lock";
+
 impl Worktree {
     pub(crate) fn create(repo: &Path, base: &str, context: &Context<'_>) -> Result<Self> {
         if base.is_empty() || base.starts_with('-') {
@@ -174,6 +176,10 @@ impl Worktree {
         let value = path
             .to_str()
             .ok_or_else(|| Error::new(2, "worktree path is not UTF-8"))?;
+        // Concurrent peer-ask / peer-delegate calls share one git worktree admin
+        // directory; serialize add/remove across processes on this repository.
+        let _admin_guard =
+            storage::lock(repo, Path::new(WORKTREE_ADMIN_LOCK), context.interrupted)?;
         process::git(
             context,
             repo,
@@ -373,11 +379,17 @@ impl Worktree {
             .path
             .to_str()
             .ok_or_else(|| Error::new(2, "invalid worktree path"))?;
+        let admin_guard = storage::lock(
+            &self.owner,
+            Path::new(WORKTREE_ADMIN_LOCK),
+            context.interrupted,
+        )?;
         process::git(
             context,
             &self.owner,
             &["worktree", "remove", "--force", path],
         )?;
+        drop(admin_guard);
         self.reclaim_wrapper();
         Ok(())
     }
@@ -1740,6 +1752,8 @@ mod tests {
         struct LockProbingExecutor {
             repo: PathBuf,
             saw_busy_during_worktree_add: AtomicBool,
+            saw_admin_busy_during_add: AtomicBool,
+            saw_admin_busy_during_remove: AtomicBool,
             mutate_tracked: AtomicBool,
             invocations: std::sync::Mutex<Vec<(String, Option<process::AttemptHeartbeat>)>>,
         }
@@ -1772,12 +1786,34 @@ mod tests {
                     assert!(owner.is_file(), "owner.json created under held lock");
                     let mut settings = oms_lock::Settings::from_env().unwrap();
                     settings.cwd = self.repo.clone();
-                    let lock = oms_lock::Lock::for_file(&owner, settings).unwrap();
+                    let lock = oms_lock::Lock::for_file(&owner, settings.clone()).unwrap();
                     assert!(
                         matches!(lock.try_acquire(), Err(oms_lock::Error::Busy)),
                         "owner.json lock must remain held across git worktree add"
                     );
                     self.saw_busy_during_worktree_add
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let admin =
+                        oms_lock::Lock::for_file(&self.repo.join(WORKTREE_ADMIN_LOCK), settings)
+                            .unwrap();
+                    assert!(
+                        matches!(admin.try_acquire(), Err(oms_lock::Error::Busy)),
+                        "worktree-admin.lock must be held across git worktree add"
+                    );
+                    self.saw_admin_busy_during_add
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+                if words.windows(2).any(|w| w == ["worktree", "remove"]) {
+                    let mut settings = oms_lock::Settings::from_env().unwrap();
+                    settings.cwd = self.repo.clone();
+                    let admin =
+                        oms_lock::Lock::for_file(&self.repo.join(WORKTREE_ADMIN_LOCK), settings)
+                            .unwrap();
+                    assert!(
+                        matches!(admin.try_acquire(), Err(oms_lock::Error::Busy)),
+                        "worktree-admin.lock must be held across git worktree remove"
+                    );
+                    self.saw_admin_busy_during_remove
                         .store(true, std::sync::atomic::Ordering::Release);
                 }
                 if prog == "codex" {
@@ -1806,6 +1842,8 @@ mod tests {
         let probing = LockProbingExecutor {
             repo: repo.clone(),
             saw_busy_during_worktree_add: AtomicBool::new(false),
+            saw_admin_busy_during_add: AtomicBool::new(false),
+            saw_admin_busy_during_remove: AtomicBool::new(false),
             mutate_tracked: AtomicBool::new(false),
             invocations: std::sync::Mutex::new(Vec::new()),
         };
@@ -1822,11 +1860,56 @@ mod tests {
                 .saw_busy_during_worktree_add
                 .load(std::sync::atomic::Ordering::Acquire)
         );
+        assert!(
+            probing
+                .saw_admin_busy_during_add
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
         let wrapper = tree.path.parent().unwrap().to_owned();
         std::os::unix::fs::symlink(&repo, wrapper.join("link")).unwrap();
         tree.remove(&context).unwrap();
+        assert!(
+            probing
+                .saw_admin_busy_during_remove
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        let mut settings = oms_lock::Settings::from_env().unwrap();
+        settings.cwd = repo.clone();
+        assert!(
+            oms_lock::Lock::for_file(&repo.join(WORKTREE_ADMIN_LOCK), settings)
+                .unwrap()
+                .try_acquire()
+                .is_ok(),
+            "worktree-admin.lock must be released after remove"
+        );
         assert!(wrapper.join("owner.json").is_file(), "owner.json kept");
         assert!(wrapper.join("link").exists());
+
+        // Concurrent worktree add/remove calls on one repository serialize cleanly.
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..6)
+                .map(|_| {
+                    let repo_ref = &repo;
+                    let stop_ref = &stop;
+                    scope.spawn(move || {
+                        let ctx = Context {
+                            cwd: repo_ref,
+                            source: repo_ref,
+                            interrupted: stop_ref,
+                            executor: &process::Native,
+                            heartbeat: None,
+                        };
+                        for _ in 0..3 {
+                            let wt = Worktree::create(repo_ref, "HEAD", &ctx).unwrap();
+                            wt.remove(&ctx).unwrap();
+                        }
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
 
         // Swapping owner.json with a symlink must leave the target untouched.
         let victim = repo.join("victim.txt");
