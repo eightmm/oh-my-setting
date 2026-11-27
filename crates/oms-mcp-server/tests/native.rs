@@ -1444,6 +1444,7 @@ fn desktop_lead_conversations() {
             read,
             "oms_send_lead_message",
             "oms_stop_lead_message",
+            "oms_read_lead_stream",
             "oms_worker_output",
             "oms_lead_settings",
             "oms_update_lead_settings",

@@ -8675,7 +8675,7 @@ fn native_lead_answer_fixture(provider: &str) {
                 ("agy",serde_json::json!({"status":"SUCCESS","conversation_id":id,"response":"actual fixture answer"}).to_string())
             };
             let fixture_script = format!(
-                "#!/bin/sh\n[ -z \"$OMS_PEER_LEAD_OBSERVATION\" ] || exit 6\ncat >/dev/null\ncat <<'END'\n{stream}\nEND\n"
+                "#!/bin/sh\n[ -z \"$OMS_PEER_LEAD_OBSERVATION\" ] || exit 6\nfor a; do [ \"$a\" = --include-partial-messages ] && p=1; done; echo ${{p:-0}} >> \"$HOME/provider-argv\"\ncat >/dev/null\ncat <<'END'\n{stream}\nEND\n"
             );
             fs::write(
                 PathBuf::from(std::env::var_os("HOME").unwrap())
@@ -8689,6 +8689,13 @@ fn native_lead_answer_fixture(provider: &str) {
             assert!(!generic.join("native-lead-observation.json").exists());
             let answers = dir.join("answers");
             success(run_peer(&answers));
+            // Only the owner's Claude call asks for partial messages to stream.
+            let argv = fs::read_to_string(
+                PathBuf::from(std::env::var_os("HOME").unwrap()).join("provider-argv"),
+            )
+            .unwrap();
+            let partial: Vec<_> = argv.lines().map(|l| l == "1").collect();
+            assert_eq!(partial, [false, provider == "claude"], "{argv}");
             let receipt = answers.join("native-lead-observation.json");
             let bytes = fs::read(&receipt).unwrap();
             let row: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
