@@ -85,8 +85,6 @@ static BINDING_FLAGS: &[BindingFlagSpec] = &[
 
 static REPLY_KINDS: &[&str] = &["thought", "response", "elicitation", "error"];
 
-pub static LINEAR_SOURCE: LinearSource = LinearSource::new();
-
 /// Verify `Linear-Signature` (lowercase hex HMAC-SHA256) against raw request bytes.
 pub fn verify_linear_signature(
     signing_material: &[u8],
