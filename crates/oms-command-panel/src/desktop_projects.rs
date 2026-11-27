@@ -18,6 +18,27 @@ const MAX_ENTRIES: usize = 128;
 const MAX_BYTES: usize = 16384;
 const MAX_AREA_BYTES: usize = 24;
 
+#[path = "project_panels.rs"]
+mod project_panels;
+pub(crate) use project_panels::PanelApp;
+
+#[derive(Clone, Copy)]
+enum TargetKind {
+    ProjectMap,
+    AreaSidecar,
+    PanelSidecar,
+}
+
+impl TargetKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ProjectMap => "desktop project map",
+            Self::AreaSidecar => "desktop project area map",
+            Self::PanelSidecar => "desktop project panel map",
+        }
+    }
+}
+
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn is_hangul(c: char) -> bool {
@@ -70,6 +91,12 @@ pub(crate) fn valid_alias(value: &str) -> bool {
 }
 
 pub(crate) fn run(options: &Options, cwd: &Path, stop: &AtomicBool) -> Result<Output> {
+    if options.has("install-panel") {
+        return project_panels::install_panel(options, cwd, stop);
+    }
+    if options.has("uninstall-panel") {
+        return project_panels::uninstall_panel(options, cwd, stop);
+    }
     if options.has("register-project") {
         return register_project(options, cwd, stop);
     }
@@ -238,6 +265,7 @@ fn validate_map_path(path: &Path) -> Result<()> {
             && !raw.ends_with(b"/")
             && path.file_name().is_some()
             && path.file_name() != Some(OsStr::new(AREAS_FILE_NAME))
+            && path.file_name() != Some(OsStr::new(project_panels::PANELS_FILE_NAME))
             && path.parent().is_some()
             && !path
                 .components()
@@ -502,28 +530,36 @@ fn validate_map_stat(stat: &Stat) -> Result<()> {
     Ok(())
 }
 
-fn validate_areas_stat(stat: &Stat) -> Result<()> {
+fn validate_private_sidecar_stat(
+    stat: &Stat,
+    invalid_prefix: &str,
+    symlink_label: &str,
+) -> Result<()> {
     let kind = FileType::from_raw_mode(stat.st_mode);
     if kind == FileType::Symlink {
-        return Err(Error::new("refusing symlinked desktop project area map"));
+        return Err(Error::new(format!("refusing symlinked {symlink_label}")));
     }
     require(
         kind == FileType::RegularFile,
-        "Invalid OMS project area map: not a regular file",
+        &format!("Invalid {invalid_prefix}: not a regular file"),
     )?;
     require(
         stat.st_nlink == 1,
-        "Invalid OMS project area map: file must not have hard links",
+        &format!("Invalid {invalid_prefix}: file must not have hard links"),
     )?;
     require(
         stat.st_uid == rustix::process::geteuid().as_raw(),
-        "Invalid OMS project area map: file is not owned by the current user",
+        &format!("Invalid {invalid_prefix}: file is not owned by the current user"),
     )?;
     require(
         stat.st_mode & 0o077 == 0,
-        "Invalid OMS project area map: file must be private to the current user",
+        &format!("Invalid {invalid_prefix}: file must be private to the current user"),
     )?;
     Ok(())
+}
+
+fn validate_areas_stat(stat: &Stat) -> Result<()> {
+    validate_private_sidecar_stat(stat, "OMS project area map", "desktop project area map")
 }
 
 fn same_stat(a: &Stat, b: &Stat) -> bool {
@@ -637,18 +673,20 @@ fn read_map_at(
     Ok(Some((map, after)))
 }
 
-fn read_areas_at(dir_fd: &OwnedFd) -> Result<Option<(BTreeMap<String, String>, Stat)>> {
-    let name = OsStr::new(AREAS_FILE_NAME);
+fn read_private_sidecar_at(
+    dir_fd: &OwnedFd,
+    name: &OsStr,
+    invalid_prefix: &str,
+    label: &str,
+) -> Result<Option<(String, Stat)>> {
     let named = match fs::statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) => {
-            validate_areas_stat(&stat)?;
+            validate_private_sidecar_stat(&stat, invalid_prefix, label)?;
             stat
         }
         Err(Errno::NOENT) => return Ok(None),
         Err(e) => {
-            return Err(Error::new(format!(
-                "cannot inspect desktop project area map: {e}"
-            )));
+            return Err(Error::new(format!("cannot inspect {label}: {e}")));
         }
     };
     let fd = match fs::openat(
@@ -658,32 +696,41 @@ fn read_areas_at(dir_fd: &OwnedFd) -> Result<Option<(BTreeMap<String, String>, S
         Mode::empty(),
     ) {
         Ok(fd) => fd,
-        Err(Errno::LOOP) => return Err(Error::new("refusing symlinked desktop project area map")),
+        Err(Errno::LOOP) => return Err(Error::new(format!("refusing symlinked {label}"))),
         Err(e) => {
-            return Err(Error::new(format!(
-                "cannot open desktop project area map: {e}"
-            )));
+            return Err(Error::new(format!("cannot open {label}: {e}")));
         }
     };
-    let opened = fs::fstat(&fd)
-        .map_err(|e| Error::new(format!("cannot inspect desktop project area map: {e}")))?;
-    validate_areas_stat(&opened)?;
+    let opened = fs::fstat(&fd).map_err(|e| Error::new(format!("cannot inspect {label}: {e}")))?;
+    validate_private_sidecar_stat(&opened, invalid_prefix, label)?;
     require(
         same_stat(&named, &opened),
-        "desktop project area map changed while opening",
+        &format!("{label} changed while opening"),
     )?;
     let mut file = std::fs::File::from(fd);
     let mut raw = String::new();
     (&mut file)
         .take((MAX_BYTES + 1) as u64)
         .read_to_string(&mut raw)
-        .map_err(|_| Error::new("Invalid OMS project area map: file is not UTF-8"))?;
-    let after = fs::fstat(&file)
-        .map_err(|e| Error::new(format!("cannot verify desktop project area map: {e}")))?;
+        .map_err(|_| Error::new(format!("Invalid {invalid_prefix}: file is not UTF-8")))?;
+    let after = fs::fstat(&file).map_err(|e| Error::new(format!("cannot verify {label}: {e}")))?;
     require(
         same_stat(&opened, &after),
-        "desktop project area map changed while reading",
+        &format!("{label} changed while reading"),
     )?;
+    Ok(Some((raw, after)))
+}
+
+fn read_areas_at(dir_fd: &OwnedFd) -> Result<Option<(BTreeMap<String, String>, Stat)>> {
+    let Some((raw, after)) = read_private_sidecar_at(
+        dir_fd,
+        OsStr::new(AREAS_FILE_NAME),
+        "OMS project area map",
+        "desktop project area map",
+    )?
+    else {
+        return Ok(None);
+    };
     let areas = parse_areas_json(&raw)?;
     Ok(Some((areas, after)))
 }
@@ -758,17 +805,21 @@ fn sync_dir(dir_fd: &OwnedFd) -> Result<()> {
     }
 }
 
+fn validate_target_stat(stat: &Stat, kind: TargetKind) -> Result<()> {
+    match kind {
+        TargetKind::ProjectMap => validate_map_stat(stat),
+        TargetKind::AreaSidecar => validate_areas_stat(stat),
+        TargetKind::PanelSidecar => project_panels::validate_panels_stat(stat),
+    }
+}
+
 fn check_destination_unchanged(
     dir_fd: &OwnedFd,
     name: &OsStr,
     before: Option<&Stat>,
-    private_only: bool,
+    kind: TargetKind,
 ) -> Result<()> {
-    let label = if private_only {
-        "desktop project area map"
-    } else {
-        "desktop project map"
-    };
+    let label = kind.label();
     match (before, fs::statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW)) {
         (None, Err(Errno::NOENT)) => Ok(()),
         (None, Ok(stat)) if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink => {
@@ -778,11 +829,7 @@ fn check_destination_unchanged(
             "{label} was created concurrently; retry"
         ))),
         (Some(prev), Ok(curr)) => {
-            if private_only {
-                validate_areas_stat(&curr)?;
-            } else {
-                validate_map_stat(&curr)?;
-            }
+            validate_target_stat(&curr, kind)?;
             require(
                 same_stat(prev, &curr),
                 &format!("{label} changed concurrently; retry"),
@@ -802,7 +849,7 @@ fn write_atomic(
     name: &OsStr,
     before: Option<&Stat>,
     bytes: &[u8],
-    private_only: bool,
+    kind: TargetKind,
 ) -> Result<()> {
     let mut temp = TempMapFile::create(dir_fd, name)?;
     temp.file
@@ -814,11 +861,7 @@ fn write_atomic(
         .map_err(|e| Error::new(format!("cannot sync staged desktop project map: {e}")))?;
     let staged = fs::fstat(&temp.file)
         .map_err(|e| Error::new(format!("cannot verify staged desktop project map: {e}")))?;
-    if private_only {
-        validate_areas_stat(&staged)?;
-    } else {
-        validate_map_stat(&staged)?;
-    }
+    validate_target_stat(&staged, kind)?;
     require(
         staged.st_mode & 0o7777 == 0o600,
         "staged desktop project map did not retain mode 0600",
@@ -827,10 +870,10 @@ fn write_atomic(
         temp.owns_entry(),
         "staged desktop project map changed before publication",
     )?;
-    check_destination_unchanged(dir_fd, name, before, private_only)?;
+    check_destination_unchanged(dir_fd, name, before, kind)?;
     fs::renameat(dir_fd, &temp.name, dir_fd, name).map_err(|e| Error {
         code: 1,
-        message: format!("cannot publish desktop project map: {e}"),
+        message: format!("cannot publish {}: {e}", kind.label()),
         publication_uncertain: true,
     })?;
     temp.published = true;
@@ -844,7 +887,7 @@ fn write_or_unlink_areas(
 ) -> Result<()> {
     let name = OsStr::new(AREAS_FILE_NAME);
     if areas.is_empty() {
-        check_destination_unchanged(dir_fd, name, before, true)?;
+        check_destination_unchanged(dir_fd, name, before, TargetKind::AreaSidecar)?;
         if before.is_some() {
             fs::unlinkat(dir_fd, name, AtFlags::empty()).map_err(|e| Error {
                 code: 1,
@@ -856,7 +899,7 @@ fn write_or_unlink_areas(
         Ok(())
     } else {
         let bytes = encode_areas_json(areas)?;
-        write_atomic(dir_fd, name, before, &bytes, true)
+        write_atomic(dir_fd, name, before, &bytes, TargetKind::AreaSidecar)
     }
 }
 
@@ -956,7 +999,13 @@ fn register_project(options: &Options, cwd: &Path, stop: &AtomicBool) -> Result<
             true
         }
     };
-    write_atomic(&dir_fd, &leaf_name, before_stat.as_ref(), &bytes, false)?;
+    write_atomic(
+        &dir_fd,
+        &leaf_name,
+        before_stat.as_ref(),
+        &bytes,
+        TargetKind::ProjectMap,
+    )?;
     if area_changed {
         areas.retain(|k, _| map.contains_key(k));
         write_or_unlink_areas(&dir_fd, before_areas_stat.as_ref(), &areas)?;
@@ -990,6 +1039,13 @@ fn unregister_project(options: &Options, cwd: &Path, stop: &AtomicBool) -> Resul
     ) {
         validate_areas_stat(&stat)?;
     }
+    if let Ok(stat) = fs::statat(
+        &dir_fd,
+        OsStr::new(project_panels::PANELS_FILE_NAME),
+        AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        project_panels::validate_panels_stat(&stat)?;
+    }
 
     let lock_target = parent.join(&leaf_name);
     let _guard = lock_map_file(&lock_target, cwd, stop)?;
@@ -1003,11 +1059,26 @@ fn unregister_project(options: &Options, cwd: &Path, stop: &AtomicBool) -> Resul
         Some((areas, stat)) => (areas, Some(stat)),
         None => (BTreeMap::new(), None),
     };
+    let (panels, before_panels_stat) = match project_panels::read_panels_at(&dir_fd)? {
+        Some((panels, stat)) => (panels, Some(stat)),
+        None => (BTreeMap::new(), None),
+    };
     let Some(removed) = map.remove(&alias) else {
         return Err(Error::new(format!(
             "project alias '{alias}' is not registered"
         )));
     };
+    if let Some(installed) = panels.get(&alias).filter(|rows| !rows.is_empty()) {
+        let apps = installed
+            .iter()
+            .map(|r| r.app.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(Error::new(format!(
+            "project alias '{alias}' still has an installed panel ({apps}); run `oms panel --uninstall-panel {} --project {alias}` first",
+            installed[0].app
+        )));
+    }
 
     // The reader rejects a missing explicitly named map, so keep its last entry instead of deleting it.
     require(
@@ -1015,7 +1086,12 @@ fn unregister_project(options: &Options, cwd: &Path, stop: &AtomicBool) -> Resul
         "refusing to remove the last alias from the OMS_PANEL_PROJECTS_FILE map: the desktop panel needs at least one entry there; unset OMS_PANEL_PROJECTS_FILE or delete the file",
     )?;
     if map.is_empty() {
-        check_destination_unchanged(&dir_fd, &leaf_name, Some(&before_stat), false)?;
+        check_destination_unchanged(
+            &dir_fd,
+            &leaf_name,
+            Some(&before_stat),
+            TargetKind::ProjectMap,
+        )?;
         fs::unlinkat(&dir_fd, &leaf_name, AtFlags::empty()).map_err(|e| Error {
             code: 1,
             message: format!("cannot remove empty desktop project map: {e}"),
@@ -1024,12 +1100,21 @@ fn unregister_project(options: &Options, cwd: &Path, stop: &AtomicBool) -> Resul
         sync_dir(&dir_fd)?;
     } else {
         let bytes = encode_projects_json(&map)?;
-        write_atomic(&dir_fd, &leaf_name, Some(&before_stat), &bytes, false)?;
+        write_atomic(
+            &dir_fd,
+            &leaf_name,
+            Some(&before_stat),
+            &bytes,
+            TargetKind::ProjectMap,
+        )?;
     }
     let area_removed = areas.remove(&alias).is_some() || (map.is_empty() && !areas.is_empty());
     if area_removed {
         areas.retain(|k, _| map.contains_key(k));
         write_or_unlink_areas(&dir_fd, before_areas_stat.as_ref(), &areas)?;
+    }
+    if map.is_empty() && panels.is_empty() && before_panels_stat.is_some() {
+        project_panels::write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)?;
     }
 
     Ok((
