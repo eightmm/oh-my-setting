@@ -485,6 +485,7 @@ dependencies = [
  "oms-command-journal",
  "oms-command-landing",
  "oms-command-lifecycle",
+ "oms-command-linear",
  "oms-command-memory",
  "oms-command-operations",
  "oms-command-panel",
@@ -745,6 +746,18 @@ dependencies = [
  "regex",
  "rustix",
  "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "oms-command-linear"
+version = "0.1.0"
+dependencies = [
+ "oms-command-room",
+ "oms-safe-fs",
+ "oms-scrub",
+ "rustix",
  "serde_json",
  "sha2",
 ]

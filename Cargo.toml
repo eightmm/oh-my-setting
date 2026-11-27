@@ -14,6 +14,7 @@ members = [
     "crates/oms-command-journal",
     "crates/oms-command-landing",
     "crates/oms-command-lifecycle",
+    "crates/oms-command-linear",
     "crates/oms-command-memory",
     "crates/oms-command-operations",
     "crates/oms-command-panel",

@@ -771,9 +771,16 @@ impl Room<'_> {
                         .cloned();
                     if carry.active()
                         && original.as_ref().is_some_and(|m| {
-                            !m.list("targets")
+                            let answer_to_sender = m
+                                .list("targets")
                                 .iter()
-                                .any(|p| p.as_str() == Some(e.text("sender")))
+                                .any(|p| p.as_str() == Some(e.text("sender")));
+                            let followup_question = e.text("message_kind") == "question"
+                                && m.text("message_kind") == "question"
+                                && e["sender"] == m["sender"]
+                                && e["recipient"] == m["recipient"]
+                                && e.text("recipient") != "all";
+                            !answer_to_sender && !followup_question
                         })
                     {
                         original = self
@@ -783,12 +790,20 @@ impl Room<'_> {
                             )?
                             .remove(e.text("reply_to"));
                     }
-                    if original.as_ref().is_none_or(|m| {
-                        !m.list("targets")
+                    let valid_reply = original.as_ref().is_some_and(|m| {
+                        let answer_to_sender = m
+                            .list("targets")
                             .iter()
                             .any(|p| p.as_str() == Some(e.text("sender")))
-                            || e["recipient"] != m["sender"]
-                    }) {
+                            && e["recipient"] == m["sender"];
+                        let followup_question = e.text("message_kind") == "question"
+                            && m.text("message_kind") == "question"
+                            && e["sender"] == m["sender"]
+                            && e["recipient"] == m["recipient"]
+                            && e.text("recipient") != "all";
+                        answer_to_sender || followup_question
+                    });
+                    if !valid_reply {
                         return Err(Error::new(
                             "reply must return to the sender of a message addressed to this participant",
                         ));

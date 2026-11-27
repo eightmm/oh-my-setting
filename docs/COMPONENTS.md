@@ -45,6 +45,7 @@ explains overlapping entrypoints.
 | `dashboard` | Read a terminal view of OMS collaboration state. | `oms dashboard` | [Panel and collaboration](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) |
 | `inbox` | Prioritize attention from shared state. | `oms inbox` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `room` | Share task-scoped messages and room snapshots. | `oms room` | [Work rooms](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) |
+| `linear` | Bridge Linear agent session webhooks into an OMS Room and send outbound-scanned activity replies with retry-safe receipts. | `oms linear` | [Linear agent sessions](LINEAR.md) |
 | `lease` | Declare time-limited, advisory intent to edit paths. | `oms lease` | [Delegating writes](#delegating-writes) |
 | `input` | Capture source-aware attachments, edit steer/next inputs and deliver them explicitly through enrolled rooms; queue imported view feedback. | `oms input` | [Input queue](INPUT-QUEUE.md) |
 | `thread` | Read and deliver shared conversation turns. | `oms thread` | [Asking other agents](#asking-other-agents) |

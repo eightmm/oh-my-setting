@@ -2111,6 +2111,7 @@ fn newly_wired_wave3_families_select_and_dispatch_without_python() {
         vec!["agent-plan", "--help"],
         vec!["agent-task", "--help"],
         vec!["room", "--help"],
+        vec!["linear", "--help"],
         vec!["journal", "--help"],
         vec!["graph", "--help"],
         vec!["land", "--help"],

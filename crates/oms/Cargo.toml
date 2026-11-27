@@ -15,6 +15,7 @@ oms-command-hooks = { path = "../oms-command-hooks" }
 oms-command-journal = { path = "../oms-command-journal" }
 oms-command-landing = { path = "../oms-command-landing" }
 oms-command-lifecycle = { path = "../oms-command-lifecycle" }
+oms-command-linear = { path = "../oms-command-linear" }
 oms-command-panel = { path = "../oms-command-panel" }
 oms-command-peer = { path = "../oms-command-peer" }
 oms-command-plan = { path = "../oms-command-plan" }

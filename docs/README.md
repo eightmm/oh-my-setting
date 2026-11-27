@@ -21,6 +21,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | Recover interrupted work | [Panel recovery](TERMINAL-PANEL.md#salvaging-a-stopped-worker) | [Settle workers](TERMINAL-PANEL.md#settle-stopped-workers) · [Cleanup](COMPONENTS.md#cleanup) |
 | Inspect recorded progress | [Dashboard](DASHBOARD.md) | Read-only snapshot and JSON schema |
 | Keep work history | [Work Journal](WORK-JOURNAL.md) | Local capture and optional Notion mirror |
+| Bridge Linear agent sessions | [Linear agent sessions](LINEAR.md) | Webhook Room intake and retry-safe replies |
 | Use another Codex harness | [Codex harnesses](CODEX-HARNESSES.md) | Codex inference through Pi or Claude Code |
 
 ## Reference
