@@ -229,24 +229,25 @@ fn discover_cached(
         })
         .unwrap_or_default();
     let mut candidates = BTreeSet::new();
-    match command(
-        repo,
-        "git",
-        &[
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-        cancel,
-    ) {
-        Ok((0, raw, _)) => {
-            for p in raw.split(|b| *b == 0).filter(|p| !p.is_empty()) {
-                candidates.insert(String::from_utf8_lossy(p).replace('\\', "/"));
-            }
+    if oms_safe_fs::has_git_marker(repo)
+        && let Ok((0, raw, _)) = command(
+            repo,
+            "git",
+            &[
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            cancel,
+        )
+    {
+        for p in raw.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+            candidates.insert(String::from_utf8_lossy(p).replace('\\', "/"));
         }
-        _ => walk(repo, Path::new(""), &mut candidates, cancel)?,
+    } else {
+        walk(repo, Path::new(""), &mut candidates, cancel)?;
     }
     let root =
         Root::open(repo).map_err(|e| Error::new(format!("cannot open source root: {e:?}")))?;
@@ -560,11 +561,14 @@ fn cache_private_files(path: &Path) -> Result<()> {
 }
 
 fn cache_open(state: &Path, writable: bool) -> Result<Option<rusqlite::Connection>> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let path = state.join("cache.sqlite3");
     no_symlinks(&path)?;
     if writable {
-        std::fs::create_dir_all(state)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(state)?;
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -628,6 +632,7 @@ fn build_from(
     found: Discovery,
 ) -> Result<(Value, super::index::Graph)> {
     let mut settings = oms_lock::Settings::from_env().map_err(|e| Error::new(e.to_string()))?;
+    settings.temp_dir = physical_temp_dir(&settings.temp_dir, &settings.cwd);
     settings.cwd = repo.to_path_buf();
     let lock = oms_lock::Lock::for_file(&state.join("manifest.json"), settings)
         .map_err(|e| Error::new(e.to_string()))?;

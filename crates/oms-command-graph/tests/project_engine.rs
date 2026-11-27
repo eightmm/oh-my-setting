@@ -4,7 +4,7 @@ use oms_command_graph::{
     run,
 };
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::{
     ffi::OsString,
     fs,
@@ -615,7 +615,11 @@ fn rust_workspace_cache_and_impact() {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(target, contents).unwrap();
     }
-    fs::create_dir_all(f.state().join("cache")).unwrap();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(f.state().join("cache"))
+        .unwrap();
     fs::write(f.state().join("cache/old.json"), "{}").unwrap();
     f.build();
     assert!(f.state().join("cache.sqlite3").is_file());
