@@ -5557,6 +5557,7 @@ mod tests {
                         physical_call: Some(tag.clone()),
                         launch_fence: Some(call.launch_fence()),
                         heartbeat: None,
+                        stream: None,
                     },
                     &stop,
                 )

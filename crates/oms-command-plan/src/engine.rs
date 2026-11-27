@@ -70,6 +70,12 @@ impl DelegateBinding {
 }
 const LANDING_REVIEW_SHA256: &str = "landing_review_sha256";
 
+#[derive(Clone, Copy)]
+enum DelegateBase<'a> {
+    Exact(&'a str),
+    AncestorOf(&'a str),
+}
+
 /// Comparison target for landing the exact Plan review selected by a runner.
 #[derive(Clone, Debug)]
 pub struct ReviewFence {
@@ -1067,6 +1073,101 @@ impl<'a> Plan<'a> {
         Ok(task)
     }
 
+    fn repo_relative_evidence(&self, raw: &str) -> String {
+        let path = Path::new(raw);
+        if !path.is_absolute() {
+            return raw.to_owned();
+        }
+        for root in [&self.context.execution_repo, &self.context.state_repo] {
+            if let Ok(rel) = path.strip_prefix(root) {
+                return rel.to_string_lossy().into_owned();
+            }
+        }
+        if let Ok(canon) = std::fs::canonicalize(path) {
+            for root in [&self.context.execution_repo, &self.context.state_repo] {
+                if let Ok(rel) = canon.strip_prefix(root) {
+                    return rel.to_string_lossy().into_owned();
+                }
+            }
+        }
+        raw.to_owned()
+    }
+
+    /// Validate a bound Review against the issued lease. When lease, epoch,
+    /// task digest, plan lineage and contracts still match, a fast-forwarded
+    /// HEAD (`base_sha` is an ancestor of `HEAD`) is admitted so landing can
+    /// re-verify the patch on the moved tip; rewritten history refuses.
+    fn delegate_review_task(
+        &self,
+        s: &mut Snapshot,
+        binding: &DelegateBinding,
+    ) -> Result<std::result::Result<Value, &'static str>> {
+        require(
+            self.context.canonical(),
+            "delegation requires the canonical Plan",
+        )?;
+        if s.plan.get("plan_id") != binding.0.get("plan_id") {
+            return Ok(Err("lease"));
+        }
+        let Some(task) = s.plan.get("tasks").opt(binding.task_id()).cloned() else {
+            return Ok(Err("lease"));
+        };
+        if !["claimed", "running"].contains(&task.text("state"))
+            || task.get("lease_id") != binding.0.get("lease_id")
+            || task.get("lease_epoch") != binding.0.get("lease_epoch")
+            || self.expired_at(s, &task, true, &delegation_time()?)?
+        {
+            return Ok(Err("lease"));
+        }
+        if json::hash(&task)? != binding.0.text("task_sha256") {
+            return Ok(Err("task hash"));
+        }
+        if s.contract.get("satisfied") != &Value::Bool(true)
+            || !crate::contracts::stale(&s.registry, &task)?.is_empty()
+        {
+            return Ok(Err("contract"));
+        }
+        let head = self.git().text(&["rev-parse", "HEAD"])?;
+        if head != binding.base_sha() && self.git().ancestor(binding.base_sha(), &head).is_err() {
+            return Ok(Err("base drift"));
+        }
+        Ok(Ok(task))
+    }
+
+    fn stale_delegate_review(
+        &self,
+        req: &Request,
+        s: &Snapshot,
+        binding: &DelegateBinding,
+        condition: &str,
+    ) -> Result<crate::Error> {
+        let artifact = self.repo_relative_evidence(req.text("artifact")?);
+        let patch = self.repo_relative_evidence(req.text("patch")?);
+        let (current_lease, current_state) = match s.task(binding.task_id()) {
+            Ok(current) => (current.text("lease_id"), current.text("state")),
+            Err(_) => ("", "missing"),
+        };
+        self.store.append_private_atomic(
+            ".oms/plan/late-results.jsonl",
+            &object([
+                ("schema", number(1)),
+                ("ts", string(&self.context.ts)),
+                ("task_id", string(binding.task_id())),
+                ("supplied_lease_id", string(binding.lease_id())),
+                ("current_lease_id", string(current_lease)),
+                ("current_state", string(current_state)),
+                ("reason", string("stale_delegate_binding")),
+                ("condition", string(condition)),
+                ("artifact", string(&artifact)),
+                ("patch", string(&patch)),
+            ]),
+        )?;
+        Ok(error(format!(
+            "stale delegate binding ({condition}); late result preserved in .oms/plan/late-results.jsonl (task={} artifact={artifact} patch={patch})",
+            binding.task_id(),
+        )))
+    }
+
     pub fn execute(&self, req: &Request) -> Result<Response> {
         self.execute_inner(req, None, None)
     }
@@ -1191,7 +1292,7 @@ impl<'a> Plan<'a> {
         &self,
         task: &Value,
         expected_patch: &str,
-        base: Option<&str>,
+        base: DelegateBase<'_>,
     ) -> Result<Option<Value>> {
         let Some(result) = task.opt("delegate_result") else {
             return Ok(None);
@@ -1216,14 +1317,30 @@ impl<'a> Plan<'a> {
             "retained native delegate index changed",
         )?;
         let index = json::parse(&index_raw)?;
+        let index_base = index.text("base_sha");
         require(
             index.text("task_id") == task.text("id")
                 && index.text("provider") == task.text("provider")
-                && base.is_none_or(|base| index.text("base_sha") == base)
+                && !index_base.is_empty()
+                && index.get("plan_binding").text("base_sha") == index_base
                 && index.get("plan_binding").get("plan_id") == result.get("plan_id")
                 && index.get("plan_binding").get("lease_id") == result.get("lease_id"),
             "retained native delegate index changed identity",
         )?;
+        match base {
+            DelegateBase::Exact(expected) => require(
+                index_base == expected,
+                "retained native delegate index changed identity",
+            )?,
+            DelegateBase::AncestorOf(head) => require(
+                index_base == head || self.git().ancestor(index_base, head).is_ok(),
+                format!(
+                    "delegated review for task {} is bound to base {index_base}, which is not an ancestor of HEAD {head}; release it with `oms agent-plan release --id {}` and rerun",
+                    task.text("id"),
+                    task.text("id"),
+                ),
+            )?,
+        }
         for (field, digest) in [("artifact", "artifact_sha256"), ("patch", "patch_sha256")] {
             let reference = result.get(field);
             let bytes = self.store.read(reference.text("path"), MAX_PATCH)?;
@@ -1252,19 +1369,21 @@ impl<'a> Plan<'a> {
         let mut snapshot = self.load_from_snapshot(self.read_locked_snapshot()?)?;
         snapshot.require_contract()?;
         let task = snapshot.task(issued.task_id())?.clone();
+        let head = self.git().text(&["rev-parse", "HEAD"])?;
         require(
             snapshot.plan.get("plan_id") == issued.0.get("plan_id")
                 && task.text("state") == "review"
                 && task.text("lease_id") == issued.lease_id()
                 && task.text("review_lease_id") == issued.lease_id()
                 && task.get("lease_epoch") == issued.0.get("lease_epoch")
-                && self.git().text(&["rev-parse", "HEAD"])? == issued.base_sha()
+                && (head == issued.base_sha()
+                    || self.git().ancestor(issued.base_sha(), &head).is_ok())
                 && crate::contracts::stale(&snapshot.registry, &task)?.is_empty(),
             "issued delegation no longer owns the exact reviewed task",
         )?;
         let patch = task.get("delegate_result").get("patch").text("sha256");
         let index = self
-            .delegate_review_evidence(&task, patch, Some(issued.base_sha()))?
+            .delegate_review_evidence(&task, patch, DelegateBase::Exact(issued.base_sha()))?
             .ok_or_else(|| error("issued delegation lacks retained native review evidence"))?;
         require(
             index.text("operation_id") == operation && index.get("plan_binding") == &issued.0,
@@ -1438,30 +1557,26 @@ impl<'a> Plan<'a> {
                     crate::retirement::cleanup(self)?;
                 }
                 let mut s = self.load()?;
-                if let Some(binding) = binding
-                    && let Err(error) = self.delegate_task(&mut s, binding)
-                {
+                if let Some(binding) = binding {
                     if req.action == Review {
-                        self.store.append_private_atomic(
-                            ".oms/plan/late-results.jsonl",
-                            &object([
-                                ("schema", number(1)),
-                                ("ts", string(&self.context.ts)),
-                                ("task_id", string(binding.task_id())),
-                                ("supplied_lease_id", string(binding.lease_id())),
-                                ("reason", string("stale_delegate_binding")),
-                                ("artifact", string(req.text("artifact")?)),
-                                ("patch", string(req.text("patch")?)),
-                            ]),
-                        )?;
+                        if let Err(condition) = self.delegate_review_task(&mut s, binding)? {
+                            return Err(self.stale_delegate_review(req, &s, binding, condition)?);
+                        }
+                    } else {
+                        self.delegate_task(&mut s, binding)?;
                     }
-                    return Err(error);
                 }
                 let captured = if let (Some(binding), Some(index)) = (binding, index) {
                     let captured = self.capture_delegate_result(req, binding, &s, index)?;
                     // File capture and Plan lock acquisition may consume the
                     // lease. Neither extends the worker's issued authority.
-                    self.delegate_task(&mut s, binding)?;
+                    if req.action == Review {
+                        if let Err(condition) = self.delegate_review_task(&mut s, binding)? {
+                            return Err(self.stale_delegate_review(req, &s, binding, condition)?);
+                        }
+                    } else {
+                        self.delegate_task(&mut s, binding)?;
+                    }
                     Some(captured)
                 } else {
                     None
@@ -1858,7 +1973,7 @@ impl<'a> Plan<'a> {
                     self.delegate_review_evidence(
                         &t,
                         proof.patch_sha256(),
-                        Some(proof.base_sha()),
+                        DelegateBase::AncestorOf(proof.base_sha()),
                     )?;
                 }
                 require(
@@ -2750,7 +2865,11 @@ impl<'a> Plan<'a> {
                 patch_sha256: json::sha(&patch),
             };
             self.require_landing_review(&current.plan, task, &expected)?;
-            self.delegate_review_evidence(task, expected.patch_sha256(), Some(base))?;
+            self.delegate_review_evidence(
+                task,
+                expected.patch_sha256(),
+                DelegateBase::AncestorOf(base),
+            )?;
             Ok(expected)
         })
     }
@@ -2768,7 +2887,7 @@ impl<'a> Plan<'a> {
             self.delegate_review_evidence(
                 &task,
                 expected.patch_sha256(),
-                Some(expected.base_sha()),
+                DelegateBase::AncestorOf(expected.base_sha()),
             )?;
             let mut view = self.view(&mut s, &task, true)?;
             view.set("plan_id", s.plan.get("plan_id").clone())?;
@@ -2889,7 +3008,17 @@ impl<'a> Plan<'a> {
                 .is_none_or(|review| review.patch_sha256() == expected),
             "Plan landing patch differs from its exact reviewed binding",
         )?;
-        self.delegate_review_evidence(t, expected, review.as_ref().map(ReviewFence::base_sha))?;
+        if t.opt("delegate_result").is_some() {
+            let live_head;
+            let target_base = match &review {
+                Some(review) => review.base_sha(),
+                None => {
+                    live_head = self.git().text(&["rev-parse", "HEAD"])?;
+                    &live_head
+                }
+            };
+            self.delegate_review_evidence(t, expected, DelegateBase::AncestorOf(target_base))?;
+        }
         require(
             json::sha(self.evidence_read(path, MAX_PATCH)?) == expected,
             "reviewed patch bytes changed during admission",
@@ -4376,6 +4505,248 @@ mod tests {
             }
         }
         assert_eq!(plan.load().unwrap().raw.unwrap(), before);
+
+        // Drift the shared HEAD forward between Start and Review while keeping
+        // the pre-start/pre-spawn moved-source refusal above intact.
+        let moved_head = git_at(&repo.0, &["rev-parse", "HEAD"]);
+        assert_ne!(moved_head, base);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(repo.0.join(".oms/artifacts"))
+            .unwrap();
+        let report_bytes = b"Verified worker report\n";
+        let patch_bytes =
+            b"diff --git a/a.txt b/a.txt\nnew file mode 100644\n--- /dev/null\n+++ b/a.txt\n@@ -0,0 +1 @@\n+ok\n";
+        for (rel, content) in [
+            (".oms/artifacts/report.md", report_bytes.as_slice()),
+            (".oms/artifacts/change.patch", patch_bytes.as_slice()),
+        ] {
+            let file = repo.0.join(rel);
+            std::fs::write(&file, content).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let make_index = |op: &str, bound: &DelegateBinding| {
+            let row = object([
+                ("schema", number(1)),
+                ("kind", string("delegate")),
+                ("event_id", string(format!("evt-{op}"))),
+                ("attempt_id", string(format!("att-{op}"))),
+                ("operation_id", string(op)),
+                ("task_id", string("task")),
+                ("provider", string("codex")),
+                ("base_sha", string(bound.base_sha())),
+                ("exit", number(0)),
+                ("verify_exit", number(0)),
+                ("verification", string("passed")),
+                ("state", string("review")),
+                ("no_change", Value::Bool(false)),
+                (
+                    "plan_binding",
+                    json::parse(&bound.encode().unwrap()).unwrap(),
+                ),
+                ("artifact", string(".oms/artifacts/report.md")),
+                ("artifact_sha256", string(json::sha(report_bytes))),
+                ("patch", string(".oms/artifacts/change.patch")),
+                ("patch_sha256", string(json::sha(patch_bytes))),
+            ]);
+            let mut raw = json::canonical(&row).unwrap();
+            raw.push(b'\n');
+            let index_file = repo.0.join(".oms/artifacts/index.jsonl");
+            std::fs::write(&index_file, raw).unwrap();
+            std::fs::set_permissions(&index_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+            row
+        };
+        let index = make_index("op-ff", &binding);
+        let review_req = Request::new(Action::Review)
+            .with("id", "task")
+            .with("lease-id", running.lease_id())
+            .with(
+                "artifact",
+                repo.0.join(".oms/artifacts/report.md").as_os_str(),
+            )
+            .with(
+                "patch",
+                repo.0.join(".oms/artifacts/change.patch").as_os_str(),
+            );
+        plan.execute_bound_task(&review_req, &running, Some(&index))
+            .unwrap();
+        assert!(!repo.0.join(".oms/plan/late-results.jsonl").exists());
+        let reviewed = plan.check_delegate_review(&binding, "op-ff").unwrap();
+        assert_eq!(reviewed.text("state"), "review");
+        let fence = plan.landing_review_fence(&reviewed, &moved_head).unwrap();
+        plan.check_landing_review(&fence).unwrap();
+
+        // Rewriting HEAD to a non-ancestor refuses landing with an actionable release hint.
+        let empty_tree = git_at(&repo.0, &["rev-parse", "HEAD^{tree}"]);
+        let unrelated = git_at(
+            &repo.0,
+            &["commit-tree", &empty_tree, "-m", "rewritten history"],
+        );
+        let _ = git_at(&repo.0, &["reset", "--hard", "-q", &unrelated]);
+        let refused = plan
+            .landing_review_fence(&reviewed, &unrelated)
+            .unwrap_err();
+        assert!(
+            refused.message.contains("is not an ancestor of HEAD")
+                && refused.message.contains("oms agent-plan release --id task"),
+            "{}",
+            refused.message
+        );
+
+        // Restore the fast-forwarded HEAD and verify Land + Finish complete cleanly.
+        let _ = git_at(&repo.0, &["reset", "--hard", "-q", &moved_head]);
+        let encoded_fence = String::from_utf8(fence.encode().unwrap()).unwrap();
+        plan.execute(
+            &Request::new(Action::Land)
+                .with("id", "task")
+                .with("lease-id", running.lease_id())
+                .with("expected-review-lease-id", running.lease_id())
+                .with("expected-review-patch", reviewed.text("patch"))
+                .with("expected-review-patch-sha256", index.text("patch_sha256"))
+                .with("expected-review-verify", "")
+                .with("expected-review-executor-id", "")
+                .with("expected-review-executor-soul-sha256", "")
+                .with("expected-review-binding", &encoded_fence),
+        )
+        .unwrap();
+        let landing_task = plan.load().unwrap().task("task").unwrap().clone();
+        let mut done_task = landing_task.clone();
+        done_task
+            .set("patch", string(reviewed.text("patch")))
+            .unwrap();
+        plan.execute(
+            &Request::new(Action::Finish)
+                .with("id", "task")
+                .with("lease-id", running.lease_id())
+                .with("patch", reviewed.text("patch"))
+                .with(
+                    "expected-landing-receipt-sha256",
+                    json::receipt_digest(&landing_task).unwrap(),
+                )
+                .with("expected-review-binding", &encoded_fence)
+                .with(
+                    "expected-landing-done-receipt-sha256",
+                    json::receipt_digest(&done_task).unwrap(),
+                ),
+        )
+        .unwrap();
+        plan.check_landing_done(
+            &plan.load().unwrap(),
+            "task",
+            Some(&fence),
+            index.text("patch_sha256"),
+        )
+        .unwrap();
+
+        // Stale delegate bindings at Review (non-ancestor base drift, task hash,
+        // and lease) surface repo-relative paths and the failed condition.
+        plan.execute(
+            &Request::new(Action::Add)
+                .with("id", "drift-task")
+                .with("title", "drift checks"),
+        )
+        .unwrap();
+        for case in ["base drift", "task hash", "lease"] {
+            let _ = git_at(&repo.0, &["reset", "--hard", "-q", &moved_head]);
+            let claim = json::parse(
+                &plan
+                    .execute(
+                        &Request::new(Action::Claim)
+                            .with("id", "drift-task")
+                            .with("provider", "codex")
+                            .flag("json"),
+                    )
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap();
+            let claim_binding = DelegateBinding::parse(
+                &json::canonical(&object([
+                    ("schema", number(1)),
+                    ("plan_id", claim.get("plan_id").clone()),
+                    ("task_id", string("drift-task")),
+                    ("task_sha256", claim.get("task_sha256").clone()),
+                    ("lease_id", claim.get("lease_id").clone()),
+                    ("lease_epoch", claim.get("lease_epoch").clone()),
+                    ("base_sha", string(&moved_head)),
+                ]))
+                .unwrap(),
+            )
+            .unwrap();
+            let run_binding = plan
+                .execute_bound_task(
+                    &Request::new(Action::Start)
+                        .with("id", "drift-task")
+                        .with("lease-id", claim_binding.lease_id()),
+                    &claim_binding,
+                    None,
+                )
+                .unwrap();
+            let mut drift_index = make_index(case.replace(' ', "-").as_str(), &claim_binding);
+            drift_index.set("task_id", string("drift-task")).unwrap();
+            let mut raw = json::canonical(&drift_index).unwrap();
+            raw.push(b'\n');
+            std::fs::write(repo.0.join(".oms/artifacts/index.jsonl"), raw).unwrap();
+            match case {
+                "base drift" => {
+                    let _ = git_at(&repo.0, &["reset", "--hard", "-q", &unrelated]);
+                }
+                "task hash" => {
+                    let mut later = context.clone();
+                    later.ts = "2099-01-01T00:00:00Z".into();
+                    Plan::open(later, &setup, &stop)
+                        .unwrap()
+                        .execute(
+                            &Request::new(Action::Touch)
+                                .with("id", "drift-task")
+                                .with("lease-id", run_binding.lease_id()),
+                        )
+                        .unwrap();
+                }
+                _ => {
+                    plan.execute(
+                        &Request::new(Action::Release)
+                            .with("id", "drift-task")
+                            .with("lease-id", run_binding.lease_id()),
+                    )
+                    .unwrap();
+                }
+            }
+            let err = plan
+                .execute_bound_task(
+                    &Request::new(Action::Review)
+                        .with("id", "drift-task")
+                        .with("lease-id", run_binding.lease_id())
+                        .with(
+                            "artifact",
+                            repo.0.join(".oms/artifacts/report.md").as_os_str(),
+                        )
+                        .with(
+                            "patch",
+                            repo.0.join(".oms/artifacts/change.patch").as_os_str(),
+                        ),
+                    &run_binding,
+                    Some(&drift_index),
+                )
+                .unwrap_err();
+            assert!(
+                err.message
+                    .contains(&format!("stale delegate binding ({case}); late result preserved in .oms/plan/late-results.jsonl"))
+                    && err.message.contains("task=drift-task")
+                    && err.message.contains("artifact=.oms/artifacts/report.md")
+                    && err.message.contains("patch=.oms/artifacts/change.patch"),
+                "{case}: {}",
+                err.message
+            );
+            if case != "lease" {
+                plan.execute(
+                    &Request::new(Action::Release)
+                        .with("id", "drift-task")
+                        .with("lease-id", run_binding.lease_id()),
+                )
+                .unwrap();
+            }
+        }
     }
 
     fn origin() -> oms_github::Slug {

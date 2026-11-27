@@ -484,6 +484,7 @@ struct Job<'a> {
     channel: Option<&'a mut dyn OwnedDuplexConsumer>,
     launch_fence: Option<&'a oms_command_peer::process::LaunchFence>,
     plan_services: Option<&'a dyn oms_command_plan::Services>,
+    stream: Option<&'a oms_command_peer::process::StreamTap>,
     #[cfg(target_os = "linux")]
     dispatch_observer: Option<protected_dispatch::Observer<'a>>,
 }
@@ -507,6 +508,7 @@ impl<'a> Job<'a> {
             channel: None,
             launch_fence: None,
             plan_services: None,
+            stream: None,
             #[cfg(target_os = "linux")]
             dispatch_observer: None,
         }
@@ -748,10 +750,16 @@ fn supervise_flags(
         if let Some(observer) = &mut dispatch_observer {
             observer.poll();
         }
-        if let Progress::Complete(mut done) = reactor
+        let progress = reactor
             .poll(id, Duration::from_millis(50))
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        if let Progress::Pending(snapshot) = &progress
+            && let Some(tap) = job.stream
+            && !snapshot.stdout.limited
         {
+            (tap.0)(&snapshot.stdout.bytes);
+        }
+        if let Progress::Complete(mut done) = progress {
             #[cfg(target_os = "linux")]
             if let Some(observer) = &mut dispatch_observer {
                 observer.poll();
@@ -1237,6 +1245,7 @@ fn peer_job<'a>(
         physical_call: input.physical_call.take(),
         launch_fence: input.launch_fence.as_ref(),
         plan_services,
+        stream: input.stream.as_ref(),
         #[cfg(target_os = "linux")]
         dispatch_observer,
         ..Job::new(argv, &input.cwd, input.timeout, input.max_bytes)
@@ -4048,6 +4057,7 @@ mod tests {
 
         let make_invocation = |heartbeat: Option<AttemptHeartbeat>| Invocation {
             argv: sh("true"),
+            stream: None,
             cwd: dir.path().to_owned(),
             input: None,
             environment: Vec::new(),
@@ -4140,6 +4150,7 @@ mod tests {
                         .unwrap(),
                     ),
                     heartbeat: None,
+                    stream: None,
                 },
                 &stop,
             )

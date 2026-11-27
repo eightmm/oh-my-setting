@@ -51,9 +51,15 @@ lock is acquired, so an expired lease cannot reuse an earlier Context timestamp.
 Bound Review requires the actual native delegate index and its verified
 artifact/patch bytes. Under the Plan lock, the owner checks the index and hashes,
 captures immutable files under the existing Plan artifact owner, and saves
-their references and original indexed provenance with Review. The selected
-immutable paths and digests also enable the ordinary exact review-evidence
-checks at admission, Land and Finish. Neither this bridge nor
+their references and original indexed provenance with Review. When the plan id,
+lease, epoch, task digest and contracts still match, bound Review admits a
+fast-forwarded checkout (`base_sha` is an ancestor of `HEAD`) while keeping the
+retained index bound to the original `base_sha`; landing re-verifies the patch
+against the current `HEAD` and refuses non-ancestor rewrites. Stale Review
+bindings append `stale_delegate_binding` to `.oms/plan/late-results.jsonl` and
+name the task, repository-relative artifact/patch paths and failed condition.
+The selected immutable paths and digests also enable the ordinary exact
+review-evidence checks at admission, Land and Finish. Neither this bridge nor
 an indexed worker exit grants completion or publication; changed and late
 results remain evidence without replacing a newer claimant.
 
