@@ -418,6 +418,37 @@ authorized `cwd` already has a project and returns an empty alias list.
 returns an error. A Codex control connection also requires the appropriate
 Room binding for actions on a conversation.
 
+Passing `cards: true` on a `catalog` binding adds `cards`: one bounded status
+card (at most 400 serialized bytes) per configured alias in alias order, read
+from the host’s `$XDG_CACHE_HOME/oh-my-setting/project-cards/` cache (fallback
+`~/.cache/oh-my-setting/project-cards/`, mode `0700` directory and `0600` files
+keyed by physical checkout path) without running a snapshot or Git subprocess on
+the request path. Omitting `cards`, passing `cards: false`, or reading a
+non-`catalog` binding leaves the response unchanged. Every successful
+`oms_panel_snapshot` for a configured alias updates its cached card, and nothing
+is written inside any project checkout. Each card derives `observedAt`,
+`branch`, `dirty`, `goal`, `plan` (`{done, total}`), `attention`, `next`,
+`active`, `main` (`"codex"`, `"claude"`, `"antigravity"`, or `null`), `crew`
+(up to three `{provider, role, id}` active worker entries), `crewTotal` (active
+worker count before the cap of three), and `degraded` from the snapshot
+dashboard. Each `crew[].id` is an opaque hash label that stays stable for a
+worker’s whole run and is not the raw attempt id. Each card carries one `state`:
+
+- `fresh`: cached card is at most 10 minutes old and at least as new as the
+  checkout’s `.git/HEAD`, `.git/index`, and `.oms/plan`;
+- `stale`: cached card is older than 10 minutes or older than `.git/HEAD`,
+  `.git/index`, or `.oms/plan` (`stat` only);
+- `missing`: checkout is valid, with no cached card stored yet;
+- `unavailable`: configured checkout is missing or invalid;
+- `withheld`: card failed the per-card outbound scan and is replaced with
+  `{alias, state: "withheld"}` so other projects still render.
+
+A `cards: true` call queues `missing` and `stale` aliases for background
+snapshot refresh off the request thread (at most two concurrent refreshes, one
+per alias, each with a deadline). A failed refresh leaves the previous card in
+place and records no diagnostic output. Delegated workers still cannot call
+`oms_list_projects`.
+
 Keep access to that map and SSH account restricted to the intended operators.
 Refresh OMS after changing the map to see the current choices. Each call on a
 mapped connection identifies a project by alias. The plugin accepts the

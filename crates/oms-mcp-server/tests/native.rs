@@ -135,6 +135,7 @@ impl Client {
             .env_remove("OMS_ROOM_PARTICIPANT")
             .env_remove("OMS_PANEL_PROJECTS_FILE")
             .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .env("XDG_CACHE_HOME", source.join("test-cache"))
             .arg(if tasks { "1" } else { "0" })
             .env("OMS_HARNESS_CHILD", if child { "1" } else { "0" })
             .env("OMS_HARNESS_DELEGATE_DEPTH", depth)
@@ -745,6 +746,618 @@ fn cross_host_project_reads() {
         reply["result"]["content"][0]["text"],
         "Project graph available in structuredContent."
     );
+    project_cards_catalog();
+}
+
+fn project_cards_catalog() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let set_mtime = |path: &Path, when: std::time::SystemTime| {
+        let d = when.duration_since(std::time::UNIX_EPOCH).unwrap();
+        let ts = rustix::fs::Timespec {
+            tv_sec: d.as_secs() as i64,
+            tv_nsec: d.subsec_nanos() as _,
+        };
+        let stamps = rustix::fs::Timestamps {
+            last_access: ts,
+            last_modification: ts,
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            path,
+            &stamps,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+    };
+    let tree_entries = |root: &Path| -> Vec<String> {
+        let mut items = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                items.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                if entry.file_type().unwrap().is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+        items.sort();
+        items
+    };
+
+    let tmp = Temp::new();
+    let source = tmp.source();
+    let repo = tmp.repo();
+
+    // Prepend trap binaries for git, gh, and ssh to prove no subprocesses spawn on cards:true.
+    let trap_bin = tmp.0.join("trap-bin");
+    std::fs::create_dir_all(&trap_bin).unwrap();
+    let trap_marker = source.join("unexpected-subprocess");
+    for tool_name in ["git", "gh", "ssh"] {
+        let bin = trap_bin.join(tool_name);
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"{tool_name}:$*\" >> '{}'\nexit 99\n",
+            trap_marker.display()
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut joined_paths = vec![trap_bin];
+    joined_paths.extend(std::env::split_paths(&inherited_path));
+    let trapped_path = std::env::join_paths(joined_paths).unwrap();
+
+    let spawn_trapped = |profile: &str, child: bool| {
+        let proc = Command::new(std::env::current_exe().unwrap())
+            .env_remove("PYTHONUTF8")
+            .env_remove("PYTHONIOENCODING")
+            .arg("--stdio")
+            .arg(&source)
+            .arg(&repo)
+            .arg(profile)
+            .env_remove("OMS_PANEL_REPO")
+            .env_remove("OMS_PANEL_PROJECTS")
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env_remove("OMS_PANEL_PROJECTS_FILE")
+            .env("PATH", &trapped_path)
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .env("XDG_CACHE_HOME", source.join("test-cache"))
+            .arg("0")
+            .env("OMS_HARNESS_CHILD", if child { "1" } else { "0" })
+            .env("OMS_HARNESS_DELEGATE_DEPTH", if child { "1" } else { "0" })
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        Client::from_child(proc)
+    };
+
+    let mut c = Client::with_depth(&source, &repo, "mcp-app", false, false, "0".as_ref());
+    let listed = c.call("tools/list", json!({}));
+    let list_tool = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "oms_list_projects")
+        .unwrap();
+    assert_eq!(
+        list_tool["inputSchema"]["properties"]["cards"]["type"],
+        "boolean"
+    );
+
+    // Delegated workers still cannot enumerate projects, with or without cards.
+    let mut worker = spawn_trapped("chatgpt-panel", true);
+    bad(
+        &worker.tool("oms_list_projects", json!({"cards": true})),
+        "delegated",
+    );
+    for invalid in [json!("true"), json!(1), json!(null), json!([])] {
+        bad(
+            &c.tool("oms_list_projects", json!({"cards": invalid})),
+            "cards must be a boolean",
+        );
+    }
+
+    // Unbound and cwd bindings leave the response byte-for-byte unchanged even with cards: true.
+    let unbound_plain = c.tool("oms_list_projects", json!({}));
+    let unbound_cards = c.tool("oms_list_projects", json!({"cards": true}));
+    assert_eq!(
+        unbound_plain["result"]["content"][0]["text"],
+        unbound_cards["result"]["content"][0]["text"]
+    );
+    assert_eq!(
+        unbound_plain["result"]["structuredContent"],
+        unbound_cards["result"]["structuredContent"]
+    );
+
+    let make_checkout = |name: &str| {
+        let dir = tmp.0.join(name);
+        std::fs::create_dir_all(dir.join(".oms/plan")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(dir.join(".git/index"), "index\n").unwrap();
+        std::fs::write(dir.join(".oms/plan/tasks.json"), "{}\n").unwrap();
+        dir
+    };
+    let alpha = make_checkout("alpha");
+    let beta = make_checkout("beta");
+    let missing_checkout = tmp.0.join("missing-checkout");
+    let alpha_before = tree_entries(&alpha);
+    let beta_before = tree_entries(&beta);
+
+    let cfg_dir = source.join("test-config/oh-my-setting");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let map_path = cfg_dir.join("desktop-projects.json");
+    let write_map = |val: Value| {
+        std::fs::write(&map_path, val.to_string()).unwrap();
+        std::fs::set_permissions(&map_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    write_map(json!({"alpha": alpha, "beta": beta, "gone": missing_checkout}));
+
+    // cards absent and cards: false are byte-for-byte identical.
+    let plain = c.tool("oms_list_projects", json!({}));
+    let false_cards = c.tool("oms_list_projects", json!({"cards": false}));
+    assert_eq!(
+        plain["result"]["content"][0]["text"],
+        false_cards["result"]["content"][0]["text"]
+    );
+    assert_eq!(
+        plain["result"]["structuredContent"],
+        false_cards["result"]["structuredContent"]
+    );
+    assert!(plain["result"]["structuredContent"].get("cards").is_none());
+
+    // Trapped server: cards: true returns missing/unavailable immediately while background refresh is gated,
+    // without spawning git, gh, or ssh, and without running oms on the request path.
+    let bg_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:00:00Z",
+            "branch": "main",
+            "git": {"available": true, "branch": "main", "dirty": false},
+            "goal": "Initial background goal",
+            "planProgress": {"verified": 2, "total": 4},
+            "attention": [{"summary": "Review PR"}],
+            "nextStep": {"id": "review", "summary": "Review pending PR", "scope": "repository"},
+            "active": 3,
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [
+                {"id": "main-1", "tool": "panel-main", "provider": "agy", "updated": "2026-11-27T06:00:00Z"},
+                {"id": "worker-b", "tool": "peer-delegate", "provider": "claude", "role": "reviewer", "created": "2026-11-27T05:56:00Z"},
+                {"id": "worker-a", "tool": "peer-delegate", "provider": "codex", "role": "impl", "created": "2026-11-27T05:55:00Z"}
+            ],
+            "degraded": false
+        }
+    });
+    fixture_settings(
+        &source,
+        json!({"snapshotGate": true, "stdout": bg_snap.to_string()}),
+    );
+    let mut trapped = spawn_trapped("mcp-app", false);
+    let initial_cards_reply = trapped.tool("oms_list_projects", json!({"cards": true}));
+    good(&initial_cards_reply);
+    assert!(!trap_marker.exists(), "git/gh/ssh must never spawn");
+    let initial_cards = payload(&initial_cards_reply)["cards"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(initial_cards.len(), 3);
+    assert_eq!(initial_cards[0]["alias"], "alpha");
+    assert_eq!(initial_cards[0]["state"], "missing");
+    assert_eq!(initial_cards[0]["main"], Value::Null);
+    assert_eq!(initial_cards[0]["crew"], json!([]));
+    assert_eq!(initial_cards[0]["crewTotal"], 0);
+    assert_eq!(initial_cards[1]["alias"], "beta");
+    assert_eq!(initial_cards[1]["state"], "missing");
+    assert_eq!(initial_cards[2]["alias"], "gone");
+    assert_eq!(initial_cards[2]["state"], "unavailable");
+    assert_eq!(initial_cards[2]["main"], Value::Null);
+    assert_eq!(initial_cards[2]["crew"], json!([]));
+    assert_eq!(initial_cards[2]["crewTotal"], 0);
+
+    // Verify cards absent remains byte-for-byte unchanged alongside cached cards once refreshed.
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        let cur = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        cur["cards"][0]["state"] == "fresh" && cur["cards"][1]["state"] == "fresh"
+    });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    let _ = std::fs::remove_file(source.join("snapshot-ready"));
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+
+    // Fresh cards: zero subprocesses at all (neither oms nor git/gh/ssh).
+    let fresh_reply = trapped.tool("oms_list_projects", json!({"cards": true}));
+    good(&fresh_reply);
+    assert!(!source.join("last-call.json").exists());
+    assert!(!trap_marker.exists());
+    let fresh_cards = payload(&fresh_reply)["cards"].as_array().unwrap().clone();
+    assert_eq!(fresh_cards[0]["state"], "fresh");
+    assert_eq!(fresh_cards[0]["goal"], "Initial background goal");
+    assert_eq!(fresh_cards[0]["plan"], json!({"done": 2, "total": 4}));
+    assert_eq!(fresh_cards[0]["attention"], 1);
+    assert_eq!(fresh_cards[0]["next"], "Review pending PR");
+    assert_eq!(fresh_cards[0]["active"], 3);
+    assert_eq!(fresh_cards[0]["main"], "antigravity");
+    assert_eq!(fresh_cards[0]["crewTotal"], 2);
+    let alpha_crew = fresh_cards[0]["crew"].as_array().unwrap();
+    assert_eq!(alpha_crew.len(), 2);
+    assert_eq!(alpha_crew[0]["provider"], "codex");
+    assert_eq!(alpha_crew[0]["role"], "impl");
+    assert_eq!(alpha_crew[1]["provider"], "claude");
+    assert_eq!(alpha_crew[1]["role"], "reviewer");
+    for (entry, raw_id) in alpha_crew.iter().zip(["worker-a", "worker-b"]) {
+        let cid = entry["id"].as_str().unwrap();
+        assert_eq!(cid.len(), 12);
+        assert!(
+            cid.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+        assert_ne!(cid, raw_id);
+    }
+    // Same attempt ids produce identical crew[].id across both projects and server processes.
+    assert_eq!(fresh_cards[0]["crew"], fresh_cards[1]["crew"]);
+    assert_eq!(fresh_cards[0]["dirty"], false);
+    assert_eq!(fresh_cards[0]["degraded"], false);
+    assert_eq!(fresh_cards[2]["state"], "unavailable");
+
+    // Cache files are 0600 inside a 0700 directory, and nothing is written in any checkout.
+    let cache_dir = source.join("test-cache/oh-my-setting/project-cards");
+    assert_eq!(
+        std::fs::symlink_metadata(&cache_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    let cached_files: Vec<_> = std::fs::read_dir(&cache_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(cached_files.len(), 2);
+    for file in &cached_files {
+        assert_eq!(
+            std::fs::symlink_metadata(file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(tree_entries(&alpha), alpha_before);
+    assert_eq!(tree_entries(&beta), beta_before);
+
+    // Fallback to ~/.cache/oh-my-setting/project-cards when XDG_CACHE_HOME is unset.
+    let fake_home = tmp.0.join("fallback-home");
+    std::fs::create_dir_all(&fake_home).unwrap();
+    fixture_settings(&source, json!({"stdout": bg_snap.to_string()}));
+    let mut home_fallback = Client::from_child(
+        Command::new(std::env::current_exe().unwrap())
+            .env_remove("PYTHONUTF8")
+            .env_remove("PYTHONIOENCODING")
+            .arg("--stdio")
+            .arg(&source)
+            .arg(&repo)
+            .arg("mcp-app")
+            .env_remove("OMS_PANEL_REPO")
+            .env_remove("OMS_PANEL_PROJECTS")
+            .env_remove("OMS_ROOM_PARTICIPANT")
+            .env_remove("OMS_PANEL_PROJECTS_FILE")
+            .env_remove("XDG_CACHE_HOME")
+            .env("HOME", &fake_home)
+            .env("XDG_CONFIG_HOME", source.join("test-config"))
+            .arg("0")
+            .env("OMS_HARNESS_CHILD", "0")
+            .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap(),
+    );
+    good(&home_fallback.tool("oms_panel_snapshot", json!({"project": "alpha"})));
+    let fallback_cache = fake_home.join(".cache/oh-my-setting/project-cards");
+    assert_eq!(
+        std::fs::symlink_metadata(&fallback_cache)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        payload(&home_fallback.tool("oms_list_projects", json!({"cards": true})))["cards"][0]["state"],
+        "fresh"
+    );
+    drop(home_fallback);
+    fixture_settings(
+        &source,
+        json!({"snapshotGate": true, "stdout": bg_snap.to_string()}),
+    );
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+
+    // Stat-only stale states from age (>10m), .git/HEAD, .git/index, and .oms/plan, with gated refresh.
+    let now = std::time::SystemTime::now();
+    for file in &cached_files {
+        set_mtime(file, now - Duration::from_secs(605));
+    }
+    let aged = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+    assert_eq!(aged["cards"][0]["state"], "stale");
+    assert_eq!(aged["cards"][1]["state"], "stale");
+    assert!(!trap_marker.exists());
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        let cur = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        cur["cards"][0]["state"] == "fresh" && cur["cards"][1]["state"] == "fresh"
+    });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    let _ = std::fs::remove_file(source.join("snapshot-ready"));
+
+    for (idx, marker) in [(0usize, ".git/HEAD"), (1, ".git/index")] {
+        let target = if idx == 0 { &alpha } else { &beta };
+        set_mtime(
+            &target.join(marker),
+            std::time::SystemTime::now() + Duration::from_secs(5),
+        );
+        let check = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        assert_eq!(check["cards"][idx]["state"], "stale", "{marker}");
+        assert!(!trap_marker.exists());
+    }
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        let cur = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        cur["cards"][0]["state"] == "fresh" && cur["cards"][1]["state"] == "fresh"
+    });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    set_mtime(
+        &alpha.join(".oms/plan"),
+        std::time::SystemTime::now() + Duration::from_secs(10),
+    );
+    let plan_stale = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+    assert_eq!(plan_stale["cards"][0]["state"], "stale");
+    assert_eq!(plan_stale["cards"][1]["state"], "fresh");
+    assert!(!trap_marker.exists());
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        payload(&trapped.tool("oms_list_projects", json!({"cards": true})))["cards"][0]["state"]
+            == "fresh"
+    });
+
+    // Old cache record without main, crew, or crewTotal still loads cleanly.
+    let legacy_cache = json!({
+        "schema": 1,
+        "observedAt": "2026-11-27T06:00:00Z",
+        "branch": "main",
+        "dirty": false,
+        "goal": "Old format cached goal",
+        "plan": {"done": 1, "total": 2},
+        "attention": 0,
+        "next": "",
+        "active": 0,
+        "degraded": false
+    });
+    for file in &cached_files {
+        std::fs::write(file, legacy_cache.to_string()).unwrap();
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let legacy_reply = trapped.tool("oms_list_projects", json!({"cards": true}));
+    good(&legacy_reply);
+    let legacy_cards = payload(&legacy_reply)["cards"].as_array().unwrap().clone();
+    assert_eq!(legacy_cards[0]["state"], "fresh");
+    assert_eq!(legacy_cards[0]["goal"], "Old format cached goal");
+    assert_eq!(legacy_cards[0]["main"], Value::Null);
+    assert_eq!(legacy_cards[0]["crew"], json!([]));
+    assert_eq!(legacy_cards[0]["crewTotal"], 0);
+    assert!(!trap_marker.exists());
+
+    // Verify conversationMain fallback, unknown provider -> null, crew order, and cap of 3 with crewTotal.
+    let crew_cap_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:08:00Z",
+            "goal": "Short",
+            "conversationMain": {"provider": "claude"},
+            "activeAttempts": [
+                {"id": "worker-d", "tool": "peer-delegate", "provider": "codex", "role": "fourth", "created": "2026-11-27T06:04:00Z"},
+                {"id": "worker-b", "tool": "peer-delegate", "provider": "agy", "role": "rev", "created": "2026-11-27T06:02:00Z"},
+                {"id": "worker-a", "tool": "peer-delegate", "provider": "codex", "role": "dev", "created": "2026-11-27T06:01:00Z"},
+                {"id": "worker-c", "tool": "peer-delegate", "provider": "pi", "role": "", "created": "2026-11-27T06:02:00Z"}
+            ],
+            "degraded": false
+        }
+    });
+    fixture_settings(&source, json!({"stdout": crew_cap_snap.to_string()}));
+    good(&c.tool("oms_panel_snapshot", json!({"project": "alpha"})));
+    let unknown_main_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:08:00Z",
+            "goal": "Unknown main",
+            "conversationMain": {"provider": "pi"},
+            "degraded": false
+        }
+    });
+    fixture_settings(&source, json!({"stdout": unknown_main_snap.to_string()}));
+    good(&c.tool("oms_panel_snapshot", json!({"project": "beta"})));
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+    let cap_cards = payload(&trapped.tool("oms_list_projects", json!({"cards": true})))["cards"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(cap_cards[0]["main"], "claude");
+    assert_eq!(cap_cards[0]["crewTotal"], 4);
+    let capped_crew = cap_cards[0]["crew"].as_array().unwrap();
+    assert_eq!(capped_crew.len(), 3);
+    assert_eq!(capped_crew[0]["provider"], "codex");
+    assert_eq!(capped_crew[0]["role"], "dev");
+    assert_eq!(capped_crew[0]["id"], alpha_crew[0]["id"]);
+    assert_eq!(capped_crew[1]["provider"], "antigravity");
+    assert_eq!(capped_crew[1]["role"], "rev");
+    assert_eq!(capped_crew[1]["id"], alpha_crew[1]["id"]);
+    assert_eq!(capped_crew[2]["provider"], Value::Null);
+    assert_eq!(capped_crew[2]["role"], Value::Null);
+    assert_eq!(cap_cards[1]["main"], Value::Null);
+    assert_eq!(cap_cards[1]["crew"], json!([]));
+    assert_eq!(cap_cards[1]["crewTotal"], 0);
+    fixture_settings(
+        &source,
+        json!({"snapshotGate": true, "stdout": bg_snap.to_string()}),
+    );
+
+    // Restore bg_snap into beta via aged refresh before testing withheld cards.
+    for file in &cached_files {
+        set_mtime(
+            file,
+            std::time::SystemTime::now() - Duration::from_secs(605),
+        );
+    }
+    let _ = trapped.tool("oms_list_projects", json!({"cards": true}));
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        let cur = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        cur["cards"][0]["state"] == "fresh"
+            && cur["cards"][0]["main"] == "antigravity"
+            && cur["cards"][1]["state"] == "fresh"
+            && cur["cards"][1]["main"] == "antigravity"
+    });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    let _ = std::fs::remove_file(source.join("snapshot-ready"));
+
+    // Write-through + per-card outbound scan: tripping role or goal withholds only that project
+    // with no main, crew, or crewTotal.
+    let runtime_tripped = ["gh", "p_", &"m".repeat(36)].concat();
+    let bad_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:10:00Z",
+            "branch": "main",
+            "git": {"available": true, "branch": "main", "dirty": false},
+            "goal": "Clean goal with tripping worker role",
+            "conversationMain": {"provider": "claude"},
+            "activeAttempts": [
+                {"id": "w1", "tool": "peer-delegate", "provider": "codex", "role": format!("r-{runtime_tripped}")}
+            ],
+            "degraded": false
+        }
+    });
+    fixture_settings(&source, json!({"stdout": bad_snap.to_string()}));
+    bad(
+        &c.tool("oms_panel_snapshot", json!({"project": "alpha"})),
+        "outbound scan",
+    );
+    let mixed = trapped.tool("oms_list_projects", json!({"cards": true}));
+    good(&mixed);
+    assert!(!mixed.to_string().contains(&runtime_tripped[..16]));
+    let mixed_cards = payload(&mixed)["cards"].as_array().unwrap().clone();
+    assert_eq!(
+        mixed_cards[0],
+        json!({"alias": "alpha", "state": "withheld"})
+    );
+    assert_eq!(mixed_cards[1]["alias"], "beta");
+    assert_eq!(mixed_cards[1]["state"], "fresh");
+    assert_eq!(mixed_cards[1]["goal"], "Initial background goal");
+    assert_eq!(mixed_cards[1]["main"], "antigravity");
+    assert_eq!(mixed_cards[2]["state"], "unavailable");
+
+    // 128-alias map fixture with 3 crew per card stays strictly below OUTPUT_LIMIT and per_card_cap.
+    let rich_snap = json!({
+        "schema": 1,
+        "kind": "oms-panel-snapshot",
+        "dashboard": {
+            "scope": "repository",
+            "updated": "2026-11-27T06:15:00Z",
+            "branch": "feature/overview-cards-bounded-128",
+            "git": {"available": true, "branch": "feature/overview-cards-bounded-128", "dirty": true},
+            "goal": "G".repeat(500),
+            "planProgress": {"verified": 12, "total": 24},
+            "attention": [{"summary": "a"}, {"summary": "b"}, {"summary": "c"}],
+            "nextStep": {"id": "step", "summary": "N".repeat(400), "scope": "repository"},
+            "active": 4,
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [
+                {"id": "main-rich", "tool": "panel-main", "provider": "agy", "updated": "2026-11-27T06:15:00Z"},
+                {"id": "crew-3", "tool": "peer-delegate", "provider": "agy", "role": "security-reviewer-worker", "created": "2026-11-27T06:13:00Z"},
+                {"id": "crew-1", "tool": "peer-delegate", "provider": "codex", "role": "backend-implementer-lead", "created": "2026-11-27T06:11:00Z"},
+                {"id": "crew-2", "tool": "peer-delegate", "provider": "claude", "role": "verification-specialist", "created": "2026-11-27T06:12:00Z"}
+            ],
+            "degraded": true
+        }
+    });
+    fixture_settings(&source, json!({"stdout": rich_snap.to_string()}));
+    let mut map_128 = serde_json::Map::new();
+    let root_128 = tmp.0.join("c128");
+    for i in 0..128 {
+        let alias_name = format!("p{i:03}");
+        let dir = root_128.join(&alias_name);
+        std::fs::create_dir_all(dir.join(".oms")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        map_128.insert(alias_name, json!(dir));
+    }
+    write_map(Value::Object(map_128));
+    for i in 0..128 {
+        good(&c.tool("oms_panel_snapshot", json!({"project": format!("p{i:03}")})));
+    }
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+    let worst_id = json!("\u{1}".repeat(1024));
+    let req_128 = json!({
+        "jsonrpc": "2.0",
+        "id": worst_id,
+        "method": "tools/call",
+        "params": {"name": "oms_list_projects", "arguments": {"cards": true}}
+    });
+    trapped.raw(format!("{req_128}\n").as_bytes());
+    let wire_128 = trapped.read_line();
+    assert!(
+        wire_128.ends_with('\n') && wire_128.len() < 60_000,
+        "128-alias wire bytes {} exceeded OUTPUT_LIMIT",
+        wire_128.len()
+    );
+    let parsed_128: Value = serde_json::from_str(&wire_128).unwrap();
+    good(&parsed_128);
+    let mut base_128 = parsed_128["result"]["structuredContent"].clone();
+    base_128.as_object_mut().unwrap().remove("cards");
+    let available_128 = 60_000usize
+        .saturating_sub(1024 * 6 + 256)
+        .saturating_sub(base_128.to_string().len())
+        .saturating_sub(256);
+    let per_card_cap_128 = (available_128 / 128).saturating_sub(2).min(400);
+    let cards_128 = parsed_128["result"]["structuredContent"]["cards"]
+        .as_array()
+        .unwrap();
+    assert_eq!(cards_128.len(), 128);
+    for (i, card) in cards_128.iter().enumerate() {
+        assert_eq!(card["alias"], format!("p{i:03}"));
+        assert_eq!(card["state"], "fresh");
+        assert_eq!(card["main"], "antigravity");
+        assert_eq!(card["crewTotal"], 3);
+        assert!(card["crew"].is_array());
+        assert!(
+            card.to_string().len() <= per_card_cap_128,
+            "card len {} exceeded per_card_cap {}",
+            card.to_string().len(),
+            per_card_cap_128
+        );
+    }
+    assert!(!source.join("last-call.json").exists());
+    assert!(!trap_marker.exists());
 }
 // Execute only the packaged remote shell command in a synthetic host. Its local
 // oms shim opens this fixture's real MCP server with the requested profile.

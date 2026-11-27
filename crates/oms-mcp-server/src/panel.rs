@@ -611,7 +611,12 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         make(
             PROJECTS,
             "List projects configured by the OMS host.",
-            json!({}),
+            json!({
+                "cards": {
+                    "type": "boolean",
+                    "description": "Include one cached status card per configured catalog alias without running a snapshot on the request path."
+                }
+            }),
             &[],
             false
         ),
@@ -1269,7 +1274,10 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                 };
             let mut text = data.to_string();
             let is_git_detail = data["git"].is_object() && data["github"].is_object();
-            if (data["dashboard"]["managedScratch"].is_object() || is_git_detail)
+            let is_project_cards = data["cards"].is_array();
+            if (data["dashboard"]["managedScratch"].is_object()
+                || is_git_detail
+                || is_project_cards)
                 && crate::value::encode(
                     &json!({"content":[{"type":"text","text":&text}],"structuredContent":&data,"isError":false}),
                     true,
@@ -1279,10 +1287,12 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                 )
                 .len()
                     + FRAME_RESERVE
-                    > crate::OUTPUT_LIMIT
+                    >= crate::OUTPUT_LIMIT
             {
                 text = if is_git_detail {
                     "Git and GitHub status available in structuredContent.".into()
+                } else if is_project_cards {
+                    "Project catalog and cached cards available in structuredContent.".into()
                 } else {
                     "Project dashboard. Canonical status and managed scratch lifecycle observations are in structuredContent.".into()
                 };
@@ -1295,9 +1305,9 @@ pub(super) fn response(data: PanelResult<Value>) -> Value {
                 )
                 .len()
                     + FRAME_RESERVE
-                    > crate::OUTPUT_LIMIT
+                    >= crate::OUTPUT_LIMIT
                 {
-                    return response(Err(if is_git_detail {
+                    return response(Err(if is_git_detail || is_project_cards {
                         "OMS desktop detail exceeds the response limit.".into()
                     } else {
                         "OMS panel snapshot exceeds its output limit.".into()
@@ -1447,7 +1457,7 @@ impl Server<'_> {
                     return error(id, -32602, "unknown project read tool");
                 }
                 let allowed: &[&str] = match name {
-                    PROJECTS => &[],
+                    PROJECTS => &["cards"],
                     OPEN => &["project", "leadConversations"],
                     OPEN_LEADS => &["project", "room", "projectKey", "providers"],
                     PREPARE_LEAD_CONTEXT => &[
@@ -1782,87 +1792,14 @@ impl Server<'_> {
         args: Vec<OsString>,
         allow_partial: bool,
     ) -> PanelResult<(String, bool)> {
-        let request = CommandRequest {
-            args: &args,
-            cwd: repo,
-            timeout: Duration::from_secs(30),
-            interrupted: self.interrupted,
-        };
-        let output = self.executor.execute(&request).map_err(|_| "OMS could not confirm the request outcome. Refresh project status before retrying.")?;
-        if output.code != 0 && !(allow_partial && output.code == 1) {
-            // Never return captured diagnostic prefixes. In particular the
-            // capture may end in the middle of a credential or private path.
-            let known = [
-                (
-                    "Room chat unavailable for this conversation",
-                    "The current conversation is no longer the confirmed Main of that Room. Refresh the panel.",
-                ),
-                (
-                    "attempt unavailable for this Room participant",
-                    "This attempt is unavailable for the selected Room participant.",
-                ),
-                (
-                    "evidence binding changed during collection",
-                    "The selected attempt changed. Refresh the participant reader.",
-                ),
-                (
-                    "room id already exists",
-                    "This request is already reserved. Use oms_start_status with its original requestId.",
-                ),
-                (
-                    "live or unverified",
-                    "A Main is already active or its previous state is unverified.",
-                ),
-                (
-                    "tmux on",
-                    "The OMS execution host requires tmux to launch a Main.",
-                ),
-                (
-                    "CLI on PATH",
-                    "The selected Main is unavailable on this execution host.",
-                ),
-                (
-                    "desktop Main startup is unconfirmed",
-                    "The Main start was submitted. Use oms_start_status with its original requestId to check its lifecycle.",
-                ),
-                (
-                    "stale or mismatched",
-                    "The approval question changed. Refresh the approval list.",
-                ),
-                (
-                    "room_inventory_incomplete",
-                    "room_inventory_incomplete: OMS could not verify unique assignment ownership within the Room inventory limits.",
-                ),
-                (
-                    "conversation is not the owner",
-                    "The current conversation is not the confirmed Main of that Room.",
-                ),
-                (
-                    "assignment needs",
-                    "The assignment needs a supported provider, title, task and request UUID.",
-                ),
-                (
-                    "message id conflicts",
-                    "That question or request already has different recorded content.",
-                ),
-                (
-                    "invalid project repository",
-                    "The selected project is not a valid OMS or Git repository.",
-                ),
-            ];
-            return Err(known
-                .iter()
-                .find(|(needle, _)| output.stderr.contains(needle))
-                .map_or(
-                    "OMS refused the operation. Refresh the project and check the host runtime.",
-                    |(_, safe)| *safe,
-                )
-                .into());
-        }
-        if output.stdout_bytes > output.stdout.len() {
-            return Err("OMS response exceeds the desktop capture limit.".into());
-        }
-        Ok((output.stdout, output.code != 0))
+        execute_panel_output(
+            self.executor.as_ref(),
+            self.interrupted,
+            repo,
+            args,
+            allow_partial,
+            Duration::from_secs(30),
+        )
     }
 
     fn issue_preview(&self, repo: &Path, args: &Value) -> PanelResult<Value> {
@@ -1937,6 +1874,13 @@ impl Server<'_> {
         if name == PROJECTS {
             if crate::delegated() {
                 return Err("A delegated worker cannot enumerate desktop projects.".into());
+            }
+            let include_cards = match args.get("cards") {
+                None => false,
+                Some(v) => v.as_bool().ok_or("cards must be a boolean.")?,
+            };
+            if include_cards {
+                return self.list_projects_with_cards(args);
             }
             let projects = configured_projects()?;
             let binding = if !projects.is_empty() {
@@ -3657,70 +3601,18 @@ impl Server<'_> {
         if dashboard.to_string().len() > crate::OUTPUT_LIMIT {
             return Err("OMS panel snapshot exceeds its output limit.".into());
         }
+        self.write_through_project_card(repo, &dashboard);
         Ok(dashboard)
     }
 
     fn panel_snapshot_projection(&self, repo: &Path, meta: &Value) -> PanelResult<Value> {
-        let mut argv = vec![
-            "dashboard".into(),
-            "--repo".into(),
-            repo.as_os_str().into(),
-            "--json".into(),
-            "--panel-snapshot".into(),
-        ];
-        // Codex supplies threadId on each call, outside model/widget arguments.
-        // Only its native consumer hash leaves this process; it grants no authority.
-        let thread = meta["threadId"].as_str().filter(|v| uuid(v));
-        if let Some(thread) = thread {
-            argv.extend([
-                "--conversation-digest".into(),
-                crate::storage::hash(thread)[..32].into(),
-            ]);
-        }
-        let (report, partial) = self.panel_exec(repo, argv, true)?;
-        if report["kind"] != "oms-panel-snapshot"
-            || report["schema"] != 1
-            || !report["dashboard"].is_object()
-        {
-            return Err("Unsupported OMS panel snapshot version.".into());
-        }
-        let mut dashboard = report["dashboard"].clone();
-        let main = &dashboard["conversationMain"];
-        let room_id = |v: &Value| {
-            v.as_str().is_some_and(|s| {
-                (1..=160).contains(&s.len())
-                    && !s.starts_with(['-', '.'])
-                    && s.bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-            })
-        };
-        let harness_unverified = !main["harness"].is_null()
-            && !(thread.is_some()
-                && dashboard["conversationBinding"] == "matched"
-                && main["source"] == "room-session"
-                && main["provider"] == "codex"
-                && main["state"] == "joined"
-                && room_id(&main["room"])
-                && room_id(&main["participant"])
-                && matches!(main["harness"].as_str(), Some("codex" | "pi")));
-        if harness_unverified {
-            dashboard["conversationMain"]["harness"] = Value::Null;
-        }
-        if partial || harness_unverified {
-            let was_degraded = dashboard["degraded"] == true;
-            dashboard["degraded"] = json!(true);
-            if dashboard["observation"].is_object()
-                && (harness_unverified
-                    || !was_degraded
-                    || dashboard["observation"]["completeness"] == "complete")
-            {
-                if dashboard["observation"]["completeness"] == "complete" {
-                    dashboard["observation"]["completeness"] = json!("partial");
-                }
-                dashboard["observation"]["revision"] = Value::Null;
-            }
-        }
-        Ok(dashboard)
+        execute_panel_snapshot(
+            self.executor.as_ref(),
+            self.interrupted,
+            repo,
+            meta,
+            Duration::from_secs(30),
+        )
     }
 
     fn panel_capabilities(&self, repo: &Path, args: &Value) -> PanelResult<Value> {
@@ -3736,6 +3628,1388 @@ impl Server<'_> {
         crate::output::outbound(stdout.as_bytes(), &Value::Null)
             .map_err(|_| "OMS withheld this response during its outbound scan".to_owned())?;
         command_catalog(&stdout, offset)
+    }
+
+    fn configured_projects_for_cards(&self) -> PanelResult<BTreeMap<String, PathBuf>> {
+        #[cfg(test)]
+        if let Some(projects) = &self.project_cards.0.inner.projects_override {
+            return Ok(projects.clone());
+        }
+        configured_projects()
+    }
+
+    fn card_cache_dir(&self) -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(dir) = &self.project_cards.0.inner.cache_override {
+            return Some(dir.clone());
+        }
+        default_card_cache_root()
+    }
+
+    fn stat_only_catalog_repo(&self, pin: &Path) -> Option<PathBuf> {
+        if !pin.is_absolute()
+            || pin.canonicalize().ok().as_deref() != Some(pin)
+            || checkout(pin).ok() != Some(true)
+            || (crate::delegated() && pin != self.caller_cwd)
+            || !stat_only_env_and_root_ok(pin, crate::delegated())
+        {
+            return None;
+        }
+        Some(pin.to_owned())
+    }
+
+    fn stat_only_panel_repo(&self, args: &Value) -> PanelResult<PathBuf> {
+        let map = self.configured_projects_for_cards()?;
+        let pin = if map.is_empty() {
+            if args.get("project").is_some() {
+                return Err(BINDING.into());
+            }
+            std::env::var_os("OMS_PANEL_REPO").map(PathBuf::from)
+        } else {
+            let id = args["project"].as_str().ok_or(BINDING)?;
+            Some(map.get(id).ok_or(BINDING)?.clone())
+        };
+        if self.config.profile == ToolProfile::McpApp && pin.is_none() {
+            return Err(BINDING.into());
+        }
+        let repo = if let Some(pin) = pin {
+            if !pin.is_absolute()
+                || pin.canonicalize().map_err(|_| BINDING)? != pin
+                || !checkout(&pin)?
+            {
+                return Err(BINDING.into());
+            }
+            pin
+        } else {
+            if self.caller_cwd.ancestors().any(|dir| {
+                dir.ends_with("plugins/cache")
+                    || dir.ends_with(".agents/plugins")
+                    || dir.join("plugin.json").is_file()
+                    || dir.join(".codex-plugin/plugin.json").is_file()
+            }) {
+                return Err(BINDING.into());
+            }
+            let mut found = None;
+            for dir in self.caller_cwd.ancestors() {
+                if checkout(dir)? {
+                    found = Some(dir.to_owned());
+                    break;
+                }
+            }
+            found.ok_or(BINDING)?
+        };
+        if (crate::delegated() && repo != self.caller_cwd)
+            || !stat_only_env_and_root_ok(&repo, crate::delegated())
+        {
+            return Err(BINDING.into());
+        }
+        Ok(repo)
+    }
+
+    fn write_through_project_card(&self, repo: &Path, dashboard: &Value) {
+        let Ok(projects) = self.configured_projects_for_cards() else {
+            return;
+        };
+        if projects.is_empty() {
+            return;
+        }
+        let matches_alias = projects
+            .values()
+            .any(|path| path == repo || path.canonicalize().ok().as_deref() == Some(repo));
+        if !matches_alias {
+            return;
+        }
+        let Some(cache_dir) = self.card_cache_dir() else {
+            return;
+        };
+        let card = StoredProjectCard::from_dashboard(dashboard);
+        let _ = write_cached_card(&cache_dir, repo, &card);
+    }
+
+    fn list_projects_with_cards(&self, args: &Value) -> PanelResult<Value> {
+        let projects = self.configured_projects_for_cards()?;
+        let binding = if !projects.is_empty() {
+            "catalog"
+        } else if std::env::var_os("OMS_PANEL_REPO").is_some() {
+            self.stat_only_panel_repo(args)?;
+            "pinned"
+        } else if self.stat_only_panel_repo(args).is_ok() {
+            "cwd"
+        } else {
+            "unbound"
+        };
+        let mut keys = json!({});
+        let mut resolved_repos: BTreeMap<String, Option<PathBuf>> = BTreeMap::new();
+        for (alias_name, configured_path) in &projects {
+            let valid_repo = self.stat_only_catalog_repo(configured_path);
+            if let Some(repo) = &valid_repo
+                && let Ok(key) = oms_command_plan::reviewed_context::project_key(repo)
+            {
+                keys[alias_name.as_str()] = json!(key);
+            }
+            resolved_repos.insert(alias_name.clone(), valid_repo);
+        }
+        let key = if matches!(binding, "pinned" | "cwd") {
+            self.stat_only_panel_repo(args)
+                .and_then(|repo| {
+                    oms_command_plan::reviewed_context::project_key(&repo)
+                        .map_err(|_| BINDING.to_owned())
+                })
+                .ok()
+        } else {
+            None
+        };
+        let alias_list = projects.keys().cloned().collect::<Vec<_>>();
+        let mut out = json!({
+            "projects": alias_list,
+            "projectKeys": keys,
+            "projectKey": key,
+            "binding": binding,
+            "readOnly": self.config.profile == ToolProfile::McpApp,
+        });
+        if binding != "catalog" {
+            return Ok(out);
+        }
+        let cache_dir = self.card_cache_dir();
+        let now = std::time::SystemTime::now();
+        let observed = std::time::Instant::now();
+        let base_bytes = out.to_string().len();
+        let count = projects.len().max(1);
+        let available_for_cards = crate::OUTPUT_LIMIT
+            .saturating_sub(FRAME_RESERVE)
+            .saturating_sub(base_bytes)
+            .saturating_sub(256);
+        let per_card_cap = (available_for_cards / count)
+            .saturating_sub(2)
+            .min(CARD_MAX_BYTES);
+        let mut cards = Vec::with_capacity(projects.len());
+        let mut to_refresh = Vec::new();
+        for alias_name in projects.keys() {
+            let Some(Some(repo)) = resolved_repos.get(alias_name) else {
+                cards.push(render_project_card(
+                    alias_name,
+                    "unavailable",
+                    None,
+                    per_card_cap,
+                ));
+                continue;
+            };
+            match cache_dir
+                .as_deref()
+                .and_then(|dir| read_cached_card(dir, repo))
+            {
+                Some((stored, card_mtime)) => {
+                    let stale = card_is_stale(repo, card_mtime, now);
+                    let state = if stale { "stale" } else { "fresh" };
+                    if stale {
+                        to_refresh.push((alias_name.clone(), repo.clone(), cache_dir.clone()));
+                    }
+                    cards.push(render_project_card(
+                        alias_name,
+                        state,
+                        Some(&stored),
+                        per_card_cap,
+                    ));
+                }
+                None => {
+                    to_refresh.push((alias_name.clone(), repo.clone(), cache_dir.clone()));
+                    cards.push(render_project_card(
+                        alias_name,
+                        "missing",
+                        None,
+                        per_card_cap,
+                    ));
+                }
+            }
+        }
+        if !to_refresh.is_empty() {
+            self.project_cards.enqueue_batch(to_refresh, observed);
+        }
+        out["cards"] = Value::Array(cards);
+        Ok(out)
+    }
+}
+
+const CARD_MAX_BYTES: usize = 400;
+const CARD_GOAL_MAX_BYTES: usize = 120;
+const CARD_NEXT_MAX_BYTES: usize = 100;
+const CARD_BRANCH_MAX_BYTES: usize = 80;
+const CARD_ROLE_MAX_BYTES: usize = 24;
+const CARD_CREW_MAX_ITEMS: usize = 3;
+const CARD_CACHE_MAX_BYTES: usize = 4096;
+const CARD_FRESH_WINDOW: Duration = Duration::from_secs(10 * 60);
+const CARD_REFRESH_DEADLINE: Duration = Duration::from_secs(15);
+const MAX_CONCURRENT_CARD_REFRESHES: usize = 2;
+const CARD_REFRESH_BACKOFF: Duration = Duration::from_secs(5 * 60);
+
+fn execute_panel_output(
+    executor: &dyn crate::CommandExecutor,
+    interrupted: &std::sync::atomic::AtomicBool,
+    repo: &Path,
+    args: Vec<OsString>,
+    allow_partial: bool,
+    timeout: Duration,
+) -> PanelResult<(String, bool)> {
+    let request = CommandRequest {
+        args: &args,
+        cwd: repo,
+        timeout,
+        interrupted,
+    };
+    let output = executor.execute(&request).map_err(
+        |_| "OMS could not confirm the request outcome. Refresh project status before retrying.",
+    )?;
+    if output.code != 0 && !(allow_partial && output.code == 1) {
+        // Never return captured diagnostic prefixes. In particular the
+        // capture may end in the middle of a credential or private path.
+        let known = [
+            (
+                "Room chat unavailable for this conversation",
+                "The current conversation is no longer the confirmed Main of that Room. Refresh the panel.",
+            ),
+            (
+                "attempt unavailable for this Room participant",
+                "This attempt is unavailable for the selected Room participant.",
+            ),
+            (
+                "evidence binding changed during collection",
+                "The selected attempt changed. Refresh the participant reader.",
+            ),
+            (
+                "room id already exists",
+                "This request is already reserved. Use oms_start_status with its original requestId.",
+            ),
+            (
+                "live or unverified",
+                "A Main is already active or its previous state is unverified.",
+            ),
+            (
+                "tmux on",
+                "The OMS execution host requires tmux to launch a Main.",
+            ),
+            (
+                "CLI on PATH",
+                "The selected Main is unavailable on this execution host.",
+            ),
+            (
+                "desktop Main startup is unconfirmed",
+                "The Main start was submitted. Use oms_start_status with its original requestId to check its lifecycle.",
+            ),
+            (
+                "stale or mismatched",
+                "The approval question changed. Refresh the approval list.",
+            ),
+            (
+                "room_inventory_incomplete",
+                "room_inventory_incomplete: OMS could not verify unique assignment ownership within the Room inventory limits.",
+            ),
+            (
+                "conversation is not the owner",
+                "The current conversation is not the confirmed Main of that Room.",
+            ),
+            (
+                "assignment needs",
+                "The assignment needs a supported provider, title, task and request UUID.",
+            ),
+            (
+                "message id conflicts",
+                "That question or request already has different recorded content.",
+            ),
+            (
+                "invalid project repository",
+                "The selected project is not a valid OMS or Git repository.",
+            ),
+        ];
+        return Err(known
+            .iter()
+            .find(|(needle, _)| output.stderr.contains(needle))
+            .map_or(
+                "OMS refused the operation. Refresh the project and check the host runtime.",
+                |(_, safe)| *safe,
+            )
+            .into());
+    }
+    if output.stdout_bytes > output.stdout.len() {
+        return Err("OMS response exceeds the desktop capture limit.".into());
+    }
+    Ok((output.stdout, output.code != 0))
+}
+
+fn execute_panel_snapshot(
+    executor: &dyn crate::CommandExecutor,
+    interrupted: &std::sync::atomic::AtomicBool,
+    repo: &Path,
+    meta: &Value,
+    timeout: Duration,
+) -> PanelResult<Value> {
+    let mut argv = vec![
+        "dashboard".into(),
+        "--repo".into(),
+        repo.as_os_str().into(),
+        "--json".into(),
+        "--panel-snapshot".into(),
+    ];
+    // Codex supplies threadId on each call, outside model/widget arguments.
+    // Only its native consumer hash leaves this process; it grants no authority.
+    let thread = meta["threadId"].as_str().filter(|v| uuid(v));
+    if let Some(thread) = thread {
+        argv.extend([
+            "--conversation-digest".into(),
+            crate::storage::hash(thread)[..32].into(),
+        ]);
+    }
+    let (stdout, partial) = execute_panel_output(executor, interrupted, repo, argv, true, timeout)?;
+    let report = crate::value::from_str(&stdout).map_err(|_| "Unreadable OMS response.")?;
+    if report["kind"] != "oms-panel-snapshot"
+        || report["schema"] != 1
+        || !report["dashboard"].is_object()
+    {
+        return Err("Unsupported OMS panel snapshot version.".into());
+    }
+    let mut dashboard = report["dashboard"].clone();
+    let main = &dashboard["conversationMain"];
+    let room_id = |v: &Value| {
+        v.as_str().is_some_and(|s| {
+            (1..=160).contains(&s.len())
+                && !s.starts_with(['-', '.'])
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
+    };
+    let harness_unverified = !main["harness"].is_null()
+        && !(thread.is_some()
+            && dashboard["conversationBinding"] == "matched"
+            && main["source"] == "room-session"
+            && main["provider"] == "codex"
+            && main["state"] == "joined"
+            && room_id(&main["room"])
+            && room_id(&main["participant"])
+            && matches!(main["harness"].as_str(), Some("codex" | "pi")));
+    if harness_unverified {
+        dashboard["conversationMain"]["harness"] = Value::Null;
+    }
+    if partial || harness_unverified {
+        let was_degraded = dashboard["degraded"] == true;
+        dashboard["degraded"] = json!(true);
+        if dashboard["observation"].is_object()
+            && (harness_unverified
+                || !was_degraded
+                || dashboard["observation"]["completeness"] == "complete")
+        {
+            if dashboard["observation"]["completeness"] == "complete" {
+                dashboard["observation"]["completeness"] = json!("partial");
+            }
+            dashboard["observation"]["revision"] = Value::Null;
+        }
+    }
+    Ok(dashboard)
+}
+
+fn stat_only_env_and_root_ok(repo: &Path, is_delegated: bool) -> bool {
+    let matches_env_dir = |var_name: &str| {
+        std::env::var_os(var_name)
+            .filter(|v| !v.is_empty())
+            .is_none_or(|v| Path::new(&v).canonicalize().ok().as_deref() == Some(repo))
+    };
+    if !matches_env_dir("OMS_STATE_REPO")
+        || !matches_env_dir(oms_reference::repository::EXECUTION_ENV)
+    {
+        return false;
+    }
+    if std::env::var_os("OMS_ROOM_ID").is_some_and(|v| !v.is_empty())
+        && !matches_env_dir("OMS_ROOM_REPO")
+    {
+        return false;
+    }
+    if !is_delegated
+        && let Some(parent) = oms_reference::repository::managed_scratch_parent(repo)
+        && parent.join(".oh-my-setting-tmp").symlink_metadata().is_ok()
+    {
+        return false;
+    }
+    if !oms_safe_fs::has_git_marker(repo)
+        && repo.ancestors().skip(1).any(oms_safe_fs::has_git_marker)
+    {
+        return false;
+    }
+    true
+}
+
+fn stat_only_checkout_ok(repo: &Path) -> bool {
+    repo.is_absolute()
+        && repo.canonicalize().ok().as_deref() == Some(repo)
+        && checkout(repo).ok() == Some(true)
+        && stat_only_env_and_root_ok(repo, false)
+}
+
+fn default_card_cache_root() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()) {
+        let base = PathBuf::from(xdg);
+        return base
+            .is_absolute()
+            .then(|| base.join("oh-my-setting/project-cards"));
+    }
+    let home = std::env::var_os("HOME").filter(|v| !v.is_empty())?;
+    let base = PathBuf::from(home);
+    base.is_absolute()
+        .then(|| base.join(".cache/oh-my-setting/project-cards"))
+}
+
+fn card_cache_file_name(physical_repo: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    format!(
+        "{}.json",
+        crate::storage::hash(physical_repo.as_os_str().as_bytes())
+    )
+}
+
+fn open_card_cache_dir(cache_dir: &Path, create: bool) -> Option<std::os::fd::OwnedFd> {
+    use rustix::fs::{FileType, Mode, OFlags};
+    use std::os::unix::fs::DirBuilderExt;
+
+    if !cache_dir.is_absolute() {
+        return None;
+    }
+    let parent = cache_dir.parent()?;
+    if create {
+        if !parent.exists() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .ok()?;
+        }
+        if !parent.symlink_metadata().ok()?.file_type().is_dir() {
+            return None;
+        }
+        match rustix::fs::mkdir(cache_dir, Mode::from_raw_mode(0o700)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => (),
+            Err(_) => return None,
+        }
+    } else if !parent.symlink_metadata().ok()?.file_type().is_dir() {
+        return None;
+    }
+    let fd = rustix::fs::open(
+        cache_dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    let st = rustix::fs::fstat(&fd).ok()?;
+    if FileType::from_raw_mode(st.st_mode) != FileType::Directory
+        || st.st_uid != rustix::process::geteuid().as_raw()
+    {
+        return None;
+    }
+    if st.st_mode & 0o777 != 0o700 {
+        if create {
+            rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o700)).ok()?;
+            let updated = rustix::fs::fstat(&fd).ok()?;
+            if updated.st_mode & 0o077 != 0 {
+                return None;
+            }
+        } else if st.st_mode & 0o077 != 0 {
+            return None;
+        }
+    }
+    Some(fd)
+}
+
+fn clean_card_line(raw: &str, max_bytes: usize) -> String {
+    let mut normalized = String::with_capacity(raw.len().min(max_bytes + 16));
+    let mut prev_newline_cr = false;
+    for ch in raw.chars() {
+        if ch == '\r' {
+            normalized.push(' ');
+            prev_newline_cr = true;
+            continue;
+        }
+        if ch == '\n' {
+            if !prev_newline_cr {
+                normalized.push(' ');
+            }
+            prev_newline_cr = false;
+            continue;
+        }
+        prev_newline_cr = false;
+        if ch == '\t' {
+            normalized.push(' ');
+        } else if !ch.is_control() {
+            normalized.push(ch);
+        }
+    }
+    let trimmed = normalized.trim();
+    crate::storage::byte_prefix(trimmed, max_bytes)
+        .trim_end()
+        .to_owned()
+}
+
+fn valid_card_iso(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && !value.chars().any(char::is_control)
+        && (value.ends_with('Z') || value.ends_with("+00:00"))
+        && value.as_bytes().get(10) == Some(&b'T')
+        && chrono::DateTime::parse_from_rfc3339(value)
+            .is_ok_and(|dt| dt.offset().local_minus_utc() == 0)
+}
+
+fn normalize_card_provider(raw: Option<&str>) -> Option<&'static str> {
+    match raw {
+        Some("codex") => Some("codex"),
+        Some("claude") => Some("claude"),
+        Some("antigravity" | "agy") => Some("antigravity"),
+        _ => None,
+    }
+}
+
+fn crew_id_from_attempt(attempt_id: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in attempt_id.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")[..12].to_owned()
+}
+
+fn valid_crew_id(value: &str) -> bool {
+    value.len() == 12
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn compare_rfc3339_or_str(a: &str, b: &str) -> std::cmp::Ordering {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(da), Ok(db)) => da.cmp(&db).then_with(|| a.cmp(b)),
+        _ => a.cmp(b),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredCrewMember {
+    provider: Option<String>,
+    role: Option<String>,
+    id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredProjectCard {
+    observed_at: Option<String>,
+    branch: Option<String>,
+    dirty: Option<bool>,
+    goal: String,
+    plan: Option<(u64, u64)>,
+    attention: u64,
+    next: String,
+    active: u64,
+    main: Option<String>,
+    crew: Vec<StoredCrewMember>,
+    crew_total: u64,
+    degraded: bool,
+    withheld: bool,
+}
+
+impl StoredProjectCard {
+    fn from_dashboard(dashboard: &Value) -> Self {
+        let observed_at = dashboard["updated"]
+            .as_str()
+            .filter(|s| valid_card_iso(s))
+            .or_else(|| {
+                dashboard["observation"]["observedAt"]
+                    .as_str()
+                    .filter(|s| valid_card_iso(s))
+            })
+            .map(str::to_owned);
+        let raw_branch = dashboard["branch"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                dashboard["git"]["branch"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+            });
+        let raw_goal = dashboard["goal"].as_str().unwrap_or("");
+        let raw_next = if dashboard["nextStep"].is_object() {
+            dashboard["nextStep"]["summary"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| dashboard["nextStep"]["id"].as_str())
+                .unwrap_or("")
+        } else {
+            dashboard["nextStep"].as_str().unwrap_or("")
+        };
+        let active_attempts = dashboard["activeAttempts"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut latest_panel_main: Option<&Value> = None;
+        let mut worker_rows: Vec<(&str, &Value)> = Vec::new();
+        let mut role_withheld = false;
+        for row in active_attempts {
+            if !row.is_object() {
+                continue;
+            }
+            if row["tool"].as_str() == Some("panel-main") {
+                latest_panel_main = Some(match latest_panel_main {
+                    None => row,
+                    Some(prev) => {
+                        let prev_ts = prev["updated"].as_str().filter(|s| !s.trim().is_empty());
+                        let cur_ts = row["updated"].as_str().filter(|s| !s.trim().is_empty());
+                        let newer = match (prev_ts, cur_ts) {
+                            (None, Some(_)) => true,
+                            (Some(p), Some(c)) => compare_rfc3339_or_str(c, p).is_gt(),
+                            _ => false,
+                        };
+                        if newer { row } else { prev }
+                    }
+                });
+                continue;
+            }
+            if let Some(raw_role) = row["role"].as_str()
+                && !raw_role.is_empty()
+                && crate::output::outbound(raw_role.as_bytes(), &Value::Null).is_err()
+            {
+                role_withheld = true;
+            }
+            if let Some(attempt_id) = row["id"].as_str().filter(|s| !s.trim().is_empty()) {
+                worker_rows.push((attempt_id, row));
+            }
+        }
+        let raw_main_provider = latest_panel_main
+            .map(|row| row["provider"].as_str())
+            .unwrap_or_else(|| dashboard["conversationMain"]["provider"].as_str());
+        let source_withheld = role_withheld
+            || [raw_branch.unwrap_or(""), raw_goal, raw_next]
+                .into_iter()
+                .any(|s| {
+                    !s.is_empty() && crate::output::outbound(s.as_bytes(), &Value::Null).is_err()
+                });
+        let branch = if source_withheld {
+            None
+        } else {
+            raw_branch
+                .map(|s| clean_card_line(s, CARD_BRANCH_MAX_BYTES))
+                .filter(|s| !s.is_empty())
+        };
+        let dirty = dashboard["git"]["dirty"].as_bool();
+        let goal = if source_withheld {
+            String::new()
+        } else {
+            clean_card_line(raw_goal, CARD_GOAL_MAX_BYTES)
+        };
+        let plan = if dashboard["planProgress"].is_object() {
+            let total = dashboard["planProgress"]["total"].as_u64();
+            let done = dashboard["planProgress"]["verified"]
+                .as_u64()
+                .or_else(|| dashboard["planProgress"]["done"].as_u64());
+            match (done, total) {
+                (Some(done), Some(total)) if done <= total => Some((done, total)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let attention = dashboard["attention"]
+            .as_array()
+            .map_or(0, |items| items.len() as u64)
+            .saturating_add(dashboard["attentionTrimmed"].as_u64().unwrap_or(0));
+        let next = if source_withheld {
+            String::new()
+        } else {
+            clean_card_line(raw_next, CARD_NEXT_MAX_BYTES)
+        };
+        let active = dashboard["active"].as_u64().unwrap_or_else(|| {
+            dashboard["activeAttempts"]
+                .as_array()
+                .map_or(0, |items| items.len() as u64)
+        });
+        let main = if source_withheld {
+            None
+        } else {
+            normalize_card_provider(raw_main_provider).map(str::to_owned)
+        };
+        worker_rows.sort_by(|(id_a, row_a), (id_b, row_b)| {
+            let ca = row_a["created"].as_str().filter(|s| !s.trim().is_empty());
+            let cb = row_b["created"].as_str().filter(|s| !s.trim().is_empty());
+            let created_cmp = match (ca, cb) {
+                (Some(a), Some(b)) => compare_rfc3339_or_str(a, b),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            };
+            created_cmp.then_with(|| id_a.cmp(id_b))
+        });
+        // The snapshot keeps only a window of active rows; count the omitted ones as workers too.
+        let omitted = dashboard["active"]
+            .as_u64()
+            .map_or(0, |all| all.saturating_sub(active_attempts.len() as u64))
+            .max(dashboard["activeAttemptsTrimmed"].as_u64().unwrap_or(0));
+        let crew_total = if source_withheld {
+            0
+        } else {
+            (worker_rows.len() as u64).saturating_add(omitted)
+        };
+        let crew = if source_withheld {
+            Vec::new()
+        } else {
+            worker_rows
+                .into_iter()
+                .take(CARD_CREW_MAX_ITEMS)
+                .map(|(attempt_id, row)| {
+                    let provider =
+                        normalize_card_provider(row["provider"].as_str()).map(str::to_owned);
+                    let cleaned_role =
+                        clean_card_line(row["role"].as_str().unwrap_or(""), CARD_ROLE_MAX_BYTES);
+                    let role = (!cleaned_role.is_empty()).then_some(cleaned_role);
+                    StoredCrewMember {
+                        provider,
+                        role,
+                        id: crew_id_from_attempt(attempt_id),
+                    }
+                })
+                .collect()
+        };
+        let degraded = dashboard["degraded"] == true;
+        Self {
+            observed_at,
+            branch,
+            dirty,
+            goal,
+            plan,
+            attention,
+            next,
+            active,
+            main,
+            crew,
+            crew_total,
+            degraded,
+            withheld: source_withheld,
+        }
+    }
+
+    fn to_cache_bytes(&self) -> Vec<u8> {
+        let plan = self
+            .plan
+            .map(|(done, total)| json!({"done": done, "total": total}))
+            .unwrap_or(Value::Null);
+        let crew = self
+            .crew
+            .iter()
+            .map(|member| {
+                json!({
+                    "provider": member.provider,
+                    "role": member.role,
+                    "id": member.id,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut record = json!({
+            "schema": 1,
+            "observedAt": self.observed_at,
+            "branch": self.branch,
+            "dirty": self.dirty,
+            "goal": self.goal,
+            "plan": plan,
+            "attention": self.attention,
+            "next": self.next,
+            "active": self.active,
+            "main": self.main,
+            "crew": crew,
+            "crewTotal": self.crew_total,
+            "degraded": self.degraded,
+        });
+        if self.withheld {
+            record["withheld"] = json!(true);
+        }
+        record.to_string().into_bytes()
+    }
+
+    fn from_cache_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() || bytes.len() > CARD_CACHE_MAX_BYTES {
+            return None;
+        }
+        oms_context::parse_json_bounded(bytes, CARD_CACHE_MAX_BYTES).ok()?;
+        let v = crate::value::from_slice(bytes).ok()?;
+        if !v.is_object() || v.get("schema").is_some_and(|s| *s != 1) {
+            return None;
+        }
+        let mut raw_withheld = false;
+        let check_outbound = |raw: &str, flag: &mut bool| {
+            if !raw.is_empty() && crate::output::outbound(raw.as_bytes(), &Value::Null).is_err() {
+                *flag = true;
+            }
+        };
+        let observed_at = match v.get("observedAt") {
+            None | Some(Value::Null) => None,
+            Some(s) => Some(s.as_str().filter(|t| valid_card_iso(t))?.to_owned()),
+        };
+        let branch = match v.get("branch") {
+            None | Some(Value::Null) => None,
+            Some(s) => {
+                let raw = s.as_str().filter(|t| !t.chars().any(char::is_control))?;
+                check_outbound(raw, &mut raw_withheld);
+                let cleaned = clean_card_line(raw, CARD_BRANCH_MAX_BYTES);
+                (!cleaned.is_empty()).then_some(cleaned)
+            }
+        };
+        let dirty = match v.get("dirty") {
+            None | Some(Value::Null) => None,
+            Some(b) => Some(b.as_bool()?),
+        };
+        let goal = match v.get("goal") {
+            None | Some(Value::Null) => String::new(),
+            Some(s) => {
+                let raw = s.as_str().filter(|t| !t.chars().any(char::is_control))?;
+                check_outbound(raw, &mut raw_withheld);
+                clean_card_line(raw, CARD_GOAL_MAX_BYTES)
+            }
+        };
+        let plan = match v.get("plan") {
+            None | Some(Value::Null) => None,
+            Some(p) => {
+                let obj = p.as_object()?;
+                if obj.keys().count() != 2 {
+                    return None;
+                }
+                let done = p["done"].as_u64()?;
+                let total = p["total"].as_u64()?;
+                if done > total {
+                    return None;
+                }
+                Some((done, total))
+            }
+        };
+        let attention = v.get("attention")?.as_u64()?;
+        let next = match v.get("next") {
+            None | Some(Value::Null) => String::new(),
+            Some(s) => {
+                let raw = s.as_str().filter(|t| !t.chars().any(char::is_control))?;
+                check_outbound(raw, &mut raw_withheld);
+                clean_card_line(raw, CARD_NEXT_MAX_BYTES)
+            }
+        };
+        let active = v.get("active")?.as_u64()?;
+        let main = match v.get("main") {
+            None | Some(Value::Null) => None,
+            Some(s) => Some(normalize_card_provider(Some(s.as_str()?))?.to_owned()),
+        };
+        let crew = match v.get("crew") {
+            None => Vec::new(),
+            Some(arr) => {
+                let items = arr.as_array()?;
+                if items.len() > CARD_CREW_MAX_ITEMS {
+                    return None;
+                }
+                let mut parsed = Vec::with_capacity(items.len());
+                for item in items {
+                    if !item.is_object() {
+                        return None;
+                    }
+                    let provider = match item.get("provider") {
+                        None | Some(Value::Null) => None,
+                        Some(s) => Some(normalize_card_provider(Some(s.as_str()?))?.to_owned()),
+                    };
+                    let role = match item.get("role") {
+                        None | Some(Value::Null) => None,
+                        Some(s) => {
+                            let raw = s.as_str().filter(|t| !t.chars().any(char::is_control))?;
+                            check_outbound(raw, &mut raw_withheld);
+                            let cleaned = clean_card_line(raw, CARD_ROLE_MAX_BYTES);
+                            (!cleaned.is_empty()).then_some(cleaned)
+                        }
+                    };
+                    let id = item
+                        .get("id")?
+                        .as_str()
+                        .filter(|s| valid_crew_id(s))?
+                        .to_owned();
+                    parsed.push(StoredCrewMember { provider, role, id });
+                }
+                parsed
+            }
+        };
+        let crew_total = match v.get("crewTotal") {
+            None => crew.len() as u64,
+            Some(n) => {
+                let total = n.as_u64()?;
+                if total < crew.len() as u64 {
+                    return None;
+                }
+                total
+            }
+        };
+        let degraded = v.get("degraded")?.as_bool()?;
+        let withheld = match v.get("withheld") {
+            None => raw_withheld,
+            Some(flag) => flag.as_bool()? || raw_withheld,
+        };
+        Some(Self {
+            observed_at,
+            branch,
+            dirty,
+            goal,
+            plan,
+            attention,
+            next,
+            active,
+            main,
+            crew,
+            crew_total,
+            degraded,
+            withheld,
+        })
+    }
+}
+
+fn write_cached_card(
+    cache_dir: &Path,
+    physical_repo: &Path,
+    card: &StoredProjectCard,
+) -> Result<(), ()> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let dir_fd = open_card_cache_dir(cache_dir, true).ok_or(())?;
+    let name = card_cache_file_name(physical_repo);
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let temp = format!(
+        ".{name}.{}.{}.part",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let data = card.to_cache_bytes();
+    let outcome = (|| -> Result<(), ()> {
+        let fd = rustix::fs::openat(
+            &dir_fd,
+            &temp,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|_| ())?;
+        rustix::fs::fchmod(&fd, Mode::from_raw_mode(0o600)).map_err(|_| ())?;
+        let mut file = std::fs::File::from(fd);
+        file.write_all(&data).map_err(|_| ())?;
+        file.sync_all().map_err(|_| ())?;
+        rustix::fs::renameat(&dir_fd, &temp, &dir_fd, &name).map_err(|_| ())?;
+        rustix::fs::fsync(&dir_fd).map_err(|_| ())?;
+        Ok(())
+    })();
+    if outcome.is_err() {
+        let _ = rustix::fs::unlinkat(&dir_fd, &temp, AtFlags::empty());
+    }
+    outcome
+}
+
+fn read_cached_card(
+    cache_dir: &Path,
+    physical_repo: &Path,
+) -> Option<(StoredProjectCard, std::time::SystemTime)> {
+    use rustix::fs::{FileType, Mode, OFlags};
+
+    let dir_fd = open_card_cache_dir(cache_dir, false)?;
+    let name = card_cache_file_name(physical_repo);
+    let fd = rustix::fs::openat(
+        &dir_fd,
+        &name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    let st = rustix::fs::fstat(&fd).ok()?;
+    if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile
+        || st.st_nlink != 1
+        || st.st_uid != rustix::process::geteuid().as_raw()
+        || st.st_mode & 0o077 != 0
+        || st.st_size <= 0
+        || (st.st_size as usize) > CARD_CACHE_MAX_BYTES
+    {
+        return None;
+    }
+    let mut file = std::fs::File::from(fd);
+    let mtime = file.metadata().ok()?.modified().ok()?;
+    let mut buf = Vec::with_capacity(st.st_size as usize);
+    (&mut file)
+        .take((CARD_CACHE_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() > CARD_CACHE_MAX_BYTES {
+        return None;
+    }
+    let card = StoredProjectCard::from_cache_bytes(&buf)?;
+    Some((card, mtime))
+}
+
+fn card_is_stale(
+    physical_repo: &Path,
+    card_mtime: std::time::SystemTime,
+    now: std::time::SystemTime,
+) -> bool {
+    if now
+        .duration_since(card_mtime)
+        .is_ok_and(|age| age > CARD_FRESH_WINDOW)
+    {
+        return true;
+    }
+    for marker in [
+        ".git/HEAD",
+        ".git/index",
+        ".oms/plan",
+        ".oms/plan/tasks.json",
+    ] {
+        if physical_repo
+            .join(marker)
+            .symlink_metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|modified| modified > card_mtime)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn render_project_card(
+    alias_name: &str,
+    state: &str,
+    stored: Option<&StoredProjectCard>,
+    max_bytes: usize,
+) -> Value {
+    let withheld = || json!({"alias": alias_name, "state": "withheld"});
+    if stored.is_some_and(|c| c.withheld) {
+        return withheld();
+    }
+    let cap = max_bytes.min(CARD_MAX_BYTES);
+    let mut observed_at = stored.and_then(|c| c.observed_at.clone());
+    let mut branch = stored.and_then(|c| c.branch.clone());
+    let dirty = stored.and_then(|c| c.dirty);
+    let mut goal = stored
+        .map(|c| clean_card_line(&c.goal, CARD_GOAL_MAX_BYTES))
+        .unwrap_or_default();
+    let mut plan = stored.and_then(|c| c.plan);
+    let attention = stored.map_or(0, |c| c.attention);
+    let mut next = stored
+        .map(|c| clean_card_line(&c.next, CARD_NEXT_MAX_BYTES))
+        .unwrap_or_default();
+    let active = stored.map_or(0, |c| c.active);
+    let main = stored.and_then(|c| c.main.clone());
+    let mut crew: Vec<StoredCrewMember> = stored
+        .map(|c| {
+            c.crew
+                .iter()
+                .take(CARD_CREW_MAX_ITEMS)
+                .map(|m| StoredCrewMember {
+                    provider: m.provider.clone(),
+                    role: m
+                        .role
+                        .as_deref()
+                        .map(|r| clean_card_line(r, CARD_ROLE_MAX_BYTES))
+                        .filter(|r| !r.is_empty()),
+                    id: m.id.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let crew_total = stored.map_or(0, |c| c.crew_total);
+    let degraded = stored.is_some_and(|c| c.degraded);
+
+    let assemble = |observed_at: &Option<String>,
+                    branch: &Option<String>,
+                    goal: &str,
+                    plan: Option<(u64, u64)>,
+                    next: &str,
+                    crew: &[StoredCrewMember]| {
+        let plan_val = plan
+            .map(|(done, total)| json!({"done": done, "total": total}))
+            .unwrap_or(Value::Null);
+        let crew_val = crew
+            .iter()
+            .map(|member| {
+                json!({
+                    "provider": member.provider,
+                    "role": member.role,
+                    "id": member.id,
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "alias": alias_name,
+            "state": state,
+            "observedAt": observed_at,
+            "branch": branch,
+            "dirty": dirty,
+            "goal": goal,
+            "plan": plan_val,
+            "attention": attention,
+            "next": next,
+            "active": active,
+            "main": main,
+            "crew": crew_val,
+            "crewTotal": crew_total,
+            "degraded": degraded,
+        })
+    };
+
+    let initial = assemble(&observed_at, &branch, &goal, plan, &next, &crew);
+    let initial_bytes = initial.to_string();
+    if crate::output::outbound(initial_bytes.as_bytes(), &Value::Null).is_err() {
+        return withheld();
+    }
+    if initial_bytes.len() <= cap {
+        return initial;
+    }
+
+    loop {
+        let branch_len = branch.as_ref().map_or(0, String::len);
+        if goal.len() >= next.len() && goal.len() >= branch_len && !goal.is_empty() {
+            goal.pop();
+        } else if next.len() >= branch_len && !next.is_empty() {
+            next.pop();
+        } else if let Some(b) = &mut branch {
+            b.pop();
+            if b.is_empty() {
+                branch = None;
+            }
+        } else if !crew.is_empty() {
+            crew.pop();
+        } else if plan.is_some() {
+            plan = None;
+        } else if observed_at.is_some() {
+            observed_at = None;
+        } else {
+            break;
+        }
+        let candidate = assemble(&observed_at, &branch, &goal, plan, &next, &crew);
+        let encoded = candidate.to_string();
+        if encoded.len() <= cap {
+            if crate::output::outbound(encoded.as_bytes(), &Value::Null).is_err() {
+                return withheld();
+            }
+            return candidate;
+        }
+    }
+    // Long aliases can leave no room even for an empty card; keep the response valid instead.
+    let minimal = json!({"alias": alias_name, "state": state, "trimmed": true});
+    if minimal.to_string().len() <= cap
+        && crate::output::outbound(minimal.to_string().as_bytes(), &Value::Null).is_ok()
+    {
+        return minimal;
+    }
+    withheld()
+}
+
+#[derive(Clone)]
+pub(crate) struct ProjectCardRefresher(std::sync::Arc<CardRefresherOwner>);
+
+struct CardRefresherOwner {
+    inner: std::sync::Arc<CardRefresherInner>,
+}
+
+struct CardRefresherInner {
+    executor: std::sync::Arc<dyn crate::CommandExecutor>,
+    stopped: std::sync::atomic::AtomicBool,
+    deadline: Duration,
+    #[cfg(test)]
+    cache_override: Option<PathBuf>,
+    #[cfg(test)]
+    projects_override: Option<BTreeMap<String, PathBuf>>,
+    state: std::sync::Mutex<CardRefresherState>,
+}
+
+#[derive(Default)]
+struct CardRefresherState {
+    pending: std::collections::VecDeque<(String, PathBuf, Option<PathBuf>)>,
+    in_flight: std::collections::BTreeSet<String>,
+    failed: BTreeMap<String, std::time::Instant>,
+    refreshed: BTreeMap<String, std::time::Instant>,
+    slot_busy: [bool; MAX_CONCURRENT_CARD_REFRESHES],
+    slots: [Option<std::thread::JoinHandle<()>>; MAX_CONCURRENT_CARD_REFRESHES],
+}
+
+impl Drop for CardRefresherOwner {
+    fn drop(&mut self) {
+        self.inner
+            .stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        let handles = {
+            let mut state = self.inner.state.lock().expect("card refresher lock");
+            state.pending.clear();
+            std::mem::take(&mut state.slots)
+        };
+        for handle in handles.into_iter().flatten() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl ProjectCardRefresher {
+    pub(crate) fn new(executor: std::sync::Arc<dyn crate::CommandExecutor>) -> Self {
+        Self(std::sync::Arc::new(CardRefresherOwner {
+            inner: std::sync::Arc::new(CardRefresherInner {
+                executor,
+                stopped: std::sync::atomic::AtomicBool::new(false),
+                deadline: CARD_REFRESH_DEADLINE,
+                #[cfg(test)]
+                cache_override: None,
+                #[cfg(test)]
+                projects_override: None,
+                state: std::sync::Mutex::new(CardRefresherState::default()),
+            }),
+        }))
+    }
+
+    #[cfg(test)]
+    fn with_test_overrides(
+        executor: std::sync::Arc<dyn crate::CommandExecutor>,
+        deadline: Duration,
+        cache_override: PathBuf,
+        projects_override: BTreeMap<String, PathBuf>,
+    ) -> Self {
+        Self(std::sync::Arc::new(CardRefresherOwner {
+            inner: std::sync::Arc::new(CardRefresherInner {
+                executor,
+                stopped: std::sync::atomic::AtomicBool::new(false),
+                deadline,
+                cache_override: Some(cache_override),
+                projects_override: Some(projects_override),
+                state: std::sync::Mutex::new(CardRefresherState::default()),
+            }),
+        }))
+    }
+
+    #[cfg(test)]
+    fn is_idle(&self) -> bool {
+        let state = self.0.inner.state.lock().expect("card refresher lock");
+        state.pending.is_empty()
+            && state.in_flight.is_empty()
+            && state.slot_busy.iter().all(|busy| !*busy)
+    }
+
+    /// `observed` is when the caller read the caches: an alias refreshed after it was seen stale
+    /// is already current and is not queued again.
+    fn enqueue_batch(
+        &self,
+        items: Vec<(String, PathBuf, Option<PathBuf>)>,
+        observed: std::time::Instant,
+    ) {
+        use std::sync::atomic::Ordering;
+
+        if self.0.inner.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        let mut stale_handles = Vec::new();
+        {
+            let mut state = self.0.inner.state.lock().expect("card refresher lock");
+            if self.0.inner.stopped.load(Ordering::Acquire) {
+                return;
+            }
+            for (alias_name, repo, cache_dir) in items {
+                if state.in_flight.contains(&alias_name)
+                    || state
+                        .refreshed
+                        .get(&alias_name)
+                        .is_some_and(|at| *at > observed)
+                    || state
+                        .failed
+                        .get(&alias_name)
+                        .is_some_and(|at| at.elapsed() < CARD_REFRESH_BACKOFF)
+                {
+                    continue;
+                }
+                if let Some(existing) = state
+                    .pending
+                    .iter_mut()
+                    .find(|(queued, _, _)| queued == &alias_name)
+                {
+                    existing.1 = repo;
+                    existing.2 = cache_dir;
+                } else if state.pending.len() < 128 {
+                    state.pending.push_back((alias_name, repo, cache_dir));
+                }
+            }
+            while !state.pending.is_empty() {
+                let Some(slot) = state.slot_busy.iter().position(|busy| !*busy) else {
+                    break;
+                };
+                let Some(first) = state.pending.pop_front() else {
+                    break;
+                };
+                state.in_flight.insert(first.0.clone());
+                state.slot_busy[slot] = true;
+                if let Some(prev) = state.slots[slot].take() {
+                    stale_handles.push(prev);
+                }
+                let inner = std::sync::Arc::clone(&self.0.inner);
+                state.slots[slot] = Some(std::thread::spawn(move || {
+                    run_card_refresh_worker(inner, slot, first);
+                }));
+            }
+        }
+        for handle in stale_handles {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn run_card_refresh_worker(
+    inner: std::sync::Arc<CardRefresherInner>,
+    slot: usize,
+    mut current: (String, PathBuf, Option<PathBuf>),
+) {
+    use std::sync::atomic::Ordering;
+
+    loop {
+        let (alias_name, repo, cache_dir) = current;
+        let mut refreshed = false;
+        if !inner.stopped.load(Ordering::Acquire)
+            && let Some(cache_dir) = cache_dir.as_deref()
+            && stat_only_checkout_ok(&repo)
+            && let Ok(dashboard) = execute_panel_snapshot(
+                inner.executor.as_ref(),
+                &inner.stopped,
+                &repo,
+                &Value::Null,
+                inner.deadline,
+            )
+            && dashboard.to_string().len() <= crate::OUTPUT_LIMIT
+            && !inner.stopped.load(Ordering::Acquire)
+            && stat_only_checkout_ok(&repo)
+        {
+            let card = StoredProjectCard::from_dashboard(&dashboard);
+            refreshed = write_cached_card(cache_dir, &repo, &card).is_ok();
+        }
+        let mut state = inner.state.lock().expect("card refresher lock");
+        state.in_flight.remove(&alias_name);
+        // A failing project waits out a backoff instead of rerunning on every poll.
+        if refreshed {
+            state.failed.remove(&alias_name);
+            state
+                .refreshed
+                .insert(alias_name.clone(), std::time::Instant::now());
+        } else {
+            state
+                .failed
+                .insert(alias_name.clone(), std::time::Instant::now());
+        }
+        if inner.stopped.load(Ordering::Acquire) {
+            state.pending.clear();
+            state.slot_busy[slot] = false;
+            return;
+        }
+        match state.pending.pop_front() {
+            Some(next) => {
+                state.in_flight.insert(next.0.clone());
+                current = next;
+            }
+            None => {
+                state.slot_busy[slot] = false;
+                return;
+            }
+        }
     }
 }
 
@@ -3862,5 +5136,606 @@ mod work_items_tests {
             item["prReviewCandidate"]["disposition"] = json!("superseded");
         });
         assert!(!valid_work_items_receipt(&inconsistent));
+    }
+
+    struct PanelCardTemp(PathBuf);
+    impl PanelCardTemp {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "oms-panel-card-unit-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir.canonicalize().unwrap())
+        }
+        fn checkout(&self, name: &str) -> PathBuf {
+            let repo = self.0.join(name);
+            std::fs::create_dir_all(repo.join(".oms/plan")).unwrap();
+            std::fs::create_dir_all(repo.join(".git")).unwrap();
+            std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+            std::fs::write(repo.join(".git/index"), "idx\n").unwrap();
+            std::fs::write(repo.join(".oms/plan/tasks.json"), "{}\n").unwrap();
+            repo
+        }
+    }
+    impl Drop for PanelCardTemp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        let since_epoch = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("post-epoch time");
+        let ts = rustix::fs::Timespec {
+            tv_sec: since_epoch.as_secs() as i64,
+            tv_nsec: since_epoch.subsec_nanos() as _,
+        };
+        let stamps = rustix::fs::Timestamps {
+            last_access: ts,
+            last_modification: ts,
+        };
+        rustix::fs::utimensat(
+            rustix::fs::CWD,
+            path,
+            &stamps,
+            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn project_card_counts_omitted_workers_and_fits_long_aliases() {
+        let rows: Vec<Value> = (0..8)
+            .map(|i| json!({"id": format!("att-{i}"), "tool": "peer-delegate", "provider": "codex", "created": format!("2026-11-27T05:5{i}:00Z")}))
+            .collect();
+        let dashboard = json!({"active": 12, "activeAttempts": rows});
+        let card = StoredProjectCard::from_dashboard(&dashboard);
+        assert_eq!(card.crew.len(), CARD_CREW_MAX_ITEMS);
+        assert_eq!(card.crew_total, 12);
+        let trimmed = json!({"activeAttempts": [], "activeAttemptsTrimmed": 4});
+        assert_eq!(StoredProjectCard::from_dashboard(&trimmed).crew_total, 4);
+
+        let long_alias = format!("a{}", "b".repeat(79));
+        let rendered = render_project_card(&long_alias, "fresh", Some(&card), 150);
+        assert!(rendered.to_string().len() <= 150, "{rendered}");
+        assert_eq!(rendered["alias"], long_alias.as_str());
+        assert_eq!(rendered["trimmed"], true);
+    }
+
+    #[test]
+    fn project_card_derivation_char_truncation_cache_safety_and_withhold() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = PanelCardTemp::new();
+        let cache_dir = tmp.0.join("cache/oh-my-setting/project-cards");
+        let alpha = tmp.checkout("alpha");
+        let beta = tmp.checkout("beta");
+
+        let multibyte_goal = "패널홈요약".repeat(25);
+        let multibyte_next = "검증단계확인".repeat(20);
+        let multibyte_role = "코드리뷰담당워커역할이름길게테스트";
+        let dashboard = json!({
+            "updated": "2026-11-27T06:00:00Z",
+            "branch": "feat/project-home",
+            "git": {"available": true, "branch": "feat/project-home", "dirty": true},
+            "goal": multibyte_goal,
+            "planProgress": {"verified": 3, "total": 7},
+            "attention": [{"code": "a"}, {"code": "b"}],
+            "attentionTrimmed": 1,
+            "nextStep": {"id": "verify", "summary": multibyte_next, "scope": "repository"},
+            "active": 5,
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [
+                {"id": "main-older", "tool": "panel-main", "provider": "codex", "updated": "2026-11-27T05:55:00Z"},
+                {"id": "main-newer", "tool": "panel-main", "provider": "agy", "updated": "2026-11-27T05:59:00Z"},
+                {"id": "", "tool": "peer-delegate", "provider": "claude", "role": "ignored", "created": "2026-11-27T05:50:00Z"},
+                {"id": "att-late", "tool": "peer-delegate", "provider": "claude", "role": "late-worker", "created": "2026-11-27T05:58:00Z"},
+                {"id": "att-tie-b", "tool": "peer-delegate", "provider": "agy", "role": multibyte_role, "created": "2026-11-27T05:56:00Z"},
+                {"id": "att-early", "tool": "peer-delegate", "provider": "codex", "role": "  architect\n\t ", "created": "2026-11-27T05:54:00Z"},
+                {"id": "att-tie-a", "tool": "agent-supervisor", "provider": "pi", "role": "   ", "created": "2026-11-27T05:56:00Z"},
+            ],
+            "degraded": false,
+        });
+        let stored = StoredProjectCard::from_dashboard(&dashboard);
+        let stored_again = StoredProjectCard::from_dashboard(&dashboard);
+        assert_eq!(stored, stored_again);
+        assert_eq!(stored.observed_at.as_deref(), Some("2026-11-27T06:00:00Z"));
+        assert_eq!(stored.branch.as_deref(), Some("feat/project-home"));
+        assert_eq!(stored.dirty, Some(true));
+        assert!(stored.goal.len() <= CARD_GOAL_MAX_BYTES);
+        assert!(stored.next.len() <= CARD_NEXT_MAX_BYTES);
+        assert_eq!(stored.plan, Some((3, 7)));
+        assert_eq!(stored.attention, 3);
+        assert_eq!(stored.active, 5);
+        assert_eq!(stored.main.as_deref(), Some("antigravity"));
+        assert_eq!(stored.crew_total, 4);
+        assert_eq!(stored.crew.len(), 3);
+        assert_eq!(stored.crew[0].provider.as_deref(), Some("codex"));
+        assert_eq!(stored.crew[0].role.as_deref(), Some("architect"));
+        assert_eq!(stored.crew[1].provider, None);
+        assert_eq!(stored.crew[1].role, None);
+        assert_eq!(stored.crew[2].provider.as_deref(), Some("antigravity"));
+        assert!(
+            stored.crew[2]
+                .role
+                .as_deref()
+                .is_some_and(|r| !r.is_empty() && r.len() <= CARD_ROLE_MAX_BYTES)
+        );
+        for (member, raw_id) in stored
+            .crew
+            .iter()
+            .zip(["att-early", "att-tie-a", "att-tie-b"])
+        {
+            assert!(valid_crew_id(&member.id), "invalid crew id {}", member.id);
+            assert_ne!(member.id, raw_id);
+            assert_eq!(member.id, crew_id_from_attempt(raw_id));
+        }
+        // Standard FNV-1a 64-bit check vector ("foobar" -> 0x85944171f73967e8).
+        assert_eq!(crew_id_from_attempt("foobar"), "85944171f739");
+        assert!(!stored.degraded);
+
+        // Fallback to conversationMain when no panel-main row exists, plus agy and unknown providers.
+        let conv_fallback = StoredProjectCard::from_dashboard(&json!({
+            "conversationMain": {"provider": "claude"},
+            "activeAttempts": [{"id": "w1", "tool": "peer-delegate", "provider": "codex"}],
+            "degraded": false,
+        }));
+        assert_eq!(conv_fallback.main.as_deref(), Some("claude"));
+        let conv_agy = StoredProjectCard::from_dashboard(&json!({
+            "conversationMain": {"provider": "agy"},
+            "degraded": false,
+        }));
+        assert_eq!(conv_agy.main.as_deref(), Some("antigravity"));
+        let unknown_panel_main = StoredProjectCard::from_dashboard(&json!({
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [{"id": "m1", "tool": "panel-main", "provider": "pi", "updated": "2026-11-27T06:00:00Z"}],
+            "degraded": false,
+        }));
+        assert_eq!(unknown_panel_main.main, None);
+        let unknown_conv_main = StoredProjectCard::from_dashboard(&json!({
+            "conversationMain": {"provider": "cursor"},
+            "degraded": false,
+        }));
+        assert_eq!(unknown_conv_main.main, None);
+
+        // Missing/unavailable cards still carry main: null, crew: [], crewTotal: 0 within cap.
+        let missing_rendered = render_project_card("empty", "missing", None, CARD_MAX_BYTES);
+        assert_eq!(missing_rendered["main"], Value::Null);
+        assert_eq!(missing_rendered["crew"], json!([]));
+        assert_eq!(missing_rendered["crewTotal"], 0);
+
+        // Shortening order: goal/next/branch shrink before crew; crew drops from the end only when
+        // still over cap, while crewTotal retains full count and main is never dropped.
+        let ascii_crew_stored = StoredProjectCard::from_dashboard(&json!({
+            "updated": "2026-11-27T06:00:00Z",
+            "branch": "feature/very-long-branch-name-for-budget-test",
+            "git": {"available": true, "branch": "feature/very-long-branch-name-for-budget-test", "dirty": false},
+            "goal": "g".repeat(200),
+            "planProgress": {"verified": 1, "total": 3},
+            "nextStep": {"id": "n", "summary": "n".repeat(160), "scope": "repository"},
+            "active": 4,
+            "activeAttempts": [
+                {"id": "m1", "tool": "panel-main", "provider": "claude", "updated": "2026-11-27T06:00:00Z"},
+                {"id": "c1", "tool": "peer-delegate", "provider": "codex", "role": "impl", "created": "2026-11-27T05:50:00Z"},
+                {"id": "c2", "tool": "peer-delegate", "provider": "claude", "role": "review", "created": "2026-11-27T05:51:00Z"},
+                {"id": "c3", "tool": "peer-delegate", "provider": "agy", "role": "verify", "created": "2026-11-27T05:52:00Z"}
+            ],
+            "degraded": false,
+        }));
+        let fit_with_all_crew =
+            render_project_card("p0", "fresh", Some(&ascii_crew_stored), CARD_MAX_BYTES);
+        assert!(fit_with_all_crew.to_string().len() <= CARD_MAX_BYTES);
+        assert_eq!(fit_with_all_crew["crew"].as_array().unwrap().len(), 3);
+        assert_eq!(fit_with_all_crew["crewTotal"], 3);
+        assert_eq!(fit_with_all_crew["main"], "claude");
+
+        let drop_one_crew = render_project_card("p0", "fresh", Some(&ascii_crew_stored), 350);
+        assert!(drop_one_crew.to_string().len() <= 350);
+        assert_eq!(drop_one_crew["goal"], "");
+        assert_eq!(drop_one_crew["next"], "");
+        assert_eq!(drop_one_crew["branch"], Value::Null);
+        assert_eq!(drop_one_crew["crew"].as_array().unwrap().len(), 2);
+        assert_eq!(drop_one_crew["crew"][0]["id"], ascii_crew_stored.crew[0].id);
+        assert_eq!(drop_one_crew["crew"][1]["id"], ascii_crew_stored.crew[1].id);
+        assert_eq!(drop_one_crew["crewTotal"], 3);
+        assert_eq!(drop_one_crew["main"], "claude");
+
+        let short_alias_rendered =
+            render_project_card("p0", "fresh", Some(&stored), CARD_MAX_BYTES);
+        assert!(short_alias_rendered.to_string().len() <= CARD_MAX_BYTES);
+        assert_eq!(short_alias_rendered["crew"].as_array().unwrap().len(), 2);
+        assert_eq!(short_alias_rendered["crewTotal"], 4);
+        assert_eq!(short_alias_rendered["main"], "antigravity");
+
+        let long_alias = "a".repeat(80);
+        let rendered = render_project_card(&long_alias, "fresh", Some(&stored), CARD_MAX_BYTES);
+        let wire = rendered.to_string();
+        assert!(
+            wire.len() <= CARD_MAX_BYTES,
+            "wire len {}: {wire}",
+            wire.len()
+        );
+        assert_eq!(rendered["alias"], long_alias);
+        assert_eq!(rendered["state"], "fresh");
+        assert_eq!(rendered["plan"], json!({"done": 3, "total": 7}));
+        assert_eq!(rendered["attention"], 3);
+        assert_eq!(rendered["active"], 5);
+        assert_eq!(rendered["main"], "antigravity");
+        assert_eq!(rendered["crewTotal"], 4);
+        let trimmed_crew = rendered["crew"].as_array().unwrap();
+        assert!(!trimmed_crew.is_empty() && trimmed_crew.len() < 3);
+        assert_eq!(trimmed_crew[0]["id"], stored.crew[0].id);
+        assert_eq!(rendered["dirty"], true);
+        assert_eq!(rendered["degraded"], false);
+        assert!(rendered["goal"].as_str().unwrap().len() <= CARD_GOAL_MAX_BYTES);
+        assert!(rendered["next"].as_str().unwrap().len() <= CARD_NEXT_MAX_BYTES);
+
+        // Cache mode 0700 / 0600, no-follow, size cap, and nothing written in checkout.
+        let before_alpha: Vec<_> = std::fs::read_dir(&alpha)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        write_cached_card(&cache_dir, &alpha, &stored).unwrap();
+        let dir_mode = std::fs::symlink_metadata(&cache_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        let file_path = cache_dir.join(card_cache_file_name(&alpha));
+        let file_mode = std::fs::symlink_metadata(&file_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(file_mode, 0o600);
+        let after_alpha: Vec<_> = std::fs::read_dir(&alpha)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(before_alpha, after_alpha);
+        let (loaded, _) = read_cached_card(&cache_dir, &alpha).unwrap();
+        assert_eq!(loaded, stored);
+
+        // Old cache record without main, crew, or crewTotal loads with defaults.
+        let legacy_record = json!({
+            "schema": 1,
+            "observedAt": "2026-11-27T06:00:00Z",
+            "branch": "main",
+            "dirty": false,
+            "goal": "Legacy cached goal",
+            "plan": {"done": 1, "total": 2},
+            "attention": 0,
+            "next": "",
+            "active": 1,
+            "degraded": false,
+        });
+        let legacy_loaded =
+            StoredProjectCard::from_cache_bytes(legacy_record.to_string().as_bytes()).unwrap();
+        assert_eq!(legacy_loaded.main, None);
+        assert!(legacy_loaded.crew.is_empty());
+        assert_eq!(legacy_loaded.crew_total, 0);
+        let legacy_rendered =
+            render_project_card("legacy", "fresh", Some(&legacy_loaded), CARD_MAX_BYTES);
+        assert_eq!(legacy_rendered["main"], Value::Null);
+        assert_eq!(legacy_rendered["crew"], json!([]));
+        assert_eq!(legacy_rendered["crewTotal"], 0);
+
+        // Symlinked or oversized cache files are rejected fail-closed.
+        let beta_file = cache_dir.join(card_cache_file_name(&beta));
+        std::os::unix::fs::symlink(&file_path, &beta_file).unwrap();
+        assert!(read_cached_card(&cache_dir, &beta).is_none());
+        std::fs::remove_file(&beta_file).unwrap();
+        std::fs::write(&beta_file, vec![b' '; CARD_CACHE_MAX_BYTES + 1]).unwrap();
+        std::fs::set_permissions(&beta_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_cached_card(&cache_dir, &beta).is_none());
+        std::fs::remove_file(&beta_file).unwrap();
+
+        // Outbound scan per card: tripping text in goal or worker role withholds only that card
+        // without main, crew, or crewTotal.
+        let tripped = ["gh", "p_", &"z".repeat(36)].concat();
+        let bad_dashboard = json!({
+            "updated": "2026-11-27T06:00:00Z",
+            "goal": format!("Inspect {tripped}"),
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [{"id": "w1", "tool": "peer-delegate", "provider": "claude", "role": "reviewer"}],
+            "degraded": false,
+        });
+        let bad_stored = StoredProjectCard::from_dashboard(&bad_dashboard);
+        assert!(
+            !String::from_utf8_lossy(&bad_stored.to_cache_bytes()).contains(&tripped),
+            "cache bytes must not retain outbound-tripping text"
+        );
+        assert_eq!(
+            render_project_card("bad", "fresh", Some(&bad_stored), CARD_MAX_BYTES),
+            json!({"alias": "bad", "state": "withheld"})
+        );
+        let bad_role_dashboard = json!({
+            "updated": "2026-11-27T06:00:00Z",
+            "goal": "Clean goal",
+            "conversationMain": {"provider": "claude"},
+            "activeAttempts": [
+                {"id": "w-secret", "tool": "peer-delegate", "provider": "codex", "role": format!("role-{tripped}")}
+            ],
+            "degraded": false,
+        });
+        let bad_role_stored = StoredProjectCard::from_dashboard(&bad_role_dashboard);
+        assert!(
+            !String::from_utf8_lossy(&bad_role_stored.to_cache_bytes()).contains(&tripped[..16]),
+            "cache bytes must not retain truncated secret role prefix"
+        );
+        assert_eq!(
+            render_project_card("bad", "fresh", Some(&bad_role_stored), CARD_MAX_BYTES),
+            json!({"alias": "bad", "state": "withheld"})
+        );
+        // Also verify read-time per-card scan when raw cached JSON contains tripping text.
+        let raw_bad = json!({
+            "schema": 1,
+            "observedAt": "2026-11-27T06:00:00Z",
+            "branch": "main",
+            "dirty": false,
+            "goal": tripped,
+            "plan": null,
+            "attention": 0,
+            "next": "",
+            "active": 0,
+            "degraded": false,
+        });
+        let parsed_raw_bad =
+            StoredProjectCard::from_cache_bytes(raw_bad.to_string().as_bytes()).unwrap();
+        assert_eq!(
+            render_project_card("bad", "fresh", Some(&parsed_raw_bad), CARD_MAX_BYTES),
+            json!({"alias": "bad", "state": "withheld"})
+        );
+    }
+
+    #[test]
+    fn stat_freshness_concurrency_deadline_and_failed_refresh_retention() {
+        use std::sync::{
+            Arc, Condvar, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+
+        struct GateExecutor {
+            request_thread: std::thread::ThreadId,
+            active: AtomicUsize,
+            max_active: AtomicUsize,
+            calls: AtomicUsize,
+            fail_mode: AtomicBool,
+            hold: Mutex<bool>,
+            cv: Condvar,
+            seen_deadlines: Mutex<Vec<Duration>>,
+        }
+        impl crate::CommandExecutor for GateExecutor {
+            fn execute(&self, request: &CommandRequest<'_>) -> Result<crate::Captured, String> {
+                assert_ne!(
+                    std::thread::current().id(),
+                    self.request_thread,
+                    "snapshot refresh must never run on the request thread"
+                );
+                self.seen_deadlines.lock().unwrap().push(request.timeout);
+                let now_active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+                self.max_active.fetch_max(now_active, Ordering::AcqRel);
+                self.calls.fetch_add(1, Ordering::AcqRel);
+                {
+                    let mut held = self.hold.lock().unwrap();
+                    while *held && !request.interrupted.load(Ordering::Acquire) {
+                        held = self.cv.wait(held).unwrap();
+                    }
+                }
+                self.active.fetch_sub(1, Ordering::AcqRel);
+                if self.fail_mode.load(Ordering::Acquire) {
+                    let leaked = ["gh", "p_", &"q".repeat(36)].concat();
+                    return Ok(crate::Captured::from_output(2, b"", leaked.as_bytes()));
+                }
+                let snap = serde_json::json!({
+                    "schema": 1,
+                    "kind": "oms-panel-snapshot",
+                    "dashboard": {
+                        "scope": "repository",
+                        "updated": "2026-11-27T06:05:00Z",
+                        "branch": "main",
+                        "git": {"available": true, "branch": "main", "dirty": false},
+                        "goal": "Refreshed in background",
+                        "planProgress": {"verified": 1, "total": 2},
+                        "attention": [],
+                        "nextStep": null,
+                        "active": 0,
+                        "degraded": false
+                    }
+                });
+                Ok(crate::Captured::from_output(
+                    0,
+                    snap.to_string().as_bytes(),
+                    b"",
+                ))
+            }
+        }
+
+        let tmp = PanelCardTemp::new();
+        let source = tmp.0.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("VERSION"), "test\n").unwrap();
+        let cache_dir = tmp.0.join("cache/oh-my-setting/project-cards");
+
+        let mut projects = BTreeMap::new();
+        for idx in 0..4 {
+            projects.insert(format!("p{idx}"), tmp.checkout(&format!("p{idx}")));
+        }
+        projects.insert("gone".into(), tmp.0.join("nonexistent"));
+
+        let exec = Arc::new(GateExecutor {
+            request_thread: std::thread::current().id(),
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            fail_mode: AtomicBool::new(false),
+            hold: Mutex::new(true),
+            cv: Condvar::new(),
+            seen_deadlines: Mutex::new(Vec::new()),
+        });
+        let interrupted = AtomicBool::new(false);
+        let cfg = crate::Config {
+            profile: ToolProfile::McpApp,
+            tasks_extension: false,
+            peer_owner: source.join("owner"),
+            oms_program: None,
+        };
+        let mut server = Server::with_executor(
+            &source,
+            &tmp.0,
+            &interrupted,
+            cfg,
+            Arc::clone(&exec) as Arc<dyn crate::CommandExecutor>,
+        )
+        .unwrap();
+        let custom_deadline = Duration::from_secs(9);
+        server.project_cards = ProjectCardRefresher::with_test_overrides(
+            Arc::clone(&exec) as Arc<dyn crate::CommandExecutor>,
+            custom_deadline,
+            cache_dir.clone(),
+            projects.clone(),
+        );
+
+        // Request returns immediately while refreshes are held, with missing + unavailable.
+        let first = server
+            .handle(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "oms_list_projects", "arguments": {"cards": true}}
+            }))
+            .unwrap();
+        let cards = first["result"]["structuredContent"]["cards"]
+            .as_array()
+            .unwrap();
+        assert_eq!(cards.len(), 5);
+        assert_eq!(cards[0]["state"], "unavailable"); // "gone" sorts before "p0"
+        for card in &cards[1..] {
+            assert_eq!(card["state"], "missing");
+        }
+        // Repeated call while in-flight deduplicates per alias and caps concurrency at 2.
+        let _ = server
+            .handle(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "oms_list_projects", "arguments": {"cards": true}}
+            }))
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while exec.active.load(Ordering::Acquire) < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(exec.max_active.load(Ordering::Acquire), 2);
+
+        // Release workers and wait for all 4 valid aliases to become fresh.
+        let seen_before_refresh = std::time::Instant::now();
+        *exec.hold.lock().unwrap() = false;
+        exec.cv.notify_all();
+        let wait_until = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply = server
+                .handle(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "oms_list_projects", "arguments": {"cards": true}}
+                }))
+                .unwrap();
+            let current = reply["result"]["structuredContent"]["cards"]
+                .as_array()
+                .unwrap();
+            if current[1..].iter().all(|c| c["state"] == "fresh") && server.project_cards.is_idle()
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < wait_until, "refresh timed out");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(exec.max_active.load(Ordering::Acquire) <= 2);
+        assert_eq!(exec.calls.load(Ordering::Acquire), 4);
+        assert!(
+            exec.seen_deadlines
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|d| *d == custom_deadline)
+        );
+
+        // Fresh call queues zero refreshes.
+        let calls_before = exec.calls.load(Ordering::Acquire);
+        let fresh_reply = server
+            .handle(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "oms_list_projects", "arguments": {"cards": true}}
+            }))
+            .unwrap();
+        assert_eq!(
+            fresh_reply["result"]["structuredContent"]["cards"][1]["goal"],
+            "Refreshed in background"
+        );
+        assert_eq!(exec.calls.load(Ordering::Acquire), calls_before);
+        // A caller that read the cache before a refresh finished does not queue it again.
+        server.project_cards.enqueue_batch(
+            vec![("p0".into(), projects["p0"].clone(), Some(cache_dir.clone()))],
+            seen_before_refresh,
+        );
+        assert!(server.project_cards.is_idle());
+        assert_eq!(exec.calls.load(Ordering::Acquire), calls_before);
+
+        // Stat-only staleness: 10-minute age, .git/HEAD, .git/index, and .oms/plan.
+        let now = std::time::SystemTime::now();
+        let p0_cache = cache_dir.join(card_cache_file_name(&projects["p0"]));
+        set_mtime(&p0_cache, now - Duration::from_secs(601));
+        set_mtime(
+            &projects["p1"].join(".git/HEAD"),
+            now + Duration::from_secs(5),
+        );
+        set_mtime(
+            &projects["p2"].join(".git/index"),
+            now + Duration::from_secs(5),
+        );
+        set_mtime(
+            &projects["p3"].join(".oms/plan"),
+            now + Duration::from_secs(5),
+        );
+
+        // Fail refreshes and verify old cards remain intact with nothing secret written.
+        exec.fail_mode.store(true, Ordering::Release);
+        let stale_reply = server
+            .handle(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "oms_list_projects", "arguments": {"cards": true}}
+            }))
+            .unwrap();
+        let stale_cards = stale_reply["result"]["structuredContent"]["cards"]
+            .as_array()
+            .unwrap();
+        for card in &stale_cards[1..] {
+            assert_eq!(card["state"], "stale");
+            assert_eq!(card["goal"], "Refreshed in background");
+        }
+        let fail_wait = std::time::Instant::now() + Duration::from_secs(5);
+        while exec.calls.load(Ordering::Acquire) < calls_before + 4
+            || !server.project_cards.is_idle()
+        {
+            assert!(std::time::Instant::now() < fail_wait);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for idx in 0..4 {
+            let file = cache_dir.join(card_cache_file_name(&projects[&format!("p{idx}")]));
+            let body = std::fs::read_to_string(&file).unwrap();
+            assert!(body.contains("Refreshed in background"));
+            assert!(!body.contains(&"q".repeat(16)));
+        }
     }
 }
