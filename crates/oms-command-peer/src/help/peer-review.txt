@@ -13,6 +13,7 @@ Usage: peer-review.sh [options] --prompt TEXT
 
 Review an existing diff with an independent provider council. The default
 council is Codex, Claude Code, and Antigravity.
+Use --adaptive --writer PROVIDER for bounded review based on the diff's risk.
 Plain review persists seat answers as artifacts.
 With --gate, enforce and record the typed gate outcome.
 
@@ -83,12 +84,35 @@ Options:
                        Codex/Claude/Antigravity council; optional agents are
                        available when explicitly named.
                        An entry may carry a model (codex:model=NAME) to pin it.
+                       With --adaptive, an explicit list overrides automatic
+                       seat counts and keeps its exact provider/model pins.
+  --adaptive           Opt in to deterministic risk-based reviewer selection;
+                       requires --writer. Small ordinary documentation or an
+                       empty diff may skip review; other changes use at least
+                       one independent reviewer, and high-risk changes two.
+                       --gate always requires at least one reviewer and the
+                       mechanical verify check. A skip is advisory, never a
+                       passing gate. No full council is started automatically.
+                       Explicit --providers and exact model pins take precedence;
+                       conflicting writer-family seats are refused. Reviewer,
+                       fallback and confirm models need a recognized OpenAI,
+                       Anthropic or Google family; known native aliases work.
+                       Missing required reviewers fail before any provider call.
+                       Incompatible with --no-diff, --since-last, --no-verify,
+                       debate/deliberation, synthesis, --security-audit and
+                       --to/--all (use --providers).
+                       Live runs require non-.oms untracked content to be staged
+                       or added with intent-to-add before review or a skip.
+                       --confirm remains one optional advisory call.
   --writer PROVIDER    Name the provider that authored the change under
                        review. By default that provider is dropped from the
                        reviewer council (its family re-judging its own patch
                        is correlated judgment, not independence); an explicit
                        --providers list including it is honored with a
-                       warning.
+                       warning outside --adaptive. Adaptive review requires
+                       a native default family (codex, claude or antigravity)
+                       and independent seats; it does not infer the writer's
+                       family from an arbitrary model routed by that provider.
   --artifact-dir PATH  Artifact directory. Default: REPO/.oms/artifacts/review.
   --model MODEL        Exact model; requires exactly one provider.
   --fallback-model M   One-shot capacity fallback; requires one provider.
@@ -153,6 +177,13 @@ Options:
                        an earlier run's finding is still open; record each with
                        `findings fix|dismiss|out-of-scope`. Also
                        OMS_REVIEW_REQUIRE_DISPOSITIONS=1. Off by default.
+                       Adaptive gates retain earlier same-base blocking findings
+                       in the current file/task scope while open or fixed: verify
+                       the fix or record a reasoned owner dismissal/out-of-scope
+                       disposition. Advisory-only findings do not block; later
+                       advisory labels cannot erase an earlier blocker. Recording
+                       verified leaves an earlier incomplete gate unchanged;
+                       rerun a standalone gate when a final pass is needed.
   --export-only        Write provider prompt artifacts and do not call CLIs.
                        Use when the current agent may not send repo context to
                        another external provider. Import answers later with
