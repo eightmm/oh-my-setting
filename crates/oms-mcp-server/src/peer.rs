@@ -89,6 +89,13 @@ fn targets(raw: &str, cwd: &Path) -> Result<Vec<String>, String> {
 }
 /// Validate explicit selections for a single managed Lead before reservation and
 /// again when reconstructing the owner's argv. Catalog entitlement is checked by the panel.
+fn lead_session(id: &str) -> bool {
+    matches(
+        "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        id,
+    )
+}
+
 pub(crate) fn valid_lead_route(provider: &str, model: &str, effort: Option<&str>) -> bool {
     use oms_command_agent_role::native_model;
     let native = match provider {
@@ -618,6 +625,7 @@ impl Server<'_> {
         thread: &str,
         binding: &str,
         settings: Option<(&str, Option<&str>)>,
+        resume: Option<&str>,
     ) -> ToolResult {
         let target = match provider {
             "agy" | "antigravity" => "antigravity",
@@ -632,7 +640,11 @@ impl Server<'_> {
         if settings.is_some_and(|(model, effort)| !valid_lead_route(target, model, effort)) {
             return Err("error: invalid Lead route".into());
         }
-        self.start_routed_peer(&args, Some((operation, binding)), true, settings)
+        // Only claude and agy publish a verified native session for a Lead.
+        if resume.is_some_and(|id| target == "codex" || !lead_session(id)) {
+            return Err("error: invalid Lead session".into());
+        }
+        self.start_routed_peer(&args, Some((operation, binding)), true, settings, resume)
     }
 
     pub(crate) fn start_bound_peer(
@@ -641,7 +653,7 @@ impl Server<'_> {
         assignment: Option<(&str, &str)>,
         preserve_current: bool,
     ) -> ToolResult {
-        self.start_routed_peer(args, assignment, preserve_current, None)
+        self.start_routed_peer(args, assignment, preserve_current, None, None)
     }
 
     fn start_routed_peer(
@@ -650,6 +662,7 @@ impl Server<'_> {
         assignment: Option<(&str, &str)>,
         preserve_current: bool,
         settings: Option<(&str, Option<&str>)>,
+        resume: Option<&str>,
     ) -> ToolResult {
         if delegated()
             && !(matches!(args["kind"].as_str(), Some("message" | "ack"))
@@ -785,6 +798,13 @@ impl Server<'_> {
             let route = json!({"model":model,"effort":effort});
             launch["lead_route"] = route.clone();
             meta["lead_route"] = route;
+        }
+        if let Some(id) = resume {
+            if !followup {
+                return Err("error: a native session requires a bound Lead follow-up".into());
+            }
+            launch["lead_resume"] = json!(id);
+            meta["lead_resume"] = json!(id);
         }
         if preserve_current {
             if followup {
@@ -1673,6 +1693,12 @@ fn owner_run(
     {
         return Err(fail("selected route requires its original Lead receipt"));
     }
+    let resume = launch.get("lead_resume");
+    if resume != meta.as_ref().and_then(|m| m.get("lead_resume"))
+        || resume.is_some_and(|id| followup.is_none() || !id.as_str().is_some_and(lead_session))
+    {
+        return Err(fail("a native session requires its original Lead receipt"));
+    }
     if meta
         .as_ref()
         .is_some_and(|m| m.get("lead_followup").is_some())
@@ -1895,6 +1921,10 @@ fn owner_run(
         // This dialog continues the original OMS thread. A supervisor's ambient
         // native session selector could otherwise send its text to another chat.
         cmd.env_remove("OMS_RESUME_SESSION");
+        // The previous turn's own verified provider session, never an ambient one.
+        if let Some(id) = resume.and_then(|id| id.as_str()) {
+            cmd.env("OMS_RESUME_SESSION", id);
+        }
     }
     // The staged native CLI validates its manifest, revision and its own executable
     // before entering provider verbs. Preserve this proof in the detached owner.
@@ -1976,7 +2006,7 @@ mod tests {
 if [ "$1" = thread ]; then
     test "$6" = context && test "$7" = --require-open && cat .oms/threads/"$5".jsonl
 else
-    test -z "${OMS_RESUME_SESSION+x}" || exit 9
+    printf '%s' "${OMS_RESUME_SESSION-unset}" > resumed
     printf '%s\0' "$@" > received
 fi
 "#,
@@ -2048,6 +2078,7 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
                 &thread,
                 &child_binding,
                 Some(("gemini-4-carbon", Some("high"))),
+                None,
             )
         };
         let no_effect = || {
@@ -2068,7 +2099,16 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
         assert!(send("agy,codex").is_err());
         assert!(
             server
-                .start_lead_followup(path, "agy", prompt, &child, &thread, &root_binding, None)
+                .start_lead_followup(
+                    path,
+                    "agy",
+                    prompt,
+                    &child,
+                    &thread,
+                    &root_binding,
+                    None,
+                    None
+                )
                 .is_err()
         );
         no_effect();
@@ -2156,7 +2196,16 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
             .unwrap();
         assert!(
             server
-                .start_lead_followup(path, "agy", prompt, &old_op, &thread, &old_binding, None)
+                .start_lead_followup(
+                    path,
+                    "agy",
+                    prompt,
+                    &old_op,
+                    &thread,
+                    &old_binding,
+                    None,
+                    None
+                )
                 .is_ok()
         );
         let old_dir = Directory::run(path, &old_op, true).unwrap();
@@ -2167,6 +2216,8 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
                 .is_none()
         );
         owner_run(Some(&program), path, path, &old_op, &old_dir).unwrap();
+        // An ambient selector never reaches a Lead turn without its own session.
+        assert_eq!(std::fs::read(path.join("resumed")).unwrap(), b"unset");
         let default_argv = std::fs::read_to_string(path.join("received")).unwrap();
         assert!(
             !default_argv
@@ -2180,6 +2231,53 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
         assert_eq!(
             std::fs::read(threads.path.join(format!("{thread}.jsonl"))).unwrap(),
             b"existing conversation\n"
+        );
+        // A follow-up continues only the previous turn's verified native session.
+        let session = "12345678-1234-4234-8234-123456789abc";
+        let next_binding = storage::hash("resumed turn");
+        let next_op = op(&next_binding);
+        legacy["binding"] = json!(next_binding);
+        root.atomic(&note_name, legacy.to_string().as_bytes())
+            .unwrap();
+        let resume = |provider, id| {
+            server.start_lead_followup(
+                path,
+                provider,
+                prompt,
+                &next_op,
+                &thread,
+                &next_binding,
+                None,
+                Some(id),
+            )
+        };
+        assert!(resume("codex", session).is_err());
+        assert!(resume("agy", "12345678-1234-4234-8234-123456789ABC").is_err());
+        assert!(resume("agy", "not-a-session").is_err());
+        assert!(!path.join(RUN_ROOT).join(&next_op).exists());
+        resume("agy", session).unwrap();
+        let next_dir = Directory::run(path, &next_op, true).unwrap();
+        let next_launch = private_json(&next_dir, "launch.json").unwrap();
+        assert_eq!(next_launch["lead_resume"], session);
+        assert_eq!(
+            private_json(&next_dir, "meta.json").unwrap()["lead_resume"],
+            session
+        );
+        let mut forged = next_launch.clone();
+        forged["lead_resume"] = json!("22345678-1234-4234-8234-123456789abc");
+        next_dir
+            .atomic("launch.json", forged.to_string().as_bytes())
+            .unwrap();
+        std::fs::remove_file(path.join("resumed")).unwrap();
+        assert!(owner_run(Some(&program), path, path, &next_op, &next_dir).is_err());
+        assert!(!path.join("resumed").exists());
+        next_dir
+            .atomic("launch.json", next_launch.to_string().as_bytes())
+            .unwrap();
+        owner_run(Some(&program), path, path, &next_op, &next_dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path.join("resumed")).unwrap(),
+            session
         );
     }
 

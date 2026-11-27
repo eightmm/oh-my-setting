@@ -697,7 +697,7 @@ test('Lead settings are private and lazy, with model-specific effort and explici
 
 test('Lead settings show only private provider evidence for the observed request',async()=>{
   const id='531cb793-8e16-4761-82c8-064497585548',model='claude-opus-4-6';
-  const observed={lastServed:{model,effort:null},nativeSession:{id,source:'provider-result',scope:'invocation',resumable:false}};
+  const observed={lastServed:{model,effort:null},nativeSession:{id,source:'provider-result',scope:'invocation',resumable:true}};
   let evidence=observed,turns=[];
   const p=await panel(['one'],dashboard,{locale:'en',tools:{
     [managedRead]:a=>{const v=leadStatus(a,'ready');if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns}};return v;},
@@ -710,18 +710,18 @@ test('Lead settings show only private provider evidence for the observed request
     button.dispatchEvent(new Event('click'));await setImmediate();await p.event('settings-toggle','click');
   };
   await open(1);
-  assert.ok(!details.hidden);assert.match(details.textContent,/Reply model reported by Claude · claude-opus-4-6\nClaude session observed for this request/);
+  assert.ok(!details.hidden);assert.match(details.textContent,/Reply model reported by Claude · claude-opus-4-6\nThe next message continues this Claude session/);
   assert.ok(!p.get('chat-settings').textContent.includes(id));
-  await choose(p,'ko');assert.match(details.textContent,/보고한 응답 모델 · claude-opus-4-6\n이 요청에 사용된 Claude 세션 확인/);
+  await choose(p,'ko');assert.match(details.textContent,/보고한 응답 모델 · claude-opus-4-6\n다음 메시지는 이 Claude 세션에서 이어짐/);
   turns=[{role:'user',turnId:id,text:'A later request',status:'failed'}];await p.event('chat-refresh','click');
   assert.ok(details.hidden);assert.ok(!p.get('settings-fields').hidden);
   await p.event('settings-toggle','click');
-  evidence={lastServed:{model:'provider-default',effort:null},nativeSession:{...observed.nativeSession,resumable:true}};
+  evidence={lastServed:{model:'provider-default',effort:null},nativeSession:{...observed.nativeSession,resumable:false}};
   await p.event('settings-toggle','click');assert.ok(!details.hidden);assert.equal(details.textContent,'실제 사용 모델 미확인');
   await p.event('settings-toggle','click');evidence={};
   await p.event('settings-toggle','click');assert.ok(!details.hidden);assert.equal(details.textContent,'실제 사용 모델 미확인');
   await p.event('chat-back','click');evidence=observed;await open(2);
-  assert.equal(details.textContent,'실제 사용 모델 미확인\n이 요청에 사용된 AGY 세션 확인');assert.ok(!details.hidden);
+  assert.equal(details.textContent,'실제 사용 모델 미확인\n다음 메시지는 이 AGY 세션에서 이어짐');assert.ok(!details.hidden);
   await p.event('chat-back','click');await open(0);assert.ok(!details.hidden);assert.equal(details.textContent,'실제 사용 모델 미확인');
   assert.equal(p.host.messages.length,0);assert.equal(p.host.contexts.length,0);
 });

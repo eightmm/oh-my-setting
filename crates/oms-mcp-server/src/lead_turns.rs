@@ -515,6 +515,11 @@ impl<'a> Conversation<'a> {
                 return Err("The previous message still has an unresolved delivery. Check its status first.".into());
             }
         }
+        // Continue the previous turn's verified native session, read before this
+        // record moves the head. No observation means a fresh native session.
+        let resume = self
+            .native_invocation(server)
+            .and_then(|(session, _)| session["id"].as_str().map(str::to_owned));
         let digest = hash(text);
         let route = self.current_settings()?["selection"].clone();
         let settings = settings::selection(self.provider, &route)?;
@@ -555,6 +560,7 @@ impl<'a> Conversation<'a> {
             self.thread,
             &binding,
             settings,
+            resume.as_deref(),
         );
         // A physical launch requires mkdir of this operation before spawn; that
         // helper never removes it. Only the original writer may attest a synchronous

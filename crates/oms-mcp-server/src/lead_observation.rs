@@ -142,7 +142,7 @@ impl Conversation<'_> {
             return None;
         }
         Some((
-            json!({"id":id,"scope":"invocation","source":"provider-result","resumable":false}),
+            json!({"id":id,"scope":"invocation","source":"provider-result","resumable":true}),
             served,
         ))
     }

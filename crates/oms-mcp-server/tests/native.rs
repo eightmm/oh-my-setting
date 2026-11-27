@@ -1842,7 +1842,7 @@ fn desktop_lead_conversations() {
         } else {
             assert_eq!(
                 settings["nativeSession"],
-                json!({"source":"provider-result","scope":"invocation","resumable":false,"id":"a1000000-0000-4000-8000-000000000001"})
+                json!({"source":"provider-result","scope":"invocation","resumable":true,"id":"a1000000-0000-4000-8000-000000000001"})
             );
             for visible in [
                 &view["result"]["structuredContent"],

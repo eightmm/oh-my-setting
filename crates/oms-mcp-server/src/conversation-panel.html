@@ -502,7 +502,7 @@ const messages = {
   "prefs.effort": ["추론 강도", "Reasoning effort"],
   "prefs.next": ["다음 메시지 설정", "Settings for the next message"],
   "prefs.actual": ["Claude가 보고한 응답 모델 · {v}", "Reply model reported by Claude · {v}"],
-  "prefs.session": ["이 요청에 사용된 {v} 세션 확인", "{v} session observed for this request"],
+  "prefs.session": ["다음 메시지는 이 {v} 세션에서 이어짐", "The next message continues this {v} session"],
   "prefs.saved": ["다음 메시지의 저장된 설정 · {v}", "Saved for the next message · {v}"],
   "prefs.default": ["OMS 기본 라우팅", "OMS routing default"],
   "prefs.modelDefault": ["모델 기본값", "Model default"],
@@ -765,7 +765,7 @@ const messages = {
   "inspect.routesNote": ["현재 근거로 예상한 선택입니다. 실제 실행 기록이나 실행 권한이 아닙니다.", "Expected choices from current evidence. These are proposals, not records of execution or permission to run."],
   "inspect.modelcatalogNote": ["캐시된 모델·추론 강도 근거 · 계정 접근이나 실제 응답 모델을 보장하지 않음", "Cached model and effort evidence · does not guarantee account access or the served model"],
   "prefs.scope": ["이 Lead의 읽기 전용 상담 · 다음 메시지부터 적용 · 워커에 상속되지 않음", "This Lead's read-only consultation · applies to the next message · not inherited by workers"],
-  "prefs.continuity": ["OMS 대화 기록을 이어갑니다. 공급자의 native 세션 재개 여부는 별도입니다.", "Continues the OMS thread. Native provider session resumption is separate."],
+  "prefs.continuity": ["OMS 대화 기록과 함께, Claude·AGY는 확인된 native 세션을 재개합니다.", "Continues the OMS thread; Claude and AGY also resume their observed native session."],
   "prefs.catalogAge": ["모델 목록 확인 후 {n}초 경과", "Model catalog observed {n} seconds ago"],
   "prefs.catalogUnknown": ["모델 목록 관측 시점 미확인", "Model catalog age unconfirmed"],
   "prefs.unobserved": ["이 답변에 연결된 계정·failover·사용량 증거 미확인", "Account, failover and usage evidence linked to this reply is unconfirmed."],
@@ -1810,7 +1810,7 @@ function showSettings(c,data,observedTurn){
   const modelReported=c.provider==='claude' && served?.effort===null && typeof served.model==='string' &&
     /^[a-z0-9][a-z0-9._:/-]{0,159}$/i.test(served.model) && !served.model.includes('..') && !['auto','provider-default'].includes(served.model);
   const sessionReported=['claude','agy'].includes(c.provider) && session?.source==='provider-result' &&
-    session.scope==='invocation' && session.resumable===false && typeof session.id==='string' &&
+    session.scope==='invocation' && session.resumable===true && typeof session.id==='string' &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(session.id);
   put('settings-scope',()=>data.scope?t('prefs.scope')+'\n'+t('prefs.continuity'):t('prefs.next'));
   put('settings-catalog',()=>[Number.isSafeInteger(data.catalogAgeSeconds)?t('prefs.catalogAge',{n:data.catalogAgeSeconds}):t('prefs.catalogUnknown'),t('prefs.unobserved')].join('\n'));
