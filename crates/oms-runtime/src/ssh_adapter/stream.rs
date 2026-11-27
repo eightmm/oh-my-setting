@@ -133,10 +133,10 @@ pub(super) fn collect(
 ) -> Result<(u64, String)> {
     resumable::check_request(req)?;
     let permit = admit_ssh_connection(
-        req.repo,
         req.cwd,
-        req.target_key,
+        req.target,
         req.host,
+        req.port,
         "collect",
         req.control,
         req.deadline,
@@ -259,9 +259,12 @@ pub(super) fn collect(
                     is_connect_failure(exit, empty_stdout, stderr),
                     req.deadline,
                     req.clock,
-                )?;
+                );
                 if exit != 0 {
-                    if total == 0 && is_interactive_auth_failure(exit, b"", stderr) {
+                    if !permit.reused_control
+                        && total == 0
+                        && is_interactive_auth_failure(exit, b"", stderr)
+                    {
                         return Err(error(INTERACTIVE_AUTH_UNSUPPORTED));
                     }
                     return Err(status(

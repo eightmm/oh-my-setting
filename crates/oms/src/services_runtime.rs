@@ -1158,7 +1158,7 @@ impl<'a> RuntimeServices<'a> {
     fn cancel(&self) -> &AtomicBool {
         self.interrupted.as_ref()
     }
-    fn child(&self, spec: ChildSpec<'_>) -> oms_command_plan::Result<ChildOut> {
+    fn child_raw(&self, spec: ChildSpec<'_>) -> Result<ChildOut, String> {
         #[cfg(target_os = "linux")]
         if self.scope == Scope::WholeTree
             && !self.control.supervise_worker().is_empty()
@@ -1177,8 +1177,7 @@ impl<'a> RuntimeServices<'a> {
                 self.control.supervise_worker(),
                 &spawn,
                 self.cancel(),
-            )
-            .map_err(plan_error)?;
+            )?;
             return Ok(ChildOut {
                 code: child.code,
                 stdout: child.stdout,
@@ -1189,7 +1188,10 @@ impl<'a> RuntimeServices<'a> {
                 dropped: child.dropped,
             });
         }
-        run_child(self.scope, spec, self.cancel()).map_err(plan_error)
+        run_child(self.scope, spec, self.cancel())
+    }
+    fn child(&self, spec: ChildSpec<'_>) -> oms_command_plan::Result<ChildOut> {
+        self.child_raw(spec).map_err(plan_error)
     }
     /// Bounded Git child with no ambient `GIT_*` redirection or prompts.
     fn git(
@@ -2553,6 +2555,172 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+struct ControlMasterOut {
+    code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    timed_out: bool,
+    launch_failed: bool,
+}
+
+fn make_nonblocking_file(pipe: impl Into<std::os::fd::OwnedFd>) -> Option<std::fs::File> {
+    let fd: std::os::fd::OwnedFd = pipe.into();
+    let flags = rustix::fs::fcntl_getfl(&fd).ok()?;
+    rustix::fs::fcntl_setfl(&fd, flags | rustix::fs::OFlags::NONBLOCK).ok()?;
+    Some(std::fs::File::from(fd))
+}
+
+fn drain_nonblocking_file(file: &mut Option<std::fs::File>, out: &mut Vec<u8>, limit: usize) {
+    let Some(f) = file.as_mut() else {
+        return;
+    };
+    let mut buf = [0u8; 8192];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => {
+                *file = None;
+                break;
+            }
+            Ok(n) => {
+                let keep = limit.saturating_sub(out.len()).min(n);
+                if keep > 0 {
+                    out.extend_from_slice(&buf[..keep]);
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                break;
+            }
+            Err(_) => {
+                *file = None;
+                break;
+            }
+        }
+    }
+}
+
+/// Start an OpenSSH ControlPersist master (`-o ControlMaster=yes -fN`) outside
+/// the `Scope::WholeTree` subreaper so the daemonized master survives command
+/// teardown while foreground connect waits stay bounded by deadline and cancel.
+fn start_ssh_control_master(
+    ssh_bin: &std::ffi::OsStr,
+    ssh_alias: &str,
+    control: &str,
+    control_persist_secs: u64,
+    deadline: Instant,
+    interrupted: &std::sync::atomic::AtomicBool,
+) -> oms_command_plan::Result<ControlMasterOut> {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    if interrupted.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(plan_error("interrupted"));
+    }
+    if Instant::now() >= deadline {
+        return Ok(ControlMasterOut {
+            code: 124,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            timed_out: true,
+            launch_failed: false,
+        });
+    }
+    let argv = oms_runtime::ssh_adapter::ssh_argv_with_mode(
+        ssh_bin,
+        ssh_alias,
+        None,
+        control,
+        control_persist_secs,
+        oms_runtime::ssh_adapter::SshControlMode::MasterStart,
+    )?;
+    let mut child = match std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return Ok(ControlMasterOut {
+                code: 127,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                timed_out: false,
+                launch_failed: true,
+            });
+        }
+    };
+    let mut out_file = child.stdout.take().and_then(make_nonblocking_file);
+    let mut err_file = child.stderr.take().and_then(make_nonblocking_file);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    loop {
+        drain_nonblocking_file(&mut out_file, &mut stdout, GIT_LIMIT);
+        drain_nonblocking_file(&mut err_file, &mut stderr, GIT_LIMIT);
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                drain_nonblocking_file(&mut out_file, &mut stdout, GIT_LIMIT);
+                drain_nonblocking_file(&mut err_file, &mut stderr, GIT_LIMIT);
+                drop(out_file);
+                drop(err_file);
+                let code = status
+                    .code()
+                    .unwrap_or_else(|| status.signal().map_or(125, |sig| 128 + sig));
+                return Ok(ControlMasterOut {
+                    code,
+                    stdout,
+                    stderr,
+                    timed_out: false,
+                    launch_failed: false,
+                });
+            }
+            Err(e) => return Err(plan_error(format!("SSH control master wait failed: {e}"))),
+            Ok(None) => {
+                if interrupted.load(std::sync::atomic::Ordering::Acquire) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(plan_error("interrupted"));
+                }
+                let Some(rem) = deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|d| !d.is_zero())
+                else {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Ok(ControlMasterOut {
+                        code: 124,
+                        stdout,
+                        stderr,
+                        timed_out: true,
+                        launch_failed: false,
+                    });
+                };
+                let wait = rem.min(Duration::from_millis(10));
+                let mut fds = Vec::new();
+                if let Some(f) = &out_file {
+                    fds.push(rustix::event::PollFd::new(f, rustix::event::PollFlags::IN));
+                }
+                if let Some(f) = &err_file {
+                    fds.push(rustix::event::PollFd::new(f, rustix::event::PollFlags::IN));
+                }
+                if fds.is_empty() {
+                    std::thread::sleep(wait);
+                } else {
+                    let ts = rustix::event::Timespec {
+                        tv_sec: wait.as_secs() as _,
+                        tv_nsec: wait.subsec_nanos() as _,
+                    };
+                    let _ = rustix::event::poll(&mut fds, Some(&ts));
+                }
+            }
+        }
+    }
+}
+
 impl RuntimeServices<'_> {
     /// Observe or advance one registered same-path checkout over ssh without a
     /// command runner: local Git proves the origin, branch and pushed commit,
@@ -2697,21 +2865,12 @@ impl RuntimeServices<'_> {
             &seconds.to_string(),
         ];
         let control = oms_runtime::ssh_adapter::ssh_control_path(&request.ssh_alias, None)?;
-        let mut argv = oms_runtime::ssh_adapter::ssh_argv(
-            &self.ssh,
-            &request.ssh_alias,
-            None,
-            &control,
-            control_persist_secs,
-        )?;
-        argv.extend(["sh", "-s", "--"].iter().map(OsString::from));
-        argv.extend(values.iter().map(|v| OsString::from(shell_quote(v))));
         let deadline = Instant::now() + request.timeout;
         let permit = oms_runtime::ssh_adapter::admit_ssh_connection(
-            state_root,
             repo,
-            &request.name,
+            Some(&request.name),
             &request.ssh_alias,
+            None,
             if request.sync {
                 "target-sync"
             } else {
@@ -2721,9 +2880,63 @@ impl RuntimeServices<'_> {
             deadline,
             self.ssh_clock(),
         )?;
-        let mut spec = ChildSpec::new(argv, request.timeout, GIT_LIMIT);
+        if !permit.reused_control {
+            let master = start_ssh_control_master(
+                &self.ssh,
+                &request.ssh_alias,
+                &control,
+                control_persist_secs,
+                deadline,
+                self.cancel(),
+            )?;
+            if master.launch_failed {
+                result.set("reason", rvalue::string("no-network"))?;
+                return Ok(result);
+            }
+            if master.timed_out {
+                return timed_out(&mut result);
+            }
+            if master.code != 0 {
+                oms_runtime::ssh_adapter::record_ssh_outcome(
+                    &permit,
+                    oms_runtime::ssh_adapter::is_connect_failure(
+                        master.code,
+                        &master.stdout,
+                        &master.stderr,
+                    ),
+                    deadline,
+                    self.ssh_clock(),
+                );
+                if oms_runtime::ssh_adapter::is_interactive_auth_failure(
+                    master.code,
+                    &master.stdout,
+                    &master.stderr,
+                ) {
+                    return Err(plan_error(
+                        oms_runtime::ssh_adapter::INTERACTIVE_AUTH_UNSUPPORTED,
+                    ));
+                }
+                result.set("reason", rvalue::string(network_reason(&master.stderr)))?;
+                return Ok(result);
+            }
+        }
+        let mut argv = oms_runtime::ssh_adapter::ssh_argv_with_mode(
+            &self.ssh,
+            &request.ssh_alias,
+            None,
+            &control,
+            control_persist_secs,
+            oms_runtime::ssh_adapter::SshControlMode::MultiplexOnly,
+        )?;
+        argv.extend(["sh", "-s", "--"].iter().map(OsString::from));
+        argv.extend(values.iter().map(|v| OsString::from(shell_quote(v))));
+        let remaining_wall = deadline.saturating_duration_since(Instant::now());
+        if remaining_wall.is_zero() {
+            return timed_out(&mut result);
+        }
+        let mut spec = ChildSpec::new(argv, remaining_wall, GIT_LIMIT);
         spec.stdin = REMOTE_SCRIPT.as_bytes().to_vec();
-        let remote = match run_child(self.scope, spec, self.cancel()) {
+        let remote = match self.child_raw(spec) {
             Ok(out) => out,
             Err(e) if e.starts_with(LAUNCH_FAILED) => {
                 result.set("reason", rvalue::string("no-network"))?;
@@ -2743,7 +2956,7 @@ impl RuntimeServices<'_> {
             ),
             deadline,
             self.ssh_clock(),
-        )?;
+        );
         let text = String::from_utf8_lossy(&remote.stdout).into_owned();
         let Some(
             [
@@ -2761,11 +2974,13 @@ impl RuntimeServices<'_> {
             ],
         ) = parse_remote_reply(remote.code, &text)
         else {
-            if oms_runtime::ssh_adapter::is_interactive_auth_failure(
-                remote.code,
-                &remote.stdout,
-                &remote.stderr,
-            ) {
+            if !permit.reused_control
+                && oms_runtime::ssh_adapter::is_interactive_auth_failure(
+                    remote.code,
+                    &remote.stdout,
+                    &remote.stderr,
+                )
+            {
                 return Err(plan_error(
                     oms_runtime::ssh_adapter::INTERACTIVE_AUTH_UNSUPPORTED,
                 ));
@@ -5567,6 +5782,12 @@ exit 92
 
     #[test]
     fn target_transport_status_runs_the_remote_script_through_ssh() {
+        if apptainer_test_process(
+            "services_runtime::runtime_tests::target_transport_status_runs_the_remote_script_through_ssh",
+            true,
+        ) {
+            return;
+        }
         let (flag, repo) = (Arc::new(AtomicBool::new(false)), Dir::repo());
         let home = Dir::new();
         let origin = "https://example.invalid/owner/project.git";
@@ -5584,7 +5805,7 @@ exit 92
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nshift\nHOME='{}' exec \"$@\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nshift\n[ \"$#\" -eq 0 ] && exit 0\nHOME='{}' exec \"$@\"\n",
                 args_log.display(),
                 home.path().display()
             ),
@@ -5596,9 +5817,17 @@ exit 92
         }
         let mut rt = services(&flag, repo.path());
         rt.ssh = fake.into_os_string();
+        let alias = format!(
+            "alias-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
         let request = |workdir: &str| TargetRequest {
             name: "box".into(),
-            ssh_alias: "alias".into(),
+            ssh_alias: alias.clone(),
             workdir: workdir.into(),
             control_persist: None,
             state_repo: None,
@@ -5615,6 +5844,7 @@ exit 92
         let recorded = std::fs::read_to_string(&args_log).unwrap();
         let recorded_lines: Vec<&str> = recorded.lines().collect();
         assert!(recorded_lines.contains(&"-a"), "{recorded}");
+        assert!(recorded_lines.contains(&"-fN"), "{recorded}");
         for expected_opt in [
             "ClearAllForwardings=yes",
             "ForwardAgent=no",
@@ -5622,7 +5852,8 @@ exit 92
             "ConnectTimeout=10",
             "ServerAliveInterval=30",
             "ServerAliveCountMax=3",
-            "ControlMaster=auto",
+            "ControlMaster=yes",
+            "ControlMaster=no",
             "ControlPath=",
             "ControlPersist=1800",
         ] {
@@ -5669,6 +5900,12 @@ exit 92
 
     #[test]
     fn target_transport_enforces_persist_backoff_hourly_cap_and_interactive_auth() {
+        if apptainer_test_process(
+            "services_runtime::runtime_tests::target_transport_enforces_persist_backoff_hourly_cap_and_interactive_auth",
+            true,
+        ) {
+            return;
+        }
         use std::os::unix::fs::PermissionsExt;
         use std::sync::atomic::AtomicU64;
 
@@ -5720,9 +5957,14 @@ exit 92
                 "    printf 'Permission denied (publickey).\\n' >&2\n",
                 "    exit 255\n",
                 "    ;;\n",
+                "  remote255)\n",
+                "    printf 'remote script crashed\\n' >&2\n",
+                "    exit 255\n",
+                "    ;;\n",
                 "esac\n",
                 "while [ \"$1\" != -- ]; do shift; done\n",
                 "shift\nshift\n",
+                "[ \"$#\" -eq 0 ] && exit 0\n",
                 "HOME='{home}' exec \"$@\"\n",
             ),
             args = args_log.display(),
@@ -5744,7 +5986,14 @@ exit 92
         // 1. Existing target record in hub runtime state without `control_persist` loads,
         //    retains approval, and defaults to ControlPersist=1800; custom `control_persist`
         //    updates ControlPersist without changing the approval fingerprint.
-        let alias = format!("svc-alias-{}", std::process::id());
+        let alias = format!(
+            "svc-alias-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
         let identity = rvalue::object([
             ("ssh_alias", rvalue::string(&alias)),
             ("workdir", rvalue::string("~/work/tree")),
@@ -5763,9 +6012,17 @@ exit 92
 
         std::fs::create_dir_all(hub.path().join(".oms/runtime")).unwrap();
         let write_hub_targets = |row: &Value| {
+            let broken = rvalue::object([
+                ("ssh_alias", rvalue::string("broken-other")),
+                ("workdir", rvalue::string("/bad/..")),
+                ("control_persist", rvalue::number(5)),
+            ]);
             let reg = rvalue::object([
                 ("schema", rvalue::number(1)),
-                ("targets", rvalue::object([("cluster", row.clone())])),
+                (
+                    "targets",
+                    rvalue::object([("cluster", row.clone()), ("broken", broken)]),
+                ),
             ]);
             std::fs::write(
                 hub.path().join(".oms/runtime/targets.json"),
@@ -5793,10 +6050,21 @@ exit 92
                 .contains("ControlPersist=1800")
         );
         assert!(
-            hub.path()
+            !hub.path()
+                .join(".oms/runtime/ssh-connections.json")
+                .exists()
+                && !repo
+                    .path()
+                    .join(".oms/runtime/ssh-connections.json")
+                    .exists(),
+            "reconnect limits must live in host-private state, not inside a repository"
+        );
+        let ctrl_str = oms_runtime::ssh_adapter::ssh_control_path(&alias, None).unwrap();
+        let host_state_dir = oms_runtime::ssh_adapter::ssh_state_dir(&ctrl_str).unwrap();
+        assert!(
+            host_state_dir
                 .join(oms_runtime::ssh_adapter::RECONNECT_STATE_FILE)
-                .is_file(),
-            "reconnect limits must be stored in the hub's runtime state"
+                .is_file()
         );
 
         target_row
@@ -5882,14 +6150,24 @@ exit 92
             capped.message
         );
 
-        // Reusing an open control connection does not count toward the hourly cap.
-        let ctrl_path =
-            PathBuf::from(oms_runtime::ssh_adapter::ssh_control_path(&alias, None).unwrap());
+        // Reusing an open control connection does not count toward the hourly cap,
+        // and a failing remote command over that reused connection leaves state unchanged.
+        let ctrl_path = PathBuf::from(&ctrl_str);
         let _ = std::fs::remove_file(&ctrl_path);
         let listener = std::os::unix::net::UnixListener::bind(&ctrl_path).unwrap();
+        let state_file = host_state_dir.join(oms_runtime::ssh_adapter::RECONNECT_STATE_FILE);
+        let state_before_reused = std::fs::read(&state_file).unwrap();
         let reused = rt.target_transport(repo.path(), &req);
+        std::fs::write(&mode_file, "remote255").unwrap();
+        let reused_fail = rt.target_transport(repo.path(), &req).unwrap();
+        assert!(!reused_fail.get("ok").truth());
+        let state_after_reused_fail = std::fs::read(&state_file).unwrap();
         drop(listener);
         let _ = std::fs::remove_file(&ctrl_path);
         assert!(reused.unwrap().get("ok").truth());
+        assert_eq!(
+            state_after_reused_fail, state_before_reused,
+            "reused connection with failing remote command must leave state unchanged"
+        );
     }
 }

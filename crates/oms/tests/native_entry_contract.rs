@@ -6277,3 +6277,258 @@ fn mcp_stdio_shutdown_wakes_without_stdin_eof() {
     }
     assert!(!fixture.0.join(".oms").exists());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn target_status_preserves_control_master_under_linux_whole_tree_scope() {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    // Stand-in ControlPersist master helper: binds the Unix control socket and stays alive.
+    if let Some(sock_raw) = std::env::var_os("OMS_TEST_STANDIN_MASTER_SOCK") {
+        let sock = PathBuf::from(sock_raw);
+        let pid_file = PathBuf::from(std::env::var_os("OMS_TEST_STANDIN_MASTER_PID").unwrap());
+        let stop_file = PathBuf::from(std::env::var_os("OMS_TEST_STANDIN_MASTER_STOP").unwrap());
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::fs::write(&pid_file, format!("{}\n", std::process::id())).unwrap();
+        let until = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < until && !stop_file.exists() {
+            let _ = listener.accept();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_file(&sock);
+        return;
+    }
+
+    fn pid_alive_non_zombie(pid: i32) -> bool {
+        if kill(Pid::from_raw(pid), None).is_err() {
+            return false;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        !stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(|state| state == "Z")
+    }
+
+    struct MasterCleanup {
+        pid_file: PathBuf,
+        stop_file: PathBuf,
+        rt_dir: PathBuf,
+    }
+    impl Drop for MasterCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.stop_file, b"1\n");
+            if let Ok(raw) = std::fs::read_to_string(&self.pid_file)
+                && let Ok(pid) = raw.trim().parse::<i32>()
+            {
+                let _ = kill(Pid::from_raw(pid), nix::sys::signal::Signal::SIGKILL);
+            }
+            let _ = std::fs::remove_dir_all(&self.rt_dir);
+        }
+    }
+
+    let l = Landing::new();
+    {
+        use std::os::unix::fs::symlink;
+        let payload_dir =
+            l.f.0
+                .join("target/oms-native/1111111111111111111111111111111111111111");
+        std::fs::set_permissions(&payload_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(
+            payload_dir.join("manifest.json"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let paths = std::env::var_os("PATH").unwrap();
+        for name in ["rm", "sleep", "tr", "mkdir"] {
+            let found = std::env::split_paths(&paths)
+                .map(|p| p.join(name))
+                .find(|p| p.is_file())
+                .unwrap();
+            symlink(std::fs::canonicalize(found).unwrap(), l.tools.join(name)).unwrap();
+        }
+    }
+    let rt_dir = std::path::PathBuf::from(format!(
+        "/tmp/oms-wt-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&rt_dir)
+        .unwrap();
+    let home = l.f.0.join("home");
+    let repo = home.join("work/tree");
+    let remote = l.f.0.join("remote-home/work/tree");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&remote).unwrap();
+
+    let origin = "https://example.invalid/owner/project.git";
+    for dir in [&repo, &remote] {
+        l.git_in(dir, &["init", "-q", "-b", "main"]);
+        l.git_in(dir, &["config", "user.name", "Test"]);
+        l.git_in(dir, &["config", "user.email", "test@example.invalid"]);
+        l.git_in(dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        l.git_in(dir, &["remote", "add", "origin", origin]);
+    }
+    let expected_head = l.git_in(&repo, &["rev-parse", "HEAD"]);
+    l.git_in(&remote, &["fetch", "-q", repo.to_str().unwrap(), "main"]);
+    l.git_in(&remote, &["reset", "-q", "--hard", "FETCH_HEAD"]);
+
+    let alias = "wt-cluster";
+    std::fs::create_dir_all(repo.join(".oms/runtime")).unwrap();
+    std::fs::write(
+        repo.join(".oms/runtime/targets.json"),
+        format!(
+            r#"{{"schema":1,"targets":{{"cluster":{{"ssh_alias":"{alias}","workdir":"~/work/tree","scheduler":"none","scratch_root":"","execution_approved":false,"approved_fingerprint":""}}}}}}"#
+        ),
+    )
+    .unwrap();
+
+    let master_pid_file = l.f.0.join("master.pid");
+    let master_starts_file = l.f.0.join("master.starts");
+    let stray_pid_file = l.f.0.join("stray.pid");
+    let stop_file = l.f.0.join("master.stop");
+    let _cleanup = MasterCleanup {
+        pid_file: master_pid_file.clone(),
+        stop_file: stop_file.clone(),
+        rt_dir: rt_dir.clone(),
+    };
+
+    let fake_ssh = l.f.0.join("fake-ssh");
+    let self_exe = std::env::current_exe().unwrap();
+    let script = format!(
+        concat!(
+            "#!/bin/sh\n",
+            "set -eu\n",
+            "ctrl=''\n",
+            "is_master=0\n",
+            "while [ \"$#\" -gt 0 ] && [ \"$1\" != -- ]; do\n",
+            "  case \"$1\" in\n",
+            "    ControlPath=*) ctrl=${{1#ControlPath=}} ;;\n",
+            "    -fN) is_master=1 ;;\n",
+            "  esac\n",
+            "  shift\n",
+            "done\n",
+            "shift\n",
+            "shift\n",
+            "if [ \"$is_master\" = 1 ]; then\n",
+            "  printf '1\\n' >> '{starts}'\n",
+            "  rm -f '{mpid}'\n",
+            "  OMS_TEST_STANDIN_MASTER_SOCK=\"$ctrl\" \\\n",
+            "  OMS_TEST_STANDIN_MASTER_PID='{mpid}' \\\n",
+            "  OMS_TEST_STANDIN_MASTER_STOP='{stop}' \\\n",
+            "  '{helper}' --exact target_status_preserves_control_master_under_linux_whole_tree_scope --nocapture >/dev/null 2>&1 &\n",
+            "  i=0\n",
+            "  while [ ! -s '{mpid}' ] && [ \"$i\" -lt 200 ]; do\n",
+            "    i=$((i + 1))\n",
+            "    sleep 0.01 2>/dev/null || sleep 1\n",
+            "  done\n",
+            "  [ -S \"$ctrl\" ]\n",
+            "  exit 0\n",
+            "fi\n",
+            "[ -S \"$ctrl\" ]\n",
+            "(sleep 30) </dev/null >/dev/null 2>&1 &\n",
+            "printf '%s\\n' \"$!\" > '{spid}'\n",
+            "HOME='{rhome}' exec sh -c \"$*\"\n",
+        ),
+        starts = master_starts_file.display(),
+        mpid = master_pid_file.display(),
+        stop = stop_file.display(),
+        helper = self_exe.display(),
+        spid = stray_pid_file.display(),
+        rhome = l.f.0.join("remote-home").display(),
+    );
+    std::fs::write(&fake_ssh, script).unwrap();
+    std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let run_status = || {
+        let locks_dir = l.f.0.join("locks");
+        let (code, out, err) = l.oms_env(
+            &[
+                "runtime",
+                "--repo",
+                repo.to_str().unwrap(),
+                "backend",
+                "target",
+                "status",
+                "cluster",
+            ],
+            &[
+                ("XDG_RUNTIME_DIR", rt_dir.to_str().unwrap()),
+                ("OMS_LOCK_DIR", locks_dir.to_str().unwrap()),
+                ("OMS_SSH_BIN", fake_ssh.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(code, 0, "status failed: stdout={out} stderr={err}");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["ok"], true, "{parsed}");
+        assert_eq!(parsed["head"], expected_head);
+        parsed
+    };
+
+    // Call 1 starts the stand-in master outside Scope::WholeTree, runs the supervised
+    // command over the socket, reaps the command's stray child, and keeps the master alive.
+    run_status();
+    let master_pid: i32 = std::fs::read_to_string(&master_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let stray_pid: i32 = std::fs::read_to_string(&stray_pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        pid_alive_non_zombie(master_pid),
+        "control master {master_pid} must survive Scope::WholeTree call"
+    );
+    assert!(
+        !pid_alive_non_zombie(stray_pid),
+        "supervised command stray child {stray_pid} must still be reaped by Scope::WholeTree"
+    );
+    let state_file = rt_dir.join("oms-ssh-state/ssh-connections.json");
+    let state_after_1: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+    assert_eq!(
+        state_after_1["targets"][format!("{alias}:22")]["connect_timestamps_ms"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Call 2 reuses the live control master and counts no new connection.
+    run_status();
+    assert!(
+        pid_alive_non_zombie(master_pid),
+        "control master {master_pid} must remain alive across reused calls"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&master_starts_file)
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "second call must reuse existing master without spawning a new master"
+    );
+    let state_after_2: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+    assert_eq!(
+        state_after_2["targets"][format!("{alias}:22")]["connect_timestamps_ms"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "reused master connection must count no new connection"
+    );
+}
