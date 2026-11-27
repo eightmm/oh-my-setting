@@ -513,9 +513,17 @@ impl<'a> Job<'a> {
     }
 }
 
-/// Returns the completion and whether an activity heartbeat failed. Bounds are
-/// validated before anything starts.
+/// Returns the completion and whether an activity heartbeat or the channel failed.
+/// Bounds are validated before anything starts.
 fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool), String> {
+    supervise_flags(job, interrupted).map(|(done, heartbeat, channel)| (done, heartbeat || channel))
+}
+
+/// Like `supervise`, keeping heartbeat failure separate from channel failure.
+fn supervise_flags(
+    job: Job<'_>,
+    interrupted: &AtomicBool,
+) -> Result<(Completion, bool, bool), String> {
     if interrupted.load(Ordering::Acquire) {
         return Err("interrupted".into());
     }
@@ -668,7 +676,7 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
         spawn(request)
     }?;
     if let Some(done) = started_done {
-        return Ok((done, false));
+        return Ok((done, false, false));
     }
     #[cfg(target_os = "linux")]
     let mut dispatch_observer = job.dispatch_observer;
@@ -759,7 +767,7 @@ fn supervise(job: Job<'_>, interrupted: &AtomicBool) -> Result<(Completion, bool
                     }
                 }
             }
-            return Ok((done, heartbeat_failed || channel_failed));
+            return Ok((done, heartbeat_failed, channel_failed));
         }
     }
 }
