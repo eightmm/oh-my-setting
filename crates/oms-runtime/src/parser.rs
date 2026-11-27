@@ -269,7 +269,7 @@ fn spec(r: &Request) -> Spec {
         (Mode::Capsule, "diff", _) => ("", "", "", "", 2, 2, false),
         (Mode::Backend, "target", "add") => (
             "",
-            "ssh-alias workdir capability scheduler scratch-root",
+            "ssh-alias workdir capability scheduler scratch-root control-persist",
             "capability",
             "ssh-alias",
             1,

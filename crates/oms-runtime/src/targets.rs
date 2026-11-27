@@ -5,6 +5,36 @@ use crate::value::*;
 use crate::{Result, error, require};
 use std::path::Path;
 pub const FILE: &str = ".oms/runtime/targets.json";
+pub const DEFAULT_CONTROL_PERSIST: u64 = 1800;
+pub const MIN_CONTROL_PERSIST: u64 = 60;
+pub const MAX_CONTROL_PERSIST: u64 = 14400;
+
+pub fn validate_control_persist(secs: u64) -> Result<u64> {
+    require(
+        (MIN_CONTROL_PERSIST..=MAX_CONTROL_PERSIST).contains(&secs),
+        format!(
+            "control_persist must be between {MIN_CONTROL_PERSIST} and {MAX_CONTROL_PERSIST} seconds"
+        ),
+    )?;
+    Ok(secs)
+}
+
+pub fn control_persist(v: &Value) -> Result<u64> {
+    let Some(raw) = v.opt("control_persist") else {
+        return Ok(DEFAULT_CONTROL_PERSIST);
+    };
+    let secs = raw
+        .int()
+        .ok()
+        .and_then(|n| u64::try_from(n).ok())
+        .ok_or_else(|| {
+            error(format!(
+                "control_persist must be an integer between {MIN_CONTROL_PERSIST} and {MAX_CONTROL_PERSIST} seconds"
+            ))
+        })?;
+    validate_control_persist(secs)
+}
+
 fn name(s: &str, label: &str) -> Result<()> {
     require(
         !s.is_empty()
@@ -17,7 +47,7 @@ fn name(s: &str, label: &str) -> Result<()> {
         ),
     )
 }
-fn record(v: &Value) -> Result<()> {
+pub(crate) fn record(v: &Value) -> Result<()> {
     keys(
         v,
         &["ssh_alias", "workdir"],
@@ -25,10 +55,12 @@ fn record(v: &Value) -> Result<()> {
             "capabilities",
             "scheduler",
             "scratch_root",
+            "control_persist",
             "execution_approved",
             "approved_fingerprint",
         ],
     )?;
+    control_persist(v)?;
     if let Some(caps) = v.opt("capabilities") {
         for cap in caps.array()? {
             let cap = cap.str()?;
@@ -123,6 +155,28 @@ pub fn update_with_options(
     scheduler: &str,
     scratch_root: &str,
 ) -> Result<Value> {
+    update_with_persist(
+        rt,
+        target,
+        ssh,
+        workdir,
+        capabilities,
+        scheduler,
+        scratch_root,
+        None,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub fn update_with_persist(
+    rt: &Runtime<'_>,
+    target: &str,
+    ssh: Option<&str>,
+    workdir: Option<&str>,
+    capabilities: &[String],
+    scheduler: &str,
+    scratch_root: &str,
+    persist: Option<u64>,
+) -> Result<Value> {
     name(target, "target name")?;
     let _guard = rt.lock(Path::new(FILE))?;
     rt.invalidate(Path::new(FILE));
@@ -152,7 +206,7 @@ pub fn update_with_options(
         let mut caps = capabilities.to_vec();
         caps.sort();
         caps.dedup();
-        let row = object([
+        let mut row = object([
             ("ssh_alias", string(ssh)),
             ("workdir", string(expected)),
             ("capabilities", a(caps.iter().map(string))),
@@ -161,6 +215,10 @@ pub fn update_with_options(
             ("execution_approved", b(false)),
             ("approved_fingerprint", string("")),
         ]);
+        if let Some(secs) = persist {
+            validate_control_persist(secs)?;
+            row.set("control_persist", number(secs))?;
+        }
         record(&row)?;
         require(
             entries.opt(target).is_none(),
@@ -320,6 +378,8 @@ pub fn inspect(
             name: target.into(),
             ssh_alias: row.text("ssh_alias").into(),
             workdir: row.text("workdir").into(),
+            control_persist: Some(control_persist(row)?),
+            state_repo: Some(rt.state_repo.clone()),
             sync,
             sha: sha.map(str::to_owned),
             timeout: std::time::Duration::from_secs(timeout as u64),
