@@ -9086,6 +9086,8 @@ fn native_lead_answer_fixture(provider: &str) {
             ("OMS_PEER_LEAD_OBSERVATION", &op),
             ("TEST_LEAD_PROVIDER", provider),
             ("OMS_PEER_CANCEL_DIR", path.to_str().unwrap()),
+            // Only a run whose own receipts name this session counts as resumed.
+            ("OMS_RESUME_SESSION", "12345678-1234-4234-8234-123456789abc"),
         ],
         || {
             let dir = PathBuf::from(std::env::var_os("OMS_PEER_CANCEL_DIR").unwrap());
@@ -9134,7 +9136,7 @@ fn native_lead_answer_fixture(provider: &str) {
                 ("agy",serde_json::json!({"status":"SUCCESS","conversation_id":id,"response":"actual fixture answer"}).to_string())
             };
             let fixture_script = format!(
-                "#!/bin/sh\n[ -z \"$OMS_PEER_LEAD_OBSERVATION\" ] || exit 6\ncat >/dev/null\ncat <<'END'\n{stream}\nEND\n"
+                "#!/bin/sh\n[ -z \"$OMS_PEER_LEAD_OBSERVATION\" ] || exit 6\nfor a; do [ \"$a\" = --include-partial-messages ] && p=1; done; echo ${{p:-0}} >> \"$HOME/provider-argv\"\ncat >/dev/null\ncat <<'END'\n{stream}\nEND\n"
             );
             fs::write(
                 PathBuf::from(std::env::var_os("HOME").unwrap())
@@ -9148,6 +9150,13 @@ fn native_lead_answer_fixture(provider: &str) {
             assert!(!generic.join("native-lead-observation.json").exists());
             let answers = dir.join("answers");
             success(run_peer(&answers));
+            // Only the owner's Claude call asks for partial messages to stream.
+            let argv = fs::read_to_string(
+                PathBuf::from(std::env::var_os("HOME").unwrap()).join("provider-argv"),
+            )
+            .unwrap();
+            let partial: Vec<_> = argv.lines().map(|l| l == "1").collect();
+            assert_eq!(partial, [false, provider == "claude"], "{argv}");
             let receipt = answers.join("native-lead-observation.json");
             let bytes = fs::read(&receipt).unwrap();
             let row: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -9166,6 +9175,50 @@ fn native_lead_answer_fixture(provider: &str) {
                 fs::metadata(&receipt).unwrap().permissions().mode() & 0o077,
                 0
             );
+            let prompt_of = |artifact: &Path| {
+                let text = fs::read_to_string(artifact).unwrap();
+                text.split("\n## Output\n").next().unwrap().to_owned()
+            };
+            let replayed = prompt_of(&answers.join(row["artifact"].as_str().unwrap()));
+            assert!(
+                replayed.matches("Read this fixture").count() > 1,
+                "{replayed}"
+            );
+            // A verified resumed session gets only the new message, no thread replay.
+            let known: Vec<_> = fs::read_dir(&answers)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            for (name, mut value) in [("meta.json", meta), ("launch.json", launch)] {
+                value["lead_resume"] = serde_json::json!(id);
+                fs::write(dir.join(name), value.to_string()).unwrap();
+            }
+            success(run(
+                &repo,
+                source,
+                "peer-ask",
+                &[
+                    "--providers",
+                    provider,
+                    "--thread",
+                    op,
+                    "--no-current",
+                    "--prompt",
+                    "Continue the fixture",
+                    "--artifact-dir",
+                    answers.to_str().unwrap(),
+                    "--no-task",
+                    "--no-memory",
+                ],
+            ));
+            let resumed = fs::read_dir(&answers)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| !known.contains(p) && p.extension().is_some_and(|x| x == "md"))
+                .unwrap();
+            let resumed = prompt_of(&resumed);
+            assert!(resumed.contains("Continue the fixture"), "{resumed}");
+            assert!(!resumed.contains("Read this fixture"), "{resumed}");
         },
     )
 }

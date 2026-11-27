@@ -520,7 +520,8 @@ pub(crate) fn prompt(
             )?;
         }
     }
-    if args.has("thread") {
+    // A resumed native Lead session already holds this thread; send only the new turn.
+    if args.has("thread") && !args.has("_lead-resumed") {
         body.push_layer(
             "history",
             &thread::context(repo, args.get("thread"), 6000, 12, false, true)?,
@@ -1114,6 +1115,22 @@ fn call_routed(
     })
     .flatten();
     let observed = std::cell::Cell::new(None);
+    let stream = scope
+        .as_ref()
+        .and_then(|_| {
+            crate::lead_observation::Stream::from_owner(
+                repo,
+                dir,
+                args.get("thread"),
+                &target.provider,
+                workdir,
+                context,
+            )
+        })
+        .map(|stream| {
+            let stream = std::sync::Arc::new(stream);
+            process::StreamTap(std::sync::Arc::new(move |raw: &[u8]| stream.observe(raw)))
+        });
     let result = providers::execute_with_fallback_output(
         &mut route,
         args.get("fallback-model"),
@@ -1124,7 +1141,7 @@ fn call_routed(
         repo,
         &usage_env,
         if scope.is_some() {
-            providers::OutputMode::Observed(&observed)
+            providers::OutputMode::Observed(&observed, stream.as_ref())
         } else {
             output_mode(args)
         },
@@ -1674,6 +1691,20 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     } else {
         None
     };
+    if tool == "peer-ask"
+        && resolved.has("no-current")
+        && !resolved.has("debate")
+        && let [target] = targets.as_slice()
+        && crate::lead_observation::resumed(
+            &repo,
+            &dir,
+            resolved.get("thread"),
+            &target.provider,
+            context,
+        )
+    {
+        resolved.set_flag("_lead-resumed");
+    }
     let args = &resolved;
     let body = prompt(
         tool,

@@ -909,6 +909,7 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
                         .map_err(|e| Error::new(2, e))?,
                 ),
                 heartbeat: None,
+                stream: None,
             },
             context.interrupted,
         );

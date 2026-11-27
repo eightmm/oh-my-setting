@@ -116,7 +116,7 @@ async function panel(projects, dashboard = {}, options = {}) {
       try {
         const value = tool(params.name, params.arguments);
         if(['oms_worker_output','oms_lead_settings','oms_update_lead_settings'].includes(params.name))result=value;
-        else result = params.name==='oms_lead_conversation_status' && value._private ? {_meta:{leadConversation:value._private},structuredContent:{projectKey:value.projectKey,room:value.room,leads:value.leads,turn:value.turn}} : params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0,...(value.projectKey?{projectKey:value.projectKey}:{})}} : {structuredContent:value};
+        else result = ['oms_lead_conversation_status','oms_read_lead_stream'].includes(params.name) && value._private ? {_meta:{leadConversation:value._private},structuredContent:{projectKey:value.projectKey,room:value.room,leads:value.leads,turn:value.turn}} : params.name === 'oms_panel_chat' ? {_meta:{chat:value}, structuredContent:{count:0,...(value.projectKey?{projectKey:value.projectKey}:{})}} : {structuredContent:value};
       }
       catch (error) { result = {isError:true, content:[{type:'text', text:error.message}]}; }
       if ((params.name === 'oms_panel_snapshot' && host.delay === params.arguments.project && host.delay) || host.delayTool === params.name) {
@@ -796,6 +796,32 @@ test('a Lead reply renders as Markdown nodes, Enter sends, and Stop ends a runni
   assert.equal(stopped.turnId,sent.turnId);assert.equal(stopped.leadRequestId,sent.leadRequestId);
   assert.ok(p.get('chat-typing').hidden);assert.ok(p.get('chat-stop').hidden);assert.ok(!p.get('chat-send').hidden);
   assert.match(p.get('chat-delivery').textContent,/Stopped/);
+  assert.ok(!p.calls.some(c=>c.name==='oms_read_lead_stream'));
+});
+
+test('a running Claude reply streams scanned partial Markdown and a failed stream read keeps the turn',async()=>{
+  let state='running',reads=[],fail=false;const timers=new Map(),log=['Partial **one**\n','more\n'];
+  const p=await panel(['one'],dashboard,{locale:'en',timers:{
+    setTimeout(fn,ms){const id=Symbol();timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}
+  },tools:{
+    [managedRead]:a=>{const v=leadStatus(a,'ready');
+      if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:state==='replied'?[{role:'user',text:'Go',turnId:a.turnId,status:state},{role:'claude',text:'Final answer',turnId:a.turnId}]:[]}};
+      if(a.turnId)v.turn={turnId:a.turnId,status:state};return v;},
+    oms_send_lead_message:a=>({...leadStatus(a,'ready'),turn:{turnId:a.turnId,status:state}}),
+    oms_read_lead_stream:a=>{reads.push(a.cursor);if(fail)throw new Error('down');const i=a.cursor?1:0;
+      return {...leadStatus(a,'ready'),_private:{room:a.room,...leadStatus(a,'ready').leads[0],stream:{turnId:a.turnId,status:state,text:log[i]||'',tool:i?null:'Read AGENTS.md',end:null,cursor:a.cursor+10}}};}
+  }});
+  p.get('leads').children[1].children[1].children.find(e=>e.type==='button').dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-text').value='Go';await p.event('chat-text','input');await p.event('chat-compose','submit');await setImmediate();
+  const partial=p.get('chat-partial'),streams=()=>[...timers.values()].filter(v=>v.ms===1200);
+  assert.deepEqual(reads,[0]);assert.ok(!partial.hidden);assert.match(partial.textContent,/Partial one/);
+  assert.ok(kids(kids(partial)[0])[0].children.some(e=>e.tagName?.toLowerCase()==='strong'));
+  assert.match(p.get('chat-typing-text').textContent,/Claude · Read AGENTS\.md/);
+  streams()[0].fn();await setImmediate();assert.deepEqual(reads,[0,10]);assert.match(partial.textContent,/Partial one\s*more/);
+  fail=true;streams()[0].fn();await setImmediate();
+  assert.ok(!p.get('chat-typing').hidden);assert.ok(!p.get('chat-compose').hidden);assert.doesNotMatch(p.get('chat-status').textContent,/mismatch|could not/i);
+  fail=false;state='replied';streams()[0].fn();await setImmediate();await setImmediate();
+  assert.ok(partial.hidden);assert.ok(p.get('chat-typing').hidden);assert.match(p.get('chat-messages').textContent,/Final answer/);assert.equal(streams().length,0);
 });
 
 test('a verified unresolved message from another view blocks a new dispatch until its turn settles',async()=>{
@@ -2115,7 +2141,7 @@ test('pending-turn polling pauses visibly and slot badges change only after a co
   const open=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
   const poll=[...jobs].find(([,v])=>v.ms===4000);jobs.delete(poll[0]);now=130000;poll[1].fn();await setImmediate();
   assert.match(p.get('chat-delivery').textContent,/Automatic checks paused/);assert.equal([...jobs.values()].filter(v=>v.ms===4000).length,0);
-  const mark=p.calls.length;await p.event('chat-check','click');assert.equal(p.calls.length,mark+1);assert.equal(p.calls.at(-1).name,managedRead);
+  const mark=p.calls.length;await p.event('chat-check','click');assert.deepEqual(p.calls.slice(mark).map(c=>c.name),[managedRead,'oms_read_lead_stream']);
   await p.event('chat-back','click');assert.equal([...jobs.values()].filter(v=>v.ms>=4000 && v.ms<=15000).length,0);
   state='replied';agyTurnState=null;await p.event('lead-refresh','click');assert.match(p.get('leads').children[1].textContent,/New reply/);
   assert.doesNotMatch(p.get('leads').children[2].textContent,/withheld|unreadable|unconfirmed/);
