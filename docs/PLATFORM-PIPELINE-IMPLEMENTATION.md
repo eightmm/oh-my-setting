@@ -104,6 +104,17 @@ flowchart TD
 만들 필요는 없지만, producer·consumer를 따로 내면 중간 revision도 호환 가능해야 한다.
 아래 테스트 경로는 재사용 지점이다. 이름을 확인하지 않은 새 테스트나 전체 suite 통과를 주장하지 않는다.
 
+아래 5계층 표는 기존 owner([로드맵 §3](CONTROL-SURFACE-ROADMAP.md#3-이미-있는-기반과-현재-한계))
+위에 `PIPE-00..11`을 매핑한 책임 지도다. 새 crate를 도입하지 않는다.
+
+| 계층 | 기존 owner | 관련 패킷 |
+| --- | --- | --- |
+| L5 플랫폼 | GitHub / Jira / Linear | PIPE-02, PIPE-09, PIPE-10, PIPE-11 |
+| L4 플랫폼 연동 | `oms-gateway` | PIPE-01, PIPE-02, PIPE-08, PIPE-09 |
+| L3 제어 표면 | CLI, MCP, Panel (`oms-control-api` + `oms-gateway`) | PIPE-00, PIPE-01, PIPE-04, PIPE-07, PIPE-08 |
+| L2 도메인 owner | plan, autonomy, panel-core, memory, runtime | PIPE-00, PIPE-02, PIPE-03, PIPE-04, PIPE-05, PIPE-06, PIPE-07 |
+| L1 실행 | peer, supervisor (`oms-host`) | PIPE-01, PIPE-03, PIPE-04, PIPE-05 |
+
 ### PIPE-00 — 현재 기준과 동작별 계약 고정
 
 - **목적 / owner:** 전체 공통 의미를 고정한다. #431과 기존 #432 계약·#437 동작 경계에 연결한다.
@@ -111,7 +122,10 @@ flowchart TD
 - **입출력:** 선택한 첫 use case와 기존 호출 경로 → 동작/대상/소유자/사전조건/효과/복구 표.
 - **구현:** 첫 동작의 실제 producer를 지정한다. `registered-cancellation-owner` 같은 미정 owner,
   표시용 Run ID, 임의 shell·argv를 공개 계약의 실행 대상으로 남기지 않는다.
-- **구현:** platform adapter, provider adapter, 실행 환경 adapter의 책임을 분리한다.
+- **구현:** [아키텍처 §3](PLATFORM-API-ARCHITECTURE.md#3-core와-세-종류의-adapter)와
+  [로드맵 §3](CONTROL-SURFACE-ROADMAP.md#3-이미-있는-기반과-현재-한계)에 맞춰
+  platform adapter(`oms-gateway`), provider adapter(`provider adapters`),
+  실행 환경 adapter(`oms-host`), 제어 조정(`oms-control-api`)의 책임을 분리한다.
   공통 조정은 기존 서비스 안에서 시작하며, 모든 CLI/MCP의 동시 이전이나 새 crate를 요구하지 않는다.
 - **재사용:** [root composition](../crates/oms/src/services_collab.rs),
   [runtime composition](../crates/oms/src/services_runtime.rs),
@@ -188,7 +202,10 @@ flowchart TD
   별도 비동기 접수가 필요하면 저장·전달·상태 조회의 소유자와 crash recovery를 구현한다.
   존재하지 않는 `/commands/...` URL이나 `202`만으로 durable queue를 약속하지 않는다.
   이 패킷 역시 첫 동작의 필요한 보장부터 추가하며, 전체 명령을 새 저장 체계로 옮기는 과제가 아니다.
-- **구현:** `not_dispatched`, `dispatched`, `confirmed`, `outcome_unknown` 등 전달 상태를 명시한다.
+- **구현:** #437 wire 계약은 [로드맵 §9.3](CONTROL-SURFACE-ROADMAP.md#93-요청거절receiptevent-예시)의
+  `operation_receipt`(`accepted` / `delivered` / `completed`)와 `delivery_unknown`을 사용하며,
+  내부 추적 상태(`not_dispatched` / `dispatched` / `confirmed` / `outcome_unknown`)는
+  [아키텍처 §6](PLATFORM-API-ARCHITECTURE.md#6-접수전달복구-계약)의 매핑에 따라 위 v1 어휘로 노출한다.
   저장 직전/직후, dispatch 직전/직후, effect 이후 응답 유실을 각각 복구한다.
   한 process 메모리의 key cache를 영속적 중복 방지로 취급하지 않는다.
 - **구현:** 멱등성 조회 키는 stable installation/workspace/principal/action과 요청 key로 구성하고,
@@ -451,22 +468,25 @@ OMS의 이슈 접수→현재 Main→Plan→배정/실행→검증/수용→결�
    모든 단계의 구현·검증·미완료 상태와 다음 재개 지점을 추적 Issue에 갱신한다.
 ```
 
-## 7. 기존 OMS-01~16 제안과의 대응
+## 7. OMS-01~16 추적 ID와의 대응
 
-| 기존 ID | 이번 구현 위치 | 첫 완주와의 관계 |
+아래 표의 OMS-01~16은 본 인계서와 [아키텍처 §11](PLATFORM-API-ARCHITECTURE.md#11-oms-0116-추적-id와-구현-패킷의-연결)에서
+추적용으로 정의한 분류 ID다(선행 문서의 기존 ID가 아님).
+
+| 추적 ID | 이번 구현 위치 | 첫 완주와의 관계 |
 | --- | --- | --- |
 | OMS-01 Domain/API 계약 | PIPE-00/01/08 | 실제 동작 계약부터 고정 |
-| OMS-02 Core 진입점 | PIPE-02~06/08 | 첫 use case에서 필요한 공통 조정만 추출 |
+| OMS-02 Core 진입점 | PIPE-02~06/08 | 첫 use case에서 필요한 공통 조정(`oms-control-api`)만 추출 |
 | OMS-03 CLI/MCP/Panel | PIPE-07/08 | 첫 소비 경로 연결; 전면 이전은 선행 아님 |
 | OMS-04 daemon/IPC | PIPE-11 | 지속 host 수요가 생길 때 |
 | OMS-05 REST/OpenAPI | PIPE-08 | 실제 REST 소비자가 필요할 때; Jira 선행 아님 |
 | OMS-06 Run/events | PIPE-05/07, 필요 시 11 | source-linked snapshot 먼저; 별도 replay 요구 보존 |
-| OMS-07 권한/approval | PIPE-00/01/04/08 | 질문·grant·사전조건과 실제 effect 분리 |
+| OMS-07 권한/approval | PIPE-00/01/03/04/08 | 질문·grant·사전조건과 실제 effect 분리 |
 | OMS-08 SDK | PIPE-11 | 반복 소비가 확인된 뒤 |
 | OMS-09 Forge Remote | PIPE-09/10 | Jira 선택 시 최소 A2A·인증·실제 결과 전달 |
 | OMS-10 Linear | PIPE-11 | 두 번째 실제 사용처 수요에 따라 |
-| OMS-11 GitHub App | PIPE-02/06, 확장은 11 | 기존 GitHub 경로 재사용; 별도 App 필수 아님 |
-| OMS-12 runner/broker | PIPE-01/04/09, 확장은 11 | 필요한 최소 연결과 custody 유지 |
+| OMS-11 GitHub App | PIPE-02/06, 확장은 11 | 기존 GitHub 경로 우선; 별도 App 도입은 조건부 |
+| OMS-12 runner/broker | PIPE-01/04/09, 확장은 11 | 필요한 최소 `oms-host` 연결과 custody 유지 |
 | OMS-13 dashboard | PIPE-07 | 기존 네 화면과 Open PR 확장 |
 | OMS-14 multi-tenant | PIPE-11 | 다조직 운영 필요 시 |
 | OMS-15 A2A | PIPE-09와 11 | Jira 최소 계약은 초기; 일반 federation은 조건부 |

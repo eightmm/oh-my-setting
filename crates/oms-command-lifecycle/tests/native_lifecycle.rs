@@ -2271,7 +2271,11 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
         let stop = AtomicBool::new(false);
         let narrow = oms_command_providers_skills::run_with_source(
             "model-doctor",
-            &["--providers".into(), "claude".into(), "--json".into()],
+            &[
+                "--providers".into(),
+                "claude,antigravity,vibe".into(),
+                "--json".into(),
+            ],
             &root,
             source,
             &stop,
@@ -2290,6 +2294,16 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
         );
         let report: Value = serde_json::from_slice(&narrow.1).unwrap();
         assert_eq!(report["providers"][0]["usable"], expected, "{report}");
+        for provider in ["antigravity", "vibe"] {
+            let row = report["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["provider"] == provider)
+                .unwrap();
+            assert_eq!(row["family"], "unknown", "{row}");
+            assert_eq!(row["usable"], expected, "{row}");
+        }
         let cache = root.join("capabilities");
         let fields = |file: &Path| -> std::collections::BTreeMap<String, String> {
             fs::read_to_string(file)
@@ -2365,6 +2379,59 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
             assert_eq!(agy_cache["effort_values"], "low medium high xhigh max");
         }
         assert_eq!(agy_cache["models_probe"], "ok");
+        if expected {
+            let distinct = std::env::var("OMS_TEST_DISTINCT_FAMILIES").unwrap() == "1";
+            let providers = if distinct {
+                "codex,claude,antigravity,vibe"
+            } else {
+                "claude,antigravity,vibe"
+            };
+            let narrow = oms_command_providers_skills::run_with_source(
+                "model-doctor",
+                &[
+                    "--providers".into(),
+                    providers.into(),
+                    "--strict-diversity".into(),
+                    "--json".into(),
+                ],
+                &root,
+                source,
+                &stop,
+            );
+            assert!(narrow.2.is_empty(), "{:?}", narrow.2);
+            let report: Value = serde_json::from_slice(&narrow.1).unwrap();
+            assert_eq!(narrow.0, i32::from(!distinct), "{report}");
+            assert_eq!(report["ok"], distinct, "{report}");
+            let diversity_error = "model-family diversity needs at least two usable families";
+            assert_eq!(
+                report["errors"],
+                if distinct {
+                    json!([])
+                } else {
+                    json!([diversity_error])
+                }
+            );
+            let aggregate = run_with_services(
+                "doctor",
+                &["--json".into(), "--strict-diversity".into()],
+                &root,
+                source,
+                &stop,
+                &NativeServices::default(),
+            );
+            assert!(aggregate.2.is_empty(), "{:?}", aggregate.2);
+            let report: Value = serde_json::from_slice(&aggregate.1).unwrap();
+            let failures = report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["section"] == "model doctor" && row["message"] == diversity_error)
+                .collect::<Vec<_>>();
+            assert_eq!(failures.is_empty(), distinct, "{report}");
+            for failure in failures {
+                assert_eq!(failure["level"], "error");
+            }
+        }
         return;
     }
     let root = std::env::temp_dir().join(format!("oms-probe-parity-{}", std::process::id()));
@@ -2382,11 +2449,23 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
     let executable = bin.join("claude");
     fs::write(&executable, "#!/bin/sh\ncase \"$1\" in\n--version) echo fixture; exit \"$OMS_TEST_VERSION_EXIT\";;\n--help) echo '--effort (low|medium|high|xhigh)'; exit \"$OMS_TEST_HELP_EXIT\";;\n*) exit 2;;\nesac\n").unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    symlink(&executable, bin.join("vibe")).unwrap();
     let agy_exec = bin.join("agy");
     fs::write(&agy_exec, "#!/bin/sh\ncase \"$1\" in\n--version) echo fixture; exit \"$OMS_TEST_VERSION_EXIT\";;\n--help) echo '  --effort  Reasoning effort (low|medium|high|xhigh|max)' >&2; exit \"$OMS_TEST_HELP_EXIT\";;\n*) exit 2;;\nesac\n").unwrap();
     fs::set_permissions(&agy_exec, fs::Permissions::from_mode(0o700)).unwrap();
-    for (version, help, mode) in [(0, 0, "auto"), (1, 0, "auto"), (0, 1, "1"), (1, 1, "1")] {
-        let case = root.join(format!("{version}-{help}"));
+    let codex_bin = root.join("codex-bin");
+    fs::create_dir(&codex_bin).unwrap();
+    let codex_exec = codex_bin.join("codex");
+    fs::write(&codex_exec, "#!/bin/sh\ncase \"$1\" in\n--version) echo fixture; exit \"$OMS_TEST_VERSION_EXIT\";;\nexec) [ \"$2\" = --help ] || exit 2; echo fixture; exit \"$OMS_TEST_HELP_EXIT\";;\n*) exit 2;;\nesac\n").unwrap();
+    fs::set_permissions(&codex_exec, fs::Permissions::from_mode(0o700)).unwrap();
+    for (version, help, mode, distinct) in [
+        (0, 0, "auto", false),
+        (0, 0, "auto", true),
+        (1, 0, "auto", false),
+        (0, 1, "1", false),
+        (1, 1, "1", false),
+    ] {
+        let case = root.join(format!("{version}-{help}-{distinct}"));
         let cache = case.join("capabilities");
         fs::create_dir_all(&cache).unwrap();
         fs::write(cache.join("claude.env"), "binary_key=previous-binary\neffort_mechanism=none\neffort_values=low\nmodels_probe=failed\nprobed_at=1\n").unwrap();
@@ -2394,6 +2473,10 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
         fs::write(cache.join("claude.efforts"), "cached-model\tlow high\n").unwrap();
         fs::write(cache.join("antigravity.env"), "binary_key=previous-agy\neffort_mechanism=none\neffort_values=\nmodels_probe=ok\nprobed_at=1\n").unwrap();
         fs::write(cache.join("antigravity.models"), "gemini-4-carbon-high\tGemini 4 Carbon (High)\ngemini-pro-orchestrator\tOrchestrator (Carbon)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\n").unwrap();
+        let mut provider_paths = vec![bin.clone()];
+        if distinct {
+            provider_paths.push(codex_bin.clone());
+        }
         let child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -2401,7 +2484,7 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
                 "--nocapture",
             ])
             .env_clear()
-            .env("PATH", &bin)
+            .env("PATH", std::env::join_paths(provider_paths).unwrap())
             .env("HOME", &case)
             .env("TMPDIR", &case)
             .env("OMS_PROBE_PARITY_ROOT", &case)
@@ -2410,11 +2493,15 @@ fn doctor_and_model_doctor_share_bounded_probe_evidence() {
             .env("OH_MY_SETTING_MODEL_DOCTOR", mode)
             .env("OMS_TEST_VERSION_EXIT", version.to_string())
             .env("OMS_TEST_HELP_EXIT", help.to_string())
+            .env(
+                "OMS_TEST_DISTINCT_FAMILIES",
+                if distinct { "1" } else { "0" },
+            )
             .output()
             .unwrap();
         assert!(
             child.status.success(),
-            "version={version}, help={help}: {} {}",
+            "version={version}, help={help}, distinct={distinct}: {} {}",
             String::from_utf8_lossy(&child.stdout),
             String::from_utf8_lossy(&child.stderr)
         );
@@ -2816,6 +2903,14 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
         let out = call("doctor", &["--json", "--no-model-doctor"], source, host);
         let report: Value = serde_json::from_slice(&out.1).unwrap();
         assert_eq!(snapshot(root), before, "doctor is read-only");
+        assert!(
+            report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["section"] == "mcp servers" && v["level"] != "error"),
+            "{report}"
+        );
         report["findings"]
             .as_array()
             .unwrap()
@@ -2964,7 +3059,95 @@ fn doctor_integration_diagnostics(source: &Path, root: &Path, host: &NativeServi
     )
     .unwrap();
     assert_eq!(inspect(json!({"mcp":true}))["exit"], 0);
-    for invalid in [json!({"args":[]}), json!({"disabled":true})] {
+    for profile in ["core", "full"] {
+        let mut selected = managed.clone();
+        selected["mcpServers"]["oh-my-setting"]["env"] = json!({"OMS_MCP_TOOL_PROFILE":profile});
+        write(&claude, &selected);
+        fs::write(
+            &codex,
+            format!(
+                "# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"{profile}\"\n",
+                json!(executable)
+            ),
+        )
+        .unwrap();
+        let saved = (fs::read(&claude).unwrap(), fs::read(&codex).unwrap());
+        assert_eq!(inspect(json!({"mcp":true}))["exit"], 0);
+        assert_eq!(
+            (fs::read(&claude).unwrap(), fs::read(&codex).unwrap()),
+            saved
+        );
+    }
+    for bad_codex in [
+        format!(
+            "# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\n# user comment inside env\nOMS_MCP_TOOL_PROFILE = \"full\"\n",
+            json!(executable)
+        ),
+        format!(
+            "# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"full\" # inline user note\n",
+            json!(executable)
+        ),
+        format!(
+            "# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.\"env\"]\nOMS_MCP_TOOL_PROFILE = \"full\"\n",
+            json!(executable)
+        ),
+        format!(
+            "[mcp_servers]\noh-my-setting.command = {}\noh-my-setting.args = [\"mcp-server\"]\noh-my-setting.env.OMS_MCP_TOOL_PROFILE = \"full\"\n",
+            json!(executable)
+        ),
+    ] {
+        fs::write(&codex, bad_codex).unwrap();
+        let saved = (fs::read(&claude).unwrap(), fs::read(&codex).unwrap());
+        let report = inspect(json!({"mcp":true}));
+        assert_eq!(report["exit"], 1, "{report}");
+        assert_eq!(
+            (fs::read(&claude).unwrap(), fs::read(&codex).unwrap()),
+            saved
+        );
+        let reason = "an unmanaged TOML table already occupies this registration";
+        for (tool, args) in [
+            ("install-mcp", &["--remove"][..]),
+            ("uninstall", &["--yes"][..]),
+        ] {
+            let out = call(tool, args, source, host);
+            assert_eq!(out.0, 2, "{tool}: {}", String::from_utf8_lossy(&out.2));
+            assert!(String::from_utf8_lossy(&out.2).contains(reason));
+            assert_eq!(
+                (fs::read(&claude).unwrap(), fs::read(&codex).unwrap()),
+                saved
+            );
+        }
+        for (section, level) in [("claude_mcp", "ok"), ("codex_mcp", "error")] {
+            assert!(
+                report["findings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["section"] == section && r["level"] == level),
+                "{report}"
+            );
+        }
+        let codex_finding = report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["section"] == "codex_mcp")
+            .unwrap();
+        let message = codex_finding["message"].as_str().unwrap();
+        assert!(message.starts_with(reason), "{message}");
+        assert!(
+            message.contains("hint: move or delete the outside table by hand"),
+            "{message}"
+        );
+    }
+    for invalid in [
+        json!({"args":[]}),
+        json!({"disabled":true}),
+        json!({"env":{"OMS_MCP_TOOL_PROFILE":"unknown"}}),
+        json!({"env":{"OMS_MCP_TOOL_PROFILE":1}}),
+        json!({"env":{"OMS_MCP_TOOL_PROFILE":"full","USER_CUSTOM":"1"}}),
+        json!({"command":"other-mcp","env":{"OMS_MCP_TOOL_PROFILE":"full"}}),
+    ] {
         let mut changed = managed.clone();
         changed["mcpServers"]["oh-my-setting"]
             .as_object_mut()
@@ -2972,6 +3155,31 @@ fn doctor_integration_diagnostics(source: &Path, root: &Path, host: &NativeServi
             .extend(invalid.as_object().unwrap().clone());
         write(&claude, &changed);
         assert_eq!(inspect(json!({"mcp":true}))["exit"], 1);
+    }
+    write(&claude, &managed);
+    for env in [
+        "{ OMS_MCP_TOOL_PROFILE = \"unknown\" }",
+        "{ OMS_MCP_TOOL_PROFILE = \"full\", USER_CUSTOM = \"1\" }",
+    ] {
+        fs::write(
+            &codex,
+            format!(
+                "[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\nenv = {env}\n",
+                json!(executable)
+            ),
+        )
+        .unwrap();
+        let report = inspect(json!({"mcp":true}));
+        assert_eq!(report["exit"], 1);
+        for (section, level) in [("claude_mcp", "ok"), ("codex_mcp", "error")] {
+            assert!(
+                report["findings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["section"] == section && r["level"] == level)
+            );
+        }
     }
     fs::write(
         &claude,
@@ -4229,6 +4437,68 @@ esac
     assert!(check_cron.contains(" auto-update check"));
     assert!(!check_cron.contains(" auto-update apply"));
     success(call("uninstall-autoupdate", &[], &source, &host));
+    let claude_config = home.join(".claude.json");
+    let saved_mcp_files = (fs::read(&claude_config).ok(), fs::read(&codex_config).ok());
+    for tool in ["install", "install-mcp", "install-agy-plugin"] {
+        let preview = if tool == "install" {
+            "--plan"
+        } else {
+            "--dry-run"
+        };
+        for invalid in ["unknown", "FULL", "chatgpt-panel", "mcp-app", ""] {
+            let out = call(
+                tool,
+                &[preview, "--mcp-tool-profile", invalid],
+                &source,
+                &host,
+            );
+            assert_eq!(
+                out.0,
+                2,
+                "{tool}/{invalid}: {}",
+                String::from_utf8_lossy(&out.2)
+            );
+        }
+        if tool != "install" {
+            for profile in ["core", "full"] {
+                let out = success(call(
+                    tool,
+                    &[preview, "--mcp-tool-profile", profile],
+                    &source,
+                    &host,
+                ));
+                assert!(
+                    String::from_utf8_lossy(&out).contains(&format!("MCP tool profile {profile}"))
+                );
+            }
+            assert_eq!(
+                call(
+                    tool,
+                    &["--remove", "--mcp-tool-profile", "full"],
+                    &source,
+                    &host
+                )
+                .0,
+                2
+            );
+        }
+        let help = success(call(tool, &["--help"], &source, &host));
+        assert!(String::from_utf8_lossy(&help).contains("--mcp-tool-profile core|full"));
+    }
+    assert_eq!(
+        call(
+            "install-agy-plugin",
+            &["--probe-surfaces", "--mcp-tool-profile", "full"],
+            &source,
+            &host
+        )
+        .0,
+        2
+    );
+    assert_eq!(
+        (fs::read(&claude_config).ok(), fs::read(&codex_config).ok()),
+        saved_mcp_files
+    );
     write(
         &home.join(".claude.json"),
         &json!({"custom":true,"mcpServers":{"oh-my-setting":{"type":"stdio","command":"python3","args":[source.join("scripts/oms-mcp-server.py")],"env":{"USER_CUSTOM":"1"}}}}),
@@ -4253,17 +4523,58 @@ esac
     let cleaned_toml = fs::read_to_string(&codex_config).unwrap();
     assert!(!cleaned_toml.contains("mcp_servers"));
     assert!(cleaned_toml.contains(custom));
-    fs::write(
-        &codex_config,
-        format!("{custom}\n[mcp_servers.oh-my-setting]\ncommand = \"custom-mcp\"\nargs = []\n"),
-    )
-    .unwrap();
-    let refused_mcp = call("install-mcp", &["--remove"], &source, &host);
-    assert_ne!(refused_mcp.0, 0);
-    assert!(
-        String::from_utf8_lossy(&refused_mcp.2)
-            .contains("an unmanaged TOML table already occupies this registration")
-    );
+    for profile in ["core", "full"] {
+        for split_codex in [
+            format!(
+                "{custom}\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"{profile}\"\n",
+                json!(home.join(".local/bin/oms"))
+            ),
+            format!(
+                "{custom}\n# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"{profile}\"\n",
+                json!(home.join(".local/bin/oms"))
+            ),
+        ] {
+            write(
+                &claude_config,
+                &json!({"custom":true,"mcpServers":{"oh-my-setting":{
+                    "type":"stdio","command":home.join(".local/bin/oms"),"args":["mcp-server"],
+                    "env":{"OMS_MCP_TOOL_PROFILE":profile}
+                }}}),
+            );
+            fs::write(&codex_config, split_codex).unwrap();
+            success(call("install-mcp", &["--remove"], &source, &host));
+            assert_eq!(read(&claude_config)["custom"], true);
+            assert!(
+                read(&claude_config)["mcpServers"]
+                    .get("oh-my-setting")
+                    .is_none()
+            );
+            let cleaned = fs::read_to_string(&codex_config).unwrap();
+            assert!(cleaned.contains(custom));
+            assert!(!cleaned.contains("mcp_servers"));
+        }
+    }
+    for refused_toml in [
+        format!(
+            "{custom}\n[mcp_servers.oh-my-setting]\ncommand = \"custom-mcp\"\nargs = []\nenv = {{ OMS_MCP_TOOL_PROFILE = \"full\" }}\n"
+        ),
+        format!(
+            "{custom}\n# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\n# user comment inside env\nOMS_MCP_TOOL_PROFILE = \"full\"\n",
+            json!(home.join(".local/bin/oms"))
+        ),
+        format!(
+            "{custom}\n# BEGIN oh-my-setting native\n[mcp_servers.oh-my-setting]\ncommand = {}\nargs = [\"mcp-server\"]\n# END oh-my-setting native\n[mcp_servers.oh-my-setting.env]\nOMS_MCP_TOOL_PROFILE = \"full\" # inline user note\n",
+            json!(home.join(".local/bin/oms"))
+        ),
+    ] {
+        fs::write(&codex_config, &refused_toml).unwrap();
+        let before = fs::read(&codex_config).unwrap();
+        let reason = "an unmanaged TOML table already occupies this registration";
+        let refused_mcp = call("install-mcp", &["--remove"], &source, &host);
+        assert_eq!(refused_mcp.0, 2);
+        assert!(String::from_utf8_lossy(&refused_mcp.2).contains(reason));
+        assert_eq!(fs::read(&codex_config).unwrap(), before);
+    }
     fs::write(&codex_config, custom).unwrap();
     write(
         &source.join("plugins/antigravity/plugin.json"),
@@ -4277,7 +4588,7 @@ esac
     );
     write(
         &agy_plugin.join("mcp_config.json"),
-        &json!({"mcpServers":{"oh-my-setting":{"command":legacy_python,"args":[source.join("scripts/oms-mcp-server.py")]}}}),
+        &json!({"mcpServers":{"oh-my-setting":{"command":legacy_python,"args":[source.join("scripts/oms-mcp-server.py")],"env":{"OMS_MCP_TOOL_PROFILE":"full"}}}}),
     );
     write(
         &agy_plugin.join("hooks.json"),
@@ -4314,6 +4625,21 @@ esac
     let plan: Value =
         serde_json::from_slice(&success(call("install", &["--plan"], &source, &host))).unwrap();
     native_only(&plan);
+    assert!(plan.get("mcp_tool_profile").is_none());
+    for profile in ["core", "full"] {
+        let selected: Value = serde_json::from_slice(&success(call(
+            "install",
+            &["--plan", "--mcp-tool-profile", profile],
+            &source,
+            &host,
+        )))
+        .unwrap();
+        assert_eq!(selected["mcp_tool_profile"], profile);
+        assert!(
+            selected["install"].get("mcp_tool_profile").is_none(),
+            "the registration remains the persistent selector"
+        );
+    }
     // Antigravity auto-enables only when its CLI directory exists.
     assert_eq!(plan["install"]["components"]["agy_plugin"], false);
     let agy_dir = home.join(".gemini/antigravity-cli");

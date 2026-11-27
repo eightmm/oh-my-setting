@@ -227,31 +227,32 @@ pub(crate) fn models(
                 .unwrap_or(paths.home.join(".cache"))
                 .join("oh-my-setting/capabilities")
         });
-    for (provider, binary, family) in [
-        ("codex", "codex", "openai"),
-        ("claude", "claude", "anthropic"),
-        ("antigravity", "agy", "unknown"),
-        ("cursor", "cursor-agent", "unknown"),
-        ("grok", "grok", "xai"),
-        ("gemini", "gemini", "google"),
-        ("qwen", "qwen", "alibaba"),
-        ("opencode", "opencode", "unknown"),
-        ("deepseek", "dsh", "deepseek"),
-        ("vibe", "vibe", "unknown"),
-        ("pi", "pi", "unknown"),
-        ("copilot", "copilot", "unknown"),
-        ("droid", "droid", "unknown"),
-        ("aider", "aider", "unknown"),
-        ("kimi", "kimi", "moonshot"),
-        ("muse", "muse", "meta"),
-        ("kiro", "kiro-cli", "unknown"),
-        ("continue", "cn", "unknown"),
-        ("goose", "goose", "unknown"),
-        ("cline", "cline", "unknown"),
-        ("kilo", "kilo", "unknown"),
-        ("openhands", "openhands", "unknown"),
-        ("auggie", "auggie", "unknown"),
+    for (provider, binary) in [
+        ("codex", "codex"),
+        ("claude", "claude"),
+        ("antigravity", "agy"),
+        ("cursor", "cursor-agent"),
+        ("grok", "grok"),
+        ("gemini", "gemini"),
+        ("qwen", "qwen"),
+        ("opencode", "opencode"),
+        ("deepseek", "dsh"),
+        ("vibe", "vibe"),
+        ("pi", "pi"),
+        ("copilot", "copilot"),
+        ("droid", "droid"),
+        ("aider", "aider"),
+        ("kimi", "kimi"),
+        ("muse", "muse"),
+        ("kiro", "kiro-cli"),
+        ("continue", "cn"),
+        ("goose", "goose"),
+        ("cline", "cline"),
+        ("kilo", "kilo"),
+        ("openhands", "openhands"),
+        ("auggie", "auggie"),
     ] {
+        let family = model_probe::diagnostic_family(provider);
         let binary = if provider == "opencode"
             && r::find("opencode", &paths.cwd).is_none()
             && r::find("opencode2", &paths.cwd).is_some()

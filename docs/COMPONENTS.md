@@ -45,6 +45,7 @@ explains overlapping entrypoints.
 | `dashboard` | Read a terminal view of OMS collaboration state. | `oms dashboard` | [Panel and collaboration](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) |
 | `inbox` | Prioritize attention from shared state. | `oms inbox` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `room` | Share task-scoped messages and room snapshots. | `oms room` | [Work rooms](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) |
+| `intake` | Receive external tracker webhooks into an OMS Room and send outbound-scanned replies with retry-safe receipts. | `oms intake` | [External tracker intake](INTAKE.md) |
 | `lease` | Declare time-limited, advisory intent to edit paths. | `oms lease` | [Delegating writes](#delegating-writes) |
 | `input` | Capture source-aware attachments, edit steer/next inputs and deliver them explicitly through enrolled rooms; queue imported view feedback. | `oms input` | [Input queue](INPUT-QUEUE.md) |
 | `thread` | Read and deliver shared conversation turns. | `oms thread` | [Asking other agents](#asking-other-agents) |
@@ -484,6 +485,7 @@ Doctor also projects the saved tool capability selection. It reports missing,
 invalid and unreadable receipts explicitly and includes only bounded selection
 fields, never the receipt path or extra contents. This selection is separate
 from the installation component profile and repository runtime configuration.
+On Linux, the `mcp servers` section inspects the current user's running `oms mcp-server` processes in `/proc` read-only and warns when any still serves an older native build than the installed revision (other platforms report an `info` row).
 
 
 ### Workspace and installation status
@@ -1535,9 +1537,10 @@ Explicitly authored notes, pins and legacy manual notes keep their existing
 eligibility. `show`, `search` and explicit `recall` still expose stored proposals
 for review; no source notes are deleted. Acceptance does not verify a claim.
 
-`oms state` reports the bounded pending-review count; `oms inbox` provides a
-`pending-memory-review` action pointing to `oms agent-memory review`. Invalid,
-unsafe or oversized review sources remain unavailable with an unknown count.
+`oms state` reports the bounded pending-review count and skipped invalid rows;
+`oms inbox` provides a `pending-memory-review` action pointing to
+`oms agent-memory review`. Unsafe or oversized review sources remain unavailable
+with an unknown count.
 The prompt state hint appears once per session and when a new candidate arrives,
 without repeating merely because an existing candidate was decided. Neither the
 hint nor `inbox --fix-safe` accepts a proposal.
@@ -1756,7 +1759,9 @@ The detailed operating contract is in the harness state-memory reference.
 
 `oms plan-from-spec` proposes tasks from an active `PROJECT.md`; it refuses a
 draft spec and does not alter the plan until the proposal is explicitly
-applied. `oms plan-run` claims and executes at most one ready task. `oms
+applied. `oms plan-run` claims and executes at most one ready task; each
+provider and landing call is bounded by `OMS_PEER_TIMEOUT` (default 20 minutes,
+the same as `peer-delegate`). `oms
 goal-drive` repeats within a cycle cap and acceptance command; the cap counts
 task attempts across resumes of one autopilot contract, bounds attempts rather
 than provider cost, and an exhausted contract is retired with `oms autopilot
@@ -1881,6 +1886,20 @@ The task retains the commit and receipt file SHA-256 as landing proof and counts
 in plan status and the panel. `patch-land` remains the default front door for single
 patches. It passes `--expected-landing-receipt-sha256` to `oms agent-plan finish`
 internally; this is a `finish` argument, not a `patch-land` option.
+
+Pre-start and provider-launch fences require the live checkout `HEAD` to match
+the delegation binding's `base_sha`. At bound `review`, when the plan id, lease,
+epoch, task digest and contracts still match and `HEAD` fast-forwarded (`base_sha`
+is an ancestor of `HEAD`, such as after `oms sync-shared`), the verified result
+is admitted to `review` with its retained `delegate_result` still bound to the
+original `base_sha`; `patch-land` and `plan-run --land` then re-admit and verify
+the patch against the current `HEAD`, refusing with a `release` hint if `HEAD`
+was rewritten to a non-ancestor. When bound `review` fails on a stale binding
+(`lease`, `task hash`, `contract`, or non-fast-forward `base drift`), it records
+a `stale_delegate_binding` row in `.oms/plan/late-results.jsonl` and names the
+task, repository-relative artifact/patch paths and failed condition; `plan-run`
+prints that diagnostic and recovers an unreplaced initial lease back to `ready`
+via `recover-lease` (leaving replacement claims and one-shot repairs untouched).
 
 Receipt discovery stays clone-local (linked worktrees share their canonical
 namespace). When an authorized main lands from a separate clone, it can use
@@ -3358,6 +3377,19 @@ handoff list/read, peer start/result/operations, and graph render/query/trace/
 affected, plus `oms_output_read` for retained output captures. Set
 `OMS_MCP_TOOL_PROFILE=full` in the MCP server's environment and restart its
 connection to discover all 33 tools; `core` is the default.
+For managed registrations, select the profile with
+`oms install-mcp --mcp-tool-profile full` (Claude and Codex),
+`oms install-agy-plugin --mcp-tool-profile full` (Antigravity), or
+`oms install --mcp-tool-profile full` (enabled MCP components).
+Use `core` to return to Core discovery. The installer stores the choice in each
+host's existing registration. Reapply, update reconciliation and
+`oms doctor --repair` retain that choice when the option is omitted; hosts may
+keep different selections. `oms doctor --integrations` recognizes both profiles,
+and uninstall removes either owned registration. Additional environment keys,
+unknown profile values and third-party commands are refused. Use the installer
+option for Antigravity because manual manifest edits invalidate its ownership
+fingerprint. These options do not select the separate ChatGPT panel or MCP App
+profiles.
 The profile is fixed at process startup, so cached discovery is stable.
 Unlisted registered tools remain callable for existing clients: this setting
 reduces discovery overhead, not permissions. Schemas, annotations, UI resources,

@@ -89,6 +89,13 @@ fn targets(raw: &str, cwd: &Path) -> Result<Vec<String>, String> {
 }
 /// Validate explicit selections for a single managed Lead before reservation and
 /// again when reconstructing the owner's argv. Catalog entitlement is checked by the panel.
+fn lead_session(id: &str) -> bool {
+    matches(
+        "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        id,
+    )
+}
+
 pub(crate) fn valid_lead_route(provider: &str, model: &str, effort: Option<&str>) -> bool {
     use oms_command_agent_role::native_model;
     let native = match provider {
@@ -257,20 +264,35 @@ fn tail(dir: &Path) -> String {
     })();
     result.unwrap_or_default()
 }
+struct LogScan {
+    artifacts: Vec<String>,
+    thread: String,
+    aborted: bool,
+}
+#[cfg(test)]
+std::thread_local! {
+    static LOG_SCAN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 fn references(
     dir: &Path,
     caller_cwd: &Path,
     owned_answers: Option<&Path>,
 ) -> (Vec<String>, String) {
+    let scan = scan_log(dir, caller_cwd, owned_answers);
+    (scan.artifacts, scan.thread)
+}
+fn scan_log(dir: &Path, caller_cwd: &Path, owned_answers: Option<&Path>) -> LogScan {
+    #[cfg(test)]
+    LOG_SCAN_COUNT.with(|n| n.set(n.get() + 1));
     // Scan the entire log but bound each retained line; history is not tail-capped.
-    let result = (|| -> io::Result<(Vec<String>, String)> {
+    let result = (|| -> io::Result<LogScan> {
         let repo = dir
             .ancestors()
             .nth(4)
             .ok_or_else(|| io::Error::other("operation root"))?;
         let opened = Directory::run(repo, dir.file_name().unwrap().to_str().unwrap(), false)
             .map_err(io::Error::other)?;
-        let fd = rustix::fs::openat(
+        let fd = match rustix::fs::openat(
             &opened.fd,
             "run.log",
             rustix::fs::OFlags::RDONLY
@@ -278,7 +300,17 @@ fn references(
                 | rustix::fs::OFlags::NONBLOCK
                 | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::empty(),
-        )?;
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => {
+                return Ok(LogScan {
+                    artifacts: Vec::new(),
+                    thread: String::new(),
+                    aborted: false,
+                });
+            }
+            Err(e) => return Err(e.into()),
+        };
         let info = rustix::fs::fstat(&fd)?;
         if rustix::fs::FileType::from_raw_mode(info.st_mode) != rustix::fs::FileType::RegularFile {
             return Err(io::Error::other("unsafe log"));
@@ -286,13 +318,23 @@ fn references(
         let mut reader = BufReader::new(File::from(fd).take(info.st_size.max(0) as u64));
         let mut paths = Vec::new();
         let mut thread = String::new();
+        let mut aborted = false;
         let mut line = Vec::new();
         let mut over = false;
+        let mut inspect = |raw: &[u8]| {
+            let text = String::from_utf8_lossy(raw);
+            if text.contains("error: native peer owner:")
+                || text.contains("cancellation handled but ")
+            {
+                aborted = true;
+            }
+            reference_line(raw, &mut paths, &mut thread, caller_cwd, owned_answers);
+        };
         loop {
             let buf = reader.fill_buf()?;
             if buf.is_empty() {
                 if !line.is_empty() && !over {
-                    reference_line(&line, &mut paths, &mut thread, caller_cwd, owned_answers);
+                    inspect(&line);
                 }
                 break;
             }
@@ -310,15 +352,23 @@ fn references(
             reader.consume(n);
             if ended {
                 if !over {
-                    reference_line(&line, &mut paths, &mut thread, caller_cwd, owned_answers);
+                    inspect(&line);
                 }
                 line.clear();
                 over = false;
             }
         }
-        Ok((paths, thread))
+        Ok(LogScan {
+            artifacts: paths,
+            thread,
+            aborted,
+        })
     })();
-    result.unwrap_or_default()
+    result.unwrap_or_else(|_| LogScan {
+        artifacts: Vec::new(),
+        thread: String::new(),
+        aborted: true,
+    })
 }
 fn reference_line(
     line: &[u8],
@@ -575,6 +625,7 @@ impl Server<'_> {
         thread: &str,
         binding: &str,
         settings: Option<(&str, Option<&str>)>,
+        resume: Option<&str>,
     ) -> ToolResult {
         let target = match provider {
             "agy" | "antigravity" => "antigravity",
@@ -589,7 +640,11 @@ impl Server<'_> {
         if settings.is_some_and(|(model, effort)| !valid_lead_route(target, model, effort)) {
             return Err("error: invalid Lead route".into());
         }
-        self.start_routed_peer(&args, Some((operation, binding)), true, settings)
+        // Only claude and agy publish a verified native session for a Lead.
+        if resume.is_some_and(|id| target == "codex" || !lead_session(id)) {
+            return Err("error: invalid Lead session".into());
+        }
+        self.start_routed_peer(&args, Some((operation, binding)), true, settings, resume)
     }
 
     pub(crate) fn start_bound_peer(
@@ -598,7 +653,7 @@ impl Server<'_> {
         assignment: Option<(&str, &str)>,
         preserve_current: bool,
     ) -> ToolResult {
-        self.start_routed_peer(args, assignment, preserve_current, None)
+        self.start_routed_peer(args, assignment, preserve_current, None, None)
     }
 
     fn start_routed_peer(
@@ -607,6 +662,7 @@ impl Server<'_> {
         assignment: Option<(&str, &str)>,
         preserve_current: bool,
         settings: Option<(&str, Option<&str>)>,
+        resume: Option<&str>,
     ) -> ToolResult {
         if delegated()
             && !(matches!(args["kind"].as_str(), Some("message" | "ack"))
@@ -742,6 +798,13 @@ impl Server<'_> {
             let route = json!({"model":model,"effort":effort});
             launch["lead_route"] = route.clone();
             meta["lead_route"] = route;
+        }
+        if let Some(id) = resume {
+            if !followup {
+                return Err("error: a native session requires a bound Lead follow-up".into());
+            }
+            launch["lead_resume"] = json!(id);
+            meta["lead_resume"] = json!(id);
         }
         if preserve_current {
             if followup {
@@ -903,7 +966,7 @@ impl Server<'_> {
             let (kind, started) = storage::started(name);
             let (status, code) = status(&dir);
             let mut row = json!({"operation":name,"kind":if truthy(&meta["kind"]) {meta["kind"].clone()} else {json!(kind)},"status":status,"started_at":if truthy(&meta["started_at"]) {meta["started_at"].clone()} else {json!(started)}});
-            cancellation(&dir, status, &mut row);
+            listing_cancellation(&dir, status, &mut row);
             if let Some(n) = age(&dir) {
                 row["age_seconds"] = json!(n);
             }
@@ -953,7 +1016,7 @@ impl Server<'_> {
     fn peer_result_snapshot(
         &self,
         args: &Value,
-        captured: Option<(&Value, &'static str, Option<i64>)>,
+        captured: Option<CapturedSnapshot<'_>>,
     ) -> ToolResult {
         let wait = integer(args, "wait_seconds", 0, 0, 50)
             .map_err(|_| "error: wait_seconds must be an integer from 0 to 50")?;
@@ -1025,8 +1088,12 @@ impl Server<'_> {
             .path;
         let mut payload = json!({"operation":op,"log":dir.join("run.log")});
         let deadline = Instant::now() + Duration::from_secs(wait as u64);
-        let (mut state, mut code) = captured.map_or_else(|| status(&dir), |(_, s, c)| (s, c));
-        let meta = captured.map_or_else(|| storage::meta(&dir), |(m, _, _)| m.clone());
+        let (mut state, mut code) = captured
+            .as_ref()
+            .map_or_else(|| status(&dir), |c| (c.state, c.code));
+        let meta = captured
+            .as_ref()
+            .map_or_else(|| storage::meta(&dir), |c| c.meta.clone());
         let owned = meta["answer_storage"] == "operation";
         if page {
             if state != "done" || !owned {
@@ -1045,7 +1112,19 @@ impl Server<'_> {
             std::thread::sleep(remaining.min(Duration::from_millis(100)));
             (state, code) = status(&dir);
         }
-        cancellation(&dir, state, &mut payload);
+        let answers = owned.then(|| dir.join("answers"));
+        let mut uncaptured_scan = None;
+        if let Some(cap) = &captured {
+            apply_cancellation(cap.cancel, state, &mut payload);
+        } else {
+            let observed = storage::valid_receipt(&dir, "cancel-observed");
+            if state == "done" {
+                uncaptured_scan = Some(scan_log(&dir, &self.caller_cwd, answers.as_deref()));
+            }
+            let view =
+                self.cancellation_view_with(&dir, &meta, state, observed, uncaptured_scan.as_ref());
+            apply_cancellation(&view, state, &mut payload);
+        }
         if let Some(n) = age(&dir).filter(|_| {
             std::fs::symlink_metadata(dir.join("prompt.txt")).is_ok_and(|m| m.file_type().is_file())
         }) {
@@ -1066,8 +1145,13 @@ impl Server<'_> {
                 Err(out.into())
             };
         }
-        let answers = owned.then(|| dir.join("answers"));
-        let (artifacts, thread) = references(&dir, &self.caller_cwd, answers.as_deref());
+        let LogScan {
+            artifacts, thread, ..
+        } = match captured {
+            Some(cap) => cap.scan,
+            None => uncaptured_scan
+                .unwrap_or_else(|| scan_log(&dir, &self.caller_cwd, answers.as_deref())),
+        };
         let per = OUTPUT_LIMIT.saturating_sub(2 * artifacts.len().saturating_sub(1))
             / artifacts.len().max(1);
         let mut sections = Vec::<String>::new();
@@ -1194,37 +1278,75 @@ impl Server<'_> {
         let updated = crate::value::Text::from(updated_stamp(dir, created.as_str().unwrap_or("")));
         let mut value = json!({"resultType":"complete","taskId":id,"createdAt":created,"lastUpdatedAt":updated,"ttlMs":null,"pollIntervalMs":5000});
         let (state, code) = status(dir);
-        if state == "done" && storage::valid_receipt(dir, "cancel-observed") {
+        let observed = storage::valid_receipt(dir, "cancel-observed");
+        let answers = (meta["answer_storage"] == "operation").then(|| dir.join("answers"));
+        let scan = (state == "done" && !observed)
+            .then(|| scan_log(dir, &self.caller_cwd, answers.as_deref()));
+        let cancel = self.cancellation_view_with(dir, &meta, state, observed, scan.as_ref());
+        value["cancellation"] = cancel.to_json();
+        if state == "done" && cancel.observed {
             value["status"] = json!("cancelled");
             value["statusMessage"] = json!(
                 "Provider cancellation was observed and the operation exited. Partial artifacts are retained."
             );
         } else if state == "running" {
-            let cancelled = storage::valid_receipt(dir, "cancel-request");
             value["status"] = json!("working");
-            value["cancellation_requested"] = json!(cancelled);
-            value["statusMessage"] = json!(if cancelled {
-                "Cancellation requested; awaiting provider cleanup."
-            } else {
-                "Peer consultation is running."
+            value["cancellation_requested"] = json!(cancel.requested);
+            value["statusMessage"] = json!(match cancel.state {
+                "confirmed" => {
+                    "Provider cancellation was observed; awaiting final operation exit."
+                }
+                "requested" => "Cancellation requested; awaiting provider cleanup.",
+                _ => "Peer consultation is running.",
             });
         } else if state == "stalled" {
             value["status"] = json!("failed");
-            value["statusMessage"] = json!("Peer process ended without a durable exit status.");
+            value["statusMessage"] = json!(match cancel.state {
+                "confirmed" => {
+                    "Provider cancellation was observed before the peer ended without a durable exit status."
+                }
+                "unknown" => {
+                    "Cancellation was requested, but the peer ended without a durable exit or observation."
+                }
+                _ => "Peer process ended without a durable exit status.",
+            });
             value["error"] = json!({"code":-32603,"message":"peer operation stalled"});
         } else {
-            let result =
-                self.peer_result_snapshot(&json!({"operation":id}), Some((&meta, state, code)));
+            let result = self.peer_result_snapshot(
+                &json!({"operation":id}),
+                Some(CapturedSnapshot {
+                    meta: &meta,
+                    state,
+                    code,
+                    cancel: &cancel,
+                    scan: scan.unwrap(),
+                }),
+            );
             let (text, bad) = match result {
                 Ok(s) => (s, false),
                 Err(crate::ToolError::Text(s)) => (s, true),
                 Err(crate::ToolError::InvalidField) => return Err(crate::FIELD_ERROR.into()),
             };
             value["status"] = json!("completed");
-            value["statusMessage"] = json!(format!(
-                "Peer consultation completed with exit {}.",
-                code.unwrap_or(1)
-            ));
+            value["statusMessage"] = json!(match cancel.state {
+                "completed_first" => format!(
+                    "Peer consultation completed with exit {} before cancellation took effect.",
+                    code.unwrap_or(1)
+                ),
+                "unknown" => match cancel.durable_exit {
+                    Some(exit) => format!(
+                        "Cancellation was requested, but the peer ended with exit {exit} without a cancellation observation."
+                    ),
+                    None => {
+                        "Cancellation was requested, but the peer ended without a durable exit or observation."
+                            .into()
+                    }
+                },
+                _ => format!(
+                    "Peer consultation completed with exit {}.",
+                    code.unwrap_or(1)
+                ),
+            });
             value["result"] = json!({"resultType":"complete","content":[{"type":"text","text":text}],"isError":bad});
         }
         Ok(value)
@@ -1249,18 +1371,183 @@ impl Server<'_> {
             .map_err(|e| (-32603, format!("could not record cancellation: {e}")))?;
         let row = json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":id,"requested_at":storage::now()});
         target
-            .atomic("cancel-request.json", format!("{row}\n").as_bytes())
+            .record_cancel_request(format!("{row}\n").as_bytes())
             .map_err(|e| (-32603, format!("could not record cancellation: {e}")))?;
         Ok(json!({"resultType":"complete"}))
     }
+    fn completed_own_work(&self, dir: &Path, meta: &Value, exit: i64, scan: &LogScan) -> bool {
+        if !(0..124).contains(&exit) || scan.aborted {
+            return false;
+        }
+        if scan.artifacts.is_empty() {
+            return exit == 0;
+        }
+        let owned = meta["answer_storage"] == "operation";
+        let repo = dir.ancestors().nth(4);
+        let op = dir.file_name().and_then(|s| s.to_str());
+        scan.artifacts.iter().all(|path| {
+            let name = Path::new(path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let bytes = if owned {
+                if Path::new(path).parent() != Some(dir.join("answers").as_path())
+                    || !crate::answer_name(name)
+                {
+                    return false;
+                }
+                let (Some(repo), Some(op)) = (repo, op) else {
+                    return false;
+                };
+                storage::read(repo, &format!("{RUN_ROOT}/{op}/answers/{name}"), MAX_ANSWER).ok()
+            } else {
+                self.caller_cwd
+                    .join(path)
+                    .parent()
+                    .and_then(|p| storage::read(p, name, MAX_ANSWER).ok())
+            };
+            bytes
+                .as_deref()
+                .and_then(completed_artifact_exit)
+                .is_some_and(|code| (0..124).contains(&code))
+        })
+    }
+    fn cancellation_view_with(
+        &self,
+        dir: &Path,
+        meta: &Value,
+        state: &str,
+        observed: bool,
+        scan: Option<&LogScan>,
+    ) -> CancellationView {
+        let request = storage::cancel_request(dir);
+        let requested = request.is_some();
+        let requested_at = request.flatten();
+        let durable_exit = (!observed && requested && state == "done")
+            .then(|| durable_status_exit(dir))
+            .flatten();
+        let cancel_state = if observed {
+            "confirmed"
+        } else if !requested {
+            "none"
+        } else if state == "running" {
+            "requested"
+        } else if state == "done"
+            && let Some(exit) = durable_exit
+            && let Some(scan) = scan
+            && self.completed_own_work(dir, meta, exit, scan)
+        {
+            "completed_first"
+        } else {
+            "unknown"
+        };
+        CancellationView {
+            requested,
+            observed,
+            requested_at,
+            durable_exit,
+            state: cancel_state,
+        }
+    }
 }
-fn cancellation(dir: &Path, state: &str, payload: &mut Value) {
-    if storage::valid_receipt(dir, "cancel-request") {
+struct CapturedSnapshot<'a> {
+    meta: &'a Value,
+    state: &'static str,
+    code: Option<i64>,
+    cancel: &'a CancellationView,
+    scan: LogScan,
+}
+struct CancellationView {
+    requested: bool,
+    observed: bool,
+    requested_at: Option<String>,
+    durable_exit: Option<i64>,
+    state: &'static str,
+}
+impl CancellationView {
+    fn to_json(&self) -> Value {
+        json!({
+            "requested_at": self.requested_at.as_deref().map_or(Value::Null, |s| json!(s)),
+            "state": self.state,
+        })
+    }
+}
+fn listing_cancellation(dir: &Path, state: &str, payload: &mut Value) {
+    let request = storage::cancel_request(dir);
+    let requested = request.is_some();
+    let requested_at = request.flatten();
+    let observed = storage::valid_receipt(dir, "cancel-observed");
+    let cancel_state = if observed {
+        "confirmed"
+    } else if !requested {
+        "none"
+    } else if state == "running"
+        || (state == "done"
+            && durable_status_exit(dir).is_some_and(|exit| (0..124).contains(&exit)))
+    {
+        "requested"
+    } else {
+        "unknown"
+    };
+    let view = CancellationView {
+        requested,
+        observed,
+        requested_at,
+        durable_exit: None,
+        state: cancel_state,
+    };
+    apply_cancellation(&view, state, payload);
+}
+fn durable_status_exit(dir: &Path) -> Option<i64> {
+    storage::read_run(dir, "status", 4096)
+        .ok()
+        .and_then(|bytes| {
+            std::str::from_utf8(&bytes)
+                .ok()?
+                .trim_matches(crate::whitespace)
+                .parse::<i64>()
+                .ok()
+        })
+}
+fn completed_artifact_exit(data: &[u8]) -> Option<i64> {
+    let mut output_open = false;
+    let mut completed = false;
+    let mut exit_seen = false;
+    let mut code = String::new();
+    for raw in data.split_inclusive(|b| *b == b'\n') {
+        let end = raw
+            .iter()
+            .rposition(|b| !matches!(*b, b'\r' | b'\n'))
+            .map_or(0, |i| i + 1);
+        let line = &raw[..end];
+        if line == b"## Output" {
+            output_open = true;
+            completed = false;
+            exit_seen = false;
+            code.clear();
+        } else if line == b"## Exit" {
+            completed = output_open;
+            exit_seen = output_open;
+            code.clear();
+        } else if exit_seen && code.is_empty() {
+            let trimmed = String::from_utf8_lossy(line)
+                .trim_matches(crate::whitespace)
+                .to_owned();
+            if !trimmed.is_empty() {
+                code = trimmed;
+            }
+        }
+    }
+    completed.then(|| code.parse::<i64>().ok()).flatten()
+}
+fn apply_cancellation(view: &CancellationView, state: &str, payload: &mut Value) {
+    if view.requested {
         payload["cancellation_requested"] = json!(true);
     }
-    if state == "done" && storage::valid_receipt(dir, "cancel-observed") {
+    if state == "done" && view.observed {
         payload["termination_reason"] = json!("cancelled");
     }
+    payload["cancellation"] = view.to_json();
 }
 fn truthy(v: &Value) -> bool {
     match v {
@@ -1405,6 +1692,12 @@ fn owner_run(
         || (route.is_some() && followup.is_none())
     {
         return Err(fail("selected route requires its original Lead receipt"));
+    }
+    let resume = launch.get("lead_resume");
+    if resume != meta.as_ref().and_then(|m| m.get("lead_resume"))
+        || resume.is_some_and(|id| followup.is_none() || !id.as_str().is_some_and(lead_session))
+    {
+        return Err(fail("a native session requires its original Lead receipt"));
     }
     if meta
         .as_ref()
@@ -1628,6 +1921,10 @@ fn owner_run(
         // This dialog continues the original OMS thread. A supervisor's ambient
         // native session selector could otherwise send its text to another chat.
         cmd.env_remove("OMS_RESUME_SESSION");
+        // The previous turn's own verified provider session, never an ambient one.
+        if let Some(id) = resume.and_then(|id| id.as_str()) {
+            cmd.env("OMS_RESUME_SESSION", id);
+        }
     }
     // The staged native CLI validates its manifest, revision and its own executable
     // before entering provider verbs. Preserve this proof in the detached owner.
@@ -1709,7 +2006,7 @@ mod tests {
 if [ "$1" = thread ]; then
     test "$6" = context && test "$7" = --require-open && cat .oms/threads/"$5".jsonl
 else
-    test -z "${OMS_RESUME_SESSION+x}" || exit 9
+    printf '%s' "${OMS_RESUME_SESSION-unset}" > resumed
     printf '%s\0' "$@" > received
 fi
 "#,
@@ -1781,6 +2078,7 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
                 &thread,
                 &child_binding,
                 Some(("gemini-4-carbon", Some("high"))),
+                None,
             )
         };
         let no_effect = || {
@@ -1801,7 +2099,16 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
         assert!(send("agy,codex").is_err());
         assert!(
             server
-                .start_lead_followup(path, "agy", prompt, &child, &thread, &root_binding, None)
+                .start_lead_followup(
+                    path,
+                    "agy",
+                    prompt,
+                    &child,
+                    &thread,
+                    &root_binding,
+                    None,
+                    None
+                )
                 .is_err()
         );
         no_effect();
@@ -1889,7 +2196,16 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
             .unwrap();
         assert!(
             server
-                .start_lead_followup(path, "agy", prompt, &old_op, &thread, &old_binding, None)
+                .start_lead_followup(
+                    path,
+                    "agy",
+                    prompt,
+                    &old_op,
+                    &thread,
+                    &old_binding,
+                    None,
+                    None
+                )
                 .is_ok()
         );
         let old_dir = Directory::run(path, &old_op, true).unwrap();
@@ -1900,6 +2216,8 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
                 .is_none()
         );
         owner_run(Some(&program), path, path, &old_op, &old_dir).unwrap();
+        // An ambient selector never reaches a Lead turn without its own session.
+        assert_eq!(std::fs::read(path.join("resumed")).unwrap(), b"unset");
         let default_argv = std::fs::read_to_string(path.join("received")).unwrap();
         assert!(
             !default_argv
@@ -1913,6 +2231,53 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
         assert_eq!(
             std::fs::read(threads.path.join(format!("{thread}.jsonl"))).unwrap(),
             b"existing conversation\n"
+        );
+        // A follow-up continues only the previous turn's verified native session.
+        let session = "12345678-1234-4234-8234-123456789abc";
+        let next_binding = storage::hash("resumed turn");
+        let next_op = op(&next_binding);
+        legacy["binding"] = json!(next_binding);
+        root.atomic(&note_name, legacy.to_string().as_bytes())
+            .unwrap();
+        let resume = |provider, id| {
+            server.start_lead_followup(
+                path,
+                provider,
+                prompt,
+                &next_op,
+                &thread,
+                &next_binding,
+                None,
+                Some(id),
+            )
+        };
+        assert!(resume("codex", session).is_err());
+        assert!(resume("agy", "12345678-1234-4234-8234-123456789ABC").is_err());
+        assert!(resume("agy", "not-a-session").is_err());
+        assert!(!path.join(RUN_ROOT).join(&next_op).exists());
+        resume("agy", session).unwrap();
+        let next_dir = Directory::run(path, &next_op, true).unwrap();
+        let next_launch = private_json(&next_dir, "launch.json").unwrap();
+        assert_eq!(next_launch["lead_resume"], session);
+        assert_eq!(
+            private_json(&next_dir, "meta.json").unwrap()["lead_resume"],
+            session
+        );
+        let mut forged = next_launch.clone();
+        forged["lead_resume"] = json!("22345678-1234-4234-8234-123456789abc");
+        next_dir
+            .atomic("launch.json", forged.to_string().as_bytes())
+            .unwrap();
+        std::fs::remove_file(path.join("resumed")).unwrap();
+        assert!(owner_run(Some(&program), path, path, &next_op, &next_dir).is_err());
+        assert!(!path.join("resumed").exists());
+        next_dir
+            .atomic("launch.json", next_launch.to_string().as_bytes())
+            .unwrap();
+        owner_run(Some(&program), path, path, &next_op, &next_dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path.join("resumed")).unwrap(),
+            session
         );
     }
 
@@ -2002,5 +2367,90 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
             .unwrap();
             assert_eq!(result, row["expected"]);
         }
+    }
+
+    #[test]
+    fn task_get_and_peer_result_scan_completed_log_once() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::AtomicBool;
+
+        let repo = temp("single-log-scan");
+        let path = &repo.0;
+        let bin = path.join("oms");
+        std::fs::write(&bin, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let flag = AtomicBool::new(false);
+        let mut server = Server::new(
+            path,
+            path,
+            &flag,
+            crate::Config {
+                profile: crate::ToolProfile::Core,
+                tasks_extension: true,
+                peer_owner: bin.clone(),
+                oms_program: Some(bin),
+            },
+        )
+        .unwrap();
+
+        let op = "consult-20261126T020000Z-aabbccdd";
+        let dir = Directory::open(path, &format!("{RUN_ROOT}/{op}"), true, true).unwrap();
+        let answers =
+            Directory::open(path, &format!("{RUN_ROOT}/{op}/answers"), true, true).unwrap();
+        dir.atomic(
+            "meta.json",
+            b"{\"answer_storage\":\"operation\",\"cancellation_supported\":true}\n",
+        )
+        .unwrap();
+        dir.atomic("prompt.txt", b"question\n").unwrap();
+        dir.atomic("status", b"0\n").unwrap();
+        dir.atomic(
+            "cancel-request.json",
+            format!(
+                "{{\"schema\":1,\"kind\":\"mcp-task-cancel-request\",\"task_id\":\"{op}\",\"requested_at\":\"2020-01-01T00:00:05Z\"}}\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        answers
+            .atomic("claude.md", b"## Output\nanswer\n## Exit\n0\n")
+            .unwrap();
+        dir.atomic(
+            "run.log",
+            format!("artifact: {}\n", answers.path.join("claude.md").display()).as_bytes(),
+        )
+        .unwrap();
+
+        LOG_SCAN_COUNT.with(|n| n.set(0));
+        let task = server
+            .handle(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tasks/get",
+                "params": {
+                    "taskId": op,
+                    "_meta": {
+                        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                        "io.modelcontextprotocol/clientCapabilities": {
+                            "extensions": {"io.modelcontextprotocol/tasks": {}}
+                        }
+                    }
+                }
+            }))
+            .unwrap();
+        assert_eq!(task["result"]["cancellation"]["state"], "completed_first");
+        assert_eq!(LOG_SCAN_COUNT.with(|n| n.get()), 1);
+
+        LOG_SCAN_COUNT.with(|n| n.set(0));
+        let direct = server
+            .handle(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": "oms_peer_result", "arguments": {"operation": op}}
+            }))
+            .unwrap();
+        assert_eq!(direct["result"]["isError"], false);
+        assert_eq!(LOG_SCAN_COUNT.with(|n| n.get()), 1);
     }
 }

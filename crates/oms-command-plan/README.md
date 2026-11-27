@@ -51,11 +51,28 @@ lock is acquired, so an expired lease cannot reuse an earlier Context timestamp.
 Bound Review requires the actual native delegate index and its verified
 artifact/patch bytes. Under the Plan lock, the owner checks the index and hashes,
 captures immutable files under the existing Plan artifact owner, and saves
-their references and original indexed provenance with Review. The selected
-immutable paths and digests also enable the ordinary exact review-evidence
-checks at admission, Land and Finish. Neither this bridge nor
+their references and original indexed provenance with Review. When the plan id,
+lease, epoch, task digest and contracts still match, bound Review admits a
+fast-forwarded checkout (`base_sha` is an ancestor of `HEAD`) while keeping the
+retained index bound to the original `base_sha`; landing re-verifies the patch
+against the current `HEAD` and refuses non-ancestor rewrites. Stale Review
+bindings append `stale_delegate_binding` to `.oms/plan/late-results.jsonl` and
+name the task, repository-relative artifact/patch paths and failed condition.
+The selected immutable paths and digests also enable the ordinary exact
+review-evidence checks at admission, Land and Finish. Neither this bridge nor
 an indexed worker exit grants completion or publication; changed and late
 results remain evidence without replacing a newer claimant.
+
+`reviewed_context` validates the optional context-pack `lead_findings` contract
+used by the desktop preparation tool and managed Plan execution. It bounds a
+quoted excerpt to 4096 UTF-8 bytes, retains its exact source/page/range and
+reviewed ready-task SHA, and re-verifies `source.answer_sha256` against the
+current Lead record in the state repository at pre-claim and dispatch time.
+`task_contract` owns the existing plan-run frozen-field identity so a claimed
+task can be checked after its full task SHA changes. The original ready SHA
+remains the Claim CAS input; the issued binding still owns Start/Review. Context
+adds no task, model, scope, Room or completion authority and never changes the
+canonical task record.
 
 `discussion` is the shared producer/consumer contract for native advisory
 councils. A proposal may carry `discussion: {path, sha256}` pointing to an

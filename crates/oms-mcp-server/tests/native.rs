@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 const META: &str = "io.modelcontextprotocol/protocolVersion";
 const CAPS: &str = "io.modelcontextprotocol/clientCapabilities";
 const EXT: &str = "io.modelcontextprotocol/tasks";
+// A size budget, not a host limit: it began as 240 KiB when the server stripped indentation, and
+// now covers the verbatim panel with the #631 More sections and new-goal window.
+const PANEL_BUDGET: usize = 256 * 1024;
 fn timeout() -> Duration {
     Duration::from_secs(
         std::env::var("OMS_TEST_CALL_TIMEOUT")
@@ -201,6 +204,34 @@ impl Drop for Client {
 fn payload(v: &Value) -> Value {
     serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
 }
+fn registry_summary(v: &Value) -> Value {
+    let mut data = payload(v);
+    let valid = |key: &Value| {
+        key.as_str().is_some_and(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    };
+    assert!(
+        data["projectKeys"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .all(
+                |(alias, key)| data["projects"].as_array().unwrap().contains(&json!(alias))
+                    && valid(key)
+            )
+    );
+    if matches!(data["binding"].as_str(), Some("cwd" | "pinned")) {
+        assert!(valid(&data["projectKey"]));
+    } else {
+        assert!(data["projectKey"].is_null());
+    }
+    data.as_object_mut().unwrap().remove("projectKeys");
+    data.as_object_mut().unwrap().remove("projectKey");
+    data
+}
 fn good(v: &Value) {
     assert_eq!(v["result"]["isError"], false, "{v}");
 }
@@ -317,6 +348,14 @@ fn cross_host_project_reads() {
             "Open the OMS panel (expands beside or over the conversation when the host allows it)."
         );
         assert_eq!(
+            opener["inputSchema"]["properties"]["project"]["description"],
+            "Pass the exact alias from oms_list_projects when the host has a project map; the initial view is included only when project names an exact alias from oms_list_projects on hosts with a project map."
+        );
+        assert_eq!(
+            graph_tool["inputSchema"]["properties"]["project"]["description"],
+            "Exact alias from oms_list_projects when the host has a project map."
+        );
+        assert_eq!(
             opener["_meta"]["openai/ui"]["entrypoints"][0]["type"],
             "global"
         );
@@ -325,16 +364,16 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v29.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v38.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
-        assert!(html.len() < 240 * 1024);
+        assert!(html.len() < PANEL_BUDGET);
         assert_eq!(
             html.as_bytes(),
             include_bytes!("../src/conversation-panel.html")
         );
-        let legacy_uri = "ui://oms/conversation-panel/v28.html";
+        let legacy_uri = "ui://oms/conversation-panel/v31.html";
         let legacy = c.call("resources/read", json!({"uri":legacy_uri}));
         let legacy = &legacy["result"]["contents"][0];
         assert_eq!(legacy["uri"], legacy_uri);
@@ -350,10 +389,16 @@ fn cross_host_project_reads() {
             view["result"]["contents"][0]["_meta"]["ui"]["preferredDisplayMode"],
             "fullscreen"
         );
+        let unbound_open = c.tool("oms_open_panel", json!({}));
+        good(&unbound_open);
+        assert!(unbound_open["result"]["_meta"].get("dashboard").is_none());
+        let expected_unbound_open =
+            json!({"panel":"OMS","project":null,"readOnly":true,"snapshotOmitted":"project"});
         assert_eq!(
-            payload(&c.tool("oms_open_panel", json!({})))["readOnly"],
-            true
+            unbound_open["result"]["structuredContent"],
+            expected_unbound_open
         );
+        assert_eq!(payload(&unbound_open), expected_unbound_open);
     }
     assert_eq!(
         payload(&c.tool("oms_list_projects", json!({})))["binding"],
@@ -378,7 +423,7 @@ fn cross_host_project_reads() {
     std::fs::write(&map, json!({"fixture":repo}).to_string()).unwrap();
     std::fs::set_permissions(map, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert_eq!(
-        payload(&c.tool("oms_list_projects", json!({}))),
+        registry_summary(&c.tool("oms_list_projects", json!({}))),
         json!({"binding":"catalog","projects":["fixture"],"readOnly":true})
     );
     let obs = json!({"schema":1,"kind":"multi-source-observation","atomic":false,"revision":"obs-v1:0123456789abcdef01234567","observedAt":"2026-11-24T10:00:00Z","completeness":"complete","sources":{"git":"ok","task":"ok","plan":"ok","attempts":"ok","artifacts":"ok","acceptance":"ok","conversation":"unconfirmed"},"evidence":{"scope":"repository","head":"1234567890ab","room":null,"latestArtifact":null,"omitted":0,"trimmed":0}});
@@ -483,6 +528,79 @@ fn cross_host_project_reads() {
             .contains("conversation-digest")
     );
     assert!(!record(&source)["argv"].to_string().contains("00000000-"));
+    let opened = c.tool("oms_open_panel", json!({"project":"fixture"}));
+    good(&opened);
+    assert_eq!(
+        opened["result"]["_meta"]["dashboard"],
+        reply["result"]["structuredContent"]["dashboard"]
+    );
+    assert!(
+        opened["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    let expected_open =
+        json!({"panel":"OMS","project":"fixture","readOnly":true,"snapshot":"attached"});
+    assert_eq!(opened["result"]["structuredContent"], expected_open);
+    let open_text = opened["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(!open_text.contains("obs-v1:"));
+    assert!(!open_text.contains("conversationMain"));
+    assert!(!open_text.contains("dashboard"));
+    assert!(payload(&opened).get("dashboard").is_none());
+    assert_eq!(payload(&opened), expected_open);
+    let unresolvable = c.tool("oms_open_panel", json!({}));
+    good(&unresolvable);
+    assert!(
+        unresolvable["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert!(unresolvable["result"]["_meta"].get("dashboard").is_none());
+    let expected_unresolvable =
+        json!({"panel":"OMS","project":null,"readOnly":true,"snapshotOmitted":"project"});
+    assert_eq!(
+        unresolvable["result"]["structuredContent"],
+        expected_unresolvable
+    );
+    assert_eq!(payload(&unresolvable), expected_unresolvable);
+    fixture_settings(&source, json!({"exit":2,"stderr":"snapshot failed"}));
+    let failed_snapshot_open = c.tool("oms_open_panel", json!({"project":"fixture"}));
+    good(&failed_snapshot_open);
+    assert!(
+        failed_snapshot_open["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert!(
+        failed_snapshot_open["result"]["_meta"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert!(payload(&failed_snapshot_open).get("dashboard").is_none());
+    assert!(payload(&failed_snapshot_open).get("snapshot").is_none());
+    assert!(
+        payload(&failed_snapshot_open)
+            .get("snapshotOmitted")
+            .is_none()
+    );
+    let oversized_snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","project":"fixture","goal":"g".repeat(60_000)}});
+    fixture_settings(&source, json!({"stdout":oversized_snapshot.to_string()}));
+    let oversized_open = c.tool("oms_open_panel", json!({"project":"fixture"}));
+    good(&oversized_open);
+    assert!(
+        oversized_open["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert!(oversized_open["result"]["_meta"].get("dashboard").is_none());
+    assert_eq!(
+        oversized_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":"fixture","readOnly":true,"snapshotOmitted":"size"})
+    );
+    assert_eq!(
+        payload(&oversized_open),
+        json!({"panel":"OMS","project":"fixture","readOnly":true,"snapshotOmitted":"size"})
+    );
     // Fail-closed: exit-1 partial response contradicting a complete observation cannot claim complete revision.
     fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
     let degraded = c.tool("oms_panel_snapshot", json!({"project":"fixture"}));
@@ -668,7 +786,7 @@ fn packaged_remote_catalog(source: &Path, repo: &Path, home: &Path) {
     let mut readonly = open(generic, &[]);
     for (client, read_only) in [(&mut desktop, false), (&mut readonly, true)] {
         assert_eq!(
-            payload(&projects(client)),
+            registry_summary(&projects(client)),
             json!({"projects":["remote"],"binding":"catalog","readOnly":read_only})
         );
         good(&client.tool("oms_open_panel", json!({"project":"remote"})));
@@ -684,18 +802,18 @@ fn packaged_remote_catalog(source: &Path, repo: &Path, home: &Path) {
     std::fs::remove_file(&map).unwrap();
     bad(&projects(&mut desktop), "Invalid OMS project map");
     assert_eq!(
-        payload(&projects(&mut readonly)),
+        registry_summary(&projects(&mut readonly)),
         json!({"projects":[],"binding":"unbound","readOnly":true})
     );
     let mut pinned = open(generic, &[("OMS_PANEL_REPO", repo.to_str().unwrap())]);
     assert_eq!(
-        payload(&projects(&mut pinned)),
+        registry_summary(&projects(&mut pinned)),
         json!({"projects":[],"binding":"pinned","readOnly":true})
     );
     let inline = json!({"operator":repo}).to_string();
     let mut catalog = open(generic, &[("OMS_PANEL_PROJECTS", &inline)]);
     assert_eq!(
-        payload(&projects(&mut catalog)),
+        registry_summary(&projects(&mut catalog)),
         json!({"projects":["operator"],"binding":"catalog","readOnly":true})
     );
 }
@@ -725,6 +843,18 @@ fn mcp_app_binding_boundaries() {
         )
     };
     let mut c = Client::with_depth(&source, &repo, "mcp-app", true, false, "0".as_ref());
+    bind(json!({"fixture":repo}));
+    let original_key =
+        payload(&c.tool("oms_list_projects", json!({})))["projectKeys"]["fixture"].clone();
+    assert!(original_key.is_string());
+    bind(json!({"fixture":other}));
+    let changed_key =
+        payload(&c.tool("oms_list_projects", json!({})))["projectKeys"]["fixture"].clone();
+    assert!(changed_key.is_string());
+    assert_ne!(
+        original_key, changed_key,
+        "alias remapping must invalidate physical-scope observations"
+    );
     bind(json!({"fixture":repo}));
     let foreign =
         json!({"threadId":"00000000-0000-4000-8000-000000000001","room":"r","participant":"p"});
@@ -1110,6 +1240,54 @@ fn worker_output_reader(c: &mut Client, source: &Path, key: &str, thread: &str) 
     assert_eq!(argv[11], "--conversation-digest");
     assert_eq!(argv[12].as_str().unwrap().len(), 32);
     assert!(!argv.to_string().contains(thread));
+    let mut full = args.clone();
+    full["answerPage"] = json!("");
+    let mut first = base.clone();
+    first["text"] = json!("abc");
+    first["truncated"] = json!(true);
+    first["page"] = json!({"page":1,"offset":0,"bytes":3,"totalBytes":11,"digest":"d".repeat(64),
+        "revision":"e".repeat(64),"hasMore":true,"nextPage":2});
+    configure(&first);
+    let r = request(c, &full);
+    good(&r);
+    let cursor = r["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    assert!(cursor.is_string());
+    full["answerPage"] = cursor;
+    let mut second = first.clone();
+    second["text"] = json!(" \n\t ");
+    second["page"]["page"] = json!(2);
+    second["page"]["offset"] = json!(3);
+    second["page"]["bytes"] = json!(4);
+    second["page"]["nextPage"] = json!(3);
+    configure(&second);
+    let r = request(c, &full);
+    good(&r);
+    assert_eq!(r["result"]["_meta"]["workerOutput"]["text"], " \n\t ");
+    full["answerPage"] = r["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    assert!(full["answerPage"].is_string());
+    bad(&request(c, &args), "could not be verified");
+    second["text"] = json!("defg");
+    second["truncated"] = json!(false);
+    second["page"]["page"] = json!(3);
+    second["page"]["offset"] = json!(7);
+    second["page"]["hasMore"] = json!(false);
+    second["page"]["nextPage"] = Value::Null;
+    configure(&second);
+    let r = request(c, &full);
+    good(&r);
+    assert_eq!(r["result"]["_meta"]["workerOutput"]["text"], "defg");
+    assert!(r["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].is_null());
+    let mut wrong = full.clone();
+    wrong["room"] = json!("other-room");
+    let mut foreign = second.clone();
+    foreign["room"] = wrong["room"].clone();
+    configure(&foreign);
+    bad(&request(c, &wrong), "another selection");
+    second["page"]["revision"] = json!("f".repeat(64));
+    configure(&second);
+    bad(&request(c, &full), "changed");
+    full["answerPage"] = json!("../answer");
+    bad(&request(c, &full), "cursor");
     for status in ["running", "not_recorded", "unavailable"] {
         let mut r = base.clone();
         r["status"] = status.into();
@@ -1147,6 +1325,70 @@ fn worker_output_reader(c: &mut Client, source: &Path, key: &str, thread: &str) 
             .to_string()
             .contains(withheld["text"].as_str().unwrap())
     );
+
+    // A secret straddling an 8192-byte page boundary (including beyond the 16 KiB preview)
+    // withholds every page of worker output via the shared whole-body scan.
+    let clean_worker = format!("{}{}", "w".repeat(16_382), "y".repeat(600));
+    fixture_settings(
+        source,
+        json!({"pagedWorkerBody":clean_worker,"room":args["room"],"leadAttempt":args["leadAttempt"],"workerAttempt":args["workerAttempt"]}),
+    );
+    let mut paged = args.clone();
+    paged["answerPage"] = json!("");
+    let p1 = request(c, &paged);
+    good(&p1);
+    let c2 = p1["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    paged["answerPage"] = c2.clone();
+    let p2 = request(c, &paged);
+    good(&p2);
+    let c3 = p2["result"]["_meta"]["workerOutput"]["page"]["nextCursor"].clone();
+    assert!(c3.is_string());
+
+    let left = ["gh", "p_LeftHalf012345"].concat();
+    let right = "RightHalf67890abcdef01";
+    let straddling_first_worker = format!(
+        "{} {left}{right} {}",
+        "w".repeat(8_192 - 1 - left.len()),
+        "y".repeat(8_800)
+    );
+    let straddling_worker = format!(
+        "{} {left}{right} {}",
+        "w".repeat(16_384 - 1 - left.len()),
+        "y".repeat(560)
+    );
+    let machine_left = ["/ho", "me/"].concat();
+    let machine_right = "runner/private-tree";
+    let straddling_machine_worker = format!(
+        "{} {machine_left}{machine_right} {}",
+        "w".repeat(8_192 - 1 - machine_left.len()),
+        "y".repeat(8_800)
+    );
+    for tainted in [
+        &straddling_first_worker,
+        &straddling_worker,
+        &straddling_machine_worker,
+    ] {
+        fixture_settings(
+            source,
+            json!({"pagedWorkerBody":tainted,"room":args["room"],"leadAttempt":args["leadAttempt"],"workerAttempt":args["workerAttempt"]}),
+        );
+        bad(&request(c, &args), "withheld");
+        for cursor in [json!(""), c2.clone(), c3.clone()] {
+            let mut req = args.clone();
+            req["answerPage"] = cursor;
+            let refused = request(c, &req);
+            bad(&refused, "withheld");
+            let wire = refused.to_string();
+            assert!(
+                !wire.contains(&left)
+                    && !wire.contains(right)
+                    && !wire.contains(&machine_left)
+                    && !wire.contains(machine_right)
+                    && !wire.contains(&"w".repeat(32))
+                    && !wire.contains(&"y".repeat(32))
+            );
+        }
+    }
 }
 
 fn desktop_lead_conversations() {
@@ -1177,6 +1419,8 @@ fn desktop_lead_conversations() {
         c.tool("oms_open_panel", json!({"leadConversations":"yes"}))["result"]["isError"],
         true
     );
+    assert_eq!(record(&source)["argv"][0], "dashboard");
+    std::fs::remove_file(source.join("last-call.json")).unwrap();
     assert_eq!(
         call(
             &mut c,
@@ -1199,9 +1443,12 @@ fn desktop_lead_conversations() {
             open,
             read,
             "oms_send_lead_message",
+            "oms_stop_lead_message",
+            "oms_read_lead_stream",
             "oms_worker_output",
             "oms_lead_settings",
             "oms_update_lead_settings",
+            "oms_prepare_lead_plan_context",
         ] {
             let denied = call(&mut blocked, name, &args, owner);
             if child {
@@ -1246,6 +1493,31 @@ fn desktop_lead_conversations() {
         "project changed",
     );
     assert_eq!(runs(), 0);
+    for providers in [
+        json!([]),
+        json!(["codex", "codex"]),
+        json!(["pi"]),
+        json!("codex"),
+    ] {
+        let invalid = call(
+            &mut c,
+            open,
+            &json!({"room":"lead-room","providers":providers}),
+            owner,
+        );
+        assert_eq!(invalid["result"]["isError"], true);
+        assert_eq!(runs(), 0);
+    }
+    let single = json!({"room":"lead-room","projectKey":key,"providers":["codex"]});
+    let first = payload(&call(&mut c, open, &single, owner));
+    assert_eq!(first["leads"].as_array().unwrap().len(), 1);
+    assert_eq!(first["leads"][0]["provider"], "codex");
+    assert_eq!(
+        first["leads"][0]["requestId"],
+        initial["leads"][0]["requestId"]
+    );
+    good(&call(&mut c, open, &single, owner));
+    assert_eq!(runs(), 1, "selective reopen must reuse its one reservation");
     let opened = payload(&call(
         &mut c,
         open,
@@ -1361,6 +1633,61 @@ fn desktop_lead_conversations() {
         .unwrap();
     assert_eq!(schema["_meta"]["ui"]["visibility"], json!(["app"]));
     assert_eq!(schema["annotations"]["idempotentHint"], true);
+    let prepare = "oms_prepare_lead_plan_context";
+    let work_items = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "oms_panel_work_items")
+        .unwrap();
+    assert_eq!(
+        work_items["_meta"]["ui"]["visibility"],
+        json!(["app", "model"])
+    );
+    assert_eq!(work_items["annotations"]["readOnlyHint"], true);
+    let schema = tools["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == prepare)
+        .unwrap();
+    assert_eq!(schema["_meta"]["ui"]["visibility"], json!(["app"]));
+    assert!(
+        schema["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("excerpt"))
+    );
+    assert!(
+        tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| {
+                t["_meta"]["ui"]["visibility"]
+                    .as_array()
+                    .is_some_and(|v| v.contains(&json!("model")))
+            })
+            .all(|t| {
+                t["name"] != prepare
+                    && t["inputSchema"]["properties"].get("excerpt").is_none()
+                    && t["inputSchema"]["properties"]
+                        .get("excerptSha256")
+                        .is_none()
+            }),
+        "no model-visible tool may accept or verify a guessed Lead excerpt"
+    );
+    for full in [false, true] {
+        let mut regular = Client::new(&source, &repo, full, false, false);
+        assert!(
+            !regular.call("tools/list", json!({}))["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == prepare)
+        );
+        assert_eq!(regular.tool(prepare, json!({}))["error"]["code"], -32602);
+    }
     let message = |seat: usize, n: usize| {
         json!({"room":"lead-room","projectKey":key,"provider":initial["leads"][seat]["provider"],
             "leadRequestId":initial["leads"][seat]["requestId"],"turnId":format!("10000000-0000-4000-8000-{n:012x}"),
@@ -1494,6 +1821,14 @@ fn desktop_lead_conversations() {
         let public = payload(&view);
         let settings = &view["result"]["_meta"]["leadSettings"];
         assert_eq!(settings["selection"], json!({"model":null,"effort":null}));
+        assert_eq!(
+            settings["scope"],
+            json!({"target":"lead-conversation","appliesTo":"next-message",
+            "inheritsToWorkers":false,"mode":"read-only-consultation","continuity":"oms-thread"})
+        );
+        for field in ["account", "failover", "usage"] {
+            assert!(settings[field].is_null());
+        }
         assert_eq!(public["revision"], settings["revision"]);
         assert!(settings["nativeTitle"].is_null());
         assert_eq!(
@@ -1509,7 +1844,7 @@ fn desktop_lead_conversations() {
         } else {
             assert_eq!(
                 settings["nativeSession"],
-                json!({"source":"provider-result","scope":"invocation","resumable":false,"id":"a1000000-0000-4000-8000-000000000001"})
+                json!({"source":"provider-result","scope":"invocation","resumable":true,"id":"a1000000-0000-4000-8000-000000000001"})
             );
             for visible in [
                 &view["result"]["structuredContent"],
@@ -1608,6 +1943,20 @@ fn desktop_lead_conversations() {
         assert_eq!(payload(&ack)["turn"]["turnId"], m["turnId"]);
         if seat == 0 {
             until(|| payload(&lookup(&mut c, &m))["turn"]["status"] == "running");
+            let pending = payload(&call(&mut c, read, &args, owner));
+            assert_eq!(pending["leads"][0]["latestTurn"]["turnId"], m["turnId"]);
+            assert_eq!(pending["leads"][0]["latestTurn"]["status"], "running");
+            assert!(!pending.to_string().contains("Private fixture"));
+            bad(
+                &call(
+                    &mut c,
+                    read,
+                    &json!({"room":m["room"],"projectKey":key,"provider":m["provider"],
+                "leadRequestId":m["leadRequestId"],"turnId":m["turnId"],"answerPage":""}),
+                    owner,
+                ),
+                "completed answer",
+            );
             let other = message(0, 9);
             bad(&call(&mut c, send, &other, owner), "unresolved");
             assert_eq!(
@@ -1619,6 +1968,311 @@ fn desktop_lead_conversations() {
             setup(false);
         }
         await_reply(&mut c, &m);
+        let latest = payload(&call(&mut c, read, &args, owner));
+        assert_eq!(latest["leads"][seat]["latestTurn"]["turnId"], m["turnId"]);
+        assert_eq!(latest["leads"][seat]["latestTurn"]["status"], "replied");
+        assert!(latest["leads"][seat]["latestTurn"]["lastObservedAt"].is_string());
+        if seat == 0 {
+            let child = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| {
+                    std::fs::read_to_string(p.join("prompt.txt"))
+                        .ok()
+                        .as_deref()
+                        == Some("Private fixture follow-up 1\n")
+                })
+                .unwrap();
+            let artifact = child.join("answers/fixture.md");
+            let original = std::fs::read(&artifact).unwrap();
+            let long = format!("{}끝", "긴문장🙂".repeat(1500));
+            std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
+            let mut full = json!({"room":m["room"],"projectKey":key,"provider":m["provider"],
+                "leadRequestId":m["leadRequestId"],"turnId":m["turnId"],"answerPage":""});
+            let mut text = String::new();
+            let mut first_cursor = Value::Null;
+            loop {
+                let r = call(&mut c, read, &full, owner);
+                good(&r);
+                let a = &r["result"]["_meta"]["leadConversation"]["answer"];
+                assert_eq!(a["offset"], text.len());
+                assert!(a["text"].as_str().unwrap().len() <= 8192);
+                text.push_str(a["text"].as_str().unwrap());
+                assert_eq!(a["handoff"]["turnId"], m["turnId"]);
+                for field in ["content", "structuredContent"] {
+                    assert!(!r["result"][field].to_string().contains("긴문장"));
+                }
+                if first_cursor.is_null() {
+                    first_cursor = a["nextCursor"].clone();
+                }
+                if a["hasMore"] == false {
+                    break;
+                }
+                full["answerPage"] = a["nextCursor"].clone();
+            }
+            assert_eq!(text, long);
+            assert_eq!(runs(), 4, "reading complete answers must not dispatch");
+            // An explicit Share payload contains the displayed text and both
+            // digests. Metadata alone cannot export a private answer.
+            let first = {
+                let mut read = full.clone();
+                read["answerPage"] = json!("");
+                read
+            };
+            let selected = call(&mut c, read, &first, owner)["result"]["_meta"]["leadConversation"]
+                ["answer"]
+                .clone();
+            let excerpt = "긴문장🙂";
+            let digest = |s: &str| oms_command_plan::json::sha(s);
+            let task = json!({"id":"reviewed-task","title":"Frozen implementation","brief":"Implement src with evidence","state":"ready","task_sha256":"a".repeat(64),"contract_stale":false,"allowed_paths":["src"],"forbidden_paths":[],"verify":"true","depends":[],"role":"implementation-worker","assignment":{"provider":"claude","model":"frozen-model","reasoning_effort":"high"}});
+            fixture_settings(&source, json!({"leadRoom":true,"leadContextTask":task}));
+            let share = json!({"kind":"oms-selected-finding","authority":"context-only","source":{"kind":"lead-answer","projectKey":key,"room":m["room"],"provider":m["provider"],"participant":selected["handoff"]["participant"],"leadRequestId":m["leadRequestId"],"turnId":m["turnId"],"operation":selected["handoff"]["operation"],"digest":selected["digest"],"pageCursor":""},"selection":{"text":excerpt,"offset":0,"bytes":excerpt.len(),"totalBytes":selected["totalBytes"],"digest":selected["digest"],"excerptSha256":digest(excerpt),"truncated":true,"displayedBytes":selected["bytes"]}});
+            let src = &share["source"];
+            let selection = &share["selection"];
+            let prepare_args = json!({"room":src["room"],"projectKey":src["projectKey"],"provider":src["provider"],"leadRequestId":src["leadRequestId"],"turnId":src["turnId"],"answerPage":src["pageCursor"],"answerSha256":src["digest"],"offset":selection["offset"],"bytes":selection["bytes"],"excerpt":selection["text"],"excerptSha256":selection["excerptSha256"],"taskId":task["id"],"taskSha256":task["task_sha256"],"executionProvider":"claude"});
+            let result = call(&mut c, prepare, &prepare_args, owner);
+            good(&result);
+            let result = payload(&result);
+            assert_eq!(result["status"], "prepared");
+            assert_eq!(result["findings"]["selection"]["text"], excerpt);
+            assert_eq!(result["execution"]["mode"], "managed-plan-run");
+            assert_eq!(result["execution"]["nativeLeadInput"], false);
+            assert_eq!(result["execution"]["startsTask"], false);
+            for command in ["previewCommand", "runCommand"] {
+                assert_eq!(result[command]["cwd"], repo.to_str().unwrap());
+                assert_eq!(result[command]["argv"][0], "panel");
+                assert_eq!(result[command]["argv"][1], "--repo");
+                assert_eq!(result[command]["argv"][2], repo.to_str().unwrap());
+                assert_eq!(result[command]["argv"][3], "--room");
+                assert_eq!(result[command]["argv"][4], m["room"]);
+            }
+            assert_eq!(result["findings"]["target"]["provider"], "claude");
+            assert_eq!(
+                result["findings"]["target"]["task_sha256"],
+                task["task_sha256"]
+            );
+            let pack_path = repo.join(result["contextPack"]["path"].as_str().unwrap());
+            let pack = std::fs::read(&pack_path).unwrap();
+            assert_eq!(
+                oms_command_plan::json::sha(&pack),
+                result["contextPack"]["sha256"]
+            );
+            let checked = oms_command_plan::reviewed_context::from_pack(&pack)
+                .unwrap()
+                .unwrap();
+            checked.check_project(&repo).unwrap();
+            assert_eq!(checked.value().get("selection").text("text"), excerpt);
+            assert_eq!(
+                payload(&call(&mut c, prepare, &prepare_args, owner)),
+                result,
+                "identical selection reuses the context pack"
+            );
+            assert_eq!(
+                runs(),
+                4,
+                "preparing context never dispatches or creates a transcript store"
+            );
+            let fixed_mismatch =
+                "The reviewed Lead excerpt or Plan task changed. Review them again.";
+            for (field, value, expect_fixed) in [
+                ("excerpt", Value::Null, true),
+                ("excerpt", json!("different caller text"), true),
+                ("excerpt", json!(" "), true),
+                ("offset", json!(1), true),
+                ("offset", json!(2), true),
+                ("offset", json!("긴문장".len() + 1), true),
+                ("bytes", json!(4097), true),
+                ("offset", json!(8192), true),
+                ("projectKey", json!("b".repeat(64)), false),
+                ("room", json!("another-room"), false),
+                ("taskSha256", json!("b".repeat(64)), true),
+                ("executionProvider", json!("antigravity"), true),
+                ("answerSha256", json!("b".repeat(64)), true),
+                ("excerptSha256", json!("b".repeat(64)), true),
+            ] {
+                let mut bad_args = prepare_args.clone();
+                bad_args[field] = value;
+                let refused = call(&mut c, prepare, &bad_args, owner);
+                assert_eq!(refused["result"]["isError"], true, "{refused}");
+                assert!(
+                    !refused.to_string().contains("긴문장"),
+                    "errors must not disclose actual source text"
+                );
+                if expect_fixed {
+                    assert_eq!(
+                        refused["result"]["content"][0]["text"], fixed_mismatch,
+                        "mismatch on {field} must return the fixed error without leaking boundaries"
+                    );
+                }
+            }
+            for count in 2..=16 {
+                let chunk = "긴문장🙂".repeat(count);
+                let mut more = prepare_args.clone();
+                more["bytes"] = json!(chunk.len());
+                more["excerpt"] = json!(chunk);
+                more["excerptSha256"] = json!(digest(&chunk));
+                good(&call(&mut c, prepare, &more, owner));
+            }
+            assert_eq!(
+                payload(&call(&mut c, prepare, &prepare_args, owner)),
+                result,
+                "existing pack with same digest is reused even at the per-operation cap"
+            );
+            let overflow = "긴문장🙂".repeat(17);
+            let mut over_args = prepare_args.clone();
+            over_args["bytes"] = json!(overflow.len());
+            over_args["excerpt"] = json!(overflow);
+            over_args["excerptSha256"] = json!(digest(&overflow));
+            bad(
+                &call(&mut c, prepare, &over_args, owner),
+                "maximum 16 prepared context packs",
+            );
+            let pack_files = std::fs::read_dir(&child)
+                .unwrap()
+                .filter_map(|e| e.ok().and_then(|d| d.file_name().into_string().ok()))
+                .filter(|name| name.starts_with("lead-plan-context-") && name.ends_with(".json"))
+                .count();
+            assert_eq!(pack_files, 16);
+            let mut changed_task = task.clone();
+            changed_task["state"] = json!("claimed");
+            fixture_settings(
+                &source,
+                json!({"leadRoom":true,"leadContextTask":changed_task}),
+            );
+            bad(&call(&mut c, prepare, &prepare_args, owner), "changed");
+            fixture_settings(&source, json!({"leadRoom":true,"leadContextTask":task}));
+            std::fs::write(&artifact, "## Output\nchanged source\n## Exit\n0\n").unwrap();
+            let refused = call(&mut c, prepare, &prepare_args, owner);
+            assert_eq!(refused["result"]["isError"], true);
+            assert_eq!(refused["result"]["content"][0]["text"], fixed_mismatch);
+            assert!(!refused.to_string().contains("changed source"));
+            std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
+            let mut bad_zero = prepare_args.clone();
+            bad_zero["bytes"] = json!(0);
+            let refused_zero = call(&mut c, prepare, &bad_zero, owner);
+            assert_eq!(refused_zero["result"]["isError"], true);
+            assert_eq!(refused_zero["result"]["content"][0]["text"], fixed_mismatch);
+            setup(false);
+            full["answerPage"] = first_cursor.clone();
+            let mut wrong = full.clone();
+            wrong["leadRequestId"] = initial["leads"][1]["requestId"].clone();
+            bad(&call(&mut c, read, &wrong, owner), "selected Lead changed");
+            let mut wrong = full.clone();
+            wrong["room"] = json!("another-room");
+            assert_eq!(call(&mut c, read, &wrong, owner)["result"]["isError"], true);
+            std::fs::write(&artifact, "## Output\nchanged answer\n## Exit\n0\n").unwrap();
+            bad(&call(&mut c, read, &full, owner), "changed");
+            std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
+            // Even an equal answer in a replacement artifact invalidates an observed page.
+            std::fs::rename(&artifact, child.join("retired-answer")).unwrap();
+            std::fs::write(&artifact, format!("## Output\n{long}\n## Exit\n0\n")).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+            bad(&call(&mut c, read, &full, owner), "changed");
+
+            // Secrets or machine-tier paths straddling an 8192-byte page boundary (both at the first
+            // shareable page cut 8192 and beyond the preview at 40960) withhold every page and mark
+            // latestTurn unavailable with outbound_withheld.
+            let left = ["gh", "p_LeftHalf012345"].concat();
+            let right = "RightHalf67890abcdef01";
+            let straddling_first = format!(
+                "{} {left}{right} {}",
+                "a".repeat(8_192 - 1 - left.len()),
+                "z".repeat(25_000)
+            );
+            let straddling = format!(
+                "{} {left}{right} {}",
+                "a".repeat(40_960 - 1 - left.len()),
+                "z".repeat(25_000)
+            );
+            let machine_left = ["/ho", "me/"].concat();
+            let machine_right = "runner/private-tree";
+            let straddling_machine = format!(
+                "{} {machine_left}{machine_right} {}",
+                "a".repeat(8_192 - 1 - machine_left.len()),
+                "z".repeat(25_000)
+            );
+            for tainted in [&straddling_first, &straddling, &straddling_machine] {
+                std::fs::write(&artifact, format!("## Output\n{tainted}\n## Exit\n0\n")).unwrap();
+                std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+                for cursor in [json!(""), first_cursor.clone()] {
+                    let mut req = full.clone();
+                    req["answerPage"] = cursor;
+                    let refused = call(&mut c, read, &req, owner);
+                    bad(&refused, "withheld");
+                    let wire = refused.to_string();
+                    assert!(
+                        !wire.contains(&left)
+                            && !wire.contains(right)
+                            && !wire.contains(&machine_left)
+                            && !wire.contains(machine_right)
+                            && !wire.contains(&"a".repeat(32))
+                            && !wire.contains(&"z".repeat(32))
+                    );
+                }
+                let status_row = payload(&call(&mut c, read, &args, owner));
+                assert_eq!(status_row["leads"][0]["latestTurn"], Value::Null);
+                assert_eq!(
+                    status_row["leads"][0]["turnState"],
+                    json!({"status":"unavailable","reason":"outbound_withheld"})
+                );
+            }
+
+            // An answer exceeding MAX_ANSWER fails closed with invalid_answer_range, not outbound_withheld.
+            let oversized = "b".repeat(8 * 1024 * 1024 + 64);
+            std::fs::write(&artifact, format!("## Output\n{oversized}\n## Exit\n0\n")).unwrap();
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let oversized_row = payload(&call(&mut c, read, &args, owner));
+            assert_eq!(oversized_row["leads"][0]["latestTurn"], Value::Null);
+            assert_eq!(
+                oversized_row["leads"][0]["turnState"],
+                json!({"status":"unavailable","reason":"invalid_answer_range"})
+            );
+            let mut oversized_page = full.clone();
+            oversized_page["answerPage"] = json!("");
+            bad(
+                &call(&mut c, read, &oversized_page, owner),
+                "exceeds the size limit",
+            );
+
+            std::fs::write(&artifact, original).unwrap();
+            std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+            // A secret straddling the 4000-byte Lead kickoff cut withholds leadConversation.
+            let kickoff_receipt: Value =
+                serde_json::from_slice(&std::fs::read(source.join("lead-fixture-codex")).unwrap())
+                    .unwrap();
+            let kickoff_artifact = repo
+                .join(".oms/artifacts/mcp")
+                .join(kickoff_receipt["operation"].as_str().unwrap())
+                .join("answers/fixture.md");
+            let kickoff_original = std::fs::read(&kickoff_artifact).unwrap();
+            let kickoff_straddling = format!(
+                "{} {left}{right} {}",
+                "k".repeat(4000 - 1 - left.len()),
+                "q".repeat(300)
+            );
+            std::fs::write(
+                &kickoff_artifact,
+                format!("## Output\n{kickoff_straddling}\n## Exit\n0\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&kickoff_artifact, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let refused_kickoff = call(
+                &mut c,
+                read,
+                &json!({"room":"lead-room","provider":"codex"}),
+                owner,
+            );
+            bad(&refused_kickoff, "withheld");
+            let kickoff_wire = refused_kickoff.to_string();
+            assert!(!kickoff_wire.contains(&left) && !kickoff_wire.contains(right));
+            std::fs::write(&kickoff_artifact, kickoff_original).unwrap();
+            std::fs::set_permissions(&kickoff_artifact, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
         let reset = change_to(
             seat,
             &payload(&changed)["revision"],
@@ -1732,6 +2386,212 @@ fn desktop_lead_conversations() {
     good(&call(&mut c, send, &uncertain, owner));
     bad(&call(&mut c, send, &message(1, 14), owner), "unresolved");
     assert_eq!(runs(), 9);
+}
+
+fn lead_turn_failure_degrades_per_row() {
+    let t = Temp::new();
+    let source = t.source();
+    let repo = t.repo();
+    std::fs::create_dir(repo.join(".oms")).unwrap();
+    fixture_settings(&source, json!({"leadRoom":true}));
+    let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", false, false, "0".as_ref());
+    let read = "oms_lead_conversation_status";
+    let open = "oms_open_lead_conversations";
+    let send = "oms_send_lead_message";
+    let owner = "01900000-0000-7000-8000-0000000000bb";
+    let args = json!({"room":"lead-room"});
+    let call = |c: &mut Client, name: &str, params: &Value| {
+        c.call(
+            "tools/call",
+            json!({"name":name,"arguments":params,"_meta":{"threadId":owner}}),
+        )
+    };
+    let initial = payload(&call(&mut c, open, &args));
+    let key = initial["projectKey"].as_str().unwrap().to_owned();
+    until(|| {
+        std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+            .unwrap()
+            .all(|e| e.unwrap().path().join("status").exists())
+    });
+    let ready = payload(&call(&mut c, open, &args));
+    assert!(
+        ready["leads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["status"] == "ready")
+    );
+    let send_turn = |c: &mut Client, seat: usize, n: usize| {
+        let turn_id = format!("20000000-0000-4000-8000-{n:012x}");
+        let m = json!({
+            "room":"lead-room",
+            "projectKey":key,
+            "provider":ready["leads"][seat]["provider"],
+            "leadRequestId":ready["leads"][seat]["requestId"],
+            "turnId":turn_id,
+            "text":format!("Check seat {n}"),
+        });
+        good(&call(c, send, &m));
+        until(|| {
+            let r = call(
+                c,
+                read,
+                &json!({"room":"lead-room","provider":m["provider"],"turnId":m["turnId"]}),
+            );
+            payload(&r)["turn"]["status"] == "replied"
+        });
+        turn_id
+    };
+    let codex_turn = send_turn(&mut c, 0, 1);
+    let _claude_turn = send_turn(&mut c, 1, 2);
+    let claude_child = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            std::fs::read_to_string(p.join("prompt.txt"))
+                .ok()
+                .as_deref()
+                == Some("Check seat 2\n")
+        })
+        .unwrap();
+    let leaked = ["gh", "p_", &"9".repeat(36)].concat();
+    let claude_artifact = claude_child.join("answers/fixture.md");
+    std::fs::write(
+        &claude_artifact,
+        format!("## Output\nsecret {leaked}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&claude_artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    for tool in [read, open] {
+        let res = call(&mut c, tool, &args);
+        good(&res);
+        let wire = res.to_string();
+        assert!(!wire.contains(&leaked) && !wire.contains("withheld during"));
+        let leads = payload(&res)["leads"].as_array().unwrap().clone();
+        assert_eq!(leads.len(), 3);
+        assert_eq!(leads[0]["provider"], "codex");
+        assert_eq!(leads[0]["status"], "ready");
+        assert_eq!(leads[0]["latestTurn"]["turnId"], codex_turn);
+        assert_eq!(leads[0]["latestTurn"]["status"], "replied");
+        assert!(leads[0].get("turnState").is_none());
+
+        assert_eq!(leads[1]["provider"], "claude");
+        assert_eq!(leads[1]["status"], "ready");
+        assert_eq!(leads[1]["latestTurn"], Value::Null);
+        assert_eq!(
+            leads[1]["turnState"],
+            json!({"status":"unavailable","reason":"outbound_withheld"})
+        );
+
+        assert_eq!(leads[2]["provider"], "agy");
+        assert_eq!(leads[2]["status"], "ready");
+        assert_eq!(leads[2]["latestTurn"], Value::Null);
+        assert!(leads[2].get("turnState").is_none());
+    }
+
+    // A corrupt head record on Claude also degrades only Claude's turn row.
+    let claude_receipt: Value =
+        serde_json::from_slice(&std::fs::read(source.join("lead-fixture-claude")).unwrap())
+            .unwrap();
+    let claude_kickoff = repo
+        .join(".oms/artifacts/mcp")
+        .join(claude_receipt["operation"].as_str().unwrap());
+    let head_path = claude_kickoff.join("lead-turn-head.json");
+    std::fs::write(&head_path, "{corrupt").unwrap();
+    std::fs::set_permissions(&head_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let corrupt_res = call(&mut c, read, &args);
+    good(&corrupt_res);
+    let leads = payload(&corrupt_res)["leads"].as_array().unwrap().clone();
+    assert_eq!(leads[0]["latestTurn"]["turnId"], codex_turn);
+    assert_eq!(leads[0]["latestTurn"]["status"], "replied");
+    assert_eq!(leads[1]["status"], "ready");
+    assert_eq!(leads[1]["latestTurn"], Value::Null);
+    assert_eq!(
+        leads[1]["turnState"],
+        json!({"status":"unavailable","reason":"invalid_turn_record"})
+    );
+    assert_eq!(leads[2]["status"], "ready");
+    assert_eq!(leads[2]["latestTurn"], Value::Null);
+
+    // Stop: only the latest running message is cancelled, the stop is shown as
+    // such, and the next message starts a fresh native session.
+    let stop = "oms_stop_lead_message";
+    fixture_settings(&source, json!({"leadRoom":true,"gate":true}));
+    let turn = "20000000-0000-4000-8000-000000000003";
+    let agy = json!({"room":"lead-room","projectKey":key,"provider":"agy",
+        "leadRequestId":ready["leads"][2]["requestId"],"turnId":turn});
+    let mut first = agy.clone();
+    first["text"] = json!("Check seat 3");
+    good(&call(&mut c, send, &first));
+    let status = |c: &mut Client| {
+        payload(&call(
+            c,
+            read,
+            &json!({"room":"lead-room","provider":"agy","turnId":turn}),
+        ))["turn"]["status"]
+            .clone()
+    };
+    until(|| status(&mut c) == "running");
+    // The running turn's owner publishes scanned partial lines; the panel pages them.
+    let child = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            std::fs::read_to_string(p.join("prompt.txt")).is_ok_and(|t| t == "Check seat 3\n")
+        })
+        .unwrap();
+    let log = child.join("lead-stream.jsonl");
+    let lines = "{\"kind\":\"tool\",\"text\":\"Read AGENTS.md\"}\n{\"kind\":\"text\",\"text\":\"Partial **reply**\\n\"}\n";
+    std::fs::write(&log, lines).unwrap();
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let read_stream = "oms_read_lead_stream";
+    let mut page = agy.clone();
+    page["cursor"] = json!(0);
+    let res = call(&mut c, read_stream, &page);
+    good(&res);
+    let streamed = &res["result"]["_meta"]["leadConversation"]["stream"];
+    assert_eq!(streamed["text"], "Partial **reply**\n");
+    assert_eq!(streamed["tool"], "Read AGENTS.md");
+    assert_eq!(streamed["status"], "running");
+    assert_eq!(streamed["cursor"], lines.len());
+    assert!(!res["result"]["content"].to_string().contains("Partial"));
+    page["cursor"] = json!(3);
+    bad(&call(&mut c, read_stream, &page), "cursor");
+    let mut stale_page = page.clone();
+    stale_page["cursor"] = json!(0);
+    stale_page["turnId"] = json!(codex_turn);
+    bad(&call(&mut c, read_stream, &stale_page), "latest");
+    let leaked = ["gh", "p_", &"8".repeat(36)].concat();
+    std::fs::write(
+        &log,
+        format!("{lines}{{\"kind\":\"text\",\"text\":\"{leaked}\\n\"}}\n"),
+    )
+    .unwrap();
+    page["cursor"] = json!(lines.len());
+    let withheld = call(&mut c, read_stream, &page);
+    assert!(!withheld.to_string().contains(&leaked));
+    bad(&withheld, "withheld");
+    let mut stale = agy.clone();
+    stale["turnId"] = json!(codex_turn);
+    bad(&call(&mut c, stop, &stale), "latest");
+    let mut unbound = agy.clone();
+    unbound.as_object_mut().unwrap().remove("projectKey");
+    bad(&call(&mut c, stop, &unbound), "exact project");
+    good(&call(&mut c, stop, &agy));
+    good(&call(&mut c, stop, &agy));
+    until(|| status(&mut c) == "stopped");
+    good(&call(&mut c, stop, &agy));
+    assert_eq!(status(&mut c), "stopped");
+    fixture_settings(&source, json!({"leadRoom":true}));
+    send_turn(&mut c, 2, 4);
+    // Kickoff: no session; first follow-up resumes the kickoff's own session;
+    // the one after a stop has no verified session to continue.
+    assert_eq!(
+        std::fs::read_to_string(source.join("resumed-antigravity")).unwrap(),
+        "\na1000000-0000-4000-8000-000000000001\n\n"
+    );
 }
 
 // Provider assignment: the Room store is proven in room_contract; here the
@@ -2086,6 +2946,180 @@ fn desktop_assignment() {
             .unwrap()
             .contains("fixture answer")
     );
+
+    // Whole-body scan before the 6000-char assignment preview cut: a secret straddling
+    // char 6000 or a machine path in bytes omitted by storage::bounded withholds the preview.
+    let assign_artifact = opdir.join("answers/fixture.md");
+    let assign_original = std::fs::read(&assign_artifact).unwrap();
+    let clean_long = format!("{}{}", "a".repeat(6000), "b".repeat(400));
+    std::fs::write(
+        &assign_artifact,
+        format!("## Output\n{clean_long}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    let long_page = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    good(&long_page);
+    assert_eq!(
+        long_page["result"]["_meta"]["chat"]["result"]["text"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        6000
+    );
+    assert_eq!(
+        long_page["result"]["_meta"]["chat"]["result"]["truncated"],
+        true
+    );
+
+    let left = ["gh", "p_LeftHalf012345"].concat();
+    let right = "RightHalf67890abcdef01";
+    let straddling = format!(
+        "{} {left}{right} {}",
+        "a".repeat(6000 - 1 - left.chars().count()),
+        "z".repeat(400)
+    );
+    std::fs::write(
+        &assign_artifact,
+        format!("## Output\n{straddling}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    let withheld_cut = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    bad(
+        &withheld_cut,
+        "OMS withheld this conversation during its outbound scan.",
+    );
+    let cut_wire = withheld_cut.to_string();
+    assert!(
+        !cut_wire.contains(&left)
+            && !cut_wire.contains(right)
+            && !cut_wire.contains(&"a".repeat(32))
+            && !cut_wire.contains(&"z".repeat(32))
+    );
+
+    let machine = ["/", "ho", "me/fixture_account/work"].concat();
+    let omitted_middle = format!("{} {machine} {}", "m".repeat(45_000), "n".repeat(25_000));
+    std::fs::write(
+        &assign_artifact,
+        format!("## Output\n{omitted_middle}\n## Exit\n0\n"),
+    )
+    .unwrap();
+    let withheld_omitted = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    bad(
+        &withheld_omitted,
+        "OMS withheld this conversation during its outbound scan.",
+    );
+    assert!(!withheld_omitted.to_string().contains(&machine));
+    std::fs::write(&assign_artifact, &assign_original).unwrap();
+
+    // Fallback transcript turns also scan the whole joined body before cutting 6000 chars.
+    let role_prefix = "claude: ";
+    let turn_straddling = format!(
+        "{} {left}{right} {}",
+        "t".repeat(6000 - role_prefix.chars().count() - 1 - left.chars().count()),
+        "u".repeat(200)
+    );
+    let straddling_updates = json!({
+        "schema":1,
+        "thread":operation,
+        "turns":[{"role":"answer","provider":"claude","quality":"ok","text":turn_straddling}],
+        "cursor":"c1",
+        "has_more":false
+    });
+    std::fs::write(&exitpath, "7\n").unwrap();
+    fixture_settings(
+        &source,
+        json!({"stdout":chat.to_string(),"updates":straddling_updates.to_string(),"room":{"desktop-assign-status":record_for("started",None,json!(operation))}}),
+    );
+    let withheld_turns = call(
+        &mut c,
+        "oms_panel_chat",
+        json!({"room":"r","participant":format!("ask-{req}")}),
+        json!({"threadId":thread}),
+    );
+    bad(
+        &withheld_turns,
+        "OMS withheld this conversation during its outbound scan.",
+    );
+    let turns_wire = withheld_turns.to_string();
+    assert!(!turns_wire.contains(&left) && !turns_wire.contains(right));
+    std::fs::write(&exitpath, "0\n").unwrap();
+    fixture_settings(
+        &source,
+        json!({"stdout":chat.to_string(),"updates":updates.to_string(),"room":{"desktop-assign-status":record_for("started",None,json!(operation))}}),
+    );
+
+    // Non-oversize answer artifact failures (missing, incomplete, hard-linked or symlinked
+    // `answer_errors`) fall back to the transcript turns instead of returning LIMIT_ERR.
+    let assert_transcript_fallback = |c: &mut Client| {
+        let fallback = call(
+            c,
+            "oms_panel_chat",
+            json!({"room":"r","participant":format!("ask-{req}")}),
+            json!({"threadId":thread}),
+        );
+        good(&fallback);
+        assert_eq!(
+            fallback["result"]["_meta"]["chat"]["result"]["text"],
+            "claude: callers found"
+        );
+    };
+    let write_private_assign = |bytes: &[u8]| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&assign_artifact, bytes).unwrap();
+        std::fs::set_permissions(&assign_artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+
+    std::fs::remove_file(&assign_artifact).unwrap();
+    assert_transcript_fallback(&mut c);
+
+    write_private_assign(b"## Output\nchanged without exit\n");
+    assert_transcript_fallback(&mut c);
+
+    write_private_assign(&assign_original);
+    let linked_copy = opdir.join("answers/changed-link.md");
+    std::fs::hard_link(&assign_artifact, &linked_copy).unwrap();
+    assert_transcript_fallback(&mut c);
+    std::fs::remove_file(&linked_copy).unwrap();
+
+    std::fs::remove_file(&assign_artifact).unwrap();
+    std::os::unix::fs::symlink(opdir.join("status"), &assign_artifact).unwrap();
+    assert_transcript_fallback(&mut c);
+    std::fs::remove_file(&assign_artifact).unwrap();
+
+    // Confirmed oversize answers still fail closed with LIMIT_ERR rather than falling back.
+    for extra in [64usize, 65 * 1024] {
+        let oversized_assign = "b".repeat(8 * 1024 * 1024 + extra);
+        write_private_assign(format!("## Output\n{oversized_assign}\n## Exit\n0\n").as_bytes());
+        let oversized_chat = call(
+            &mut c,
+            "oms_panel_chat",
+            json!({"room":"r","participant":format!("ask-{req}")}),
+            json!({"threadId":thread}),
+        );
+        bad(
+            &oversized_chat,
+            "OMS desktop detail exceeds the response limit.",
+        );
+        let wire = oversized_chat.to_string();
+        assert!(!wire.contains("callers found") && !wire.contains(&"b".repeat(32)));
+    }
+    write_private_assign(&assign_original);
     bad(
         &call(
             &mut c,
@@ -2167,7 +3201,7 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 24);
+    assert_eq!(tools.as_array().unwrap().len(), 27);
     assert_eq!(tools[0]["name"], "oms_open_panel");
     assert_eq!(
         tools[0]["description"],
@@ -2178,7 +3212,22 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v29.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v38.html");
+    for name in [
+        "oms_panel_usage",
+        "oms_panel_project_graph",
+        "oms_panel_tui_view",
+    ] {
+        let read = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap();
+        assert_eq!(read["_meta"]["ui"]["visibility"], json!(["app", "model"]));
+        assert_eq!(read["annotations"]["readOnlyHint"], true);
+        assert_eq!(read["annotations"]["openWorldHint"], false);
+    }
     // Codex uses the stdio transport configuration to decide whether to reuse a running server.
     for package in [
         include_str!("../../../plugins/oms/mcp.json"),
@@ -2204,7 +3253,7 @@ fn conversation_panel() {
     let current = read(&mut c, uri);
     assert_eq!(current["uri"], *uri);
     let html = current["text"].as_str().unwrap();
-    assert!(html.len() < 240 * 1024);
+    assert!(html.len() < PANEL_BUDGET);
     assert_eq!(
         html.as_bytes(),
         include_bytes!("../src/conversation-panel.html")
@@ -2244,6 +3293,15 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v25.html"),
         json!("ui://oms/conversation-panel/v27.html"),
         json!("ui://oms/conversation-panel/v28.html"),
+        json!("ui://oms/conversation-panel/v29.html"),
+        json!("ui://oms/conversation-panel/v30.html"),
+        json!("ui://oms/conversation-panel/v31.html"),
+        json!("ui://oms/conversation-panel/v32.html"),
+        json!("ui://oms/conversation-panel/v33.html"),
+        json!("ui://oms/conversation-panel/v34.html"),
+        json!("ui://oms/conversation-panel/v35.html"),
+        json!("ui://oms/conversation-panel/v36.html"),
+        json!("ui://oms/conversation-panel/v37.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -2257,7 +3315,17 @@ fn conversation_panel() {
         )["error"]["code"],
         -32602
     );
-    assert!(c.tool("oms_open_panel", json!({}))["result"].is_object());
+    let unbound_open = c.tool("oms_open_panel", json!({}));
+    good(&unbound_open);
+    assert!(unbound_open["result"]["_meta"].get("dashboard").is_none());
+    assert_eq!(
+        unbound_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"project"})
+    );
+    assert_eq!(
+        payload(&unbound_open),
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"project"})
+    );
     assert!(c.tool("oms_peer_start", json!({}))["error"].is_object());
     assert!(c.tool("oms_panel_snapshot", json!({"repo":source}))["error"].is_object());
     assert!(
@@ -2265,13 +3333,13 @@ fn conversation_panel() {
     );
     bad(&c.tool("oms_panel_snapshot", json!({})), "OMS_PANEL_REPO");
     assert_eq!(
-        payload(&c.tool("oms_list_projects", json!({}))),
+        registry_summary(&c.tool("oms_list_projects", json!({}))),
         json!({"projects":[],"binding":"unbound","readOnly":false})
     );
     assert!(!source.join("last-call.json").exists());
     std::fs::create_dir(repo.join(".oms")).unwrap();
     assert_eq!(
-        payload(&c.tool("oms_list_projects", json!({}))),
+        registry_summary(&c.tool("oms_list_projects", json!({}))),
         json!({"projects":[],"binding":"cwd","readOnly":false})
     );
     let snapshot = json!({"schema":1,"kind":"oms-panel-snapshot","dashboard":{"scope":"repository","currentRoom":null,"project":"demo","goal":"Finish inspection","active":null,"activeAttempts":[],"attention":[{"summary":"Review pending","count":2}]}});
@@ -2284,6 +3352,29 @@ fn conversation_panel() {
         record(&source)["argv"],
         json!(["dashboard", "--repo", repo, "--json", "--panel-snapshot"])
     );
+    let opened = c.tool("oms_open_panel", json!({"leadConversations":true}));
+    good(&opened);
+    assert_eq!(opened["result"]["_meta"]["dashboard"], *data);
+    assert!(
+        opened["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert!(payload(&opened).get("dashboard").is_none());
+    assert_eq!(
+        opened["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"leadConversations":true,"snapshot":"attached"})
+    );
+    assert!(
+        !opened["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Finish inspection")
+    );
+    assert_eq!(
+        payload(&opened),
+        json!({"panel":"OMS","project":null,"leadConversations":true,"snapshot":"attached"})
+    );
     // Keep one runtime command blocked while the host opens and reads its tab.
     // A queued project call must stay behind the snapshot and emit its own ID.
     fixture_settings(
@@ -2295,6 +3386,19 @@ fn conversation_panel() {
     };
     send(&mut c, 9001, "oms_panel_snapshot");
     until(|| source.join("snapshot-ready").exists());
+    let snapshot_pid = record(&source)["pid"].clone();
+    let busy_open = c.tool("oms_open_panel", json!({}));
+    good(&busy_open);
+    assert!(busy_open["result"]["_meta"].get("dashboard").is_none());
+    assert_eq!(
+        busy_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
+    );
+    assert_eq!(
+        payload(&busy_open),
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
+    );
+    assert_eq!(record(&source)["pid"], snapshot_pid);
     for id in 9002..=9009 {
         send(&mut c, id, "oms_list_approvals");
     }
@@ -2302,12 +3406,20 @@ fn conversation_panel() {
     let refused = c.read();
     assert_eq!(refused["id"], 9010);
     assert_eq!(refused["error"]["code"], -32000);
+    let full_open = c.tool("oms_open_panel", json!({}));
+    good(&full_open);
+    assert!(full_open["result"]["_meta"].get("dashboard").is_none());
     assert_eq!(
-        c.tool("oms_open_panel", json!({}))["result"]["structuredContent"]["panel"],
-        "OMS"
+        full_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
+    );
+    assert_eq!(
+        payload(&full_open),
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
     );
     assert_eq!(read(&mut c, uri)["text"], current["text"]);
     assert_eq!(record(&source)["argv"][0], "dashboard");
+    assert_eq!(record(&source)["pid"], snapshot_pid);
     std::fs::write(source.join("snapshot-release"), "").unwrap();
     let ready = c.read();
     assert_eq!(ready["id"], 9001);
@@ -2317,7 +3429,143 @@ fn conversation_panel() {
         assert_eq!(approvals["id"], id);
         assert_eq!(payload(&approvals)["approvals"], json!([]));
     }
+    let idle_open = c.tool("oms_open_panel", json!({}));
+    good(&idle_open);
+    assert!(
+        idle_open["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert!(payload(&idle_open).get("dashboard").is_none());
+    assert!(
+        !idle_open["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("dashboard")
+    );
+    assert_eq!(idle_open["result"]["_meta"]["dashboard"]["project"], "demo");
+    assert_eq!(
+        idle_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
+    );
+    assert_eq!(
+        payload(&idle_open),
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
+    );
+    assert_eq!(record(&source)["argv"][0], "dashboard");
+    assert_ne!(record(&source)["pid"], snapshot_pid);
+    // An idle OPEN running on the runtime worker also counts as in-flight: a concurrent OPEN or
+    // resources/read returns immediately on the input thread without spawning a second dashboard.
+    std::fs::remove_file(source.join("snapshot-ready")).unwrap();
+    std::fs::remove_file(source.join("snapshot-release")).unwrap();
+    send(&mut c, 9020, "oms_open_panel");
+    until(|| source.join("snapshot-ready").exists());
+    let open_pid = record(&source)["pid"].clone();
+    assert_eq!(read(&mut c, uri)["text"], current["text"]);
+    let concurrent_open = c.tool("oms_open_panel", json!({}));
+    good(&concurrent_open);
+    assert!(
+        concurrent_open["result"]["_meta"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert_eq!(
+        concurrent_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
+    );
+    assert_eq!(
+        payload(&concurrent_open),
+        json!({"panel":"OMS","project":null,"snapshotOmitted":"busy"})
+    );
+    assert_eq!(record(&source)["pid"], open_pid);
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    let gated_open = c.read();
+    assert_eq!(gated_open["id"], 9020);
+    good(&gated_open);
+    assert!(
+        gated_open["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert!(payload(&gated_open).get("dashboard").is_none());
+    assert_eq!(
+        gated_open["result"]["_meta"]["dashboard"]["project"],
+        "demo"
+    );
+    assert_eq!(
+        gated_open["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
+    );
+    assert_eq!(
+        payload(&gated_open),
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
+    );
+    let single_open = Command::new(std::env::current_exe().unwrap())
+        .arg("--single-open")
+        .arg(&source)
+        .arg(&repo)
+        .env_remove("OMS_PANEL_REPO")
+        .env_remove("OMS_PANEL_PROJECTS")
+        .env_remove("OMS_ROOM_PARTICIPANT")
+        .env_remove("OMS_PANEL_PROJECTS_FILE")
+        .env("XDG_CONFIG_HOME", source.join("test-config"))
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .output()
+        .unwrap();
+    assert!(single_open.status.success(), "{single_open:?}");
+    let single_reply: Value = serde_json::from_slice(&single_open.stdout).unwrap();
+    good(&single_reply);
+    assert!(
+        single_reply["result"]["structuredContent"]
+            .get("dashboard")
+            .is_none()
+    );
+    assert!(payload(&single_reply).get("dashboard").is_none());
+    assert_eq!(
+        single_reply["result"]["_meta"]["dashboard"]["project"],
+        "demo"
+    );
+    assert_eq!(
+        single_reply["result"]["structuredContent"],
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
+    );
+    assert_eq!(
+        payload(&single_reply),
+        json!({"panel":"OMS","project":null,"snapshot":"attached"})
+    );
     fixture_settings(&source, json!({"exit":1,"stdout":snapshot.to_string()}));
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = source.join("test-config/oh-my-setting");
+        std::fs::create_dir_all(&dir).unwrap();
+        let map = dir.join("desktop-projects.json");
+        std::fs::write(&map, json!({"demo":repo}).to_string()).unwrap();
+        std::fs::set_permissions(&map, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let unaliased = c.tool("oms_open_panel", json!({}));
+        good(&unaliased);
+        assert!(unaliased["result"]["_meta"].get("dashboard").is_none());
+        assert_eq!(
+            unaliased["result"]["structuredContent"],
+            json!({"panel":"OMS","project":null,"snapshotOmitted":"project"})
+        );
+        assert_eq!(
+            payload(&unaliased),
+            json!({"panel":"OMS","project":null,"snapshotOmitted":"project"})
+        );
+        let aliased = c.tool("oms_open_panel", json!({"project":"demo"}));
+        good(&aliased);
+        assert_eq!(aliased["result"]["_meta"]["dashboard"]["project"], "demo");
+        assert_eq!(
+            aliased["result"]["structuredContent"],
+            json!({"panel":"OMS","project":"demo","snapshot":"attached"})
+        );
+        assert_eq!(
+            payload(&aliased),
+            json!({"panel":"OMS","project":"demo","snapshot":"attached"})
+        );
+        std::fs::remove_file(&map).unwrap();
+    }
     for full in [false, true] {
         let mut regular = Client::new(&source, &repo, full, false, false);
         assert!(
@@ -2400,6 +3648,86 @@ fn conversation_panel() {
         ]
         .map(Value::from)
     );
+    let mut response = detail.clone();
+    response["messages"] = json!([]);
+    response["evidence"] = json!({"attempt":"bound-attempt","section":"transcript","page":1,
+        "source":"indexed-answer","text":"한글","lines":["한글"],"offset":0,"bytes":6,"totalBytes":12,
+        "digest":"a".repeat(64),"revision":"b".repeat(64),"nextPage":2,"hasMore":true,"truncated":false});
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    let project_key = payload(&c.tool("oms_list_projects", json!({})))["projectKey"].clone();
+    assert_eq!(project_key.as_str().unwrap().len(), 64);
+    let mut full = json!({"room":"fixture","participant":"owner","section":"transcript","attempt":"bound-attempt","evidenceCursor":""});
+    bad(&evidence(&mut c, full.clone()), "observed project key");
+    full["projectKey"] = json!("0".repeat(64));
+    bad(&evidence(&mut c, full.clone()), "observed project key");
+    full["projectKey"] = project_key.clone();
+    let r = evidence(&mut c, full.clone());
+    good(&r);
+    assert_eq!(r["result"]["structuredContent"]["projectKey"], project_key);
+    assert_eq!(r["result"]["_meta"]["chat"]["projectKey"], project_key);
+    full["evidenceCursor"] = r["result"]["_meta"]["chat"]["evidence"]["nextCursor"].clone();
+    assert!(full["evidenceCursor"].is_string());
+    for field in ["content", "structuredContent"] {
+        assert!(!r["result"][field].to_string().contains("한글"));
+    }
+    response["evidence"]["page"] = json!(2);
+    response["evidence"]["offset"] = json!(6);
+    response["evidence"]["text"] = json!("결과");
+    response["evidence"]["hasMore"] = json!(false);
+    response["evidence"]["nextPage"] = Value::Null;
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    let r = evidence(&mut c, full.clone());
+    good(&r);
+    assert_eq!(r["result"]["_meta"]["chat"]["evidence"]["text"], "결과");
+    let mut foreign = full.clone();
+    foreign["participant"] = json!("other");
+    response["participant"] = json!("other");
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    bad(&evidence(&mut c, foreign), "another selection");
+    response["participant"] = json!("owner");
+    response["evidence"]["revision"] = json!("c".repeat(64));
+    fixture_settings(&source, json!({"stdout":response.to_string()}));
+    bad(&evidence(&mut c, full.clone()), "changed");
+    full["page"] = json!(2);
+    bad(&evidence(&mut c, full), "returned cursor");
+
+    // Room transcript/diff full paging withholds every page when a secret straddles byte 8192.
+    let clean_evidence = format!("{}{}", "a".repeat(8_190), "z".repeat(400));
+    fixture_settings(
+        &source,
+        json!({"pagedChatEvidence":{"base":detail,"attempt":"bound-attempt","section":"transcript","body":clean_evidence}}),
+    );
+    let mut ev_req = json!({"room":"fixture","participant":"owner","section":"transcript","attempt":"bound-attempt","projectKey":project_key,"evidenceCursor":""});
+    let ev_p1 = evidence(&mut c, ev_req.clone());
+    good(&ev_p1);
+    let ev_c2 = ev_p1["result"]["_meta"]["chat"]["evidence"]["nextCursor"].clone();
+    assert!(ev_c2.is_string());
+
+    let left = ["gh", "p_LeftHalf012345"].concat();
+    let right = "RightHalf67890abcdef01";
+    let straddling_evidence = format!(
+        "{} {left}{right} {}",
+        "a".repeat(8_192 - 1 - left.len()),
+        "z".repeat(360)
+    );
+    fixture_settings(
+        &source,
+        json!({"pagedChatEvidence":{"base":detail,"attempt":"bound-attempt","section":"transcript","body":straddling_evidence}}),
+    );
+    for cursor in [json!(""), ev_c2] {
+        ev_req["evidenceCursor"] = cursor;
+        let refused = evidence(&mut c, ev_req.clone());
+        bad(&refused, "withheld");
+        let wire = refused.to_string();
+        assert!(
+            !wire.contains(&left)
+                && !wire.contains(right)
+                && !wire.contains(&"a".repeat(32))
+                && !wire.contains(&"z".repeat(32))
+        );
+    }
+
+    fixture_settings(&source, json!({"stdout":detail.to_string()}));
     bad(
         &evidence(
             &mut c,
@@ -4594,6 +5922,10 @@ fn peer_status_tasks() {
     good(&running);
     assert_eq!(payload(&running)["status"], "running");
     assert_eq!(
+        payload(&running)["cancellation"],
+        json!({"requested_at":Value::Null,"state":"none"})
+    );
+    assert_eq!(
         c.call(
             "tasks/get",
             json!({"taskId":op,"_meta":{META:"2026-07-28"}})
@@ -4602,6 +5934,15 @@ fn peer_status_tasks() {
     );
     let get = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}));
     assert_eq!(get["result"]["status"], "working");
+    assert_eq!(get["result"]["cancellation_requested"], false);
+    assert_eq!(
+        get["result"]["cancellation"],
+        json!({"requested_at":Value::Null,"state":"none"})
+    );
+    assert_eq!(
+        get["result"]["statusMessage"],
+        "Peer consultation is running."
+    );
     assert_eq!(
         c.call("tasks/update", json!({"taskId":op,"_meta":modern()}))["error"]["code"],
         -32602
@@ -4612,30 +5953,148 @@ fn peer_status_tasks() {
         json!({"resultType":"complete"}),
         "{cancel}"
     );
-    let receipt: Value =
-        serde_json::from_slice(&std::fs::read(dir.join("cancel-request.json")).unwrap()).unwrap();
+    let first_bytes = std::fs::read(dir.join("cancel-request.json")).unwrap();
+    let receipt: Value = serde_json::from_slice(&first_bytes).unwrap();
     assert_eq!(receipt["schema"], 1);
     assert_eq!(receipt["task_id"], op);
+    let first_at = receipt["requested_at"].as_str().unwrap().to_owned();
+    let second = c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}));
     assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation_requested"],
-        true
+        second["result"],
+        json!({"resultType":"complete"}),
+        "{second}"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("cancel-request.json")).unwrap(),
+        first_bytes
+    );
+    let pinned_at = "2020-01-01T00:00:05Z";
+    let pinned_bytes = format!(
+        "{{\"kind\":\"mcp-task-cancel-request\",\"requested_at\":\"{pinned_at}\",\"schema\":1,\"task_id\":\"{op}\"}}  \n"
+    )
+    .into_bytes();
+    std::fs::write(dir.join("cancel-request.json"), &pinned_bytes).unwrap();
+    assert_eq!(
+        c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+        json!({"resultType":"complete"})
+    );
+    assert_eq!(
+        std::fs::read(dir.join("cancel-request.json")).unwrap(),
+        pinned_bytes
+    );
+    std::fs::remove_file(dir.join("pid")).unwrap();
+    let requested_get =
+        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(requested_get["cancellation_requested"], true);
+    assert_eq!(
+        requested_get["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
+    );
+    assert_eq!(
+        requested_get["statusMessage"],
+        "Cancellation requested; awaiting provider cleanup."
+    );
+    let waited = payload(&c.tool("oms_peer_result", json!({"operation":op,"wait_seconds":1})));
+    assert_eq!(waited["status"], "running");
+    assert_eq!(waited["cancellation_requested"], true);
+    assert_eq!(
+        waited["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"][0]["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
+    );
+    let legacy_bytes =
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request"}).to_string();
+    std::fs::write(dir.join("cancel-request.json"), &legacy_bytes).unwrap();
+    let legacy_get = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(legacy_get["cancellation_requested"], true);
+    assert_eq!(
+        legacy_get["cancellation"],
+        json!({"requested_at":Value::Null,"state":"requested"})
+    );
+    assert_eq!(
+        legacy_get["statusMessage"],
+        "Cancellation requested; awaiting provider cleanup."
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_result", json!({"operation":op})))["cancellation"],
+        json!({"requested_at":Value::Null,"state":"requested"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"][0]["cancellation"],
+        json!({"requested_at":Value::Null,"state":"requested"})
+    );
+    assert_eq!(
+        c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+        json!({"resultType":"complete"})
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("cancel-request.json")).unwrap(),
+        legacy_bytes
     );
     for bytes in [
         "not json".to_owned(),
-        json!({"schema":1,"task_id":"foreign","kind":"mcp-task-cancel-request"}).to_string(),
+        json!({"schema":1,"task_id":"foreign","kind":"mcp-task-cancel-request","requested_at":first_at}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":Value::Null}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":123}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":""}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":"not-rfc3339"}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":"2020-01-01T09:00:05+09:00"}).to_string(),
+        json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-request","requested_at":"2020-01-01T00:00:05-00:00"}).to_string(),
         "x".repeat(4097),
     ] {
         std::fs::write(dir.join("cancel-request.json"), bytes).unwrap();
+        let ignored = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+        assert_eq!(ignored["cancellation_requested"], false);
         assert_eq!(
-            c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation_requested"],
-            false
+            ignored["cancellation"],
+            json!({"requested_at":Value::Null,"state":"none"})
+        );
+        assert_eq!(ignored["statusMessage"], "Peer consultation is running.");
+        let r = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+        assert!(r.get("cancellation_requested").is_none());
+        assert_eq!(
+            r["cancellation"],
+            json!({"requested_at":Value::Null,"state":"none"})
         );
     }
+    assert_eq!(
+        c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+        json!({"resultType":"complete"})
+    );
+    let replaced_bytes = std::fs::read(dir.join("cancel-request.json")).unwrap();
+    let replaced_row: Value = serde_json::from_slice(&replaced_bytes).unwrap();
+    assert!(
+        replaced_row["requested_at"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
+    );
+    assert_eq!(
+        c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+        json!({"resultType":"complete"})
+    );
+    assert_eq!(
+        std::fs::read(dir.join("cancel-request.json")).unwrap(),
+        replaced_bytes
+    );
     std::fs::remove_file(dir.join("cancel-request.json")).unwrap();
     std::os::unix::fs::symlink(dir.join("meta.json"), dir.join("cancel-request.json")).unwrap();
+    let ignored = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(ignored["cancellation_requested"], false);
     assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation_requested"],
-        false
+        ignored["cancellation"],
+        json!({"requested_at":Value::Null,"state":"none"})
+    );
+    assert_eq!(
+        c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+        json!({"resultType":"complete"})
+    );
+    assert_eq!(
+        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation"]["state"],
+        "requested"
     );
     std::fs::remove_file(dir.join("cancel-request.json")).unwrap();
     let dead = Command::new(std::env::current_exe().unwrap())
@@ -4648,32 +6107,160 @@ fn peer_status_tasks() {
     std::fs::write(dir.join("pid"), format!("{pid}\n")).unwrap();
     let r = c.tool("oms_peer_result", json!({"operation":op}));
     bad(&r, "stalled");
+    let stalled_none = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(stalled_none["status"], "failed");
     assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["status"],
-        "failed"
+        stalled_none["cancellation"],
+        json!({"requested_at":Value::Null,"state":"none"})
     );
-    std::fs::write(dir.join("status"), "bad status").unwrap();
     assert_eq!(
-        payload(&c.tool("oms_peer_result", json!({"operation":op})))["exit"],
-        1
+        stalled_none["statusMessage"],
+        "Peer process ended without a durable exit status."
     );
+    for (raw_status, expected_exit) in [("bad status", 1), ("124\n", 124), ("1\n", 1), ("0\n", 0)] {
+        std::fs::write(dir.join("status"), raw_status).unwrap();
+        let snap = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+        assert_eq!(snap["status"], "completed");
+        assert_eq!(
+            snap["cancellation"],
+            json!({"requested_at":Value::Null,"state":"none"})
+        );
+        assert_eq!(
+            snap["statusMessage"],
+            format!("Peer consultation completed with exit {expected_exit}.")
+        );
+    }
+    std::fs::remove_file(dir.join("status")).unwrap();
+    std::fs::write(dir.join("cancel-request.json"), &pinned_bytes).unwrap();
+    let stalled_req = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(stalled_req["status"], "failed");
+    assert_eq!(
+        stalled_req["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    assert_eq!(
+        stalled_req["statusMessage"],
+        "Cancellation was requested, but the peer ended without a durable exit or observation."
+    );
+    let stalled_res = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+    assert_eq!(stalled_res["cancellation_requested"], true);
+    assert_eq!(
+        stalled_res["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"][0]["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    for (non_own, expected_msg) in [
+        (
+            "bad status",
+            "Cancellation was requested, but the peer ended without a durable exit or observation.",
+        ),
+        (
+            "124\n",
+            "Cancellation was requested, but the peer ended with exit 124 without a cancellation observation.",
+        ),
+        (
+            "1\n",
+            "Cancellation was requested, but the peer ended with exit 1 without a cancellation observation.",
+        ),
+        (
+            "130\n",
+            "Cancellation was requested, but the peer ended with exit 130 without a cancellation observation.",
+        ),
+        (
+            "-15\n",
+            "Cancellation was requested, but the peer ended with exit -15 without a cancellation observation.",
+        ),
+    ] {
+        std::fs::write(dir.join("status"), non_own).unwrap();
+        let res = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+        if non_own == "bad status" {
+            assert_eq!(res["exit"], 1);
+        }
+        assert_eq!(
+            res["cancellation"],
+            json!({"requested_at":pinned_at,"state":"unknown"})
+        );
+        let snap = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+        assert_eq!(snap["status"], "completed");
+        assert_eq!(
+            snap["cancellation"],
+            json!({"requested_at":pinned_at,"state":"unknown"})
+        );
+        assert_eq!(snap["statusMessage"], expected_msg);
+    }
     std::fs::write(dir.join("status"), "0").unwrap();
+    let completed_first =
+        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(completed_first["status"], "completed");
     assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["status"],
-        "completed"
+        completed_first["cancellation"],
+        json!({"requested_at":pinned_at,"state":"completed_first"})
+    );
+    assert_eq!(
+        completed_first["statusMessage"],
+        "Peer consultation completed with exit 0 before cancellation took effect."
+    );
+    let embedded: Value = serde_json::from_str(
+        completed_first["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(embedded["cancellation_requested"], true);
+    assert!(embedded.get("termination_reason").is_none());
+    assert_eq!(
+        embedded["cancellation"],
+        json!({"requested_at":pinned_at,"state":"completed_first"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"][0]["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
     );
     assert_eq!(
         c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["error"]["code"],
         -32602
+    );
+    assert_eq!(
+        std::fs::read(dir.join("cancel-request.json")).unwrap(),
+        pinned_bytes
     );
     std::fs::write(
         dir.join("cancel-observed.json"),
         json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-observed"}).to_string(),
     )
     .unwrap();
+    let confirmed = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(confirmed["status"], "cancelled");
     assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["status"],
-        "cancelled"
+        confirmed["cancellation"],
+        json!({"requested_at":pinned_at,"state":"confirmed"})
+    );
+    assert_eq!(
+        confirmed["statusMessage"],
+        "Provider cancellation was observed and the operation exited. Partial artifacts are retained."
+    );
+    let confirmed_res = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+    assert_eq!(confirmed_res["termination_reason"], "cancelled");
+    assert_eq!(
+        confirmed_res["cancellation"],
+        json!({"requested_at":pinned_at,"state":"confirmed"})
+    );
+    std::fs::remove_file(dir.join("status")).unwrap();
+    assert_eq!(
+        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation"],
+        json!({"requested_at":pinned_at,"state":"confirmed"})
+    );
+    std::fs::write(dir.join("status"), "0").unwrap();
+    std::fs::remove_file(dir.join("cancel-request.json")).unwrap();
+    let observed_only =
+        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(observed_only["status"], "cancelled");
+    assert_eq!(
+        observed_only["cancellation"],
+        json!({"requested_at":Value::Null,"state":"confirmed"})
     );
     let legacy = "ask-20190101T000000Z-0badc0de";
     run_dir(&repo, legacy, json!({}), Some("0"));
@@ -4714,6 +6301,240 @@ fn peer_status_tasks() {
             "after must",
         );
     }
+
+    let owner_bin = PathBuf::from(env!("CARGO_BIN_EXE_oms-mcp-peer-owner"));
+    let owner_op = "consult-20200101T000001Z-11111111";
+    let owner_dir = run_dir(
+        &repo,
+        owner_op,
+        json!({"answer_storage":"operation","cancellation_supported":true}),
+        None,
+    );
+    std::fs::write(
+        owner_dir.join("launch.json"),
+        json!({"kind":"consult","targets":["claude"],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        owner_dir.join("cancel-request.json"),
+        json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":owner_op,"requested_at":pinned_at}).to_string(),
+    )
+    .unwrap();
+    std::fs::create_dir(owner_dir.join("cancel-observed.json")).unwrap();
+    let owner_log = std::fs::File::create(owner_dir.join("run.log")).unwrap();
+    let owner_err = owner_log.try_clone().unwrap();
+    let owner_out = Command::new(&owner_bin)
+        .args([
+            source.as_os_str(),
+            repo.as_os_str(),
+            owner_op.as_ref(),
+            source.join("bin/oms").as_os_str(),
+        ])
+        .env("PATH", "")
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .stdout(owner_log)
+        .stderr(owner_err)
+        .status()
+        .unwrap();
+    assert!(!owner_out.success());
+    assert_eq!(
+        std::fs::read_to_string(owner_dir.join("status")).unwrap(),
+        "1\n"
+    );
+    let owner_snap =
+        c.call("tasks/get", json!({"taskId":owner_op,"_meta":modern()}))["result"].clone();
+    assert_eq!(owner_snap["status"], "completed");
+    assert_eq!(
+        owner_snap["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    assert_eq!(
+        owner_snap["statusMessage"],
+        "Cancellation was requested, but the peer ended with exit 1 without a cancellation observation."
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_result", json!({"operation":owner_op})))["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["operation"] == owner_op)
+            .unwrap()["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let runner_script = source.join("runner-cancel-receipt-fail");
+    std::fs::write(
+        &runner_script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}' > \"$OMS_PEER_CANCEL_DIR/cancel-request.json\"\necho 'error: cancellation handled but receipt publication failed: ReadOnly' >&2\nexit 1\n",
+            json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":"consult-20200101T000002Z-22222222","requested_at":pinned_at})
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&runner_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let runner_op = "consult-20200101T000002Z-22222222";
+    let runner_dir = run_dir(
+        &repo,
+        runner_op,
+        json!({"answer_storage":"operation","cancellation_supported":true}),
+        None,
+    );
+    std::fs::write(
+        runner_dir.join("launch.json"),
+        json!({"kind":"consult","targets":["claude"],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}}).to_string(),
+    )
+    .unwrap();
+    let runner_log = std::fs::File::create(runner_dir.join("run.log")).unwrap();
+    let runner_err = runner_log.try_clone().unwrap();
+    let runner_out = Command::new(&owner_bin)
+        .args([
+            source.as_os_str(),
+            repo.as_os_str(),
+            runner_op.as_ref(),
+            runner_script.as_os_str(),
+        ])
+        .env("PATH", "")
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .stdout(runner_log)
+        .stderr(runner_err)
+        .status()
+        .unwrap();
+    assert!(runner_out.success());
+    assert_eq!(
+        std::fs::read_to_string(runner_dir.join("status")).unwrap(),
+        "1\n"
+    );
+    let runner_snap =
+        c.call("tasks/get", json!({"taskId":runner_op,"_meta":modern()}))["result"].clone();
+    assert_eq!(runner_snap["status"], "completed");
+    assert_eq!(
+        runner_snap["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    assert_eq!(
+        runner_snap["statusMessage"],
+        "Cancellation was requested, but the peer ended with exit 1 without a cancellation observation."
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_result", json!({"operation":runner_op})))["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+
+    let seat_op = "consult-20200101T000003Z-33333333";
+    let seat_dir = run_dir(
+        &repo,
+        seat_op,
+        json!({"answer_storage":"operation","cancellation_supported":true}),
+        Some("1\n"),
+    );
+    std::fs::write(
+        seat_dir.join("cancel-request.json"),
+        json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":seat_op,"requested_at":pinned_at}).to_string(),
+    )
+    .unwrap();
+    let seat_answer = seat_dir.join("answers/claude.md");
+    std::fs::write(&seat_answer, "## Output\npartial without exit\n").unwrap();
+    std::fs::write(
+        seat_dir.join("run.log"),
+        format!("{}\n", seat_answer.display()),
+    )
+    .unwrap();
+    assert_eq!(
+        c.call("tasks/get", json!({"taskId":seat_op,"_meta":modern()}))["result"]["cancellation"],
+        json!({"requested_at":pinned_at,"state":"unknown"})
+    );
+    std::fs::write(
+        &seat_answer,
+        "## Output\nprovider failed on its own\n## Exit\n1\n",
+    )
+    .unwrap();
+    let seat_snap =
+        c.call("tasks/get", json!({"taskId":seat_op,"_meta":modern()}))["result"].clone();
+    assert_eq!(
+        seat_snap["cancellation"],
+        json!({"requested_at":pinned_at,"state":"completed_first"})
+    );
+    assert_eq!(
+        seat_snap["statusMessage"],
+        "Peer consultation completed with exit 1 before cancellation took effect."
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["operation"] == seat_op)
+            .unwrap()["cancellation"],
+        json!({"requested_at":pinned_at,"state":"requested"})
+    );
+
+    let legacy_guard_op = "consult-20200101T000004Z-44444444";
+    let legacy_guard_dir = run_dir(
+        &repo,
+        legacy_guard_op,
+        json!({"answer_storage":"operation","cancellation_supported":true}),
+        None,
+    );
+    std::fs::write(
+        legacy_guard_dir.join("launch.json"),
+        json!({"kind":"consult","targets":["claude"],"thread":"","new_thread":false,"debate_rounds":0,"context_options":{}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        legacy_guard_dir.join("cancel-request.json"),
+        json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":legacy_guard_op}).to_string(),
+    )
+    .unwrap();
+    let _ = std::fs::remove_file(source.join("last-call.json"));
+    let guard_log = std::fs::File::create(legacy_guard_dir.join("run.log")).unwrap();
+    let guard_err = guard_log.try_clone().unwrap();
+    let guard_out = Command::new(&owner_bin)
+        .args([
+            source.as_os_str(),
+            repo.as_os_str(),
+            legacy_guard_op.as_ref(),
+            source.join("bin/oms").as_os_str(),
+        ])
+        .env("PATH", "")
+        .env("OMS_HARNESS_CHILD", "0")
+        .env("OMS_HARNESS_DELEGATE_DEPTH", "0")
+        .stdout(guard_log)
+        .stderr(guard_err)
+        .status()
+        .unwrap();
+    assert!(guard_out.success());
+    assert!(!source.join("last-call.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(legacy_guard_dir.join("status")).unwrap(),
+        "125\n"
+    );
+    assert!(legacy_guard_dir.join("cancel-observed.json").is_file());
+    let guard_snap = c.call(
+        "tasks/get",
+        json!({"taskId":legacy_guard_op,"_meta":modern()}),
+    )["result"]
+        .clone();
+    assert_eq!(guard_snap["status"], "cancelled");
+    assert_eq!(
+        guard_snap["cancellation"],
+        json!({"requested_at":Value::Null,"state":"confirmed"})
+    );
+    assert_eq!(
+        payload(&c.tool("oms_peer_operations", json!({})))["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["operation"] == legacy_guard_op)
+            .unwrap()["cancellation"],
+        json!({"requested_at":Value::Null,"state":"confirmed"})
+    );
 }
 fn peer_start_threads() {
     let t = Temp::new();
@@ -5070,32 +6891,83 @@ fn cancellation_concurrency() {
     let t = Temp::new();
     let source = t.source();
     let repo = t.repo();
-    let op = "consult-20200101T000000Z-deadbeef";
-    let dir = run_dir(&repo, op, json!({"cancellation_supported":true}), None);
-    let mut threads = Vec::new();
-    for _ in 0..4 {
-        let s = source.clone();
-        let r = repo.clone();
-        threads.push(std::thread::spawn(move || {
-            let mut c = Client::new(&s, &r, false, true, false);
-            let v = c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}));
-            assert_eq!(v["result"], json!({"resultType":"complete"}), "{v}");
-        }));
+    for (idx, initial) in [
+        None,
+        Some("not json".to_owned()),
+        Some(
+            json!({
+                "schema": 1,
+                "task_id": "foreign",
+                "kind": "mcp-task-cancel-request",
+                "requested_at": "2020-01-01T00:00:05Z"
+            })
+            .to_string(),
+        ),
+        Some(
+            json!({
+                "schema": 1,
+                "task_id": "consult-20200101T000003Z-deadbeef",
+                "kind": "mcp-task-cancel-request",
+                "requested_at": "2020-01-01T09:00:05+09:00"
+            })
+            .to_string(),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let op = format!("consult-20200101T00000{idx}Z-deadbeef");
+        let dir = run_dir(&repo, &op, json!({"cancellation_supported":true}), None);
+        if let Some(invalid) = initial {
+            std::fs::write(dir.join("cancel-request.json"), invalid).unwrap();
+        }
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let s = source.clone();
+            let r = repo.clone();
+            let op_id = op.clone();
+            let run = dir.clone();
+            let gate = std::sync::Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                let mut c = Client::new(&s, &r, false, true, false);
+                gate.wait();
+                let v = c.call("tasks/cancel", json!({"taskId":op_id,"_meta":modern()}));
+                assert_eq!(v["result"], json!({"resultType":"complete"}), "{v}");
+                std::fs::read(run.join("cancel-request.json")).unwrap()
+            }));
+        }
+        let seen: Vec<Vec<u8>> = threads.into_iter().map(|h| h.join().unwrap()).collect();
+        let bytes = std::fs::read(dir.join("cancel-request.json")).unwrap();
+        for observed in &seen {
+            assert_eq!(observed, &bytes);
+        }
+        let row: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(row["task_id"], op);
+        assert!(row["requested_at"].as_str().unwrap().ends_with('Z'));
+        let mut c = Client::new(&source, &repo, false, true, false);
+        assert_eq!(
+            c.call("tasks/cancel", json!({"taskId":op,"_meta":modern()}))["result"],
+            json!({"resultType":"complete"})
+        );
+        assert_eq!(
+            std::fs::read(dir.join("cancel-request.json")).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["cancellation"],
+            json!({"requested_at":row["requested_at"],"state":"requested"})
+        );
+        assert!(dir.join("cancel-request.lock").is_file());
+        assert_eq!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
+                .count(),
+            0
+        );
     }
-    for thread in threads {
-        thread.join().unwrap();
-    }
-    let row: Value =
-        serde_json::from_slice(&std::fs::read(dir.join("cancel-request.json")).unwrap()).unwrap();
-    assert_eq!(row["task_id"], op);
-    assert_eq!(
-        std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".part"))
-            .count(),
-        0
-    );
 }
 fn peer_detached_cancel() {
     let t = Temp::new();
@@ -5105,6 +6977,10 @@ fn peer_detached_cancel() {
     let mut c = Client::new(&source, &repo, false, true, false);
     let started=c.call("tools/call",json!({"name":"oms_peer_start","arguments":{"kind":"consult","prompt":"hold"},"_meta":modern()}));
     assert_eq!(started["result"]["resultType"], "task");
+    assert_eq!(
+        started["result"]["cancellation"],
+        json!({"requested_at":Value::Null,"state":"none"})
+    );
     let op = started["result"]["taskId"].as_str().unwrap().to_owned();
     let dir = repo.join(".oms/artifacts/mcp").join(&op);
     until(|| dir.join("fixture-ready").is_file());
@@ -5119,13 +6995,17 @@ fn peer_detached_cancel() {
         "complete"
     );
     until(|| dir.join("status").is_file());
-    assert_eq!(
-        c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"]["status"],
-        "cancelled"
-    );
+    let settled = c.call("tasks/get", json!({"taskId":op,"_meta":modern()}))["result"].clone();
+    assert_eq!(settled["status"], "cancelled");
+    assert_eq!(settled["cancellation"]["state"], "confirmed");
+    assert!(settled["cancellation"]["requested_at"].as_str().is_some());
     assert!(!source.join("release").exists());
     let rows = payload(&c.tool("oms_peer_operations", json!({})));
     assert_eq!(rows["operations"][0]["termination_reason"], "cancelled");
+    assert_eq!(
+        rows["operations"][0]["cancellation"],
+        settled["cancellation"]
+    );
     let target = dir.clone();
     let mut handles = Vec::new();
     for _ in 0..4 {
@@ -5615,6 +7495,14 @@ fn fake_oms() {
     let tmp = source.join(format!(".call-{}", std::process::id()));
     std::fs::write(&tmp, record.to_string()).unwrap();
     std::fs::rename(tmp, source.join("last-call.json")).unwrap();
+    if cfg["leadRoom"] == true && args.first().is_some_and(|a| a == "agent-plan") {
+        assert_eq!(args.len(), 6);
+        assert_eq!(args[1], "--repo");
+        assert_eq!(args[3], "evidence-snapshot");
+        assert_eq!(args[4], "--id");
+        println!("{}", cfg["leadContextTask"]);
+        return;
+    }
     if cfg["leadRoom"] == true && args.first().is_some_and(|a| a == "models") {
         assert_eq!(args.len(), 4);
         assert_eq!(args[1], "--providers");
@@ -5682,6 +7570,16 @@ fn fake_oms() {
             PathBuf::from(&args[args.iter().position(|s| s == "--artifact-dir").unwrap() + 1]);
         std::fs::create_dir_all(&out).unwrap();
         let run = out.parent().unwrap();
+        if cfg["leadRoom"] == true {
+            let provider = args.windows(2).find(|a| a[0] == "--providers").unwrap()[1]
+                .to_string_lossy()
+                .into_owned();
+            let resumed = std::env::var("OMS_RESUME_SESSION").unwrap_or_default();
+            let mut log = std::fs::read_to_string(source.join(format!("resumed-{provider}")))
+                .unwrap_or_default();
+            log.push_str(&format!("{resumed}\n"));
+            std::fs::write(source.join(format!("resumed-{provider}")), log).unwrap();
+        }
         if cfg["gate"] == true {
             std::fs::write(run.join("fixture-ready"), "ready").unwrap();
             until(|| source.join("release").exists() || run.join("cancel-request.json").exists());
@@ -5692,6 +7590,10 @@ fn fake_oms() {
                     json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-observed"}).to_string(),
                 )
                 .unwrap();
+                if cfg["leadRoom"] == true {
+                    // A stopped Lead turn ends without publishing an answer.
+                    std::process::exit(130);
+                }
             }
         }
         let artifact = out.join("fixture.md");
@@ -5748,6 +7650,9 @@ fn fake_oms() {
                 },
             );
         std::fs::write(&artifact, format!("## Output\n{reply}\n## Exit\n0\n")).unwrap();
+        // Native peer storage publishes answer artifacts privately (storage::write).
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o600)).unwrap();
         if cfg["leadRoom"] == true {
             // Normal native peer-ask stdout prints the seat path before its response.
             let provider = args.windows(2).find(|a| a[0] == "--providers").unwrap()[1]
@@ -5886,6 +7791,108 @@ fn fake_oms() {
     }
     if args.iter().any(|v| v == "updates") && cfg["updates"].is_string() {
         print!("{}", cfg["updates"].as_str().unwrap());
+        return;
+    }
+    if let Some(body) = cfg["pagedWorkerBody"].as_str()
+        && args.iter().any(|v| v == "--desktop-worker-output")
+    {
+        let page = args
+            .windows(2)
+            .find(|pair| pair[0] == "--page")
+            .and_then(|pair| pair[1].to_str()?.parse::<usize>().ok());
+        let selector = page.map_or(
+            oms_scrub::PageSelector::Offset(0),
+            oms_scrub::PageSelector::Number,
+        );
+        let out = match oms_scrub::outbound_page(body, 1024 * 1024, selector) {
+            Ok(part) => {
+                if let Some(page) = page {
+                    json!({
+                        "room":cfg["room"],
+                        "leadAttempt":cfg["leadAttempt"],
+                        "workerAttempt":cfg["workerAttempt"],
+                        "status":"complete",
+                        "source":"indexed-answer",
+                        "text":part.text,
+                        "truncated":part.has_more,
+                        "page":{
+                            "page":page,
+                            "offset":part.offset,
+                            "bytes":part.end - part.offset,
+                            "totalBytes":part.total_bytes,
+                            "digest":"d".repeat(64),
+                            "revision":"e".repeat(64),
+                            "hasMore":part.has_more,
+                            "nextPage":part.has_more.then_some(page + 1)
+                        }
+                    })
+                } else {
+                    let preview_end = body.floor_char_boundary(body.len().min(16 * 1024));
+                    json!({
+                        "room":cfg["room"],
+                        "leadAttempt":cfg["leadAttempt"],
+                        "workerAttempt":cfg["workerAttempt"],
+                        "status":"complete",
+                        "source":"indexed-answer",
+                        "text":&body[..preview_end],
+                        "truncated":preview_end < body.len()
+                    })
+                }
+            }
+            Err(oms_scrub::PageError::OutboundWithheld) => json!({
+                "room":cfg["room"],
+                "leadAttempt":cfg["leadAttempt"],
+                "workerAttempt":cfg["workerAttempt"],
+                "status":"outbound_withheld",
+                "text":Value::Null,
+                "source":Value::Null,
+                "truncated":false
+            }),
+            Err(oms_scrub::PageError::InvalidRange) => std::process::exit(2),
+        };
+        println!("{out}");
+        return;
+    }
+    if let Some(spec) = cfg.get("pagedChatEvidence").filter(|v| v.is_object())
+        && args.iter().any(|v| v == "--evidence-full")
+    {
+        let page = args
+            .windows(2)
+            .find(|pair| pair[0] == "--page")
+            .and_then(|pair| pair[1].to_str()?.parse::<usize>().ok())
+            .unwrap_or(1);
+        let body = spec["body"].as_str().unwrap();
+        let mut out = spec["base"].clone();
+        out["messages"] = json!([]);
+        out["evidence"] = match oms_scrub::outbound_page(
+            body,
+            16 * 1024 * 1024,
+            oms_scrub::PageSelector::Number(page),
+        ) {
+            Ok(part) => json!({
+                "attempt":spec["attempt"],
+                "section":spec["section"],
+                "page":page,
+                "source":"indexed-answer",
+                "text":part.text,
+                "lines":part.text.lines().collect::<Vec<_>>(),
+                "offset":part.offset,
+                "bytes":part.end - part.offset,
+                "totalBytes":part.total_bytes,
+                "digest":"a".repeat(64),
+                "revision":"b".repeat(64),
+                "nextPage":part.has_more.then_some(page + 1),
+                "hasMore":part.has_more,
+                "truncated":false
+            }),
+            Err(oms_scrub::PageError::OutboundWithheld) => json!({
+                "attempt":spec["attempt"],
+                "section":spec["section"],
+                "status":"outbound_withheld"
+            }),
+            Err(oms_scrub::PageError::InvalidRange) => std::process::exit(2),
+        };
+        println!("{out}");
         return;
     }
     if cfg["hold"] == true {
@@ -6324,6 +8331,19 @@ fn main() {
         assert_eq!(r["utf8"], "");
         return;
     }
+    if args.get(1).is_some_and(|a| a == "--single-open") {
+        let flag = AtomicBool::new(false);
+        let mut cfg = pinned(Path::new(&args[2]), config(false, false));
+        cfg.profile = ToolProfile::ChatGptPanel;
+        let mut s = Server::new(Path::new(&args[2]), Path::new(&args[3]), &flag, cfg).unwrap();
+        let v = s
+            .handle(
+                &json!({"id":1,"method":"tools/call","params":{"name":"oms_open_panel","arguments":{}}}),
+            )
+            .unwrap();
+        println!("{v}");
+        return;
+    }
     if args.get(1).is_some_and(|a| a == "--exit") {
         return;
     }
@@ -6351,7 +8371,7 @@ fn main() {
         .unwrap();
         return;
     }
-    let cases: [(&str, fn()); 37] = [
+    let cases: [(&str, fn()); 38] = [
         ("lossless_values", lossless_values),
         ("raw_peer_paths", raw_peer_paths),
         ("parser_reference", parser_reference),
@@ -6362,6 +8382,10 @@ fn main() {
         ("mcp_app_binding_boundaries", mcp_app_binding_boundaries),
         ("conversation_panel", conversation_panel),
         ("desktop_lead_conversations", desktop_lead_conversations),
+        (
+            "lead_turn_failure_degrades_per_row",
+            lead_turn_failure_degrades_per_row,
+        ),
         ("desktop_assignment", desktop_assignment),
         ("panel_command_catalog", panel_command_catalog),
         ("environment_authority", environment_authority),

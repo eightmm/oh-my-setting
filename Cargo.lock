@@ -481,6 +481,7 @@ dependencies = [
  "oms-command-graph",
  "oms-command-hooks",
  "oms-command-input",
+ "oms-command-intake",
  "oms-command-job-digest",
  "oms-command-journal",
  "oms-command-landing",
@@ -670,6 +671,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "oms-command-intake"
+version = "0.1.0"
+dependencies = [
+ "oms-command-room",
+ "oms-safe-fs",
+ "oms-scrub",
+ "rustix",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "oms-command-job-digest"
 version = "0.1.0"
 dependencies = [
@@ -789,6 +802,7 @@ name = "oms-command-panel"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "oms-command-graph",
  "oms-command-operations",
  "oms-command-peer",
  "oms-command-plan",
@@ -1153,6 +1167,7 @@ dependencies = [
  "chrono",
  "oms-command-agent-role",
  "oms-command-operations",
+ "oms-command-plan",
  "oms-context",
  "oms-output",
  "oms-output-capture",

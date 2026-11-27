@@ -74,7 +74,7 @@ pub(crate) fn plan_status(
 }
 
 pub(crate) fn snapshot(ctx: &Context<'_>, host: &dyn HostServices) -> Result<Value> {
-    collect_snapshot(ctx, host, None)
+    collect_snapshot(ctx, host, None, false).map(|(state, _)| state)
 }
 
 fn attempt_room(row: &Value) -> AttemptRoom<'_> {
@@ -186,7 +186,8 @@ fn collect_snapshot(
     ctx: &Context<'_>,
     host: &dyn HostServices,
     consumer: Option<&str>,
-) -> Result<Value> {
+    include_dashboard: bool,
+) -> Result<(Value, Option<projection::DashboardArtifacts>)> {
     let mut state = object([
         ("schema", number(1)),
         ("project", helpers::project(&ctx.repo)),
@@ -223,6 +224,7 @@ fn collect_snapshot(
         .ok()
         .and_then(|v| v.array().ok())
         .unwrap_or(&[]);
+    let mut conversation_room = None;
     if let Some(consumer) = consumer
         && events.as_ref().is_ok_and(|v| v.array().is_ok())
     {
@@ -251,22 +253,24 @@ fn collect_snapshot(
             ctx.interrupted,
             false,
             false,
-        ) && let Ok(mut binding) = room.conversation_main(consumer, panel_mains)
-        {
-            if let Some(harness) = conversation_harness(consumer, &binding, event_rows) {
-                binding["conversationMain"].set("harness", harness);
-            }
-            if let Ok(encoded) = oms_command_room::value::encode(&binding, false, true)
-                && let Ok(mut binding) = json::parse(&encoded)
-            {
-                let room = binding.get("conversationMain").text("room");
-                if !room.is_empty() {
-                    let (items, omitted) = panel_room_attempts(event_rows, room);
-                    binding.set("attempts", Value::Array(items))?;
-                    binding.set("attemptsOmitted", number(omitted))?;
+        ) {
+            if let Ok(mut binding) = room.conversation_main(consumer, panel_mains) {
+                if let Some(harness) = conversation_harness(consumer, &binding, event_rows) {
+                    binding["conversationMain"].set("harness", harness);
                 }
-                state.set("conversation", binding)?;
+                if let Ok(encoded) = oms_command_room::value::encode(&binding, false, true)
+                    && let Ok(mut binding) = json::parse(&encoded)
+                {
+                    let room_id = binding.get("conversationMain").text("room");
+                    if !room_id.is_empty() {
+                        let (items, omitted) = panel_room_attempts(event_rows, room_id);
+                        binding.set("attempts", Value::Array(items))?;
+                        binding.set("attemptsOmitted", number(omitted))?;
+                    }
+                    state.set("conversation", binding)?;
+                }
             }
+            conversation_room = Some(room);
         }
     }
     let mut counts = json::empty();
@@ -296,14 +300,13 @@ fn collect_snapshot(
         .iter()
         .filter(|r| !r.get("terminal").truth())
         .rev()
-        .cloned()
         .collect();
+    // Stable sorting preserves reverse traversal order for equal rank and timestamp.
     active_latest.sort_by(|a, b| {
         oms_command_operations::activity_rank(a.text("state"))
             .cmp(&oms_command_operations::activity_rank(b.text("state")))
             .then_with(|| b.text("updated_at").cmp(a.text("updated_at")))
     });
-    active_latest.truncate(8);
     state.set(
         "agent_operations",
         object([
@@ -323,7 +326,10 @@ fn collect_snapshot(
                 "recent",
                 Value::Array(event_rows.iter().rev().take(8).rev().cloned().collect()),
             ),
-            ("active_latest", Value::Array(active_latest)),
+            (
+                "active_latest",
+                Value::Array(active_latest.into_iter().take(8).cloned().collect()),
+            ),
         ]),
     )?;
     let approvals = decoded(oms_command_operations::run(
@@ -353,12 +359,23 @@ fn collect_snapshot(
     )?;
     let memory_review = match oms_command_memory::pending_review(&ctx.repo, ctx.interrupted) {
         Ok(summary) => object([
-            ("healthy", Value::Bool(true)),
+            ("healthy", Value::Bool(summary.skipped == 0)),
+            (
+                "status",
+                string(if summary.skipped == 0 {
+                    "ok"
+                } else {
+                    "partial"
+                }),
+            ),
             ("pending", number(summary.pending)),
+            ("skipped", number(summary.skipped)),
         ]),
         Err(_) => object([
             ("healthy", Value::Bool(false)),
+            ("status", string("unavailable")),
             ("pending", Value::Null),
+            ("skipped", Value::Null),
             ("error", string("status-unavailable")),
         ]),
     };
@@ -385,27 +402,17 @@ fn collect_snapshot(
         collector(journal, ctx.repo.join(".oms/work-journal").exists()),
     )?;
     let (runs, bad) = storage::rows(&ctx.repo, &spine::index(ctx))?;
-    let mut by_id: Vec<Value> = Vec::new();
-    for row in runs {
-        let id = row.text("run_id");
-        if id.is_empty() {
-            continue;
-        }
-        let i = by_id
-            .iter()
-            .position(|r| r.text("run_id") == id)
-            .unwrap_or_else(|| {
-                by_id.push(object([
-                    ("run_id", string(id)),
-                    ("closed", Value::Bool(false)),
-                ]));
-                by_id.len() - 1
-            });
-        by_id[i].set("last", row.get("ts").clone())?;
-        if row.text("tool") == "oms-run" && row.text("event") == "close" {
-            by_id[i].set("closed", Value::Bool(true))?;
-        }
-    }
+    let by_id = spine::group_runs(
+        runs,
+        |id, _| object([("run_id", string(id)), ("closed", Value::Bool(false))]),
+        |run, row| {
+            run.set("last", row.get("ts").clone())?;
+            if row.text("tool") == "oms-run" && row.text("event") == "close" {
+                run.set("closed", Value::Bool(true))?;
+            }
+            Ok(())
+        },
+    )?;
     state.set(
         "runs",
         object([
@@ -477,8 +484,14 @@ fn collect_snapshot(
     }
     state.set("room_mail", mail)?;
     state.set("repo", string(ctx.repo.to_string_lossy()))?;
-    projection::enrich(ctx, host, &mut state)?;
-    Ok(state)
+    let artifacts = projection::enrich(
+        ctx,
+        host,
+        &mut state,
+        include_dashboard,
+        conversation_room.as_ref(),
+    )?;
+    Ok((state, artifacts))
 }
 
 fn quote(raw: &str) -> String {
@@ -696,9 +709,9 @@ pub(crate) fn run(
     let mut code = 0;
     for i in 0..count {
         crate::checkpoint(ctx.interrupted)?;
-        let mut state = match cached.take() {
-            Some(state) => state,
-            None => collect_snapshot(&ctx, host, consumer)?,
+        let (mut state, artifacts) = match cached.take() {
+            Some(state) => (state, None),
+            None => collect_snapshot(&ctx, host, consumer, tool == "dashboard")?,
         };
         if matches!(tool, "state" | "dashboard")
             && let Some(observed) = host.scratch_activity(&ctx.repo, ctx.interrupted)
@@ -748,7 +761,9 @@ pub(crate) fn run(
                 ])
             }
             "dashboard" => {
-                let mut report = projection::dashboard(&ctx, &state)?;
+                let artifacts =
+                    artifacts.ok_or_else(|| error(2, "dashboard artifact observation missing"))?;
+                let mut report = projection::dashboard(&ctx, &state, artifacts)?;
                 code = i32::from(!report.get("collection").get("ok").truth());
                 let panel =
                     projection::panel_snapshot(&ctx.repo, &report, state.get("conversation"));
@@ -898,5 +913,327 @@ mod panel_room_tests {
         assert_eq!(capped_rows.len(), 24);
         assert_eq!(capped_omitted, 1);
         assert_eq!(capped_rows[0].text("attempt_id"), "working-older");
+    }
+
+    #[test]
+    fn collect_snapshot_reuses_active_room_logs_and_falls_back_safely() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+
+        let init_repo = |path: &Path| {
+            std::fs::create_dir_all(path).unwrap();
+            let path = path.canonicalize().unwrap();
+            let ok = std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&path)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+            path
+        };
+        let threads_without_age = |state: &Value| {
+            let mut threads = state.get("threads").clone();
+            let mut recent = threads.get("recent").clone();
+            for thread in recent.array_mut().unwrap() {
+                assert!(thread.remove("age_seconds").unwrap().int().is_ok());
+            }
+            threads.set("recent", recent).unwrap();
+            threads
+        };
+        let enrich_state = || {
+            object([
+                ("schema", number(1)),
+                ("task", json::empty()),
+                ("plan", json::empty()),
+                ("failures", json::empty()),
+            ])
+        };
+
+        let root = std::env::temp_dir().join(crate::random_id("oms-state-room-reuse-").unwrap());
+        std::fs::create_dir_all(&root).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let stop = AtomicBool::new(false);
+            let repo = init_repo(&root.join("repo"));
+            let foreign = init_repo(&root.join("foreign"));
+
+            let writer = oms_command_room::Room::open(
+                &repo,
+                Default::default(),
+                &oms_command_room::LocalServices,
+                &stop,
+                true,
+                false,
+            )
+            .unwrap();
+            let create_bound = |id: &str| {
+                writer
+                    .create(Some(id), &format!("Title {id}"), None, Some("owner"), None)
+                    .unwrap();
+                let mut join = oms_command_room::Join::new("owner", "codex");
+                join.native_session = Some(id.to_owned());
+                writer.join(id, join).unwrap();
+                format!("{:x}", Sha256::digest(id.as_bytes()))[..32].to_owned()
+            };
+            let digest = create_bound("room-open-bound");
+            create_bound("room-open-other");
+            create_bound("room-closed");
+            writer.close("room-closed", "owner").unwrap();
+
+            // Sealed Room falls back to state read and is excluded as closed/successor.
+            writer
+                .create(Some("room-sealed"), "Sealed", None, Some("owner"), None)
+                .unwrap();
+            let sealed_path = repo.join(".oms/threads/room-sealed.jsonl");
+            let mut sealed_bytes = std::fs::read(&sealed_path).unwrap();
+            sealed_bytes.extend_from_slice(
+                b"{\"schema\":1,\"ts\":\"2026-11-27T00:00:00Z\",\"thread\":\"room-sealed\",\"seq\":3,\"role\":\"note\",\"agent\":\"agent\",\"text\":\"Rolled over\",\"room_event\":{\"kind\":\"successor\",\"target\":\"room-open-bound\"}}\n",
+            );
+            std::fs::write(&sealed_path, sealed_bytes).unwrap();
+            std::fs::set_permissions(&sealed_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+            // Legacy non-Room thread without trailing newline + stale timestamp + provider.
+            let plain_path = repo.join(".oms/threads/plain-legacy.jsonl");
+            std::fs::write(
+                &plain_path,
+                br#"{"schema":1,"ts":"2020-01-01T00:00:00Z","thread":"plain-legacy","seq":1,"role":"note","provider":"claude","text":"legacy"}"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(&plain_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+            // Malformed thread falls back and is skipped when bad > 0.
+            let malformed_path = repo.join(".oms/threads/bad-thread.jsonl");
+            std::fs::write(&malformed_path, b"{bad\n").unwrap();
+            std::fs::set_permissions(&malformed_path, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+
+            let current_path = repo.join(".oms/threads/CURRENT");
+            std::fs::write(&current_path, b"room-open-bound\n").unwrap();
+            std::fs::set_permissions(&current_path, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+
+            let ctx = Context {
+                runtime: None,
+                cwd: repo.clone(),
+                repo: repo.clone(),
+                state_repo: repo.clone(),
+                interrupted: &stop,
+            };
+            projection::reset_test_thread_io_counters();
+            let (with_reuse, _) =
+                collect_snapshot(&ctx, &crate::NoHostServices, Some(&digest), true).unwrap();
+            assert_eq!(projection::test_thread_io_counts(), (3, 3));
+
+            projection::reset_test_thread_io_counters();
+            let (without_reuse, _) =
+                collect_snapshot(&ctx, &crate::NoHostServices, None, true).unwrap();
+            assert_eq!(projection::test_thread_io_counts(), (0, 6));
+            assert_eq!(
+                threads_without_age(&with_reuse),
+                threads_without_age(&without_reuse)
+            );
+            // The generic thread summary excludes the legacy closed role, while
+            // a Room close is recorded as a Room event on a note row.
+            assert_eq!(with_reuse.get("threads").get("open").int().unwrap(), 4);
+
+            // Rejection & fallback checks with a pre-warmed Room between conversation_main and enrich.
+            let cached_room = oms_command_room::Room::open(
+                &repo,
+                Default::default(),
+                &oms_command_room::LocalServices,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap();
+            cached_room.conversation_main(&digest, []).unwrap();
+
+            // Append to room-open-bound and atomically replace room-open-other.
+            writer
+                .send(
+                    "room-open-bound",
+                    oms_command_room::Send::note("owner", "all", "updated"),
+                )
+                .unwrap();
+            let other_path = repo.join(".oms/threads/room-open-other.jsonl");
+            let mut other_bytes = std::fs::read(&other_path).unwrap();
+            other_bytes.extend_from_slice(
+                format!(
+                    "{{\"schema\":1,\"ts\":\"{}\",\"thread\":\"room-open-other\",\"seq\":4,\"role\":\"note\",\"provider\":\"gemini\",\"text\":\"replaced\"}}\n",
+                    timestamp(epoch()).unwrap()
+                )
+                .as_bytes(),
+            );
+            let tmp_other = repo.join(".oms/threads/.tmp-room-open-other");
+            std::fs::write(&tmp_other, &other_bytes).unwrap();
+            std::fs::set_permissions(&tmp_other, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::rename(&tmp_other, &other_path).unwrap();
+
+            let mut mutated_state = enrich_state();
+            projection::reset_test_thread_io_counters();
+            projection::enrich(
+                &ctx,
+                &crate::NoHostServices,
+                &mut mutated_state,
+                false,
+                Some(&cached_room),
+            )
+            .unwrap();
+            // Only room-closed stays reusable; room-open-bound + room-open-other + 3 non-active fall back.
+            assert_eq!(projection::test_thread_io_counts(), (1, 5));
+            let other_turns = mutated_state
+                .get("threads")
+                .get("recent")
+                .array()
+                .unwrap()
+                .iter()
+                .find(|r| r.text("id") == "room-open-other")
+                .unwrap()
+                .get("turns")
+                .int()
+                .unwrap();
+            assert_eq!(other_turns, 4);
+
+            // Foreign Room repository is rejected by canonical anchor check.
+            let foreign_writer = oms_command_room::Room::open(
+                &foreign,
+                Default::default(),
+                &oms_command_room::LocalServices,
+                &stop,
+                true,
+                false,
+            )
+            .unwrap();
+            foreign_writer
+                .create(
+                    Some("room-open-bound"),
+                    "Foreign",
+                    None,
+                    Some("owner"),
+                    None,
+                )
+                .unwrap();
+            foreign_writer.discover().unwrap();
+            let mut foreign_state = enrich_state();
+            projection::reset_test_thread_io_counters();
+            projection::enrich(
+                &ctx,
+                &crate::NoHostServices,
+                &mut foreign_state,
+                false,
+                Some(&foreign_writer),
+            )
+            .unwrap();
+            assert_eq!(projection::test_thread_io_counts(), (0, 6));
+
+            // Hardlinking a cached active Room forces fallback and preserves single-link refusal.
+            let fresh_room = oms_command_room::Room::open(
+                &repo,
+                Default::default(),
+                &oms_command_room::LocalServices,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap();
+            fresh_room.conversation_main(&digest, []).unwrap();
+            let hard = repo.join(".oms/threads/zzz-hard-link.jsonl");
+            std::fs::hard_link(repo.join(".oms/threads/room-open-bound.jsonl"), &hard).unwrap();
+            let mut linked_state = enrich_state();
+            projection::reset_test_thread_io_counters();
+            assert!(
+                projection::enrich(
+                    &ctx,
+                    &crate::NoHostServices,
+                    &mut linked_state,
+                    false,
+                    Some(&fresh_room),
+                )
+                .is_err()
+            );
+            // bad-thread & plain-legacy & room-closed run before room-open-bound, which
+            // must reject reuse due to st_nlink == 2 and fail in fallback storage::rows.
+            assert_eq!(projection::test_thread_io_counts(), (1, 3));
+            std::fs::remove_file(&hard).unwrap();
+
+            // Incomplete MAX_ROOMS + CURRENT fallback: 65 rooms are all cached and reused.
+            let crowded_repo = init_repo(&root.join("crowded"));
+            let crowded_writer = oms_command_room::Room::open(
+                &crowded_repo,
+                Default::default(),
+                &oms_command_room::LocalServices,
+                &stop,
+                true,
+                false,
+            )
+            .unwrap();
+            let mut all_ids = Vec::new();
+            for i in 0..=oms_command_room::MAX_ROOMS {
+                let id = format!("room-{i:03}");
+                crowded_writer
+                    .create(
+                        Some(&id),
+                        &format!("Crowded {i}"),
+                        None,
+                        Some("owner"),
+                        None,
+                    )
+                    .unwrap();
+                let mut join = oms_command_room::Join::new("owner", "codex");
+                join.native_session = Some(id.clone());
+                crowded_writer.join(&id, join).unwrap();
+                all_ids.push(id);
+            }
+            let crowded_current = crowded_repo.join(".oms/threads/CURRENT");
+            assert!(crowded_current.is_file());
+            let (discovered, incomplete) = crowded_writer.discover().unwrap();
+            assert!(incomplete);
+            let omitted = all_ids
+                .into_iter()
+                .find(|id| !discovered.iter().any(|r| r.text("id") == id))
+                .expect("at least one room omitted past MAX_ROOMS");
+            let target_digest =
+                format!("{:x}", Sha256::digest(omitted.as_bytes()))[..32].to_owned();
+            std::fs::write(&crowded_current, format!("{omitted}\n")).unwrap();
+            std::fs::set_permissions(&crowded_current, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+
+            let crowded_ctx = Context {
+                runtime: None,
+                cwd: crowded_repo.clone(),
+                repo: crowded_repo.clone(),
+                state_repo: crowded_repo.clone(),
+                interrupted: &stop,
+            };
+            projection::reset_test_thread_io_counters();
+            let (crowded_reuse, _) = collect_snapshot(
+                &crowded_ctx,
+                &crate::NoHostServices,
+                Some(&target_digest),
+                true,
+            )
+            .unwrap();
+            let binding = crowded_reuse.get("conversation");
+            assert_eq!(binding.text("conversationBinding"), "matched");
+            assert_eq!(binding.get("conversationMain").text("room"), omitted);
+            assert!(binding.get("conversationMain").get("incomplete").truth());
+            assert_eq!(
+                projection::test_thread_io_counts(),
+                (oms_command_room::MAX_ROOMS + 1, 0)
+            );
+            projection::reset_test_thread_io_counters();
+            let (crowded_plain, _) =
+                collect_snapshot(&crowded_ctx, &crate::NoHostServices, None, true).unwrap();
+            assert_eq!(
+                projection::test_thread_io_counts(),
+                (0, oms_command_room::MAX_ROOMS + 1)
+            );
+            assert_eq!(
+                threads_without_age(&crowded_reuse),
+                threads_without_age(&crowded_plain)
+            );
+        });
+        let _ = std::fs::remove_dir_all(root);
+        result.unwrap();
     }
 }

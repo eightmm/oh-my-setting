@@ -1181,6 +1181,302 @@ fn managed_inventory(paths: &Paths, source: &Path, target: &Path) -> Result<Valu
     Ok(row)
 }
 
+struct RunningMcpServer {
+    pid: u32,
+    home: PathBuf,
+    revision: String,
+    age: Option<String>,
+    profile: Option<String>,
+    panel_version: Option<String>,
+}
+
+fn proc_file_bytes(
+    dir: rustix::fd::BorrowedFd<'_>,
+    name: &str,
+    uid: Option<u32>,
+    limit: usize,
+) -> Option<Vec<u8>> {
+    use std::{io::Read, os::unix::fs::MetadataExt};
+    let fd = rustix::fs::openat(
+        dir,
+        name,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .ok()?;
+    let file = fs::File::from(fd);
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || uid.is_some_and(|expected| meta.uid() != expected) {
+        return None;
+    }
+    let mut raw = Vec::new();
+    file.take(limit as u64 + 1).read_to_end(&mut raw).ok()?;
+    (raw.len() <= limit).then_some(raw)
+}
+
+fn parse_uptime_centis(proc_fd: rustix::fd::BorrowedFd<'_>) -> Option<u64> {
+    let raw = proc_file_bytes(proc_fd, "uptime", None, 256)?;
+    let first = std::str::from_utf8(&raw).ok()?.split_whitespace().next()?;
+    let (secs, frac) = first.split_once('.').unwrap_or((first, ""));
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let secs = secs.parse::<u64>().ok()?;
+    let mut digits = frac.bytes().take(2);
+    let d1 = digits.next().unwrap_or(b'0');
+    let d2 = digits.next().unwrap_or(b'0');
+    let centis = u64::from(d1 - b'0') * 10 + u64::from(d2 - b'0');
+    secs.checked_mul(100)?.checked_add(centis)
+}
+
+fn parse_process_age(
+    pid_fd: rustix::fd::BorrowedFd<'_>,
+    uid: u32,
+    uptime_centis: Option<u64>,
+) -> Option<String> {
+    let uptime = uptime_centis?;
+    let raw = proc_file_bytes(pid_fd, "stat", Some(uid), 4096)?;
+    let text = std::str::from_utf8(&raw).ok()?;
+    let start_ticks = text
+        .rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse::<u64>()
+        .ok()?;
+    if start_ticks > uptime.saturating_add(100) {
+        return None;
+    }
+    let secs = uptime.saturating_sub(start_ticks) / 100;
+    Some(if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    })
+}
+
+fn match_mcp_server_cmdline(raw: &[u8]) -> Option<(PathBuf, String)> {
+    use std::os::unix::ffi::OsStrExt;
+    let body = raw.strip_suffix(b"\0").unwrap_or(raw);
+    if body.is_empty() {
+        return None;
+    }
+    let argv = body.split(|&b| b == 0).collect::<Vec<_>>();
+    let [program, b"--oms-dispatch", home, rev, b"--", b"mcp-server"] = argv.as_slice() else {
+        return None;
+    };
+    if program.is_empty() || home.is_empty() {
+        return None;
+    }
+    let rev = std::str::from_utf8(rev).ok()?;
+    crate::payload::valid_revision(rev).ok()?;
+    let home = std::ffi::OsStr::from_bytes(home);
+    Some((PathBuf::from(home), rev.to_owned()))
+}
+
+fn clean_env_scalar(raw: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(raw).ok()?;
+    if text.is_empty() {
+        return None;
+    }
+    Some(
+        text.chars()
+            .take(64)
+            .map(|c| {
+                if c.is_control() || c.is_whitespace() {
+                    '?'
+                } else {
+                    c
+                }
+            })
+            .collect(),
+    )
+}
+
+fn parse_mcp_environ(raw: &[u8]) -> (Option<String>, Option<String>) {
+    let mut profile = None;
+    let mut panel_version = None;
+    for entry in raw.split(|&b| b == 0) {
+        if let Some(value) = entry.strip_prefix(b"OMS_MCP_TOOL_PROFILE=") {
+            profile = clean_env_scalar(value);
+        } else if let Some(value) = entry.strip_prefix(b"OMS_MCP_PANEL_RESOURCE_VERSION=") {
+            panel_version = clean_env_scalar(value);
+        }
+    }
+    (profile, panel_version)
+}
+
+fn scan_mcp_servers(proc_root: &Path) -> Option<Vec<RunningMcpServer>> {
+    use std::os::unix::fs::MetadataExt;
+    let proc_fd = rustix::fs::open(
+        proc_root,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .ok()?;
+    let entries = fs::read_dir(proc_root).ok()?;
+    let uid = rustix::process::geteuid().as_raw();
+    let uptime = parse_uptime_centis(rustix::fd::AsFd::as_fd(&proc_fd));
+    let mut servers = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let name = entry.file_name();
+        let Some(pid_str) = name.to_str() else {
+            continue;
+        };
+        if pid_str.is_empty() || !pid_str.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
+        if pid == 0 {
+            continue;
+        }
+        let Ok(pid_fd) = rustix::fs::openat(
+            &proc_fd,
+            pid_str,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) else {
+            continue;
+        };
+        let pid_dir = fs::File::from(pid_fd);
+        let Ok(meta) = pid_dir.metadata() else {
+            continue;
+        };
+        if !meta.is_dir() || meta.uid() != uid {
+            continue;
+        }
+        let borrowed = rustix::fd::AsFd::as_fd(&pid_dir);
+        let Some(cmdline) = proc_file_bytes(borrowed, "cmdline", Some(uid), 64 * 1024) else {
+            continue;
+        };
+        let Some((home, revision)) = match_mcp_server_cmdline(&cmdline) else {
+            continue;
+        };
+        let (profile, panel_version) = proc_file_bytes(borrowed, "environ", Some(uid), 1024 * 1024)
+            .map(|raw| parse_mcp_environ(&raw))
+            .unwrap_or((None, None));
+        let age = parse_process_age(borrowed, uid, uptime);
+        servers.push(RunningMcpServer {
+            pid,
+            home,
+            revision,
+            age,
+            profile,
+            panel_version,
+        });
+    }
+    servers.sort_by_key(|s| s.pid);
+    Some(servers)
+}
+
+/// Read-only inspection of running OMS MCP servers for the current user.
+/// Never signals, kills, or restarts any process.
+fn mcp_servers_at(paths: &Paths, proc_root: Option<&Path>) -> Vec<Value> {
+    const SECTION: &str = "mcp servers";
+    const STALE_LIMIT: usize = 20;
+    let Some(proc_root) = proc_root else {
+        return vec![finding(
+            SECTION,
+            "info",
+            "running OMS MCP servers were not inspected on this platform",
+        )];
+    };
+    let Some(servers) = scan_mcp_servers(proc_root) else {
+        return vec![finding(
+            SECTION,
+            "info",
+            "running OMS MCP servers could not be inspected",
+        )];
+    };
+    let row = paths.load().ok().flatten();
+    let installed = row
+        .as_ref()
+        .and_then(|row| receipt::native_revision(row).map(str::to_owned));
+    // Servers dispatched from another install root belong to that install, not this one;
+    // without an owner and revision there is nothing host-independent to compare.
+    let (Some(owner), Some(installed)) = (
+        row.as_ref().and_then(|row| receipt::owner(row).ok()),
+        installed,
+    ) else {
+        return vec![finding(
+            SECTION,
+            "info",
+            "running OMS MCP servers not compared; install receipt unavailable",
+        )];
+    };
+    let servers = servers
+        .into_iter()
+        .filter(|server| r::physical(&server.home).is_ok_and(|home| home == owner))
+        .collect::<Vec<_>>();
+    let stale = servers
+        .iter()
+        .filter(|server| server.revision != installed)
+        .collect::<Vec<_>>();
+    if stale.is_empty() {
+        let count = servers.len();
+        let message = if count == 0 {
+            "0 running OMS MCP servers".to_owned()
+        } else {
+            format!(
+                "{count} running OMS MCP server(s) at installed revision {}",
+                &installed[..12]
+            )
+        };
+        return vec![finding(SECTION, "ok", message)];
+    }
+    let installed_short = &installed[..12];
+    let mut rows = Vec::new();
+    for server in stale.iter().take(STALE_LIMIT) {
+        let mut details = vec![format!("installed {installed_short}")];
+        if let Some(age) = &server.age {
+            details.push(format!("age {age}"));
+        }
+        if let Some(profile) = &server.profile {
+            details.push(format!("OMS_MCP_TOOL_PROFILE={profile}"));
+        }
+        if let Some(panel) = &server.panel_version {
+            details.push(format!("OMS_MCP_PANEL_RESOURCE_VERSION={panel}"));
+        }
+        rows.push(finding(
+            SECTION,
+            "warn",
+            format!(
+                "pid {} serves older build {} ({}); reconnect or restart the host's OMS MCP server for that conversation; ending only pid {} makes the host start a fresh server on its next call",
+                server.pid,
+                &server.revision[..12],
+                details.join(", "),
+                server.pid,
+            ),
+        ));
+    }
+    if stale.len() > STALE_LIMIT {
+        let remaining = stale.len() - STALE_LIMIT;
+        rows.push(finding(
+            SECTION,
+            "warn",
+            format!(
+                "{remaining} additional stale OMS MCP server(s) not listed; reconnect or restart those host OMS MCP servers"
+            ),
+        ));
+    }
+    rows
+}
+
 fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> Result<Vec<Value>> {
     let mut rows = Vec::new();
     match paths.load() {
@@ -1267,6 +1563,10 @@ fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> R
             "native payload missing, unsafe or invalid",
         )),
     }
+    rows.extend(mcp_servers_at(
+        paths,
+        cfg!(target_os = "linux").then(|| Path::new("/proc")),
+    ));
     for name in ["git", "bash"] {
         rows.push(finding(
             "runtime",
@@ -1417,13 +1717,54 @@ fn surfaces(paths: &Paths) -> Result<Vec<Value>> {
     Ok(rows)
 }
 
+fn codex_mcp_finding(paths: &Paths, codex_config: &Path) -> Value {
+    if !r::exists(codex_config) {
+        return finding(
+            "codex_mcp",
+            "error",
+            "recorded integration is missing, changed, or unproven",
+        );
+    }
+    let mut dry_run = Options::default();
+    dry_run.tool = "install-mcp".into();
+    match r::read(codex_config, r::LIMIT)
+        .and_then(|raw| crate::integrations::converge_codex_mcp(paths, &dry_run, &raw))
+    {
+        Ok((Some(current), _)) if current["args"] == json!(["mcp-server"]) => {
+            finding("codex_mcp", "ok", "recorded integration matches")
+        }
+        Ok(_) => finding(
+            "codex_mcp",
+            "error",
+            "recorded integration is missing, changed, or unproven",
+        ),
+        Err(err) => finding(
+            "codex_mcp",
+            "error",
+            format!(
+                "{}; hint: move or delete the outside table by hand",
+                clean(&err.1)
+            ),
+        ),
+    }
+}
+
 fn integrations(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<crate::Output> {
+    integrations_at(paths, options, flag, &paths.codex_config()?)
+}
+
+pub(crate) fn integrations_at(
+    paths: &Paths,
+    options: &Options,
+    flag: &AtomicBool,
+    codex_config: &Path,
+) -> Result<crate::Output> {
     let receipt = paths
         .require_owner()?
         .ok_or_else(|| r::Error(2, "integration checks require an install receipt".into()))?;
     let components = &receipt["components"];
     let mut rows = Vec::new();
-    let mut record = |component: &str, enabled: bool, healthy: bool| {
+    let record = |component: &str, enabled: bool, healthy: bool| {
         let (level, message) = if !enabled {
             ("note", "not recorded; skipped")
         } else if healthy {
@@ -1434,21 +1775,21 @@ fn integrations(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<c
                 "recorded integration is missing, changed, or unproven",
             )
         };
-        rows.push(finding(component, level, message));
+        finding(component, level, message)
     };
     r::check(flag)?;
     let hooks = components["claude_hooks"] == true;
-    record(
+    rows.push(record(
         "claude_hooks",
         hooks,
         !hooks || surfaces(paths).is_ok_and(|rows| rows.iter().all(|row| row["level"] != "error")),
-    );
+    ));
     let codex = components["codex_plugin"] == true;
-    record(
+    rows.push(record(
         "codex_plugin",
         codex,
         !codex || crate::plugins::codex_healthy(paths, flag).unwrap_or(false),
-    );
+    ));
     r::check(flag)?;
     let agy = components["agy_plugin"] == true;
     let agy_owned = !agy
@@ -1457,18 +1798,15 @@ fn integrations(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<c
             &paths.home.join(".gemini/config/plugins/oh-my-setting"),
         )
         .unwrap_or(false);
-    record("agy_plugin", agy, agy_owned);
+    rows.push(record("agy_plugin", agy, agy_owned));
     let mcp = components["mcp"] == true;
     if mcp || agy {
-        // Reuse doctor inventory parsing, but require only the managed scopes
-        // written by installation. Unrelated custom servers are never launched.
+        // Reuse doctor inventory parsing for JSON MCP manifests; Codex runs
+        // install's own TOML dry-run classifier on the file bytes so doctor
+        // never reports ok where install, repair, or uninstall would refuse.
         let inventory = specs(paths)?;
-        for (enabled, provider, scope, section) in [
-            (mcp, "claude", "user", "claude_mcp"),
-            (mcp, "codex", "user", "codex_mcp"),
-            (agy, "antigravity", "plugin-oh-my-setting", "agy_mcp"),
-        ] {
-            let healthy = inventory.servers.iter().any(|server| {
+        let json_mcp_healthy = |provider: &str, scope: &str| {
+            inventory.servers.iter().any(|server| {
                 server.provider == provider
                     && server.scope == scope
                     && server.name == "oh-my-setting"
@@ -1483,11 +1821,25 @@ fn integrations(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<c
                 layer["provider"] == provider
                     && layer["scope"] == scope
                     && layer["status"] == "parsed"
-            });
-            record(section, enabled, healthy);
+            })
+        };
+        rows.push(record(
+            "claude_mcp",
+            mcp,
+            !mcp || json_mcp_healthy("claude", "user"),
+        ));
+        if mcp {
+            rows.push(codex_mcp_finding(paths, codex_config));
+        } else {
+            rows.push(record("codex_mcp", false, true));
         }
+        rows.push(record(
+            "agy_mcp",
+            agy,
+            !agy || json_mcp_healthy("antigravity", "plugin-oh-my-setting"),
+        ));
     } else {
-        record("mcp", false, true);
+        rows.push(record("mcp", false, true));
     }
     r::check(flag)?;
     let mut result = report(paths, rows);
@@ -2058,6 +2410,53 @@ mod tests {
                     .any(|r| r["section"] == section && r["level"] == "ok")
             );
         }
+        for (env, expected) in [
+            (json!({"OMS_MCP_TOOL_PROFILE":"core"}), "ok"),
+            (json!({"OMS_MCP_TOOL_PROFILE":"full"}), "ok"),
+            (json!({"OMS_MCP_TOOL_PROFILE":"unknown"}), "error"),
+            (
+                json!({"OMS_MCP_TOOL_PROFILE":"full","USER_CUSTOM":"1"}),
+                "error",
+            ),
+        ] {
+            let mut selected = r::parse(&mcp).unwrap();
+            selected["mcpServers"]["oh-my-setting"]["env"] = env;
+            let selected = r::bytes(&selected).unwrap();
+            let mut tx = crate::transaction::Transaction::begin(&paths).unwrap();
+            // Publish the generated directory as installation does. Replacing
+            // one child first would include its temporary undo file in the
+            // directory identity recorded before transaction cleanup.
+            tx.files(
+                &target,
+                &[
+                    ("plugin.json", plugin, 0o600),
+                    ("mcp_config.json", &selected, 0o600),
+                ],
+            )
+            .unwrap();
+            let marker = json!({"schema":1,"kind":"directory","source":source,
+                "sha256":crate::transaction::identity(&target).unwrap()});
+            tx.write(
+                &crate::install::marker(&target),
+                &r::bytes(&marker).unwrap(),
+                0o600,
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            assert!(crate::install::owned(&source, &target).unwrap());
+            let (code, report) = inspect();
+            assert_eq!(code, i32::from(expected == "error"), "{report}");
+            assert_eq!(fs::read(target.join("mcp_config.json")).unwrap(), selected);
+            for (section, level) in [("agy_plugin", "ok"), ("agy_mcp", expected)] {
+                assert!(
+                    report["findings"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|r| r["section"] == section && r["level"] == level)
+                );
+            }
+        }
         fs::write(target.join("mcp_config.json"), b"{\"mcpServers\":{}}").unwrap();
         let (code, report) = inspect();
         assert_eq!(code, 1);
@@ -2110,5 +2509,244 @@ mod tests {
         }
         assert_eq!(level("my-hud --claude-statusline").as_deref(), Some("warn"));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn mcp_servers_report_stale_builds_with_exact_argv_and_bounded_env() {
+        use std::os::unix::fs::symlink;
+        let scratch = r::Scratch::new().unwrap();
+        let paths = Paths {
+            home: scratch.0.join("home"),
+            source: scratch.0.join("source"),
+            receipt: scratch.0.join("config/install.json"),
+            config: scratch.0.join("config"),
+            state: scratch.0.join("state"),
+            data: scratch.0.join("data"),
+            cwd: scratch.0.join("source"),
+        };
+        for dir in [&paths.home, &paths.source, &paths.config, &paths.data] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let installed_rev = r::hash(b"installed-native-build")[..40].to_owned();
+        let stale_rev = r::hash(b"older-native-build")[..40].to_owned();
+        let receipt = r::bytes(&json!({
+            "schema": 1,
+            "source_root": paths.source,
+            "commit": installed_rev,
+            "version": "1",
+            "channel": "edge",
+            "installed_at": "fixture",
+            "plugin": {"name": "oh-my-setting", "version": "1", "sha256": "fixture"},
+            "native": {
+                "revision": installed_rev,
+                "libexec": paths.data.join("libexec"),
+                "frontdoor": paths.data.join("libexec").join(&installed_rev).join("oms-frontdoor")
+            }
+        }))
+        .unwrap();
+        fs::write(&paths.receipt, &receipt).unwrap();
+
+        let proc_dir = scratch.0.join("proc");
+        fs::create_dir_all(&proc_dir).unwrap();
+        fs::write(proc_dir.join("uptime"), b"7200.00 0.00\n").unwrap();
+        // Non-numeric and unreadable/symlinked entries must be ignored cleanly.
+        symlink("201", proc_dir.join("self")).unwrap();
+        fs::create_dir(proc_dir.join("bus")).unwrap();
+        fs::create_dir(proc_dir.join("199")).unwrap();
+        fs::create_dir(proc_dir.join("200")).unwrap();
+        symlink(proc_dir.join("uptime"), proc_dir.join("200/cmdline")).unwrap();
+
+        let write_proc =
+            |pid: u32, argv: &[&str], env: &[(&str, &str)], start_ticks: Option<u64>| {
+                let dir = proc_dir.join(pid.to_string());
+                fs::create_dir_all(&dir).unwrap();
+                let mut cmdline = Vec::new();
+                for token in argv {
+                    cmdline.extend_from_slice(token.as_bytes());
+                    cmdline.push(0);
+                }
+                fs::write(dir.join("cmdline"), cmdline).unwrap();
+                let mut environ = Vec::new();
+                for (k, v) in env {
+                    environ.extend_from_slice(k.as_bytes());
+                    environ.push(b'=');
+                    environ.extend_from_slice(v.as_bytes());
+                    environ.push(0);
+                }
+                fs::write(dir.join("environ"), environ).unwrap();
+                if let Some(ticks) = start_ticks {
+                    let tail = format!("S 1 {pid} {pid} 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 {ticks} 0");
+                    fs::write(dir.join("stat"), format!("{pid} (oms) {tail}\n")).unwrap();
+                }
+            };
+
+        let current_bin = paths.data.join("libexec").join(&installed_rev).join("oms");
+        let stale_bin = paths.data.join("libexec").join(&stale_rev).join("oms");
+        let source_str = paths.source.to_str().unwrap();
+
+        // One current server.
+        write_proc(
+            201,
+            &[
+                current_bin.to_str().unwrap(),
+                "--oms-dispatch",
+                source_str,
+                &installed_rev,
+                "--",
+                "mcp-server",
+            ],
+            &[
+                ("OMS_MCP_TOOL_PROFILE", "core"),
+                ("PRIVATE_VALUE", "current-private-material"),
+            ],
+            Some(700_000),
+        );
+        // One stale server with profile and panel version env plus unrelated env.
+        write_proc(
+            202,
+            &[
+                stale_bin.to_str().unwrap(),
+                "--oms-dispatch",
+                source_str,
+                &stale_rev,
+                "--",
+                "mcp-server",
+            ],
+            &[
+                ("OMS_MCP_TOOL_PROFILE", "full"),
+                ("OMS_MCP_PANEL_RESOURCE_VERSION", "v34"),
+                ("USER_CUSTOM", "stale-private-material"),
+            ],
+            Some(360_000),
+        );
+        // Unrelated processes whose argv merely contains `mcp-server` inside another token.
+        let embedded = format!(
+            "{} --oms-dispatch {source_str} {stale_rev} -- mcp-server",
+            stale_bin.display()
+        );
+        write_proc(203, &["/bin/sh", "-c", &embedded], &[], Some(360_000));
+        write_proc(
+            204,
+            &[
+                stale_bin.to_str().unwrap(),
+                "--oms-dispatch",
+                source_str,
+                &stale_rev,
+                "--",
+                "mcp-server-helper",
+            ],
+            &[],
+            Some(360_000),
+        );
+
+        // A stale server dispatched from another install root is that install's concern.
+        let other_root = scratch.0.join("other-install");
+        fs::create_dir_all(&other_root).unwrap();
+        write_proc(
+            205,
+            &[
+                stale_bin.to_str().unwrap(),
+                "--oms-dispatch",
+                other_root.to_str().unwrap(),
+                &stale_rev,
+                "--",
+                "mcp-server",
+            ],
+            &[],
+            Some(360_000),
+        );
+
+        let doc = report(&paths, mcp_servers_at(&paths, Some(&proc_dir)));
+        assert_eq!(doc["status"], "ok", "{doc}");
+        assert_eq!(doc["exit"], 0, "{doc}");
+        let findings = doc["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "{doc}");
+        assert_eq!(findings[0]["section"], "mcp servers");
+        assert_eq!(findings[0]["level"], "warn");
+        let msg = findings[0]["message"].as_str().unwrap();
+        assert!(msg.contains("pid 202"), "{msg}");
+        assert!(msg.contains(&stale_rev[..12]), "{msg}");
+        assert!(msg.contains(&installed_rev[..12]), "{msg}");
+        assert!(msg.contains("age 1h"), "{msg}");
+        assert!(msg.contains("OMS_MCP_TOOL_PROFILE=full"), "{msg}");
+        assert!(msg.contains("OMS_MCP_PANEL_RESOURCE_VERSION=v34"), "{msg}");
+        assert!(msg.contains("reconnect or restart"), "{msg}");
+        assert!(msg.contains("ending only pid 202"), "{msg}");
+        let rendered = doc.to_string();
+        for forbidden in [
+            "pid 201",
+            "pid 203",
+            "pid 204",
+            "pid 205",
+            "USER_CUSTOM",
+            "PRIVATE_VALUE",
+            "stale-private-material",
+            "current-private-material",
+        ] {
+            assert!(!rendered.contains(forbidden), "{forbidden} in {rendered}");
+        }
+
+        // Without the stale server, only the exact-matching current server is counted.
+        fs::remove_dir_all(proc_dir.join("202")).unwrap();
+        let current_only = report(&paths, mcp_servers_at(&paths, Some(&proc_dir)));
+        assert_eq!(current_only["status"], "ok");
+        let rows = current_only["findings"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{current_only}");
+        assert_eq!(rows[0]["section"], "mcp servers");
+        assert_eq!(rows[0]["level"], "ok");
+        let ok_msg = rows[0]["message"].as_str().unwrap();
+        assert!(ok_msg.contains("1 running OMS MCP server(s)"), "{ok_msg}");
+        assert!(ok_msg.contains(&installed_rev[..12]), "{ok_msg}");
+
+        // With zero matching servers running, one ok row states 0.
+        fs::remove_dir_all(proc_dir.join("201")).unwrap();
+        let none_running = report(&paths, mcp_servers_at(&paths, Some(&proc_dir)));
+        assert_eq!(none_running["status"], "ok");
+        assert_eq!(none_running["findings"][0]["level"], "ok");
+        assert_eq!(
+            none_running["findings"][0]["message"],
+            "0 running OMS MCP servers"
+        );
+
+        // Stale server warnings cap at 20 rows plus one summary row for the remainder.
+        for pid in 300..322 {
+            write_proc(
+                pid,
+                &[
+                    stale_bin.to_str().unwrap(),
+                    "--oms-dispatch",
+                    source_str,
+                    &stale_rev,
+                    "--",
+                    "mcp-server",
+                ],
+                &[],
+                None,
+            );
+        }
+        let capped = report(&paths, mcp_servers_at(&paths, Some(&proc_dir)));
+        assert_eq!(capped["status"], "ok");
+        let capped_rows = capped["findings"].as_array().unwrap();
+        assert_eq!(capped_rows.len(), 21, "{capped}");
+        assert!(capped_rows.iter().all(|r| r["level"] == "warn"));
+        assert!(
+            capped_rows[20]["message"]
+                .as_str()
+                .unwrap()
+                .contains("2 additional stale OMS MCP server(s)"),
+            "{capped}"
+        );
+
+        // Non-Linux callers pass None and emit a single info row.
+        let uninspected = mcp_servers_at(&paths, None);
+        assert_eq!(uninspected.len(), 1);
+        assert_eq!(uninspected[0]["section"], "mcp servers");
+        assert_eq!(uninspected[0]["level"], "info");
+        assert!(
+            uninspected[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not inspected")
+        );
     }
 }

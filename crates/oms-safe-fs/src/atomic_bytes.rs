@@ -187,6 +187,12 @@ struct Anchor<'a> {
     dirs: Vec<OwnedFd>,
     dir_stats: Vec<Stat>,
 }
+
+struct ReadStats {
+    before: Stat,
+    after: Stat,
+}
+
 impl<'a> Anchor<'a> {
     fn open(
         root: &'a Root,
@@ -321,11 +327,12 @@ impl<'a> Anchor<'a> {
         }
     }
 
-    fn read(
+    fn read<E: From<ByteError>>(
         &self,
         options: ByteReadOptions,
         hook: &mut impl FnMut(Stage) -> Result<(), Errno>,
-    ) -> Result<(Vec<u8>, Option<Stat>), ByteError> {
+        check_opened: impl FnOnce(&Stat) -> Result<(), E>,
+    ) -> Result<(Vec<u8>, Option<ReadStats>), E> {
         let named = self.named()?;
         hook(Stage::BeforeLeafOpen).map_err(io_error)?;
         let fd = match fs::openat(
@@ -335,25 +342,26 @@ impl<'a> Anchor<'a> {
             Mode::empty(),
         ) {
             Ok(fd) => fd,
-            Err(Errno::NOENT) if named.is_some() => return Err(ByteError::Changed),
+            Err(Errno::NOENT) if named.is_some() => return Err(ByteError::Changed.into()),
             Err(Errno::NOENT) if options.missing_ok && named.is_none() => {
                 self.revalidate()?;
                 return Ok((Vec::new(), None));
             }
-            Err(error) => return Err(io_error(error)),
+            Err(error) => return Err(io_error(error).into()),
         };
         let before = fs::fstat(&fd).map_err(io_error)?;
         if !self.valid_leaf(&before) {
-            return Err(ByteError::Unsafe);
+            return Err(ByteError::Unsafe.into());
         }
         if !named
             .as_ref()
             .is_some_and(|stat| self.leaf_unchanged(stat, &before))
         {
-            return Err(ByteError::Changed);
+            return Err(ByteError::Changed.into());
         }
         self.check_leaf(Some(&before))?;
         self.revalidate()?;
+        check_opened(&before)?;
         hook(Stage::BeforeRead).map_err(io_error)?;
         let mut file = std::fs::File::from(fd);
         let mut bytes = Vec::new();
@@ -365,26 +373,27 @@ impl<'a> Anchor<'a> {
                 Ok(count) => count,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => {
-                    return Err(ByteError::Io(
-                        Errno::from_io_error(&error).unwrap_or(Errno::IO),
-                    ));
+                    return Err(
+                        ByteError::Io(Errno::from_io_error(&error).unwrap_or(Errno::IO)).into(),
+                    );
                 }
             };
             if count == 0 {
                 break;
             }
             if count > remaining {
-                return Err(ByteError::InputTooLarge);
+                return Err(ByteError::InputTooLarge.into());
             }
             bytes.extend_from_slice(&buffer[..count]);
         }
         hook(Stage::AfterRead).map_err(io_error)?;
-        if !self.leaf_unchanged(&before, &fs::fstat(&file).map_err(io_error)?) {
-            return Err(ByteError::Changed);
+        let after = fs::fstat(&file).map_err(io_error)?;
+        if !self.leaf_unchanged(&before, &after) {
+            return Err(ByteError::Changed.into());
         }
         self.check_leaf(Some(&before))?;
         self.revalidate()?;
-        Ok((bytes, Some(before)))
+        Ok((bytes, Some(ReadStats { before, after })))
     }
 }
 
@@ -480,18 +489,42 @@ impl Root {
         self.read_bytes_with(path, options, |_| Ok(()))
     }
 
+    /// Use the same bounded read as [`Self::read_no_follow`], checking the
+    /// opened descriptor's stat before reading. Returns the descriptor's
+    /// post-read stat with the bytes, or `None` for a permitted absent input.
+    pub fn read_no_follow_checked<E: From<ByteError>>(
+        &self,
+        path: &Path,
+        options: ByteReadOptions,
+        check_opened: impl FnOnce(&Stat) -> Result<(), E>,
+    ) -> Result<(Vec<u8>, Option<Stat>), E> {
+        self.read_snapshot_with(path, options, |_| Ok(()), check_opened)
+            .map(|(bytes, stats)| (bytes, stats.map(|s| s.after)))
+    }
+
     fn read_bytes_with(
         &self,
         path: &Path,
         options: ByteReadOptions,
-        mut hook: impl FnMut(Stage) -> Result<(), Errno>,
+        hook: impl FnMut(Stage) -> Result<(), Errno>,
     ) -> Result<Vec<u8>, ByteError> {
+        self.read_snapshot_with(path, options, hook, |_| Ok(()))
+            .map(|(bytes, _)| bytes)
+    }
+
+    fn read_snapshot_with<E: From<ByteError>>(
+        &self,
+        path: &Path,
+        options: ByteReadOptions,
+        mut hook: impl FnMut(Stage) -> Result<(), Errno>,
+        check_opened: impl FnOnce(&Stat) -> Result<(), E>,
+    ) -> Result<(Vec<u8>, Option<ReadStats>), E> {
         let anchor = match Anchor::open(self, path, false, &mut hook) {
             Ok(anchor) => anchor,
-            Err(ByteError::Missing) if options.missing_ok => return Ok(Vec::new()),
-            Err(error) => return Err(error),
+            Err(ByteError::Missing) if options.missing_ok => return Ok((Vec::new(), None)),
+            Err(error) => return Err(error.into()),
         };
-        anchor.read(options, &mut hook).map(|(bytes, _)| bytes)
+        anchor.read(options, &mut hook, check_opened)
     }
 
     /// Copy-on-write byte mutation. Callers MUST hold the canonical external
@@ -641,7 +674,8 @@ impl Root {
         exclusive: bool,
     ) -> Result<MutationOutcome, MutationError<E>> {
         let anchor = Anchor::open(self, path, options.create_parent, &mut hook)?;
-        let (old, before) = anchor.read(options.read, &mut hook)?;
+        let (old, stats) = anchor.read::<ByteError>(options.read, &mut hook, |_| Ok(()))?;
+        let before = stats.map(|s| s.before);
         if options
             .expected_exists
             .is_some_and(|exists| exists != before.is_some())

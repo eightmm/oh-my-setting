@@ -780,13 +780,28 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut plan = crate::plan_delegate::BoundDelegate::prepare(&mut resolved, &repo, context)?;
     let args = &resolved;
     let interactive = args.has("interactive");
+    if args.has("expected-context-pack-sha256") && !args.has("context-pack") {
+        return fail("--expected-context-pack-sha256 requires --context-pack");
+    }
     let orientation = if args.has("context-pack") {
         Some(crate::context_pack::orientation(
             &args.path("context-pack", context.cwd),
+            args.has("expected-context-pack-sha256")
+                .then(|| args.get("expected-context-pack-sha256")),
         )?)
     } else {
         None
     };
+    if let Some(excerpt) = orientation.as_ref().and_then(|pack| pack.reviewed.as_ref()) {
+        plan.as_ref()
+            .ok_or_else(|| {
+                Error::new(
+                    2,
+                    "reviewed Lead context requires an issued canonical Plan binding",
+                )
+            })?
+            .check_context(excerpt)?;
+    }
     let mut target = Target::parse(args.required("to")?)?;
     peer::apply_account(args, std::slice::from_mut(&mut target))?;
     let question = peer::question(args, context)?;
@@ -933,7 +948,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             &storage::file(&args.path("review-artifact", context.cwd))?,
         )?;
     }
-    safety::outbound(prompt.as_bytes())?;
+    safety::outbound_prompt(prompt.as_bytes())?;
     let mut header = format!(
         "# OMS peer-delegate\n\n- provider: {}\n- base_sha: {base}\n- access: {}\n\n## Prompt\n\n{prompt}\n",
         target.provider,
@@ -1022,7 +1037,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         let prepared = prepare().and_then(|compiled| {
             let prior = prompt.len();
             prompt.compiled_context(&compiled)?;
-            safety::outbound(prompt.as_bytes())?;
+            safety::outbound_prompt(prompt.as_bytes())?;
             header.push_str(&prompt[prior..]);
             Ok(compiled)
         });
@@ -1081,6 +1096,11 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     )?;
     transition(&repo, &attempt, "starting", obj([]), context)?;
     transition(&repo, &attempt, "working", obj([]), context)?;
+    let heartbeat = process::AttemptHeartbeat {
+        repo: repo.clone(),
+        attempt: attempt.clone(),
+    };
+    let live_context = context.with_heartbeat(Some(&heartbeat));
     let mut code = 1;
     let mut body = header.into_bytes();
     let mut captured = Vec::new();
@@ -1136,7 +1156,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                     full_prompt.push_layer("task", &turn_prompt);
                     full_prompt.push_layer("framing", "\n");
                 }
-                safety::outbound(full_prompt.as_bytes())?;
+                safety::outbound_prompt(full_prompt.as_bytes())?;
                 let res = providers::execute_with_fallback_env(
                     &mut route,
                     args.get("fallback-model"),
@@ -1146,7 +1166,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                     timeout,
                     &repo,
                     &extra_env,
-                    context,
+                    &live_context,
                 );
                 let res = match res {
                     Ok(r) => r,
@@ -1219,7 +1239,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                         peer::timeout(args, "peer-delegate")?,
                         &repo,
                         &extra_env,
-                        context,
+                        &live_context,
                     )
                 });
             let result = match result {
@@ -1320,7 +1340,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             && let Some(command) = &command
         {
             transition(&repo, &attempt, "verifying", obj([]), context)?;
-            let checked = verify_env(command, &worktree.path, &extra_env, context)?;
+            let checked = verify_env(command, &worktree.path, &extra_env, &live_context)?;
             code = checked.code;
             if !checked.complete && code == 0 {
                 code = 1;
@@ -1648,6 +1668,7 @@ mod tests {
             source: &repo,
             interrupted: &stop,
             executor: &native,
+            heartbeat: None,
         };
         let tree = Worktree::create(&repo, "HEAD", &context).unwrap();
         let wrapper = tree.path.parent().unwrap().to_owned();
@@ -1673,9 +1694,54 @@ mod tests {
 
     #[test]
     fn remove_leaves_wrapper_with_unexpected_entries_untouched() {
+        const INNER: &str = "OMS_TEST_DELEGATE_EXECUTOR_INNER";
+        if std::env::var_os(INNER).is_none() {
+            use std::os::unix::fs::PermissionsExt;
+            let sandbox =
+                std::env::temp_dir().join(format!("oms-peer-fake-env-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&sandbox);
+            let bin = sandbox.join("bin");
+            let home = sandbox.join("home");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(&home).unwrap();
+            let fake_codex = bin.join("codex");
+            std::fs::write(&fake_codex, b"#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            )))
+            .unwrap();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "delegate::tests::remove_leaves_wrapper_with_unexpected_entries_untouched",
+                    "--nocapture",
+                ])
+                // A parent run under an OMS dispatch exports task, Room and attempt variables
+                // that would change the attempt refs this test asserts.
+                .env_clear()
+                .envs(std::env::var_os("TMPDIR").map(|dir| ("TMPDIR", dir)))
+                .env(INNER, "1")
+                .env("PATH", path)
+                .env("HOME", &home)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&sandbox);
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(out.status.success(), "{combined}");
+            assert!(combined.contains("1 passed;"), "{combined}");
+            return;
+        }
+
         struct LockProbingExecutor {
             repo: PathBuf,
             saw_busy_during_worktree_add: AtomicBool,
+            mutate_tracked: AtomicBool,
+            invocations: std::sync::Mutex<Vec<(String, Option<process::AttemptHeartbeat>)>>,
         }
         impl process::Executor for LockProbingExecutor {
             fn execute(
@@ -1683,6 +1749,17 @@ mod tests {
                 request: process::Invocation,
                 interrupted: &AtomicBool,
             ) -> Result<process::Completed> {
+                let prog = request
+                    .argv
+                    .first()
+                    .and_then(|a| Path::new(a).file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_owned();
+                self.invocations
+                    .lock()
+                    .unwrap()
+                    .push((prog.clone(), request.heartbeat.clone()));
                 let words: Vec<String> = request
                     .argv
                     .iter()
@@ -1703,6 +1780,23 @@ mod tests {
                     self.saw_busy_during_worktree_add
                         .store(true, std::sync::atomic::Ordering::Release);
                 }
+                if prog == "codex" {
+                    if self
+                        .mutate_tracked
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        std::fs::write(request.cwd.join("victim.txt"), b"updated\n").unwrap();
+                    }
+                    return Ok(process::Completed {
+                        code: 0,
+                        stdout: b"Answer:\nok\nTradeoffs:\nnone\nEvidence:\nvictim.txt\nRisks:\nnone\nRecommendation:\nship\nVerification:\ntrue\n".to_vec(),
+                        stderr: Vec::new(),
+                        complete: true,
+                        cleanup_complete: Some(true),
+                        owned_cleanup: None,
+                        elapsed: std::time::Duration::from_millis(1),
+                    });
+                }
                 process::Native.execute(request, interrupted)
             }
         }
@@ -1712,12 +1806,15 @@ mod tests {
         let probing = LockProbingExecutor {
             repo: repo.clone(),
             saw_busy_during_worktree_add: AtomicBool::new(false),
+            mutate_tracked: AtomicBool::new(false),
+            invocations: std::sync::Mutex::new(Vec::new()),
         };
         let context = Context {
             cwd: &repo,
             source: &repo,
             interrupted: &stop,
             executor: &probing,
+            heartbeat: None,
         };
         let tree = Worktree::create(&repo, "HEAD", &context).unwrap();
         assert!(
@@ -1741,6 +1838,117 @@ mod tests {
         sym_tree.remove(&context).unwrap();
         assert_eq!(std::fs::read(&victim).unwrap(), b"preserve");
         assert!(sym_wrapper.join("owner.json").is_symlink());
+
+        // Live attempts carry AttemptHeartbeat on provider and verify invocations, never on git.
+        git(&repo, &["add", "victim.txt"]);
+        git(&repo, &["commit", "-qm", "track victim"]);
+        probing.invocations.lock().unwrap().clear();
+        probing
+            .mutate_tracked
+            .store(true, std::sync::atomic::Ordering::Release);
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let run_context = Context {
+            cwd: &repo,
+            source,
+            interrupted: &stop,
+            executor: &probing,
+            heartbeat: None,
+        };
+        let delegate_args = peer::parse(&[
+            "--repo".into(),
+            repo.as_os_str().to_owned(),
+            "--to".into(),
+            "codex".into(),
+            "--model".into(),
+            "fixture".into(),
+            "--no-task".into(),
+            "--no-memory".into(),
+            "--no-ml-context".into(),
+            "--no-graph-context".into(),
+            "--verify".into(),
+            "true".into(),
+            "Update victim.txt".into(),
+        ])
+        .unwrap();
+        let (code, _, err) = run(&delegate_args, &run_context).unwrap();
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+        let (_, attempts) = oms_command_operations::load_projection(&repo).unwrap();
+        let delegate_attempt = attempts
+            .iter()
+            .find(|row| row.get("tool").text() == Some("peer-delegate"))
+            .and_then(|row| row.get("attempt_id").text())
+            .unwrap()
+            .to_owned();
+        let expected_delegate = process::AttemptHeartbeat {
+            repo: repo.clone(),
+            attempt: delegate_attempt,
+        };
+        {
+            let calls = probing.invocations.lock().unwrap();
+            let git_count = calls.iter().filter(|(prog, _)| prog == "git").count();
+            assert!(git_count > 0);
+            assert!(
+                calls
+                    .iter()
+                    .filter(|(prog, _)| prog == "git")
+                    .all(|(_, beat)| beat.is_none())
+            );
+            let non_git: Vec<_> = calls.iter().filter(|(prog, _)| prog != "git").collect();
+            assert_eq!(
+                non_git,
+                vec![
+                    &("codex".to_owned(), Some(expected_delegate.clone())),
+                    &("bash".to_owned(), Some(expected_delegate)),
+                ]
+            );
+        }
+
+        probing.invocations.lock().unwrap().clear();
+        probing
+            .mutate_tracked
+            .store(false, std::sync::atomic::Ordering::Release);
+        let (ask_code, _, ask_err) = peer::run(
+            "peer-ask",
+            &[
+                "--repo".into(),
+                repo.as_os_str().to_owned(),
+                "--providers".into(),
+                "codex".into(),
+                "--model".into(),
+                "fixture".into(),
+                "--no-task".into(),
+                "--no-memory".into(),
+                "--no-ml-context".into(),
+                "--no-graph-context".into(),
+                "Summarize status".into(),
+            ],
+            &run_context,
+        )
+        .unwrap();
+        assert_eq!(ask_code, 0, "{}", String::from_utf8_lossy(&ask_err));
+        let (_, attempts) = oms_command_operations::load_projection(&repo).unwrap();
+        let ask_attempt = attempts
+            .iter()
+            .find(|row| row.get("tool").text() == Some("peer-ask"))
+            .and_then(|row| row.get("attempt_id").text())
+            .unwrap()
+            .to_owned();
+        let expected_ask = process::AttemptHeartbeat {
+            repo: repo.clone(),
+            attempt: ask_attempt,
+        };
+        {
+            let calls = probing.invocations.lock().unwrap();
+            assert!(
+                calls
+                    .iter()
+                    .filter(|(prog, _)| prog == "git")
+                    .all(|(_, beat)| beat.is_none())
+            );
+            let non_git: Vec<_> = calls.iter().filter(|(prog, _)| prog != "git").collect();
+            assert_eq!(non_git, vec![&("codex".to_owned(), Some(expected_ask))]);
+        }
+
         let _ = std::fs::remove_dir_all(&repo);
     }
 

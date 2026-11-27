@@ -148,6 +148,21 @@ pub fn resolve(task: &Json, defaults: &Json) -> Result<Json> {
             }
         }
     }
+    // A reviewed assignment that names no model takes the operator's explicit
+    // model for the same provider only; another provider's model never carries.
+    if !std::ptr::eq(source, defaults)
+        && matches!(field(source, "model"), Json::Null)
+        && get(source, "provider", "") == get(defaults, "provider", "")
+    {
+        for key in ["model", "fallback_model", "reasoning_effort"] {
+            if matches!(field(source, key), Json::Null)
+                && !matches!(field(defaults, key), Json::Null)
+                && let Some(slot) = output.iter_mut().find(|(k, _)| k == key.as_bytes())
+            {
+                slot.1 = copy(field(defaults, key));
+            }
+        }
+    }
     Ok(Json::Object(output))
 }
 pub fn fields(route: &Json) -> Result<Vec<u8>> {

@@ -1271,7 +1271,10 @@ fn incomplete_stop(reason: &str) -> bool {
 #[derive(Clone, Copy)]
 pub(crate) enum OutputMode<'a> {
     Legacy,
-    Observed(&'a std::cell::Cell<Option<crate::lead_observation::Observation>>),
+    Observed(
+        &'a std::cell::Cell<Option<crate::lead_observation::Observation>>,
+        Option<&'a crate::process::StreamTap>,
+    ),
     Native,
 }
 
@@ -1379,6 +1382,8 @@ pub(crate) fn native_result_footer(provider: &str, kind: &str, row: &V) -> bool 
             text(row, "subtype") == "hook_response"
                 && matches!(text(row, "hook_event"), "Stop" | "SessionEnd")
                 && text(row, "outcome") == "success"
+                // Emitted after `result` once a turn used tools.
+                || text(row, "subtype") == "task_summary"
         }
         _ => false,
     }
@@ -1755,6 +1760,9 @@ fn transport(
             cmd.args(&["--output-format", "stream-json", "--verbose", "-p"]);
         }
         "antigravity" => {
+            if let Some(resume) = nonempty_env("OMS_RESUME_SESSION") {
+                cmd.option("--conversation", resume);
+            }
             cmd.model(route);
             cmd.option("--add-dir", cwd);
             cmd.effort(route, "--effort");
@@ -2286,7 +2294,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
     context: &Context<'_>,
 ) -> Result<Completed> {
     prompt.validate()?;
-    crate::safety::outbound(prompt.bytes())?;
+    crate::safety::outbound_prompt(prompt.bytes())?;
     if matches!(output_mode, OutputMode::Native) {
         require_native_output(&route.provider)?;
     } else if !discovered(&route.provider) {
@@ -2329,7 +2337,19 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
     {
         return fail("provider does not support read access through this transport");
     }
-    let transport = transport(route, prompt.bytes(), cwd, write, timeout)?;
+    let mut transport = transport(route, prompt.bytes(), cwd, write, timeout)?;
+    let stream = match output_mode {
+        OutputMode::Observed(_, Some(tap)) if route.provider == "claude" && !write => {
+            // Partial events precede `-p`; completion still comes from `result`.
+            transport.argv.iter().rposition(|a| a == "-p").map(|at| {
+                transport
+                    .argv
+                    .insert(at, "--include-partial-messages".into());
+                tap.clone()
+            })
+        }
+        _ => None,
+    };
     let team_protocol = if extra_env
         .iter()
         .any(|(k, v)| k == "OMS_TEAM_REQUEST_PROTOCOL" && v == "oms-team-request-v1")
@@ -2478,7 +2498,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                     .map_err(|e| Error::new(2, e))?;
             exec_argv = std::iter::once(wrapped_prog).chain(wrapped_args).collect();
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + crate::process::NATIVE_ADMISSION_BUDGET;
         let team = crate::process::TeamLocator::from_extra(&extra_env)?;
         let physical_task = crate::usage::env(&extra_env, "OMS_TASK_ID");
         let attempt = crate::process::PhysicalAttempt {
@@ -2561,6 +2581,8 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                 oms_supervisor::process::PhysicalCall::new(&usage_receipt.identity.call_id)
                     .map_err(|e| Error::new(2, e))?,
             ),
+            heartbeat: context.heartbeat.cloned(),
+            stream: stream.clone(),
         };
         let result = crate::plan_delegate::check_launch(&extra_env, &route.provider, cwd, context)
             .and_then(|plan| {
@@ -2684,7 +2706,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
         if !account_observed {
             result.stderr.extend_from_slice(b"\nwarning: account-home continuity unavailable; usage attribution remains unknown\n");
         }
-        if let OutputMode::Observed(slot) = output_mode {
+        if let OutputMode::Observed(slot, _) = output_mode {
             let observation = (result.code == 0
                 && result.complete
                 && terminal
@@ -3130,6 +3152,7 @@ mod bridge_route_tests {
             source: repo,
             interrupted: &stop,
             executor: capture,
+            heartbeat: None,
         };
         let mut route = route.clone();
         execute_env(&mut route, prompt, cwd, write, 12, repo, &[], &context)
@@ -3407,6 +3430,7 @@ mod bridge_route_tests {
                         source: repo,
                         interrupted: &stop,
                         executor: &executor,
+                        heartbeat: None,
                     };
                     let mut route = Route {
                         provider: "claude".into(),
@@ -3634,6 +3658,7 @@ mod bridge_route_tests {
                         source: repo,
                         interrupted: &stop,
                         executor: &report,
+                        heartbeat: None,
                     };
                     let result =
                         execute_env(&mut route, b"fixture", cwd, false, 12, repo, &[], &context)
@@ -3757,6 +3782,7 @@ mod bridge_route_tests {
                     source: repo,
                     interrupted: &stop,
                     executor: &reports,
+                    heartbeat: None,
                 };
                 let mut route = Route {
                     provider: "claude".into(),
@@ -4263,6 +4289,8 @@ mod bridge_route_tests {
                                     + "resume|--all|fixture-session|-";
                             } else if provider == "claude" {
                                 expanded = "--resume|fixture-session|".to_owned() + &expanded;
+                            } else if provider == "antigravity" {
+                                expanded = "--conversation|fixture-session|".to_owned() + &expanded;
                             }
                         }
                         let expected: Vec<OsString> = expanded
@@ -4415,7 +4443,12 @@ mod bridge_route_tests {
                         let valid = prompt.len() <= 120000
                             && std::str::from_utf8(&prompt).is_ok()
                             && !prompt.contains(&0);
-                        assert_eq!(result.is_ok(), valid, "{provider}, {} bytes", prompt.len());
+                        assert_eq!(
+                            result.is_ok(),
+                            valid,
+                            "{provider}, {} bytes: {result:?}",
+                            prompt.len()
+                        );
                         assert_eq!(capture.0.lock().unwrap().len(), usize::from(valid));
                     }
                 }
@@ -4431,7 +4464,11 @@ mod bridge_route_tests {
                 for size in [0, 120000, 120001] {
                     let capture = Capture::default();
                     let result = direct(&route, &vec![b'x'; size], true, repo, cwd, &capture);
-                    assert_eq!(result.is_ok(), mode != "interactive" || size <= 120000);
+                    assert_eq!(
+                        result.is_ok(),
+                        mode != "interactive" || size <= 120000,
+                        "{mode}, {size} bytes: {result:?}"
+                    );
                     let calls = capture.0.lock().unwrap();
                     if let Some(call) = calls.first() {
                         let dirs: Vec<_> = call

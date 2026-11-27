@@ -21,6 +21,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | Recover interrupted work | [Panel recovery](TERMINAL-PANEL.md#salvaging-a-stopped-worker) | [Settle workers](TERMINAL-PANEL.md#settle-stopped-workers) · [Cleanup](COMPONENTS.md#cleanup) |
 | Inspect recorded progress | [Dashboard](DASHBOARD.md) | Read-only snapshot and JSON schema |
 | Keep work history | [Work Journal](WORK-JOURNAL.md) | Local capture and optional Notion mirror |
+| Receive external tracker requests | [External tracker intake](INTAKE.md) | Source-neutral Room intake and retry-safe replies (Linear adapter) |
 | Use another Codex harness | [Codex harnesses](CODEX-HARNESSES.md) | Codex inference through Pi or Claude Code |
 
 ## Reference
@@ -52,6 +53,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | [Research follow-ups](RESEARCH-FOLLOWUPS.md) | Design-only contracts for bounded ACP supervision, live observations and paired context evaluation |
 | [Agent harness work packets](AGENT-HARNESS-WORK-PACKETS.md) | Design-only AH-01–13: capability tiers, session adapter contract, conformance tests, guard and sandbox coverage, council seats and collaboration surfaces for arbitrary agents |
 | [Control and session contract](CONTROL-SESSION-CONTRACT.md) | Source-mapped identity, authority and per-operation capability contract for the four Main harnesses (issue #432) |
+| [Resident project implementation](RESIDENT-PROJECT-IMPLEMENTATION.md) | Design-only single-project resident flow: headless Main, typed contracts, recovery, adapter boundaries and PR-sized acceptance mapped to #619 |
 | [Memory consolidation](MEMORY-CONSOLIDATION.md) | Proposed incremental Dreaming, evidence-linked recovery lessons, memory validity and existing-owner implementation packets |
 | [UI/UX and feature design](CONTROL-PLANE-UX-AND-FEATURES.md) | Comparative UX patterns, task flows, feature proposals and measurable acceptance |
 | [Agreed GUI direction](CONTROL-SURFACE-UX.md) | Task/results-first screens, separate relationship views, interactive example and implementation acceptance |

@@ -74,30 +74,32 @@ OMS-01~16은 역사적인 제안 식별자이고 PIPE-00~11은 구현 계획의 
 
 ```mermaid
 flowchart TD
-  U["CLI · MCP · Panel"] --> A["작업별 application service"]
-  P["업무 플랫폼 adapter"] --> A
+  U["CLI · MCP · Panel"] --> A["작업별 application service (oms-control-api)"]
+  P["업무 플랫폼 adapter (oms-gateway)"] --> A
   A --> D["Plan · Room · 권한 · 결과 owner"]
   A --> E["기존 실행 service"]
-  E --> M["Agent adapter"]
-  E --> R["실행 환경 adapter"]
-  D --> Q["조회 · 결과 · 증거 projection"]
+  E --> M["Provider adapter (provider adapters)"]
+  E --> R["실행 환경 adapter (oms-host)"]
+  D --> Q["조회 · 결과 · 증거 projection (oms-control-api)"]
   E --> Q
   Q --> U
   Q --> P
 ```
 
 이것은 논리적 책임 경계이며 crate·database·프로세스 배치 결정이 아니다.
+[로드맵 §3](CONTROL-SURFACE-ROADMAP.md#3-이미-있는-기반과-현재-한계)의 기존 모듈 후보를
+그대로 재사용하며, 아래 표는 본 문서의 논리 경계와 로드맵 §3 이름의 일대일 매핑이다.
 Core service는 입력 바인딩, action별 권한·사전조건, 기존 owner 호출 순서,
 receipt 연결과 복구를 조정한다. 각 owner는 기존 guard·claim·CAS·receipt·side effect를 소유한다.
 다중 owner와 외부 플랫폼의 변경을 하나의 원자적 transaction이라고 주장하지 않는다.
 
-| 경계 | 맡을 일 | 기존 재사용점 |
-| --- | --- | --- |
-| 업무 플랫폼 adapter | 설치·사용자·이슈·대화 문맥, 입출력 변환, 결과 전달 | 기존 GitHub intake/landing; Jira·Linear 계약은 별도 adapter |
-| Agent adapter | native session·호출 방식·지원 기능·결과 관측 | 기존 Codex·Claude·AGY 등의 확인된 경로 |
-| 실행 환경 adapter | execution root·process·자원·custody·cleanup | runtime, supervisor와 검증된 backend |
-| Application service | 작업의 입력부터 결과까지 기존 owner 연결 | `CollabServices`, `RuntimeServices`, 기존 Plan/Panel service ports [S1] |
-| Query projection | 기존 증거를 허용된 범위에서 모아 제공 | runtime, panel-core와 bounded reader [S2, S4] |
+| 경계 | 로드맵 §3 대응 | 맡을 일 | 기존 재사용점 |
+| --- | --- | --- | --- |
+| 업무 플랫폼 adapter | `oms-gateway` · host plugins (#434/#435/#438/#445) | 설치·사용자·이슈·대화 문맥, 입출력 변환, 결과 전달 | 기존 GitHub intake/landing; Jira·Linear 계약은 별도 adapter |
+| Provider adapter | `provider adapters` · `oms-provider-codex` (#432/#436) | native session·호출 방식·지원 기능·결과 관측 | 기존 Codex·Claude·AGY·Pi 및 custom adapter 경로 |
+| 실행 환경 adapter | `oms-host` (#444) | execution root·process·자원·custody·cleanup | runtime, supervisor와 검증된 multi-host owner |
+| Application service | `oms-control-api` action writer (#432/#433/#437) | 작업의 입력부터 결과까지 기존 owner 연결 | `CollabServices`, `RuntimeServices`, 기존 Plan/Panel service ports [S1] |
+| Query projection | `oms-control-api` typed projection (#432/#433/#437) | 기존 증거를 허용된 범위에서 모아 제공 | runtime, panel-core와 bounded reader [S2, S4] |
 
 `NativeCommand`, `ExecutionRequest`와 supervised fixed-argv 호출은 내부 실행 경계다. [S1, S4]
 이를 원격에서 임의 argv·env·path를 받는 계약으로 공개하지 않는다.
@@ -116,7 +118,7 @@ receipt 연결과 복구를 조정한다. 각 owner는 기존 guard·claim·CAS�
 | `RunnerBinding` | 등록된 실행 주체와 registration generation, 허용된 execution/state root 연결 |
 | `TargetRef` | action별 tagged native reference; Plan task·Peer operation·attempt·실험 run을 합치지 않음 |
 | `ActionPreconditions` | 해당 owner가 실제 검사하는 task/plan digest, 상태·lease·generation 또는 동등한 불투명한 증명 |
-| `CommandReceipt` | 요청·전달의 단계, 실제 owner receipt, 관측된 효과; 실행 task의 대체 원장 아님 |
+| `operation_receipt` | [로드맵 §9.3](CONTROL-SURFACE-ROADMAP.md#93-요청거절receiptevent-예시)의 단일 v1 wire 계약(`accepted` / `delivered` / `completed`, 불명 상태 `delivery_unknown`); 내부 전달 단계, 실제 owner receipt, 관측된 효과를 연결하며 실행 task의 대체 원장이 아님 |
 | `RunView` | 확인된 native reference들을 모은 read projection; 미확인 연결은 누락/unknown |
 | `EvidenceRef` | producer, immutable digest, 접근 범위, 읽기·보존 정책 |
 | `ResultContract` | 요구 산출물, verifier, 수용과 전달의 완료 조건 |
@@ -194,15 +196,19 @@ Patch가 없는 action에 가짜 patch 필드를 요구하지 않고, owner별 �
 - 분리된 비동기 접수가 필요하면 bounded command receipt 저장의 소유자·조회·보존·복구를 구현한다.
   이 저장은 전달 상태를 다루며 Plan task·실행 custody·권한 원장을 복제하지 않는다.
 
-| 전달 상태 예시 | 의미 | 후속 처리 |
-| --- | --- | --- |
-| `not_dispatched` | 접수 기록은 있지만 실행 owner에게 아직 전달하지 않음 | 기존 intent와 현재 권한·expiry로 전달 적격성 재검사 |
-| `dispatched` | owner 호출/전달을 시도한 기록이 있고 결과 확인 중 | 원래 owner와 native reference로 추적 |
-| `confirmed` | 해당 동작의 효과가 owner 증거로 확인됨 | 의미가 맞는 receipt와 projection 반환 |
-| `outcome_unknown` | 효과가 발생했을 수 있으나 확정할 근거가 부족함 | 재관측·reconciliation; 새 ID로 무조건 재실행하지 않음 |
+#437 공개 wire 어휘는 [로드맵 §9.3](CONTROL-SURFACE-ROADMAP.md#93-요청거절receiptevent-예시)의
+`operation_receipt`(`accepted` / `delivered` / `completed`)와 `delivery_unknown`을 단일 기준으로
+사용한다. 아래 표의 내부 전달 단계는 별도 wire 타입이 아니라 그 v1 어휘에 대응한다.
+
+| wire `operation_receipt` 어휘 | 내부 전달 단계 | 의미 | 후속 처리 |
+| --- | --- | --- | --- |
+| `outcome: "accepted"` | `not_dispatched` | 접수 기록은 있지만 실행 owner에게 아직 전달하지 않음 | 기존 intent와 현재 권한·expiry로 전달 적격성 재검사 |
+| `outcome: "delivered"` | `dispatched` | owner 호출/전달을 시도한 기록이 있고 결과 확인 중 | 원래 owner와 native reference로 추적 |
+| `outcome: "completed"` | `confirmed` | 해당 동작의 효과가 owner 증거로 확인됨 | 의미가 맞는 receipt와 projection 반환 |
+| `delivery_unknown` | `outcome_unknown` | 효과가 발생했을 수 있으나 확정할 근거가 부족함 | 재관측·reconciliation; 새 ID로 무조건 재실행하지 않음 |
 
 이는 구현할 전달 계약이며 현재 공통 state machine이 존재한다는 뜻이 아니다.
-접수·실행·검증·외부 전달은 별도 축이고, `not_dispatched`를 unknown effect로 표시하지 않는다.
+접수·실행·검증·외부 전달은 별도 축이고, `accepted`(`not_dispatched`)를 `delivery_unknown`으로 표시하지 않는다.
 Owner의 명시적 거절과 실제로 끝난 실패도 결과 불명과 구분한다.
 
 Idempotency는 검증된 안정적인 installation/주체, workspace, action, key와 정규화 payload digest에 묶는다.
@@ -329,25 +335,26 @@ Private selection과 다른 사용자 context는 stale 공개 snapshot에 포함
 접근 철회나 binding 교체에서는 재인가 전 이전 내용을 계속 보여주지 않는다.
 이전 답변의 공유나 follow-up draft 작성은 Main 전달·Plan 실행 receipt가 아니다.
 
-## 11. OMS-01~16과 구현 패킷의 연결
+## 11. OMS-01~16 추적 ID와 구현 패킷의 연결
 
 상세 내용과 dependency는 [PIPE-00~11 구현 계획](PLATFORM-PIPELINE-IMPLEMENTATION.md)에 있다.
-아래 번호는 16개 필수 선행 프로젝트를 뜻하지 않는다.
+OMS-01~16은 별도 선행 문서의 기존 번호가 아니라 본 문서와 구현 인계서에서 추적용으로 정리한
+분류 ID이며, 16개 필수 선행 프로젝트를 뜻하지 않는다.
 
-| 역사적 제안 | 현재 처리 / 연결 패킷 |
+| 추적 ID | 현재 처리 / 연결 패킷 |
 | --- | --- |
 | OMS-01 Domain/API 계약 | PIPE-00·01·08: action별 의미·identity·실제 wire 계약 |
-| OMS-02 Core 진입점 | PIPE-02~06·08: 한 사용자 흐름의 application service부터 추출 |
+| OMS-02 Core 진입점 | PIPE-02~06·08: 한 사용자 흐름의 `oms-control-api` service부터 추출 |
 | OMS-03 CLI/MCP/Panel | PIPE-07·08: 필요한 caller만 연결하고 기존 호환성 보존 |
 | OMS-04 Daemon/local IPC | PIPE-11 조건부; 기존 host 수명으로 부족한 실제 수요 |
 | OMS-05 REST/OpenAPI | PIPE-08의 소비자 선택; Jira A2A의 필수 선행 아님 |
 | OMS-06 Run/Event | PIPE-05·07 snapshot; durable stream은 PIPE-11 조건부 |
-| OMS-07 권한·실행 | PIPE-00·01·03·04: 질문/grant·사전조건·실제 효과 구분 |
+| OMS-07 권한·실행 | PIPE-00·01·03·04·08: 질문/grant·사전조건·실제 효과 구분 |
 | OMS-08 Connector SDK | PIPE-11 조건부; 반복되는 두 번째 소비자의 요구 확인 |
-| OMS-09 Forge Remote | PIPE-09: Jira를 선택하면 최소 A2A·identity·배포·결과 mapping |
+| OMS-09 Forge Remote | PIPE-09·10: Jira를 선택하면 최소 A2A·identity·배포·결과 mapping |
 | OMS-10 Linear Agent | PIPE-11 선택 확장; 기존 사람 assignee·delegation 의미 보존 |
-| OMS-11 GitHub App | PIPE-06에서 기존 GitHub 경로 우선; App 도입은 PIPE-11 조건부 |
-| OMS-12 Runner/Job Broker | PIPE-09의 최소 private-host 연결, 일반 broker는 PIPE-11 조건부 |
+| OMS-11 GitHub App | PIPE-02·06에서 기존 GitHub 경로 우선; App 도입은 PIPE-11 조건부 |
+| OMS-12 Runner/Job Broker | PIPE-01·04·09의 최소 `oms-host` 연결, 일반 broker는 PIPE-11 조건부 |
 | OMS-13 Web Dashboard | PIPE-07: 기존 네 화면과 작업·결과 동선 재사용 |
 | OMS-14 Multi-tenant | PIPE-11 조건부; 실제 다조직 운영 요구와 격리 검증 |
 | OMS-15 A2A Gateway | Jira subset은 PIPE-09; 일반 federation은 PIPE-11 조건부 |

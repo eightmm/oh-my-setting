@@ -4,7 +4,7 @@ use crate::{
     Context, Options, Output, Result, Value, epoch, error, helpers, json, json_output, random_id,
     require, storage, success, timestamp,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +16,29 @@ pub(crate) fn index(ctx: &Context<'_>) -> PathBuf {
         .filter(|p| !p.is_empty())
         .map(|p| helpers::absolute(&ctx.cwd, p))
         .unwrap_or_else(|| ctx.state_repo.join(".oms/runs/spine.jsonl"))
+}
+
+pub(crate) fn group_runs(
+    rows: Vec<Value>,
+    new_run: impl Fn(&str, &Value) -> Value,
+    update_run: impl Fn(&mut Value, &Value) -> Result<()>,
+) -> Result<Vec<Value>> {
+    let mut runs = Vec::new();
+    let mut positions = HashMap::new();
+    for row in rows {
+        let id = row.text("run_id");
+        if id.is_empty() {
+            continue;
+        }
+        let position = positions.get(id).copied().unwrap_or_else(|| {
+            let position = runs.len();
+            positions.insert(id.to_owned(), position);
+            runs.push(new_run(id, &row));
+            position
+        });
+        update_run(&mut runs[position], &row)?;
+    }
+    Ok(runs)
 }
 
 pub(crate) fn current(ctx: &Context<'_>) -> Result<String> {
@@ -230,43 +253,36 @@ pub(crate) fn run(
                 .transpose()
                 .map_err(|_| error(2, "ls requires a non-negative integer"))?
                 .unwrap_or(10);
-            let mut runs: Vec<Value> = Vec::new();
-            for row in rows {
-                let id = row.text("run_id");
-                if id.is_empty() {
-                    continue;
-                }
-                let i = match runs.iter().position(|r| r.text("run_id") == id) {
-                    Some(i) => i,
-                    None => {
-                        runs.push(object([
-                            ("run_id", string(id)),
-                            ("first", row.get("ts").clone()),
-                            ("last", row.get("ts").clone()),
-                            ("closed", Value::Bool(false)),
-                            ("events", number(0)),
-                            ("tools", Value::Array(vec![])),
-                        ]));
-                        runs.len() - 1
+            let mut runs = group_runs(
+                rows,
+                |id, row| {
+                    object([
+                        ("run_id", string(id)),
+                        ("first", row.get("ts").clone()),
+                        ("last", row.get("ts").clone()),
+                        ("closed", Value::Bool(false)),
+                        ("events", number(0)),
+                        ("tools", Value::Array(vec![])),
+                    ])
+                },
+                |run, row| {
+                    run.set("last", row.get("ts").clone())?;
+                    run.set("events", number(run.get("events").int()? + 1))?;
+                    if row.text("tool") == "oms-run" && row.text("event") == "close" {
+                        run.set("closed", Value::Bool(true))?;
                     }
-                };
-                let run = &mut runs[i];
-                run.set("last", row.get("ts").clone())?;
-                run.set("events", number(run.get("events").int()? + 1))?;
-                if row.text("tool") == "oms-run" && row.text("event") == "close" {
-                    run.set("closed", Value::Bool(true))?;
-                }
-                let mut tools = run
-                    .get("tools")
-                    .strings()?
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect::<BTreeSet<_>>();
-                if !row.text("tool").is_empty() {
-                    tools.insert(row.text("tool").into());
-                }
-                run.set("tools", json::list(tools.iter().map(String::as_str)))?;
-            }
+                    let mut tools = run
+                        .get("tools")
+                        .strings()?
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect::<BTreeSet<_>>();
+                    if !row.text("tool").is_empty() {
+                        tools.insert(row.text("tool").into());
+                    }
+                    run.set("tools", json::list(tools.iter().map(String::as_str)))
+                },
+            )?;
             runs.retain(|r| !opts.flag("open") || !r.get("closed").truth());
             let selected = runs.split_off(if n == 0 {
                 0

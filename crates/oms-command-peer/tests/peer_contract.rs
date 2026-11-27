@@ -227,6 +227,7 @@ struct ProviderProbe {
     calls: Mutex<Vec<ObservedProvider>>,
     outcome: i32,
     mutate: bool,
+    answer: Option<Vec<u8>>,
 }
 fn option_value<'a>(argv: &'a [OsString], name: &str) -> Option<&'a OsString> {
     argv.windows(2)
@@ -243,6 +244,7 @@ impl Executor for ProviderProbe {
         stop: &AtomicBool,
     ) -> oms_command_peer::Result<Completed> {
         if request.argv[0] == "git" {
+            assert!(request.heartbeat.is_none());
             return Native.execute(request, stop);
         }
         let file = ["--prompt-file", "--message-file", "-f"]
@@ -312,7 +314,10 @@ impl Executor for ProviderProbe {
         }
         Ok(Completed {
             code: self.outcome,
-            stdout: b"fixture answer\n".to_vec(),
+            stdout: self
+                .answer
+                .clone()
+                .unwrap_or_else(|| b"fixture answer\n".to_vec()),
             stderr: Vec::new(),
             complete: true,
             cleanup_complete: Some(true),
@@ -1910,6 +1915,10 @@ fn plan_delegate_uses_exact_issued_lease_and_native_verified_result() {
             ),
             ("private-empty-resume", &[("OMS_RESUME_SESSION", "")]),
             ("private", &[]),
+            (
+                "private-reviewed-context",
+                &[("OMS_ROOM_ID", "lead-room"), ("OMS_TEST_LEAD_CONTEXT", "1")],
+            ),
         ] {
             provider_isolated_with_env(name, layout, env, &body);
         }
@@ -2231,6 +2240,11 @@ exec "$real_git" "$@"
                     assert!(prompt.contains("Required verification:"));
                     assert!(prompt.contains("Implement the detailed fixture work."));
                     assert!(prompt.contains("Forbidden paths: denied.txt"));
+                    if self.mode == "context-ok" {
+                        assert!(prompt.contains("Reviewed Lead findings"));
+                        assert!(prompt.contains("> Lead reviewed the tracked.txt boundary."));
+                        assert!(prompt.contains("Reference data only"));
+                    }
                     let script = match self.mode {
                         "unknown-stderr-only" => {
                             Some("printf '%s\\n' 'provider capacity unavailable' >&2; exit 1")
@@ -2307,11 +2321,21 @@ exec "$real_git" "$@"
                 "repair",
                 "missing-brief",
             ];
-            let modes: &[&str] = match std::env::var("OMS_RESUME_SESSION").as_deref() {
-                Ok("fixture-ambient-resume") => &["ambient-resume"],
-                Ok("") => &["ok"],
-                Err(std::env::VarError::NotPresent) => &regular,
-                other => panic!("unexpected fixture resume state: {other:?}"),
+            let modes: &[&str] = if std::env::var_os("OMS_TEST_LEAD_CONTEXT").is_some() {
+                &[
+                    "context-ok",
+                    "context-pack-changed",
+                    "context-task-changed",
+                    "context-room-changed",
+                    "context-answer-changed",
+                ]
+            } else {
+                match std::env::var("OMS_RESUME_SESSION").as_deref() {
+                    Ok("fixture-ambient-resume") => &["ambient-resume"],
+                    Ok("") => &["ok"],
+                    Err(std::env::VarError::NotPresent) => &regular,
+                    other => panic!("unexpected fixture resume state: {other:?}"),
+                }
             };
             for &mode in modes {
                 let repo = provider_repo();
@@ -2371,6 +2395,9 @@ exec "$real_git" "$@"
                         .with("verify", "test -s tracked.txt");
                 }
                 host.plan(task_request);
+                let ready = mode
+                    .starts_with("context-")
+                    .then(|| host.plan(Request::new(Action::EvidenceSnapshot).with("id", "t1")));
                 let mut issued = host.plan(
                     Request::new(Action::Claim)
                         .with("id", "t1")
@@ -2438,6 +2465,101 @@ exec "$real_git" "$@"
                     "--plan-binding".into(),
                     binding,
                 ];
+                if let Some(ready) = &ready {
+                    let body = "Lead reviewed the tracked.txt boundary.";
+                    let write_lead_file = |rel: &str, content: &[u8]| {
+                        let path = repo.0.join(rel);
+                        use std::os::unix::fs::DirBuilderExt;
+                        fs::DirBuilder::new()
+                            .recursive(true)
+                            .mode(0o700)
+                            .create(path.parent().unwrap())
+                            .unwrap();
+                        fs::write(&path, content).unwrap();
+                        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+                    };
+                    let scope = "1".repeat(64);
+                    let lead_binding = "2".repeat(64);
+                    let prompt_sha = "3".repeat(64);
+                    let thread = "ask-thread-fixture";
+                    let op = "ask-fixture";
+                    for dir_rel in [
+                        ".oms",
+                        ".oms/artifacts",
+                        ".oms/artifacts/mcp",
+                        ".oms/artifacts/mcp/ask-thread-fixture",
+                        ".oms/artifacts/mcp/ask-fixture",
+                        ".oms/artifacts/mcp/ask-fixture/answers",
+                    ] {
+                        let p = repo.0.join(dir_rel);
+                        fs::create_dir_all(&p).unwrap();
+                        fs::set_permissions(&p, fs::Permissions::from_mode(0o700)).unwrap();
+                    }
+                    write_lead_file(&format!(".oms/artifacts/mcp/{thread}/status"), b"0\n");
+                    write_lead_file(
+                        &format!(".oms/artifacts/mcp/{thread}/meta.json"),
+                        serde_json::json!({"operation":thread,"thread":thread,"kind":"ask","answer_storage":"operation","targets":["claude"],"panel_assignment":scope})
+                            .to_string()
+                            .as_bytes(),
+                    );
+                    write_lead_file(
+                        &format!(".oms/artifacts/mcp/{thread}/lead-turn-turn-fixture.json"),
+                        serde_json::json!({"id":"turn-fixture","scope":scope,"binding":lead_binding,"digest":prompt_sha})
+                            .to_string()
+                            .as_bytes(),
+                    );
+                    write_lead_file(&format!(".oms/artifacts/mcp/{op}/status"), b"0\n");
+                    write_lead_file(
+                        &format!(".oms/artifacts/mcp/{op}/meta.json"),
+                        serde_json::json!({"operation":op,"thread":thread,"kind":"ask","answer_storage":"operation","lead_followup":true,"targets":["claude"],"panel_assignment":lead_binding,"prompt_sha256":prompt_sha})
+                            .to_string()
+                            .as_bytes(),
+                    );
+                    let answer_rel = format!(".oms/artifacts/mcp/{op}/answers/fixture.md");
+                    write_lead_file(
+                        &format!(".oms/artifacts/mcp/{op}/run.log"),
+                        format!("{answer_rel}\n").as_bytes(),
+                    );
+                    write_lead_file(
+                        &answer_rel,
+                        format!("## Output\n{body}\n## Exit\n0\n").as_bytes(),
+                    );
+                    let mut findings = serde_json::json!({"schema":1,"kind":"reviewed-lead-answer","authority":"context-only",
+                        "source":{"project_key":oms_command_plan::reviewed_context::project_key(&repo.0).unwrap(),"room":"lead-room","participant":"ask-lead-fixture","provider":"claude","lead_request_id":"lead-fixture","turn_id":"turn-fixture","operation":"ask-fixture","answer_sha256":json::sha(body),"page_offset":0,"page_bytes":body.len(),"page_cursor_sha256":json::sha(""),"answer_bytes":body.len()},
+                        "selection":{"text":body,"offset":0,"bytes":body.len(),"sha256":json::sha(body)},
+                        "target":{"task_id":"t1","task_sha256":ready.text("task_sha256"),"contract_sha256":oms_command_plan::reviewed_context::task_contract(ready).unwrap(),"provider":"claude"}});
+                    if mode == "context-task-changed" {
+                        findings["target"]["contract_sha256"] = serde_json::json!("b".repeat(64));
+                    }
+                    if mode == "context-room-changed" {
+                        findings["source"]["room"] = serde_json::json!("another-room");
+                    }
+                    let digest =
+                        json::hash(&json::parse(&serde_json::to_vec(&findings).unwrap()).unwrap())
+                            .unwrap();
+                    let mut bytes = serde_json::to_vec(&serde_json::json!({"pack_digest":digest,"files":[],"lead_findings":findings})).unwrap();
+                    let sha = json::sha(&bytes);
+                    if mode == "context-pack-changed" {
+                        bytes.push(b'\n');
+                    }
+                    repo.write(".oms/reviewed-context.json", bytes);
+                    if mode == "context-answer-changed" {
+                        write_lead_file(
+                            &answer_rel,
+                            b"## Output\nLead answer changed after preparation.\n## Exit\n0\n",
+                        );
+                    }
+                    call.extend([
+                        "--context-pack".into(),
+                        repo.0
+                            .join(".oms/reviewed-context.json")
+                            .to_str()
+                            .unwrap()
+                            .into(),
+                        "--expected-context-pack-sha256".into(),
+                        sha,
+                    ]);
+                }
                 if mode == "unknown-stderr-only" {
                     call.extend(["--fallback-model".into(), "fixture-fallback".into()]);
                 }
@@ -2452,7 +2574,8 @@ exec "$real_git" "$@"
                     mode,
                     "worktree-head-after-start-proof" | "worktree-index-after-start-proof"
                 );
-                let pre_start_refusal = late_git_change
+                let pre_start_refusal = (mode.starts_with("context-") && mode != "context-ok")
+                    || late_git_change
                     || matches!(
                         mode,
                         "missing-brief"
@@ -2490,7 +2613,15 @@ exec "$real_git" "$@"
                     String::from_utf8_lossy(&output.2)
                 );
                 if let Some((snapshot, prior_events, prior_plan)) = before {
-                    let reason = if mode == "missing-brief" {
+                    let reason = if mode == "context-pack-changed" {
+                        "context pack bytes changed"
+                    } else if mode == "context-task-changed" {
+                        "differs from the frozen Plan task"
+                    } else if mode == "context-room-changed" {
+                        "another Room"
+                    } else if mode == "context-answer-changed" {
+                        "unavailable or changed"
+                    } else if mode == "missing-brief" {
                         "agent-plan amend --id t1 --brief-file PATH"
                     } else if mode == "ambient-resume" {
                         "OMS_RESUME_SESSION cannot select a provider session for Plan delegation"
@@ -2521,7 +2652,10 @@ exec "$real_git" "$@"
                     assert!(host.alias_during_start.lock().unwrap().is_none());
                     continue;
                 }
-                if matches!(mode, "ok" | "repair" | "ok-footer" | "worktree-split-index") {
+                if matches!(
+                    mode,
+                    "ok" | "repair" | "ok-footer" | "worktree-split-index" | "context-ok"
+                ) {
                     assert_eq!(output.0, 0, "{message}");
                     assert_eq!(task.text("state"), "review", "{message}");
                     assert_eq!(task.text("review_lease_id"), issued.text("lease_id"));
@@ -2838,6 +2972,463 @@ fn provider_private_prompt_cleanup_and_read_boundaries() {
                     assert_ne!(output.0, 0);
                     assert!(probe.calls.lock().unwrap().is_empty());
                 }
+            }
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+            let home_first = ["file://", "/ho", "me/person/checkout/src/lib.rs#L10"].concat();
+            let home_second = ["file://", "/ho", "me/person/checkout/src/main.rs#L20"].concat();
+            let consult_repo = provider_repo();
+            let answer_probe = ProviderProbe {
+                answer: Some(
+                    format!(
+                        "Summary of findings.\nSee {home_first}\nAlso check {home_second}\nConclusion: safe to proceed.\n"
+                    )
+                    .into_bytes(),
+                ),
+                ..Default::default()
+            };
+            let consult_out = oms_command_peer::run_with_executor(
+                "consult",
+                &args(&[
+                    "--to",
+                    "claude",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "inspect clean question",
+                ]),
+                &consult_repo.0,
+                source,
+                &STOP,
+                &answer_probe,
+            );
+            assert_eq!(consult_out.0, 0, "{}", message(&consult_out));
+            assert!(
+                !String::from_utf8_lossy(&consult_out.2).contains("rephrase"),
+                "{}",
+                String::from_utf8_lossy(&consult_out.2)
+            );
+            let printed = std::str::from_utf8(&consult_out.1).unwrap();
+            assert!(
+                !printed.contains(&home_first) && !printed.contains(&home_second),
+                "{printed}"
+            );
+            assert!(!printed.contains("rephrase"), "{printed}");
+            let consult_artifacts = oms_command_peer::storage::names(
+                &consult_repo.0,
+                Path::new(".oms/artifacts/consult"),
+                ".md",
+            )
+            .unwrap();
+            assert_eq!(consult_artifacts.len(), 1);
+            let recorded_artifact = consult_repo
+                .0
+                .join(".oms/artifacts/consult")
+                .join(&consult_artifacts[0]);
+            assert!(recorded_artifact.is_file());
+            let recorded_raw = fs::read_to_string(&recorded_artifact).unwrap();
+            assert!(
+                recorded_raw.contains(&home_first) && recorded_raw.contains(&home_second),
+                "{recorded_raw}"
+            );
+            let expected_block = format!(
+                "\nclaude:\nSummary of findings.\n[oms-redacted:home-path]\n[oms-redacted:home-path]\nConclusion: safe to proceed.\nnote: 2 line(s) redacted by the shared content scan; recorded artifact: {}\n",
+                recorded_artifact.display()
+            );
+            assert!(printed.contains(&expected_block), "{printed}");
+            let consult_threads = oms_command_peer::storage::names(
+                &consult_repo.0,
+                Path::new(".oms/threads"),
+                ".jsonl",
+            )
+            .unwrap();
+            assert_eq!(consult_threads.len(), 1);
+            let consult_thread_log = fs::read_to_string(
+                consult_repo
+                    .0
+                    .join(".oms/threads")
+                    .join(&consult_threads[0]),
+            )
+            .unwrap();
+            assert!(
+                consult_thread_log.contains("[oms-redacted:home-path]")
+                    && !consult_thread_log.contains(&home_first)
+                    && !consult_thread_log.contains(&home_second),
+                "{consult_thread_log}"
+            );
+            let follow_up = oms_command_peer::run_with_executor(
+                "consult",
+                &args(&[
+                    "--to",
+                    "claude",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "follow-up clean question",
+                ]),
+                &consult_repo.0,
+                source,
+                &STOP,
+                &ProviderProbe::default(),
+            );
+            assert_eq!(follow_up.0, 0, "{}", message(&follow_up));
+
+            struct CouncilAnswerProbe {
+                probe: ProviderProbe,
+                home_line: String,
+                native: bool,
+            }
+            impl Executor for CouncilAnswerProbe {
+                fn council_parallelism(&self) -> usize {
+                    self.probe.council_parallelism()
+                }
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    let binary = request.argv[0].clone();
+                    let git = binary == "git";
+                    let workdir = request.cwd.clone();
+                    let mut result = self.probe.execute(request, stop)?;
+                    if git {
+                        return Ok(result);
+                    }
+                    let prompt = {
+                        let calls = self.probe.calls.lock().unwrap();
+                        let own = calls
+                            .iter()
+                            .find(|call| call.request.cwd == workdir)
+                            .unwrap();
+                        String::from_utf8_lossy(&own.prompt).into_owned()
+                    };
+                    let synthesis = prompt.contains("Synthesize these independent answers.");
+                    result.stdout = if synthesis {
+                        b"Decision: proceed safely\nEvidence: tracked contract\nRemaining disagreements: none\nVerification: cargo test\n".to_vec()
+                    } else if binary == "claude" {
+                        format!(
+                            "Alternatives: keep or refactor\nEvidence: tracked contract\nSee {}\nCounterargument: edge cases\nVerification: cargo test\nChanged from previous round: none\nRemaining disagreements: none\n",
+                            self.home_line
+                        )
+                        .into_bytes()
+                    } else {
+                        b"Alternatives: keep current API\nEvidence: unit tests\nCounterargument: migration cost\nVerification: cargo test\nChanged from previous round: none\nRemaining disagreements: none\n".to_vec()
+                    };
+                    if self.native {
+                        result.stdout = native_provider_answer(&binary, &result.stdout);
+                    }
+                    Ok(result)
+                }
+            }
+            let council_repo = provider_repo();
+            let council_probe = CouncilAnswerProbe {
+                probe: ProviderProbe::default(),
+                home_line: home_first.clone(),
+                native: false,
+            };
+            let council_out = oms_command_peer::run_with_executor(
+                "peer-ask",
+                &args(&[
+                    "--providers",
+                    "codex,claude",
+                    "--debate",
+                    "1",
+                    "--synthesize",
+                    "claude",
+                    "--thread",
+                    "th-council-redacted",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "council clean question",
+                ]),
+                &council_repo.0,
+                source,
+                &STOP,
+                &council_probe,
+            );
+            assert_eq!(council_out.0, 0, "{}", message(&council_out));
+            let council_stdout = std::str::from_utf8(&council_out.1).unwrap();
+            let council_stderr = std::str::from_utf8(&council_out.2).unwrap();
+            assert!(!council_stdout.contains("rephrase"), "{council_stdout}");
+            assert!(!council_stderr.contains("rephrase"), "{council_stderr}");
+            assert!(!council_stdout.contains(&home_first), "{council_stdout}");
+            assert!(
+                council_stdout.contains("[oms-redacted:home-path]"),
+                "{council_stdout}"
+            );
+            assert!(council_stdout.contains("synthesis:"), "{council_stdout}");
+            for observed in council_probe.probe.calls.lock().unwrap().iter() {
+                let sent = std::str::from_utf8(&observed.prompt).unwrap();
+                assert!(!sent.contains(&home_first), "{sent}");
+            }
+            let council_thread_log = fs::read_to_string(
+                council_repo
+                    .0
+                    .join(".oms/threads/th-council-redacted.jsonl"),
+            )
+            .unwrap();
+            assert!(
+                council_thread_log.contains("[oms-redacted:home-path]")
+                    && !council_thread_log.contains(&home_first)
+                    && !council_thread_log.contains("rephrase"),
+                "{council_thread_log}"
+            );
+            let ask_artifacts = oms_command_peer::storage::names(
+                &council_repo.0,
+                Path::new(".oms/artifacts/ask"),
+                ".md",
+            )
+            .unwrap();
+            let claude_artifacts: Vec<_> = ask_artifacts
+                .iter()
+                .filter(|name| name.starts_with("claude-"))
+                .collect();
+            assert!(!claude_artifacts.is_empty(), "{ask_artifacts:?}");
+            for name in claude_artifacts {
+                let raw = fs::read_to_string(council_repo.0.join(".oms/artifacts/ask").join(name))
+                    .unwrap();
+                assert!(raw.contains(&home_first), "{name}: {raw}");
+            }
+
+            let typed_council_repo = provider_repo();
+            let typed_council_probe = CouncilAnswerProbe {
+                probe: ProviderProbe::default(),
+                home_line: home_first.clone(),
+                native: true,
+            };
+            let typed_council_out = oms_command_peer::run_with_executor(
+                "peer-ask",
+                &args(&[
+                    "--providers",
+                    "codex:model=first,claude:model=second",
+                    "--debate",
+                    "1",
+                    "--deliberation",
+                    "--require-complete",
+                    "--synthesis-json",
+                    "--synthesize",
+                    "codex:model=exact-synthesis",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "typed council clean question",
+                ]),
+                &typed_council_repo.0,
+                source,
+                &STOP,
+                &typed_council_probe,
+            );
+            assert_eq!(typed_council_out.0, 0, "{}", message(&typed_council_out));
+            let typed_stdout = std::str::from_utf8(&typed_council_out.1).unwrap();
+            let typed_stderr = std::str::from_utf8(&typed_council_out.2).unwrap();
+            assert!(!typed_stdout.contains("rephrase"), "{typed_stdout}");
+            assert!(!typed_stderr.contains("rephrase"), "{typed_stderr}");
+            assert!(!typed_stdout.contains(&home_first), "{typed_stdout}");
+            let typed_report: serde_json::Value =
+                serde_json::from_slice(&typed_council_out.1).unwrap();
+            assert_eq!(typed_report["kind"], "oms-council-synthesis");
+            for observed in typed_council_probe.probe.calls.lock().unwrap().iter() {
+                let sent = std::str::from_utf8(&observed.prompt).unwrap();
+                assert!(!sent.contains(&home_first), "{sent}");
+                if sent.contains("Critique the previous positions")
+                    || sent.contains("Synthesize these independent answers.")
+                {
+                    assert!(sent.contains("[oms-redacted:home-path]"), "{sent}");
+                }
+            }
+            let typed_claude_artifacts: Vec<_> = oms_command_peer::storage::names(
+                &typed_council_repo.0,
+                Path::new(".oms/artifacts/ask"),
+                ".md",
+            )
+            .unwrap()
+            .into_iter()
+            .filter(|name| name.starts_with("claude-"))
+            .collect();
+            assert_eq!(typed_claude_artifacts.len(), 2);
+            for name in &typed_claude_artifacts {
+                let raw =
+                    fs::read_to_string(typed_council_repo.0.join(".oms/artifacts/ask").join(name))
+                        .unwrap();
+                assert!(raw.contains(&home_first), "{name}: {raw}");
+            }
+
+            struct ReviewAuditProbe {
+                probe: ProviderProbe,
+                home_line: String,
+            }
+            impl Executor for ReviewAuditProbe {
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    let binary = request.argv[0].clone();
+                    let git = binary == "git";
+                    let mut result = self.probe.execute(request, stop)?;
+                    if git {
+                        return Ok(result);
+                    }
+                    result.stdout = if binary == "codex" {
+                        format!(
+                            "See {}\n```findings\n{{\"file\":\"hooks/pre-commit\",\"line\":1,\"severity\":\"blocking\",\"summary\":\"check hook\",\"quote\":\"changed\"}}\n```\nChanged from previous round:\nnone\nCONFIDENCE: 0.9\nGATE: fail\n",
+                            self.home_line
+                        )
+                        .into_bytes()
+                    } else {
+                        b"Advisory security check complete.\n".to_vec()
+                    };
+                    Ok(result)
+                }
+            }
+            let review_repo = provider_repo();
+            review_repo.write("hooks/pre-commit", "baseline\n");
+            review_repo.git(&["add", "hooks/pre-commit"]);
+            review_repo.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "add hook",
+            ]);
+            review_repo.write("hooks/pre-commit", "changed\n");
+            let review_probe = ReviewAuditProbe {
+                probe: ProviderProbe::default(),
+                home_line: home_first.clone(),
+            };
+            let review_out = oms_command_peer::run_with_executor(
+                "peer-review",
+                &args(&[
+                    "--providers",
+                    "codex",
+                    "--debate",
+                    "1",
+                    "--gate",
+                    "--no-verify",
+                    "--security-audit",
+                    "claude",
+                    "--writer",
+                    "antigravity",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "--no-graph-context",
+                    "check review redaction",
+                ]),
+                &review_repo.0,
+                source,
+                &STOP,
+                &review_probe,
+            );
+            assert_eq!(review_out.0, 1, "{}", message(&review_out));
+            let review_stdout = std::str::from_utf8(&review_out.1).unwrap();
+            let review_stderr = std::str::from_utf8(&review_out.2).unwrap();
+            assert!(!review_stdout.contains("rephrase"), "{review_stdout}");
+            assert!(!review_stderr.contains("rephrase"), "{review_stderr}");
+            assert!(!review_stdout.contains(&home_first), "{review_stdout}");
+            assert!(
+                review_stdout.contains("[oms-redacted:home-path]")
+                    && review_stdout.contains("security: recorded (advisory)"),
+                "{review_stdout}"
+            );
+            for observed in review_probe.probe.calls.lock().unwrap().iter() {
+                let sent = std::str::from_utf8(&observed.prompt).unwrap();
+                assert!(!sent.contains(&home_first), "{sent}");
+            }
+            let finding_logs = oms_command_peer::storage::names(
+                &review_repo.0,
+                Path::new(".oms/artifacts/review"),
+                ".jsonl",
+            )
+            .unwrap();
+            assert_eq!(finding_logs.len(), 1);
+            let finding_rows = oms_command_peer::storage::load(
+                &review_repo.0,
+                &Path::new(".oms/artifacts/review").join(&finding_logs[0]),
+            )
+            .unwrap();
+            assert_eq!(finding_rows.len(), 1);
+            assert_eq!(finding_rows[0].get("file").text(), Some("hooks/pre-commit"));
+
+            let withheld_repo = provider_repo();
+            let overflow_answer = format!("See {home_first}\n").repeat(oms_scrub::MAX_HITS + 1);
+            let withheld_probe = ProviderProbe {
+                answer: Some(overflow_answer.into_bytes()),
+                ..Default::default()
+            };
+            let withheld_out = oms_command_peer::run_with_executor(
+                "consult",
+                &args(&[
+                    "--to",
+                    "claude",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "overflow answer question",
+                ]),
+                &withheld_repo.0,
+                source,
+                &STOP,
+                &withheld_probe,
+            );
+            assert_eq!(withheld_out.0, 0, "{}", message(&withheld_out));
+            let withheld_stdout = std::str::from_utf8(&withheld_out.1).unwrap();
+            let withheld_stderr = std::str::from_utf8(&withheld_out.2).unwrap();
+            assert!(!withheld_stdout.contains("rephrase"), "{withheld_stdout}");
+            assert!(!withheld_stderr.contains("rephrase"), "{withheld_stderr}");
+            assert!(!withheld_stdout.contains(&home_first), "{withheld_stdout}");
+            let withheld_artifacts = oms_command_peer::storage::names(
+                &withheld_repo.0,
+                Path::new(".oms/artifacts/consult"),
+                ".md",
+            )
+            .unwrap();
+            assert_eq!(withheld_artifacts.len(), 1);
+            let withheld_artifact = withheld_repo
+                .0
+                .join(".oms/artifacts/consult")
+                .join(&withheld_artifacts[0]);
+            assert!(
+                fs::read_to_string(&withheld_artifact)
+                    .unwrap()
+                    .contains(&home_first)
+            );
+            assert!(
+                withheld_stdout.contains(&format!(
+                    "[oms-redacted:withheld] answer withheld by the shared content scan; recorded artifact: {}",
+                    withheld_artifact.display()
+                )),
+                "{withheld_stdout}"
+            );
+            for extra in [&[][..], &["--dry-run"][..]] {
+                let blocked_probe = ProviderProbe::default();
+                let mut blocked_args = vec![
+                    "--to",
+                    "claude",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                ];
+                blocked_args.extend_from_slice(extra);
+                let blocked_prompt = format!("inspect {home_first}");
+                blocked_args.push(&blocked_prompt);
+                let blocked = oms_command_peer::run_with_executor(
+                    "consult",
+                    &args(&blocked_args),
+                    &consult_repo.0,
+                    source,
+                    &STOP,
+                    &blocked_probe,
+                );
+                assert_eq!(blocked.0, 3, "{extra:?}: {}", message(&blocked));
+                assert!(blocked.1.is_empty());
+                assert!(blocked_probe.calls.lock().unwrap().is_empty());
+                assert_eq!(
+                    std::str::from_utf8(&blocked.2).unwrap(),
+                    "error: outbound prompt blocked by the shared content scan; rephrase private content\n"
+                );
             }
             assert!(fs::read_dir(std::env::temp_dir()).unwrap().all(|entry| {
                 let name = entry.unwrap().file_name();
@@ -4691,10 +5282,12 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
             env_override: Option<PathBuf>,
             effective_stdout: String,
             slot_lock_busy: bool,
+            heartbeat: Option<oms_command_peer::process::AttemptHeartbeat>,
         }
         struct EnvRecorder {
             repo: PathBuf,
             mutate: AtomicBool,
+            git_calls: std::sync::atomic::AtomicUsize,
             calls: Mutex<Vec<ObservedCall>>,
         }
         impl Executor for EnvRecorder {
@@ -4710,8 +5303,14 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                     .unwrap_or("")
                     .to_owned();
                 if prog.ends_with("git") {
+                    assert!(
+                        request.heartbeat.is_none(),
+                        "git helper invocation must not carry attempt heartbeat"
+                    );
+                    self.git_calls.fetch_add(1, Ordering::SeqCst);
                     return oms_command_peer::process::Native.execute(request, interrupted);
                 }
+                let heartbeat = request.heartbeat.clone();
                 let env_override = request
                     .environment
                     .iter()
@@ -4756,6 +5355,7 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                     env_override,
                     effective_stdout,
                     slot_lock_busy,
+                    heartbeat,
                 });
                 Ok(completed)
             }
@@ -4865,6 +5465,7 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
         let recorder = EnvRecorder {
             repo: repo.0.clone(),
             mutate: AtomicBool::new(true),
+            git_calls: std::sync::atomic::AtomicUsize::new(0),
             calls: Mutex::new(Vec::new()),
         };
         let verify_cmd = "printf '%s' \"${CARGO_TARGET_DIR-<unset>}\"";
@@ -4963,6 +5564,24 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
 
         let is_temp_tree =
             |cwd: &Path| cwd.starts_with(repo.0.join(".oms/tmp")) && cwd.ends_with("tree");
+        assert!(recorder.git_calls.load(Ordering::SeqCst) > 0);
+        let (_, attempts) = oms_command_operations::load_projection(&repo.0).unwrap();
+        let attempt_for = |tool: &str| {
+            attempts
+                .iter()
+                .find(|row| row.get("tool").text() == Some(tool))
+                .and_then(|row| row.get("attempt_id").text())
+                .unwrap()
+                .to_owned()
+        };
+        let delegate_attempt = oms_command_peer::process::AttemptHeartbeat {
+            repo: repo.0.clone(),
+            attempt: attempt_for("peer-delegate"),
+        };
+        let review_attempt = oms_command_peer::process::AttemptHeartbeat {
+            repo: repo.0.clone(),
+            attempt: attempt_for("peer-review"),
+        };
         let calls = recorder.calls.lock().unwrap();
         assert_eq!(
             calls.len(),
@@ -4975,6 +5594,12 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
         assert_eq!(calls[3].prog, "bash");
         assert_eq!(calls[4].prog, "bash");
         assert_eq!(calls[5].prog, "bash");
+        assert_eq!(calls[0].heartbeat.as_ref(), Some(&delegate_attempt));
+        assert_eq!(calls[1].heartbeat.as_ref(), Some(&delegate_attempt));
+        assert_eq!(calls[2].heartbeat.as_ref(), Some(&review_attempt));
+        assert_eq!(calls[3].heartbeat, None);
+        assert_eq!(calls[4].heartbeat, None);
+        assert_eq!(calls[5].heartbeat, None);
         assert_eq!(calls[0].cwd, calls[1].cwd);
         for idx in [0, 1, 2, 4, 5] {
             assert!(
@@ -8340,6 +8965,14 @@ fn peer_delegate_help_flags_parse_and_do_not_always_refuse_and_next_step_require
                     "--context-pack" => {
                         call.extend(["--context-pack".into(), pack_path.to_str().unwrap().into()]);
                     }
+                    "--expected-context-pack-sha256" => {
+                        call.extend([
+                            "--context-pack".into(),
+                            pack_path.to_str().unwrap().into(),
+                            "--expected-context-pack-sha256".into(),
+                            oms_command_plan::json::sha(fs::read(&pack_path).unwrap()),
+                        ]);
+                    }
                     _ if !*takes_value => {
                         call.push(opt.clone());
                     }
@@ -8453,6 +9086,8 @@ fn native_lead_answer_fixture(provider: &str) {
             ("OMS_PEER_LEAD_OBSERVATION", &op),
             ("TEST_LEAD_PROVIDER", provider),
             ("OMS_PEER_CANCEL_DIR", path.to_str().unwrap()),
+            // Only a run whose own receipts name this session counts as resumed.
+            ("OMS_RESUME_SESSION", "12345678-1234-4234-8234-123456789abc"),
         ],
         || {
             let dir = PathBuf::from(std::env::var_os("OMS_PEER_CANCEL_DIR").unwrap());
@@ -8501,7 +9136,7 @@ fn native_lead_answer_fixture(provider: &str) {
                 ("agy",serde_json::json!({"status":"SUCCESS","conversation_id":id,"response":"actual fixture answer"}).to_string())
             };
             let fixture_script = format!(
-                "#!/bin/sh\n[ -z \"$OMS_PEER_LEAD_OBSERVATION\" ] || exit 6\ncat >/dev/null\ncat <<'END'\n{stream}\nEND\n"
+                "#!/bin/sh\n[ -z \"$OMS_PEER_LEAD_OBSERVATION\" ] || exit 6\nfor a; do [ \"$a\" = --include-partial-messages ] && p=1; done; echo ${{p:-0}} >> \"$HOME/provider-argv\"\ncat >/dev/null\ncat <<'END'\n{stream}\nEND\n"
             );
             fs::write(
                 PathBuf::from(std::env::var_os("HOME").unwrap())
@@ -8515,6 +9150,13 @@ fn native_lead_answer_fixture(provider: &str) {
             assert!(!generic.join("native-lead-observation.json").exists());
             let answers = dir.join("answers");
             success(run_peer(&answers));
+            // Only the owner's Claude call asks for partial messages to stream.
+            let argv = fs::read_to_string(
+                PathBuf::from(std::env::var_os("HOME").unwrap()).join("provider-argv"),
+            )
+            .unwrap();
+            let partial: Vec<_> = argv.lines().map(|l| l == "1").collect();
+            assert_eq!(partial, [false, provider == "claude"], "{argv}");
             let receipt = answers.join("native-lead-observation.json");
             let bytes = fs::read(&receipt).unwrap();
             let row: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -8533,6 +9175,50 @@ fn native_lead_answer_fixture(provider: &str) {
                 fs::metadata(&receipt).unwrap().permissions().mode() & 0o077,
                 0
             );
+            let prompt_of = |artifact: &Path| {
+                let text = fs::read_to_string(artifact).unwrap();
+                text.split("\n## Output\n").next().unwrap().to_owned()
+            };
+            let replayed = prompt_of(&answers.join(row["artifact"].as_str().unwrap()));
+            assert!(
+                replayed.matches("Read this fixture").count() > 1,
+                "{replayed}"
+            );
+            // A verified resumed session gets only the new message, no thread replay.
+            let known: Vec<_> = fs::read_dir(&answers)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            for (name, mut value) in [("meta.json", meta), ("launch.json", launch)] {
+                value["lead_resume"] = serde_json::json!(id);
+                fs::write(dir.join(name), value.to_string()).unwrap();
+            }
+            success(run(
+                &repo,
+                source,
+                "peer-ask",
+                &[
+                    "--providers",
+                    provider,
+                    "--thread",
+                    op,
+                    "--no-current",
+                    "--prompt",
+                    "Continue the fixture",
+                    "--artifact-dir",
+                    answers.to_str().unwrap(),
+                    "--no-task",
+                    "--no-memory",
+                ],
+            ));
+            let resumed = fs::read_dir(&answers)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| !known.contains(p) && p.extension().is_some_and(|x| x == "md"))
+                .unwrap();
+            let resumed = prompt_of(&resumed);
+            assert!(resumed.contains("Continue the fixture"), "{resumed}");
+            assert!(!resumed.contains("Read this fixture"), "{resumed}");
         },
     )
 }

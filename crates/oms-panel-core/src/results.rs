@@ -2415,7 +2415,7 @@ fn call_ending(row: &Value) -> Option<&'static str> {
         None
     }
 }
-fn answer(bytes: &[u8]) -> Result<String> {
+fn raw_answer(bytes: &[u8]) -> Result<String> {
     let raw = std::str::from_utf8(bytes).map_err(Error::new)?;
     let mut body = String::new();
     let mut reading = false;
@@ -2458,7 +2458,12 @@ fn answer(bytes: &[u8]) -> Result<String> {
         selected.push_str(line);
         selected.push('\n');
     }
-    Ok(crate::value::redact(selected.as_bytes())?.trim().into())
+    Ok(selected)
+}
+fn answer(bytes: &[u8]) -> Result<String> {
+    Ok(crate::value::redact(raw_answer(bytes)?.as_bytes())?
+        .trim()
+        .into())
 }
 fn awaiting_land(task: &str, attempts: &[Value], rows: &[Value]) -> bool {
     let patches = rows
@@ -2660,6 +2665,12 @@ fn round_delta(store: &Store, attempts: &[Value], rows: &[&Value]) -> Option<Val
 /// an indexed artifact whose location and content digest have been verified.
 pub fn indexed_answer(store: &Store, row: &Value) -> Result<String> {
     answer(&indexed_artifact(store, row)?)
+}
+
+/// Extract the verified answer slice without per-line redaction so whole-body
+/// outbound scanners see the exact retained bytes before paging.
+pub fn unredacted_indexed_answer(store: &Store, row: &Value) -> Result<String> {
+    Ok(raw_answer(&indexed_artifact(store, row)?)?.trim().into())
 }
 
 pub fn indexed_artifact(store: &Store, row: &Value) -> Result<Vec<u8>> {

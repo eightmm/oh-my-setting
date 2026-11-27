@@ -1161,7 +1161,9 @@ and when it finishes (for example, `~12.3k in / 2.3k out` and
 (for example, `cached 13.4m, new 495.4k`). When output usage is unavailable, the
 row falls back to `N tok`. Input, cache and output are summed when the provider
 reports a breakdown, so Claude and Codex compare. Unknown usage leaves the row
-cell blank; missing data is never shown as 0. Narrow panes keep the short form
+cell blank; missing data is never shown as 0. A board whose listed rows all lack a
+total drops the `— tok` placeholder column and gives the width to the call; once any row
+reports, unknown rows show `— tok` again so the column stays aligned. Narrow panes keep the short form
 or drop it before clipping the call's name.
 
 A Claude main's own subagents (Agent tool and workflow runs) appear as read-only rows
@@ -2913,10 +2915,13 @@ Both are display-only.
 
 Provider errors are labeled `failed`. Failed items open a reader with the ending,
 errors, kept worktree and a salvage hint when applicable. Within a class the newest
-comes first. Above the board a header such as `Attention 7 · 1 needs you · 2 failed · 3
-decide · 1 stale` (zero classes dropped; narrower widths shorten the words to `1 you · 2
-fail · 3 dec`, then `Attention 7`) opens the Attention tab and is followed by the top
-three items. The `Attention N` tab groups every item under a class heading; arrows pick
+comes first. Above the board a header such as `Attention · 1 needs you · oldest 25m · 2
+failed · 3 decide · 1 stale` opens the Attention tab and is followed by the top three
+items. What a person acts on leads in the title color: `needs you` with the oldest
+recorded wait across every needs-you item (omitted when none has a timestamp), then
+`failed`; Main-handled classes follow muted (no color, no dimming). The total moves to
+the `N new / N` tag. Zero classes drop; narrower widths drop `oldest` first, then shorten
+the words to `1 you · 2 fail · 3 dec`, then show `Attention 7`. The `Attention N` tab groups every item under a class heading; arrows pick
 one, Enter or a click shows it in Detail, and `f` opens a call's full result on the
 right.
 
@@ -3061,8 +3066,12 @@ main reviewed a result instead of showing internal fields.
 card opens its proven original conversation. Calls with no known main are counted on one
 warning row (`t` lists them in the tree). Within advisors and within workers, calls waiting on the
 person (needs approval, needs input, awaiting decision) sort first, then running, then failed. The
-Activity heading counts the calls the board draws and adds `N past` for the settled ones in the Past
-tab; with none drawn, a dim row says `No active calls` or `No calls yet`. Past rows dim the call
+Activity heading (the provider name alone, or `Provider · Lead chat [N] · model` when its
+Lead chat is connected) counts the calls the board draws and adds `N past` for the settled ones in the Past
+tab; with none drawn, a dim row says `No active calls` or `No calls yet`. In the default Overview, a
+call whose printed row repeats an earlier one (same provider, role, label, title, state and
+model) folds into it: the kept row ends with `×N` and the rest count toward `N folded (Tab
+all)`. Identical rows that need attention fold too, keeping the oldest attempt in view; the Attention list (`b`) still lists each one. Native children never fold, since identical ones mark an ambiguous roster match. Selection walks the same folded rows; Tab All and filters list every attempt. Past rows dim the call
 name and keep the state tag's color.
 
 ### Single-main and recovery guards

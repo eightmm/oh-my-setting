@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 const FEEDBACK_REPAIRS: &str = ".oms/feedback/repairs.jsonl";
+const LATE_RESULTS: &str = ".oms/plan/late-results.jsonl";
 
 fn feedback_reference(task: &Value) -> Result<Option<String>> {
     // The title is part of the existing reviewed task/proposal and rendered
@@ -165,6 +166,7 @@ fn repair_feedback(
     expected: &oms_command_plan::ReviewFence,
     route: &Value,
     wall: Duration,
+    intent: Option<&Value>,
 ) -> Result<Option<Output>> {
     if !args.flag("land") || !args.flag("auto-repair") {
         return Ok(None);
@@ -272,7 +274,8 @@ fn repair_feedback(
         "feedback repair response lacks exact reviewed lease evidence",
     )?;
     feedback_record(ctx, &claim, "acknowledged")?;
-    let expected = review_fence(ctx, &repaired, head)?;
+    let land_head = current_landing_base(ctx, head, intent)?;
+    let expected = review_fence(ctx, &repaired, &land_head)?;
     let landed = land(ctx, args, &repaired, &expected, wall)?;
     let code = landed.code;
     out.append(landed);
@@ -298,6 +301,95 @@ fn show(ctx: &Context<'_>, id: &str) -> Result<Value> {
     require(out.code == 0, "cannot read plan task")?;
     value::parse(&out.stdout)
 }
+
+fn current_landing_base(
+    ctx: &Context<'_>,
+    initial: &str,
+    intent: Option<&Value>,
+) -> Result<String> {
+    if intent.is_some() {
+        return Ok(initial.to_owned());
+    }
+    let head = ctx.git(&["rev-parse", "HEAD"])?;
+    if head != initial {
+        require(
+            ctx.plan()?.git().ancestor(initial, &head).is_ok(),
+            format!(
+                "Plan delegation base {initial} is not an ancestor of current HEAD {head}; release the task and rerun"
+            ),
+        )?;
+    }
+    Ok(head)
+}
+
+fn recover_stale_delegate(
+    ctx: &Context<'_>,
+    id: &str,
+    lease: &str,
+    since: usize,
+    resume: bool,
+) -> Option<(Value, bool)> {
+    if lease.is_empty() {
+        return None;
+    }
+    let rows = ctx.rows(LATE_RESULTS).ok()?;
+    let row = rows
+        .get(since..)
+        .unwrap_or(&[])
+        .iter()
+        .rev()
+        .find(|row| {
+            value::text(row, "reason") == "stale_delegate_binding"
+                && value::text(row, "task_id") == id
+                && value::text(row, "supplied_lease_id") == lease
+        })?
+        .clone();
+    let mut released = false;
+    if !resume {
+        let _gate = ctx.gates.map(crate::storage::Gates::plan);
+        for state in ["running", "claimed"] {
+            if ctx
+                .action(
+                    &Request::new(Action::RecoverLease)
+                        .with("id", id)
+                        .with("lease-id", lease)
+                        .with("expected-state", state),
+                )
+                .is_ok_and(|out| out.code == 0)
+            {
+                released = true;
+                break;
+            }
+        }
+    }
+    Some((row, released))
+}
+
+fn format_stale_delegate(
+    id: &str,
+    row: &Value,
+    state: &str,
+    released: bool,
+    include_error: bool,
+) -> String {
+    let condition = {
+        let c = value::text(row, "condition");
+        if c.is_empty() { "binding" } else { c }
+    };
+    let artifact = value::text(row, "artifact");
+    let patch = value::text(row, "patch");
+    let mut text = String::new();
+    if include_error {
+        text.push_str(&format!(
+            "error: stale delegate binding ({condition}); late result preserved in {LATE_RESULTS} (task={id} artifact={artifact} patch={patch})\n"
+        ));
+    }
+    text.push_str(&format!(
+        "plan-run: late-result task={id} condition={condition} state={} artifact={artifact} patch={patch} ledger={LATE_RESULTS}\n",
+        if released { "ready" } else { state }
+    ));
+    text
+}
 fn route(ctx: &Context<'_>, task: &Value, args: &Args) -> Result<Value> {
     let defaults = json!({"provider": ctx.services.normalize_provider(args.required("to")?)?, "model": args.text("model")?, "fallback_model": args.text("fallback-model")?, "reasoning_effort": args.get("reasoning-effort", "auto")?, "workload": "standard"});
     let task = oms_context::parse_json(&value::canonical(task)?)
@@ -322,6 +414,14 @@ fn delegate(
     head: &str,
     wall: Duration,
 ) -> Result<(Output, Option<Value>)> {
+    if let Some(excerpt) = context_pack(ctx, args)? {
+        excerpt.check_task(
+            &ctx.state,
+            &value::plan(task)?,
+            value::text(route, "provider"),
+            false,
+        )?;
+    }
     let id = value::text(task, "id");
     require(
         ctx.git(&["rev-parse", "HEAD"])? == head,
@@ -361,6 +461,12 @@ fn delegate(
     if args.has("context-pack") {
         call.push("--context-pack".into());
         call.push(args.values["context-pack"].clone());
+    }
+    if args.has("expected-context-pack-sha256") {
+        call.extend([
+            "--expected-context-pack-sha256".into(),
+            args.values["expected-context-pack-sha256"].clone(),
+        ]);
     }
     if let Some(artifact) = artifact {
         call.extend([
@@ -476,6 +582,48 @@ fn land(
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     execute_bound(ctx, args, None)
 }
+fn context_pack(
+    ctx: &Context<'_>,
+    args: &Args,
+) -> Result<Option<oms_command_plan::reviewed_context::LeadExcerpt>> {
+    if !args.has("context-pack") {
+        return Ok(None);
+    }
+    let pack = ctx.services.validate_context_pack(
+        &ctx.state,
+        &args.path("context-pack", &ctx.repo),
+        ctx.interrupted,
+    )?;
+    if args.has("expected-context-pack-sha256") {
+        require(
+            value::text(&pack, "sha256") == args.required("expected-context-pack-sha256")?,
+            "context pack bytes changed before Plan claim or dispatch",
+        )?;
+    }
+    let Some(findings) = pack.get("lead_findings") else {
+        return Ok(None);
+    };
+    require(
+        args.has("expected-context-pack-sha256")
+            && args.has("expected-task-sha256")
+            && args.has("id")
+            && !args.flag("parallel")
+            && !args.flag("next"),
+        "reviewed Lead context requires an exact serial task and pinned context pack",
+    )?;
+    let excerpt =
+        oms_command_plan::reviewed_context::LeadExcerpt::parse(&value::canonical(findings)?)?;
+    excerpt.check_project(&ctx.state)?;
+    excerpt.check_room(&std::env::var("OMS_ROOM_ID").unwrap_or_default())?;
+    require(
+        excerpt.target().text("task_id") == args.required("id")?
+            && excerpt.target().text("task_sha256") == args.required("expected-task-sha256")?
+            && excerpt.target().text("provider")
+                == ctx.services.normalize_provider(args.required("to")?)?,
+        "reviewed Lead context differs from the selected Plan task or provider",
+    )?;
+    Ok(Some(excerpt))
+}
 /// Validation shared by the serial and parallel entry points; returns the
 /// provider wall bound.
 pub(crate) fn preflight(ctx: &Context<'_>, args: &Args) -> Result<Duration> {
@@ -496,16 +644,12 @@ pub(crate) fn preflight(ctx: &Context<'_>, args: &Args) -> Result<Duration> {
     if args.has("allow-floor-change") {
         verify::reason(args.required("allow-floor-change")?)?;
     }
-    if args.has("context-pack") {
-        ctx.services.validate_context_pack(
-            &ctx.repo,
-            &args.path("context-pack", &ctx.repo),
-            ctx.interrupted,
-        )?;
-    }
+    context_pack(ctx, args)?;
     ctx.git(&["rev-parse", "--git-dir"])?;
+    // The wall is forwarded to peer-delegate as OMS_PEER_TIMEOUT, so a shorter
+    // default here would cut peer-delegate's own 20-minute write default.
     ctx.peer_wall.map_or_else(
-        || verify::duration(&std::env::var("OMS_PEER_TIMEOUT").unwrap_or_else(|_| "5m".into())),
+        || verify::duration(&std::env::var("OMS_PEER_TIMEOUT").unwrap_or_else(|_| "20m".into())),
         Ok,
     )
 }
@@ -624,6 +768,9 @@ pub(crate) fn run_task(
         route["reasoning_effort"] = resolved.effort.clone().into();
         route["fallback_effort"] = resolved.fallback_effort.clone().into();
         let provider = value::text(&route, "provider");
+        if let Some(excerpt) = context_pack(ctx, args)? {
+            excerpt.check_task(&ctx.state, &value::plan(&task)?, provider, true)?;
+        }
         let state = value::text(&task, "state");
         let resume = state == "claimed"
             && task["repair_count"].as_u64() == Some(1)
@@ -682,30 +829,11 @@ pub(crate) fn run_task(
             .is_empty(),
             "floor_incompatible_verifier: task verify reads content it may modify",
         )?;
-        let mut stable = serde_json::Map::new();
-        for key in [
-            "id",
-            "title",
-            "brief",
-            "depends",
-            "allowed_paths",
-            "forbidden_paths",
-            "verify",
-            "role",
-            "assignment",
-        ] {
-            if key != "assignment"
-                || task
-                    .get(key)
-                    .is_some_and(|v| v.as_object().is_some_and(|o| !o.is_empty()))
-            {
-                stable.insert(key.into(), task.get(key).cloned().unwrap_or(Value::Null));
-            }
-        }
+        let contract = oms_command_plan::reviewed_context::task_contract(&value::plan(&task)?)?;
         let identity = format!(
             "plan-run task={id} base={base} provider={provider} verify={} contract={} route={}",
             &value::hash(&verify)[..16],
-            &value::hash(value::canonical(&Value::Object(stable))?)[..16],
+            &contract[..16],
             &value::hash(resolved.contract())[..16]
         );
         let failure = invoke(
@@ -760,7 +888,8 @@ pub(crate) fn run_task(
             } else {
                 None
             };
-            let (delegated, reviewed) = delegate(
+            let late_before = ctx.rows(LATE_RESULTS).map(|rows| rows.len()).unwrap_or(0);
+            let (delegated, reviewed) = match delegate(
                 ctx,
                 args,
                 &task,
@@ -769,10 +898,47 @@ pub(crate) fn run_task(
                 review_artifact,
                 base,
                 wall,
-            )?;
+            ) {
+                Ok(pair) => pair,
+                Err(mut error) => {
+                    if let Some((row, released)) =
+                        recover_stale_delegate(ctx, &id, &lease, late_before, resume)
+                    {
+                        let state = show(ctx, &id)
+                            .map(|t| value::text(&t, "state").to_owned())
+                            .unwrap_or_else(|_| "unknown".into());
+                        let note = format_stale_delegate(
+                            &id,
+                            &row,
+                            &state,
+                            released,
+                            !error.message.contains("late result preserved"),
+                        );
+                        error.message = format!("{}\n{}", error.message, note.trim_end());
+                    }
+                    return Err(error);
+                }
+            };
             let code = delegated.code;
             output.append(delegated);
             if code != 0 {
+                if let Some((row, released)) =
+                    recover_stale_delegate(ctx, &id, &lease, late_before, resume)
+                {
+                    let state = show(ctx, &id)
+                        .map(|t| value::text(&t, "state").to_owned())
+                        .unwrap_or_else(|_| "unknown".into());
+                    let include_error =
+                        !String::from_utf8_lossy(&output.stderr).contains("late result preserved");
+                    output.stderr.extend_from_slice(
+                        format_stale_delegate(&id, &row, &state, released, include_error)
+                            .as_bytes(),
+                    );
+                    if resume {
+                        terminalize_repair(ctx, &id, &lease)?;
+                    }
+                    return Ok(output);
+                }
                 if resume {
                     terminalize_repair(ctx, &id, &lease)?;
                 }
@@ -803,16 +969,21 @@ pub(crate) fn run_task(
                 && !value::text(&task, "patch").is_empty(),
             "worker success lacks exact reviewed lease/patch evidence",
         )?;
+        let mut land_base = base.to_owned();
         let expected = if args.flag("land") {
             Some(match initial_review {
                 Some(expected) => expected,
-                None => review_fence(ctx, &task, base)?,
+                None => {
+                    land_base = current_landing_base(ctx, base, intent)?;
+                    review_fence(ctx, &task, &land_base)?
+                }
             })
         } else {
             None
         };
         if let Some(expected) = expected.as_ref()
-            && let Some(repaired) = repair_feedback(ctx, args, &task, expected, &route, wall)?
+            && let Some(repaired) =
+                repair_feedback(ctx, args, &task, expected, &route, wall, intent)?
         {
             output.append(repaired);
             return Ok(output);
@@ -855,7 +1026,7 @@ pub(crate) fn run_task(
                     &route,
                     0,
                     absolute.to_str(),
-                    base,
+                    &land_base,
                     wall,
                 )?;
                 let repair_code = repaired.code;
@@ -868,7 +1039,8 @@ pub(crate) fn run_task(
                             && task["repair_count"].as_u64() == Some(1),
                         "repair did not retain its exact one-shot review",
                     )?;
-                    let expected = review_fence(ctx, &task, base)?;
+                    land_base = current_landing_base(ctx, &land_base, intent)?;
+                    let expected = review_fence(ctx, &task, &land_base)?;
                     landed = land(ctx, args, &task, &expected, wall)?;
                 } else {
                     terminalize_repair(ctx, &id, &lease)?;

@@ -45,7 +45,9 @@ Projection inputs must be fresh bounded canonical reads and physical paths.
 `oms-work-inspect` validates the canonical status snapshot. Original JSON
 number spellings, unknown object fields and WTF-8 strings are retained by the
 JSON adapters. Assignment validation rejects controls and transport aliases;
-an explicit assignment overrides all route defaults, including empty models.
+an explicit assignment overrides all route defaults, including empty models;
+only when it has no `model` key and names the operator's provider do its absent
+`model`, `fallback_model` and `reasoning_effort` keys come from the operator route.
 No adapter authorizes acceptance, provider launches or task execution.
 
 ## Parent service contracts

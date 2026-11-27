@@ -100,7 +100,7 @@ impl Compiled {
         let bundle = root
             .read_no_follow(&bundle_path, bounded)
             .map_err(|_| invalid())?;
-        safety::outbound(&bundle)?;
+        safety::outbound_prompt(&bundle)?;
         let bundle_sha256 = storage::hash(&bundle);
         let attribution = manifest.get("request_attribution");
         let policy_sha256 = text(&manifest, "phase_rules_sha256").to_owned();

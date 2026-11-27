@@ -719,7 +719,7 @@ pub fn compile_bundle_with_root(
 }
 
 /// Validate a context pack before passing its contents to a provider.
-pub fn validate_context_pack(path: &Path, _repo: &Path) -> Result<Value> {
+pub fn validate_context_pack(path: &Path, repo: &Path) -> Result<Value> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -732,6 +732,13 @@ pub fn validate_context_pack(path: &Path, _repo: &Path) -> Result<Value> {
     let raw = root
         .read_os(name, 262144, oms_safe_fs::Policy::source())
         .map_err(|e| Error::new(format!("cannot read pack: {e:?}")))?;
+    let reviewed =
+        oms_command_plan::reviewed_context::from_pack(&raw).map_err(|e| Error::new(e.message))?;
+    if let Some(excerpt) = &reviewed {
+        excerpt
+            .check_project(repo)
+            .map_err(|e| Error::new(e.message))?;
+    }
     std::str::from_utf8(&raw).map_err(|_| Error::new("pack is not UTF-8"))?;
     use std::os::unix::ffi::OsStrExt;
     let mut env = Vec::new();
@@ -884,9 +891,11 @@ pub fn validate_context_pack(path: &Path, _repo: &Path) -> Result<Value> {
             "project_graph_revision is not a single bounded line",
         ));
     }
-    Ok(
-        json!({"schema":1,"path":path.to_string_lossy(),"pack_digest":digest,"project_graph_revision":revision,"file_count":files.len(),"files":files,"tests":tests,"test_cases":cases,"evidence":evidence,"sha256":sha(&raw)}),
-    )
+    let mut view = json!({"schema":1,"path":path.to_string_lossy(),"pack_digest":digest,"project_graph_revision":revision,"file_count":files.len(),"files":files,"tests":tests,"test_cases":cases,"evidence":evidence,"sha256":sha(&raw)});
+    if reviewed.is_some() {
+        view["lead_findings"] = pack["lead_findings"].clone();
+    }
+    Ok(view)
 }
 
 #[cfg(test)]
@@ -958,6 +967,47 @@ mod bridge_pack_tests {
             validate_context_pack(&path, &dir).unwrap()["file_count"],
             200
         );
+        let text = "Reviewed finding in src/a.py.";
+        let findings = json!({"schema":1,"kind":"reviewed-lead-answer","authority":"context-only",
+            "source":{"project_key":oms_command_plan::reviewed_context::project_key(&dir).unwrap(),"room":"review-room","participant":"ask-fixture","provider":"claude","lead_request_id":"lead-fixture","turn_id":"turn-fixture","operation":"ask-fixture","answer_sha256":"a".repeat(64),"page_offset":0,"page_bytes":text.len(),"page_cursor_sha256":sha(""),"answer_bytes":text.len()},
+            "selection":{"text":text,"offset":0,"bytes":text.len(),"sha256":sha(text)},
+            "target":{"task_id":"reviewed-task","task_sha256":"b".repeat(64),"contract_sha256":"c".repeat(64),"provider":"claude"}});
+        let pack = |finding: &Value| {
+            let digest = oms_command_plan::json::hash(
+                &oms_command_plan::json::parse(finding.to_string().as_bytes()).unwrap(),
+            )
+            .unwrap();
+            json!({"pack_digest":digest,"files":[],"lead_findings":finding})
+        };
+        std::fs::write(&path, pack(&findings).to_string()).unwrap();
+        assert_eq!(
+            validate_context_pack(&path, &dir).unwrap()["lead_findings"],
+            findings
+        );
+        for change in [
+            "version",
+            "oversized",
+            "range",
+            "digest",
+            "project",
+            "extra",
+        ] {
+            let mut finding = findings.clone();
+            match change {
+                "version" => finding["schema"] = json!(2),
+                "oversized" => {
+                    let text = "a".repeat(4097);
+                    finding["selection"] =
+                        json!({"text":text,"offset":0,"bytes":4097,"sha256":sha(&text)});
+                }
+                "range" => finding["selection"]["offset"] = json!(1),
+                "digest" => finding["selection"]["sha256"] = json!("f".repeat(64)),
+                "project" => finding["source"]["project_key"] = json!("f".repeat(64)),
+                _ => finding["authorityOverride"] = json!(true),
+            }
+            std::fs::write(&path, pack(&finding).to_string()).unwrap();
+            assert!(validate_context_pack(&path, &dir).is_err(), "{change}");
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
