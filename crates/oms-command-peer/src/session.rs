@@ -908,6 +908,7 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
                     oms_supervisor::process::PhysicalCall::new(&call_id)
                         .map_err(|e| Error::new(2, e))?,
                 ),
+                heartbeat: None,
             },
             context.interrupted,
         );

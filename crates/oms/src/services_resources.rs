@@ -1101,6 +1101,7 @@ mod tests {
                     merge: false,
                     physical_call: Some(tag.clone()),
                     launch_fence: None,
+                    heartbeat: None,
                 },
                 stop,
             )
@@ -1401,6 +1402,7 @@ mod tests {
                             merge: false,
                             physical_call: Some(tag.clone()),
                             launch_fence: None,
+                            heartbeat: None,
                         },
                         stop,
                     )

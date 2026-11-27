@@ -145,6 +145,7 @@ pub fn run_codex_hook_handoff(
         source: source_root,
         interrupted,
         executor: &process::Native,
+        heartbeat: None,
     };
     check(interrupted)
         .and_then(|()| session::handoff(args, &context, Some(transcript)))
@@ -171,6 +172,7 @@ pub fn run_with_executor(
             source: source_root,
             interrupted,
             executor,
+            heartbeat: None,
         };
         match tool {
             "output-digest" => digest::run(args, &context),
@@ -195,11 +197,18 @@ fn output_error(e: Error) -> Output {
     )
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct Context<'a> {
     pub cwd: &'a Path,
     pub source: &'a Path,
     pub interrupted: &'a AtomicBool,
     pub executor: &'a dyn process::Executor,
+    pub heartbeat: Option<&'a process::AttemptHeartbeat>,
+}
+impl<'a> Context<'a> {
+    pub(crate) fn with_heartbeat(&self, heartbeat: Option<&'a process::AttemptHeartbeat>) -> Self {
+        Self { heartbeat, ..*self }
+    }
 }
 pub(crate) fn check(interrupted: &AtomicBool) -> Result<()> {
     if interrupted.load(Ordering::Acquire) {
