@@ -1887,6 +1887,20 @@ in plan status and the panel. `patch-land` remains the default front door for si
 patches. It passes `--expected-landing-receipt-sha256` to `oms agent-plan finish`
 internally; this is a `finish` argument, not a `patch-land` option.
 
+Pre-start and provider-launch fences require the live checkout `HEAD` to match
+the delegation binding's `base_sha`. At bound `review`, when the plan id, lease,
+epoch, task digest and contracts still match and `HEAD` fast-forwarded (`base_sha`
+is an ancestor of `HEAD`, such as after `oms sync-shared`), the verified result
+is admitted to `review` with its retained `delegate_result` still bound to the
+original `base_sha`; `patch-land` and `plan-run --land` then re-admit and verify
+the patch against the current `HEAD`, refusing with a `release` hint if `HEAD`
+was rewritten to a non-ancestor. When bound `review` fails on a stale binding
+(`lease`, `task hash`, `contract`, or non-fast-forward `base drift`), it records
+a `stale_delegate_binding` row in `.oms/plan/late-results.jsonl` and names the
+task, repository-relative artifact/patch paths and failed condition; `plan-run`
+prints that diagnostic and recovers an unreplaced initial lease back to `ready`
+via `recover-lease` (leaving replacement claims and one-shot repairs untouched).
+
 Receipt discovery stays clone-local (linked worktrees share their canonical
 namespace). When an authorized main lands from a separate clone, it can use
 `oms land --handoff-receipt-to /path/to/shared-checkout` to import the producer's
