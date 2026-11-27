@@ -4,10 +4,12 @@ mod apptainer;
 use oms_command_plan::services::GroupMembership;
 use oms_supervisor::capture::{CaptureOptions, LimitAction};
 use oms_supervisor::process::{Progress, Reactor, Request, Scope, Streams};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 const ACCOUNT_ENUM_WALL: Duration = Duration::from_secs(10);
@@ -85,6 +87,57 @@ pub(crate) fn observed_host_generation_before(
     ))
 }
 
+const MAX_CACHED_GROUPS: usize = 32;
+const MAX_CACHED_MEMBER_UIDS: usize = 32;
+type GroupMembershipCache = RefCell<BTreeMap<u32, GroupMembership>>;
+
+thread_local! {
+    static PANEL_GROUP_CACHES: RefCell<Vec<Rc<GroupMembershipCache>>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) struct PanelSnapshotGroupScope(Rc<GroupMembershipCache>);
+
+impl PanelSnapshotGroupScope {
+    pub(crate) fn new() -> Self {
+        let cache = Rc::new(GroupMembershipCache::default());
+        PANEL_GROUP_CACHES.with_borrow_mut(|scopes| scopes.push(Rc::clone(&cache)));
+        Self(cache)
+    }
+}
+
+impl oms_command_state::PanelSnapshotScope for PanelSnapshotGroupScope {}
+
+impl Drop for PanelSnapshotGroupScope {
+    fn drop(&mut self) {
+        PANEL_GROUP_CACHES.with_borrow_mut(|scopes| scopes.retain(|c| !Rc::ptr_eq(c, &self.0)));
+    }
+}
+
+fn resolve_group_membership_cached_with(
+    gid: u32,
+    resolve: impl FnOnce(u32) -> oms_command_plan::Result<GroupMembership>,
+) -> oms_command_plan::Result<GroupMembership> {
+    // Keep the cache request-local even if the resolver enters a nested scope.
+    let cache = PANEL_GROUP_CACHES.with_borrow(|scopes| scopes.last().cloned());
+    let Some(cache) = cache else {
+        return resolve(gid);
+    };
+    if let Some(membership) = cache.borrow().get(&gid).cloned() {
+        return Ok(membership);
+    }
+    let membership = resolve(gid)?;
+    // Large shared groups still resolve normally without retaining their member lists.
+    if membership.explicit_member_uids.len() + membership.primary_member_uids.len()
+        <= MAX_CACHED_MEMBER_UIDS
+    {
+        let mut cache = cache.borrow_mut();
+        if cache.len() < MAX_CACHED_GROUPS {
+            cache.insert(gid, membership.clone());
+        }
+    }
+    Ok(membership)
+}
+
 /// Resolves group membership for private-group permission checks in
 /// `oms_command_plan` and `oms_runtime`, matching Python `_private_group`.
 ///
@@ -92,7 +145,9 @@ pub(crate) fn observed_host_generation_before(
 /// process with an explicit wall deadline and output bound so an unresponsive
 /// host directory service can never hang in-process permission checks.
 pub(crate) fn resolve_group_membership(gid: u32) -> oms_command_plan::Result<GroupMembership> {
-    resolve_group_membership_with(gid, &run_clean_probe)
+    resolve_group_membership_cached_with(gid, |gid| {
+        resolve_group_membership_with(gid, &run_clean_probe)
+    })
 }
 pub(crate) fn resolve_group_membership_before(
     gid: u32,
@@ -3662,6 +3717,85 @@ mod group_tests {
         );
         assert!(parse_nsswitch_databases(concat!("pass", "wd:\n").as_bytes()).is_err());
         assert!(parse_nsswitch_databases(b"broken-line\n").is_err());
+    }
+
+    fn membership(gid: u32, uid: u32) -> GroupMembership {
+        GroupMembership {
+            gid,
+            explicit_member_uids: Vec::new(),
+            primary_member_uids: vec![uid],
+        }
+    }
+
+    #[test]
+    fn group_membership_reuses_successes_per_gid_and_panel_scope() {
+        let lookup = |gid, uid| {
+            resolve_group_membership_cached_with(gid, |gid| Ok(membership(gid, uid))).unwrap()
+        };
+        assert_ne!(lookup(10, 1), lookup(10, 2));
+        {
+            let _scope = PanelSnapshotGroupScope::new();
+            let first = lookup(10, 3);
+            let second = lookup(20, 4);
+            assert_eq!(second.gid, 20);
+            assert_eq!(lookup(10, 5), first);
+            assert_eq!(lookup(20, 5), second);
+
+            let unwind = std::panic::catch_unwind(|| {
+                let _nested = PanelSnapshotGroupScope::new();
+                assert_eq!(lookup(10, 6), membership(10, 6));
+                assert_eq!(lookup(10, 7), membership(10, 6));
+                std::panic::resume_unwind(Box::new("leave nested panel snapshot"));
+            });
+            assert_eq!(
+                unwind.unwrap_err().downcast_ref::<&str>(),
+                Some(&"leave nested panel snapshot")
+            );
+            assert_eq!(lookup(10, 8), first);
+            assert_eq!(
+                std::thread::spawn(move || lookup(10, 9)).join().unwrap(),
+                membership(10, 9)
+            );
+        }
+        assert_eq!(lookup(10, 10), membership(10, 10));
+        let _next_scope = PanelSnapshotGroupScope::new();
+        assert_eq!(lookup(10, 11), membership(10, 11));
+    }
+
+    #[test]
+    fn group_membership_cache_retries_failures_and_bounds_retained_proofs() {
+        let _scope = PanelSnapshotGroupScope::new();
+        let failed = resolve_group_membership_cached_with(1, |_| Err(plan_error("unavailable")));
+        assert!(failed.is_err());
+
+        let large = GroupMembership {
+            gid: 1,
+            explicit_member_uids: vec![],
+            primary_member_uids: vec![1; MAX_CACHED_MEMBER_UIDS + 1],
+        };
+        assert_eq!(
+            resolve_group_membership_cached_with(1, |_| Ok(large.clone())).unwrap(),
+            large
+        );
+        assert_eq!(
+            resolve_group_membership_cached_with(1, |gid| Ok(membership(gid, 1))).unwrap(),
+            membership(1, 1)
+        );
+        assert_eq!(
+            resolve_group_membership_cached_with(1, |_| panic!("cached GID resolved again"))
+                .unwrap(),
+            membership(1, 1)
+        );
+
+        for gid in 2..=MAX_CACHED_GROUPS as u32 {
+            resolve_group_membership_cached_with(gid, |gid| Ok(membership(gid, 1))).unwrap();
+        }
+        let overflow = MAX_CACHED_GROUPS as u32 + 1;
+        let first =
+            resolve_group_membership_cached_with(overflow, |gid| Ok(membership(gid, 1))).unwrap();
+        let second =
+            resolve_group_membership_cached_with(overflow, |gid| Ok(membership(gid, 2))).unwrap();
+        assert_ne!(first, second);
     }
 
     #[test]

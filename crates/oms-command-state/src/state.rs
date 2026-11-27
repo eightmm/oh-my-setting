@@ -711,7 +711,14 @@ pub(crate) fn run(
         crate::checkpoint(ctx.interrupted)?;
         let (mut state, artifacts) = match cached.take() {
             Some(state) => (state, None),
-            None => collect_snapshot(&ctx, host, consumer, tool == "dashboard")?,
+            None => {
+                let _scope = if tool == "dashboard" && opts.flag("panel-snapshot") {
+                    host.begin_panel_snapshot()
+                } else {
+                    None
+                };
+                collect_snapshot(&ctx, host, consumer, tool == "dashboard")?
+            }
         };
         if matches!(tool, "state" | "dashboard")
             && let Some(observed) = host.scratch_activity(&ctx.repo, ctx.interrupted)
