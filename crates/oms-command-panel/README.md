@@ -320,8 +320,8 @@ alias to path:
 oms panel --register-project [PATH] [--alias NAME] [--area NAME]
 oms panel --unregister-project ALIAS
 oms panel --projects [--json]
-oms panel --install-panel claude --project ALIAS [--dry-run] [--json]
-oms panel --uninstall-panel claude --project ALIAS [--dry-run] [--json]
+oms panel --install-panel claude|codex --project ALIAS [--dry-run] [--json]
+oms panel --uninstall-panel claude|codex --project ALIAS [--dry-run] [--json]
 ```
 
 `--register-project` resolves `PATH` (defaulting to the current directory) to its
@@ -353,5 +353,13 @@ record-write failure and reporting `uncertain: true` when rollback fails), and t
 identical reinstalls as no-ops; `--uninstall-panel claude --project ALIAS` forgets the ownership
 row without running `claude` when the recorded checkout is gone (`action: "forgotten"`), probes
 `claude mcp get` first to leave user-modified local entries in place while dropping the row, and
-removes only matching entries, while `--unregister-project` refuses aliases that still have a
-recorded panel.
+removes only matching entries. `--install-panel codex --project ALIAS` validates that `oms-ALIAS`
+is a valid lowercase Codex plugin name, maintains an OMS-marked mode `0700`/`0600` host
+marketplace `oms-host-panels` under `oh-my-setting/codex-panels/` in the user config directory
+(`plugins/oms-ALIAS/{plugin.json,mcp.json}` pinned with `OMS_PANEL_REPO`,
+`OMS_MCP_TOOL_PROFILE=chatgpt-panel`, and `OMS_MCP_PANEL_RESOURCE_VERSION`), registers the
+marketplace once and adds `oms-ALIAS@oms-host-panels` via `OMS_CODEX_BIN`/`codex`, and records a
+`user`-scope ownership row (with matching adoption, no-op, rollback and `uncertain: true`
+guarantees); `--uninstall-panel codex --project ALIAS` removes `oms-ALIAS@oms-host-panels`,
+drops the bundle and row, and removes `oms-host-panels` plus the marked marketplace root when no
+Codex rows remain, while `--unregister-project` refuses aliases that still have a recorded panel.

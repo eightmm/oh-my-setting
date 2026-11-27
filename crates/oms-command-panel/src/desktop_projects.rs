@@ -562,7 +562,7 @@ fn validate_areas_stat(stat: &Stat) -> Result<()> {
     validate_private_sidecar_stat(stat, "OMS project area map", "desktop project area map")
 }
 
-fn same_stat(a: &Stat, b: &Stat) -> bool {
+pub(super) fn same_stat(a: &Stat, b: &Stat) -> bool {
     a.st_dev == b.st_dev
         && a.st_ino == b.st_ino
         && a.st_mode == b.st_mode
@@ -735,16 +735,16 @@ fn read_areas_at(dir_fd: &OwnedFd) -> Result<Option<(BTreeMap<String, String>, S
     Ok(Some((areas, after)))
 }
 
-struct TempMapFile<'a> {
+pub(super) struct TempMapFile<'a> {
     dir_fd: &'a OwnedFd,
-    name: OsString,
-    file: std::fs::File,
+    pub(super) name: OsString,
+    pub(super) file: std::fs::File,
     initial: Stat,
-    published: bool,
+    pub(super) published: bool,
 }
 
 impl<'a> TempMapFile<'a> {
-    fn create(dir_fd: &'a OwnedFd, target_name: &OsStr) -> Result<Self> {
+    pub(super) fn create(dir_fd: &'a OwnedFd, target_name: &OsStr) -> Result<Self> {
         let mut name = OsString::from(".");
         name.push(target_name);
         name.push(format!(
@@ -776,7 +776,7 @@ impl<'a> TempMapFile<'a> {
         })
     }
 
-    fn owns_entry(&self) -> bool {
+    pub(super) fn owns_entry(&self) -> bool {
         fs::statat(self.dir_fd, &self.name, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|stat| {
             FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
                 && stat.st_nlink == 1

@@ -378,6 +378,52 @@ fn project_read(name: &str) -> bool {
     )
 }
 
+fn panel_title_for_repo(repo: &Path) -> String {
+    match repo
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+    {
+        Some(dir) => format!("OMS · {dir}"),
+        None => "OMS".into(),
+    }
+}
+
+fn pinned_panel_title() -> String {
+    let Ok(projects) = configured_projects() else {
+        return "OMS".into();
+    };
+    if !projects.is_empty() {
+        return "OMS".into();
+    }
+    let Some(pin) = std::env::var_os("OMS_PANEL_REPO").map(PathBuf::from) else {
+        return "OMS".into();
+    };
+    let interrupted = std::sync::atomic::AtomicBool::new(false);
+    if !pin.is_absolute()
+        || pin.canonicalize().ok().as_ref() != Some(&pin)
+        || checkout(&pin) != Ok(true)
+        || oms_reference::repository::Resolver::from_env()
+            .ok()
+            .is_none_or(|resolver| {
+                resolver
+                    .state_repository(&pin, false, &interrupted)
+                    .ok()
+                    .as_ref()
+                    != Some(&pin)
+                    || resolver.native_repository(&pin, &interrupted).ok().as_ref() != Some(&pin)
+            })
+        || std::env::var_os("OMS_STATE_REPO")
+            .filter(|p| !p.is_empty())
+            .is_some_and(|path| {
+                Path::new(&path).canonicalize().ok().as_deref() != Some(pin.as_path())
+            })
+    {
+        return "OMS".into();
+    }
+    panel_title_for_repo(&pin)
+}
+
 pub(super) fn definitions(profile: ToolProfile) -> Value {
     let make = |name: &str,
                 description: &str,
@@ -408,9 +454,12 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         &[],
         false,
     );
+    let panel_title = pinned_panel_title();
     opener["_meta"]["ui"]["resourceUri"] = json!(URI);
-    opener["_meta"]["com.google.antigravity/ui"] =
-        json!({"entrypoints":[{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}]});
+    opener["_meta"]["com.google.antigravity/ui"] = json!({"entrypoints":[
+        {"type":"aux_pane","title":&panel_title},
+        {"type":"global","title":&panel_title}
+    ]});
     opener["_meta"]["openai/outputTemplate"] = json!(URI);
     opener["_meta"]["openai/ui"] = openai_ui.clone();
     let mut home_opener = make(
@@ -1530,8 +1579,17 @@ impl Server<'_> {
         let result = match method {
             "resources/templates/list" => json!({"resourceTemplates":[]}),
             "resources/list" => {
+                let title = if configured_projects().is_ok_and(|p| p.is_empty())
+                    && std::env::var_os("OMS_PANEL_REPO").is_some()
+                {
+                    self.panel_repo(&json!({}))
+                        .map(|repo| panel_title_for_repo(&repo))
+                        .unwrap_or_else(|_| "OMS".into())
+                } else {
+                    "OMS".into()
+                };
                 json!({"resources":[
-                    {"uri":URI,"name":"oms-conversation-panel","title":"OMS","mimeType":MIME},
+                    {"uri":URI,"name":"oms-conversation-panel","title":title,"mimeType":MIME},
                     {"uri":HOME_URI,"name":"oms-home-panel","title":"OMS Home","mimeType":MIME}
                 ]})
             }

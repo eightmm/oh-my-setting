@@ -4139,7 +4139,7 @@ fn project_panels_claude_lifecycle_parity() {
     assert!(stderr.contains("--register-project"), "{stderr}");
     assert!(take_calls().is_empty());
 
-    for bad_app in ["codex", "antigravity"] {
+    for bad_app in ["antigravity", "agy"] {
         let (code, _, stderr) = run_panel(
             base,
             &["--install-panel", bad_app, "--project", "alpha-service"],
@@ -4147,7 +4147,7 @@ fn project_panels_claude_lifecycle_parity() {
             &[],
         );
         assert_ne!(code, 0);
-        assert!(stderr.contains("supported: claude"), "{stderr}");
+        assert!(stderr.contains("supported: claude, codex"), "{stderr}");
         assert!(take_calls().is_empty());
     }
 
@@ -5119,6 +5119,1086 @@ fn project_panels_claude_lifecycle_parity() {
     }
 }
 
+fn stub_codex_main(state_dir: &Path) -> ! {
+    use std::io::Write;
+    let cwd = std::env::current_dir().unwrap();
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let calls_path = state_dir.join("calls.jsonl");
+    let mut log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&calls_path)
+        .unwrap();
+    writeln!(log_file, "{}", json!({"cwd": cwd, "argv": argv})).unwrap();
+
+    let control: Value = std::fs::read(state_dir.join("control.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| json!({}));
+    let state_path = state_dir.join("codex-state.json");
+    let mut state: Value = std::fs::read(&state_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_else(|| json!({"marketplaces": {}, "installed": {}}));
+
+    let save_state = |val: &Value| {
+        write_private_file(&state_path, &serde_json::to_vec(val).unwrap());
+    };
+
+    let args_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+    match args_ref.as_slice() {
+        ["plugin", "list", "--json"] => {
+            if let Some(code) = control["listExitCode"].as_i64() {
+                if let Some(out) = control["listStdout"].as_str() {
+                    println!("{out}");
+                }
+                if let Some(err) = control["listStderr"].as_str() {
+                    eprintln!("{err}");
+                }
+                std::process::exit(code as i32);
+            }
+            let rows: Vec<Value> = state["installed"]
+                .as_object()
+                .map(|m| m.values().cloned().collect())
+                .unwrap_or_default();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "installed": rows,
+                    "available": [],
+                }))
+                .unwrap()
+            );
+            std::process::exit(0);
+        }
+        ["plugin", "marketplace", "list"] => {
+            if let Some(code) = control["mpListExitCode"].as_i64() {
+                if let Some(out) = control["mpListStdout"].as_str() {
+                    println!("{out}");
+                }
+                if let Some(err) = control["mpListStderr"].as_str() {
+                    eprintln!("{err}");
+                }
+                std::process::exit(code as i32);
+            }
+            let mps = state["marketplaces"].as_object().unwrap();
+            if mps.is_empty() {
+                println!("No plugin marketplaces in scope.");
+            } else {
+                println!("MARKETPLACE          ROOT");
+                for (name, root) in mps {
+                    println!("{name}  {}", root.as_str().unwrap());
+                }
+            }
+            std::process::exit(0);
+        }
+        ["plugin", "marketplace", "add", root] => {
+            let mp_file = Path::new(root).join(".agents/plugins/marketplace.json");
+            let mp_val: Value = serde_json::from_slice(&std::fs::read(&mp_file).unwrap()).unwrap();
+            let mp_name = mp_val["name"].as_str().unwrap();
+            assert_ne!(
+                mp_name, "oh-my-setting-local",
+                "must never touch lifecycle marketplace"
+            );
+            if control["failMarketAdd"] == true {
+                eprintln!(
+                    "simulated marketplace add failure\n{{\"secret\":\"forbidden\"}}\nCUSTOM_ENV_EXAMPLE=do-not-echo"
+                );
+                std::process::exit(1);
+            }
+            state["marketplaces"]
+                .as_object_mut()
+                .unwrap()
+                .insert(mp_name.to_owned(), json!(*root));
+            save_state(&state);
+            std::process::exit(0);
+        }
+        ["plugin", "marketplace", "remove", name] => {
+            assert_ne!(
+                *name, "oh-my-setting-local",
+                "must never remove lifecycle marketplace"
+            );
+            if control["failMarketRemove"] == true {
+                eprintln!("simulated marketplace remove failure");
+                std::process::exit(1);
+            }
+            let existed = state["marketplaces"]
+                .as_object_mut()
+                .unwrap()
+                .remove(*name)
+                .is_some();
+            save_state(&state);
+            if existed {
+                std::process::exit(0);
+            }
+            eprintln!("Error: marketplace `{name}` is not configured or installed");
+            std::process::exit(1);
+        }
+        ["plugin", "add", plugin_id] => {
+            let (plugin_name, market_name) = plugin_id.rsplit_once('@').unwrap();
+            assert!(
+                market_name != "oh-my-setting-local"
+                    && plugin_name != "oms"
+                    && plugin_name != "oh-my-setting",
+                "must never touch lifecycle plugins: {plugin_id}"
+            );
+            if control["failPluginAdd"] == true {
+                eprintln!(
+                    "simulated plugin add failure\n{{\"mcpServers\":{{\"leak\":\"forbidden\"}}}}\nCUSTOM_ENV_EXAMPLE=do-not-echo"
+                );
+                std::process::exit(1);
+            }
+            let Some(root_str) = state["marketplaces"][market_name]
+                .as_str()
+                .map(str::to_owned)
+            else {
+                eprintln!("marketplace {market_name} is not configured");
+                std::process::exit(1);
+            };
+            let mp_root = Path::new(&root_str);
+            let mp_manifest: Value = serde_json::from_slice(
+                &std::fs::read(mp_root.join(".agents/plugins/marketplace.json")).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                mp_manifest["plugins"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p["name"] == plugin_name),
+                "marketplace.json did not list {plugin_name}: {mp_manifest}"
+            );
+            let bundle_dir = mp_root.join("plugins").join(plugin_name);
+            let plugin_json: Value =
+                serde_json::from_slice(&std::fs::read(bundle_dir.join("plugin.json")).unwrap())
+                    .unwrap();
+            let _mcp_json: Value =
+                serde_json::from_slice(&std::fs::read(bundle_dir.join("mcp.json")).unwrap())
+                    .unwrap();
+            assert_eq!(plugin_json["name"], plugin_name);
+            state["installed"].as_object_mut().unwrap().insert(
+                (*plugin_id).to_owned(),
+                json!({
+                    "pluginId": *plugin_id,
+                    "name": plugin_name,
+                    "marketplaceName": market_name,
+                    "version": plugin_json["version"],
+                    "installed": true,
+                    "enabled": true,
+                    "source": {
+                        "source": "local",
+                        "path": bundle_dir,
+                    }
+                }),
+            );
+            save_state(&state);
+            if let Some(conflict) = control["touchOnPluginAdd"].as_str() {
+                write_private_file(Path::new(conflict), b"{}\n");
+            }
+            if control["writeThenHangPluginAdd"] == true {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+            std::process::exit(0);
+        }
+        ["plugin", "remove", plugin_id] => {
+            let (plugin_name, market_name) = plugin_id.rsplit_once('@').unwrap();
+            assert!(
+                market_name != "oh-my-setting-local"
+                    && plugin_name != "oms"
+                    && plugin_name != "oh-my-setting",
+                "must never touch lifecycle plugins: {plugin_id}"
+            );
+            if let Some(code) = control["removeExitCode"].as_i64() {
+                if let Some(err) = control["removeStderr"].as_str() {
+                    eprintln!("{err}");
+                }
+                std::process::exit(code as i32);
+            }
+            if control["failPluginRemove"] == true {
+                eprintln!("simulated plugin remove failure");
+                std::process::exit(1);
+            }
+            state["installed"]
+                .as_object_mut()
+                .unwrap()
+                .remove(*plugin_id);
+            save_state(&state);
+            std::process::exit(0);
+        }
+        _ => {
+            eprintln!("unexpected codex stub invocation: {argv:?}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn project_panels_codex_lifecycle_parity() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let root = TempDir::new("oms-panel-codex-install");
+    let base = root.path();
+    let xdg = base.join("temp-xdg");
+    let home_dir = base.join("temp-home");
+    let codex_home = base.join("temp-codex-home");
+    let locks = base.join("locks");
+    let stub_bin_dir = base.join("stub-bin");
+    let stub_state = base.join("stub-state");
+    for d in [
+        &xdg,
+        &home_dir,
+        &codex_home,
+        &locks,
+        &stub_bin_dir,
+        &stub_state,
+    ] {
+        ensure_private_dir(d);
+    }
+
+    // Sentinel config files: oms panel must never edit vendor config files directly.
+    ensure_private_dir(&home_dir.join(".codex"));
+    let sentinel_files = [
+        (
+            codex_home.join("config.toml"),
+            b"[mcp_servers]\n".as_slice(),
+        ),
+        (
+            home_dir.join(".codex/config.toml"),
+            b"[mcp_servers]\n".as_slice(),
+        ),
+    ];
+    let mut sentinel_inodes = Vec::new();
+    for (path, bytes) in &sentinel_files {
+        write_private_file(path, bytes);
+        sentinel_inodes.push(std::fs::symlink_metadata(path).unwrap().ino());
+    }
+
+    let exe = std::env::current_exe().unwrap();
+    let path_codex = stub_bin_dir.join("codex");
+    let explicit_codex = base.join("custom-codex-bin");
+    std::os::unix::fs::symlink(&exe, &path_codex).unwrap();
+    std::os::unix::fs::symlink(&exe, &explicit_codex).unwrap();
+
+    let calls_log = stub_state.join("calls.jsonl");
+    let state_file = stub_state.join("codex-state.json");
+    let control_file = stub_state.join("control.json");
+    let set_control = |val: Value| {
+        write_private_file(&control_file, &serde_json::to_vec(&val).unwrap());
+    };
+    let reset_codex_state = || {
+        // Seed lifecycle-owned marketplace and `oms` / `oh-my-setting` plugins so we prove
+        // `oms panel` never touches them across install, rollback, or last-alias uninstall.
+        write_private_file(
+            &state_file,
+            &serde_json::to_vec(&json!({
+                "marketplaces": {
+                    "oh-my-setting-local": "/srv/oms-source"
+                },
+                "installed": {
+                    "oh-my-setting@oh-my-setting-local": {
+                        "pluginId": "oh-my-setting@oh-my-setting-local",
+                        "installed": true
+                    },
+                    "oms@oh-my-setting-local": {
+                        "pluginId": "oms@oh-my-setting-local",
+                        "installed": true
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+    };
+    let read_codex_state =
+        || -> Value { serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap() };
+    let take_calls = || -> Vec<Value> {
+        let Ok(raw) = std::fs::read_to_string(&calls_log) else {
+            return Vec::new();
+        };
+        let _ = std::fs::remove_file(&calls_log);
+        raw.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    set_control(json!({}));
+    reset_codex_state();
+
+    let run_panel = |cwd: &Path, args: &[&str], use_explicit_bin: bool, extra: &[(&str, &str)]| {
+        let mut cmd = Command::new(&exe);
+        cmd.env_clear()
+            .env("OMS_PANEL_PARITY_CLI", "1")
+            .env("OMS_PANEL_PARITY_CODEX_STUB", &stub_state)
+            .env("PATH", &stub_bin_dir)
+            .env("HOME", &home_dir)
+            .env("XDG_CONFIG_HOME", &xdg)
+            .env("CODEX_HOME", &codex_home)
+            .env("TMPDIR", base)
+            .env("OMS_LOCK_DIR", &locks)
+            .current_dir(cwd)
+            .args(args);
+        if use_explicit_bin {
+            cmd.env("OMS_CODEX_BIN", &explicit_codex);
+        }
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        (
+            out.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let alpha = base.join("checkouts/alpha-service");
+    std::fs::create_dir_all(&alpha).unwrap();
+    init_git_repo(&alpha);
+    std::fs::write(alpha.join("README.md"), "alpha\n").unwrap();
+    let alpha_canon = alpha.canonicalize().unwrap();
+    let alpha_tree_before = snapshot_tree(&alpha_canon);
+
+    let beta = base.join("checkouts/beta-service");
+    std::fs::create_dir_all(beta.join(".oms")).unwrap();
+    let beta_canon = beta.canonicalize().unwrap();
+    let beta_tree_before = snapshot_tree(&beta_canon);
+
+    assert_eq!(run_panel(&alpha, &["--register-project"], true, &[]).0, 0);
+    assert_eq!(run_panel(&beta, &["--register-project"], true, &[]).0, 0);
+
+    let panels_sidecar = xdg.join("oh-my-setting/desktop-project-panels.json");
+    let mp_root = xdg.join("oh-my-setting/codex-panels");
+    let mp_marker = mp_root.join(".oh-my-setting-codex-panels.json");
+    let mp_manifest_path = mp_root.join(".agents/plugins/marketplace.json");
+
+    let expected_launcher = home_dir.join(".local/bin/oms");
+    let expected_version = include_str!("../../../VERSION").trim();
+    let repo_oms_mcp: Value =
+        serde_json::from_str(include_str!("../../../plugins/oms/mcp.json")).unwrap();
+    let expected_res_ver =
+        repo_oms_mcp["mcpServers"]["oms-panel"]["env"]["OMS_MCP_PANEL_RESOURCE_VERSION"]
+            .as_str()
+            .unwrap();
+
+    // 1. Aliases that are valid project aliases in desktop-projects.json but NOT valid lowercase
+    //    Codex plugin names are refused with a clear message before running or writing anything.
+    let bad_alias_checkout = base.join("checkouts/bad-plugin-alias");
+    std::fs::create_dir_all(bad_alias_checkout.join(".oms")).unwrap();
+    let overlong_alias = "a".repeat(61);
+    for bad_alias in [
+        "UpperAlias",
+        "snake_alias",
+        "double--dash",
+        "double..dot",
+        "mixed.-sep",
+        "trailing-",
+        "trailing.",
+        overlong_alias.as_str(),
+    ] {
+        assert_eq!(
+            run_panel(
+                &bad_alias_checkout,
+                &["--register-project", "--alias", bad_alias],
+                true,
+                &[],
+            )
+            .0,
+            0
+        );
+        let (code, _, stderr) = run_panel(
+            base,
+            &["--install-panel", "codex", "--project", bad_alias],
+            true,
+            &[],
+        );
+        assert_ne!(code, 0, "accepted invalid plugin alias {bad_alias:?}");
+        assert!(
+            stderr.contains("valid Codex plugin name"),
+            "missing clear plugin name message for {bad_alias:?}: {stderr}"
+        );
+        assert!(take_calls().is_empty());
+        assert!(!mp_root.exists() && !panels_sidecar.exists());
+        assert_eq!(
+            run_panel(base, &["--unregister-project", bad_alias], true, &[]).0,
+            0
+        );
+    }
+
+    // 2. Dry-run (plain and --json) writes nothing and runs nothing.
+    let xdg_before_dry = snapshot_tree(&xdg);
+    let locks_before_dry = snapshot_tree(&locks);
+    let (code, dry_txt, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--dry-run",
+        ],
+        false,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        dry_txt.contains("codex plugin marketplace add")
+            && dry_txt.contains("codex plugin add oms-alpha-service@oms-host-panels"),
+        "{dry_txt}"
+    );
+    assert!(take_calls().is_empty());
+    assert!(!mp_root.exists() && !panels_sidecar.exists());
+    assert_eq!(snapshot_tree(&xdg), xdg_before_dry);
+    assert_eq!(snapshot_tree(&locks), locks_before_dry);
+
+    let (code, dry_json_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--dry-run",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let dry_json: Value = serde_json::from_str(&dry_json_raw).unwrap();
+    assert_eq!(
+        dry_json,
+        json!({
+            "app": "codex",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-alpha-service@oms-host-panels",
+            "action": "install",
+            "changed": false,
+        })
+    );
+    assert!(take_calls().is_empty());
+    assert!(!mp_root.exists() && !panels_sidecar.exists());
+
+    // 3. Unmanaged directory at `oh-my-setting/codex-panels` without marker is refused untouched.
+    std::fs::create_dir_all(&mp_root).unwrap();
+    let foreign_file = mp_root.join("foreign.txt");
+    std::fs::write(&foreign_file, b"keep-me\n").unwrap();
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("ownership marker"), "{stderr}");
+    assert!(take_calls().is_empty());
+    assert_eq!(std::fs::read(&foreign_file).unwrap(), b"keep-me\n");
+    assert!(!panels_sidecar.exists());
+    std::fs::remove_dir_all(&mp_root).unwrap();
+
+    // Symlinked `codex-panels` directory is also refused.
+    let outside_mp = base.join("outside-mp");
+    ensure_private_dir(&outside_mp);
+    std::os::unix::fs::symlink(&outside_mp, &mp_root).unwrap();
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("symlink"), "{stderr}");
+    assert!(take_calls().is_empty());
+    std::fs::remove_file(&mp_root).unwrap();
+
+    // 4. First install writes bundle (0700 dirs, 0600 files, marker, manifest listing, pinned env),
+    //    runs `marketplace add` once then `plugin add`, records user-scope row, and writes nothing
+    //    inside the checkout.
+    let (code, install_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let install_json: Value = serde_json::from_str(&install_raw).unwrap();
+    assert_eq!(
+        install_json,
+        json!({
+            "app": "codex",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-alpha-service@oms-host-panels",
+            "action": "install",
+            "changed": true,
+        })
+    );
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "add", mp_root]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "add", "oms-alpha-service@oms-host-panels"]}),
+        ]
+    );
+
+    let alpha_bundle_dir = mp_root.join("plugins/oms-alpha-service");
+    for dir in [
+        &mp_root,
+        &mp_root.join(".agents"),
+        &mp_root.join(".agents/plugins"),
+        &mp_root.join("plugins"),
+        &alpha_bundle_dir,
+    ] {
+        let m = std::fs::symlink_metadata(dir).unwrap();
+        assert!(m.is_dir() && !m.file_type().is_symlink());
+        assert_eq!(
+            m.mode() & 0o7777,
+            0o700,
+            "expected 0700 on {}",
+            dir.display()
+        );
+    }
+    let alpha_plugin_path = alpha_bundle_dir.join("plugin.json");
+    let alpha_mcp_path = alpha_bundle_dir.join("mcp.json");
+    for file in [
+        &mp_marker,
+        &mp_manifest_path,
+        &alpha_plugin_path,
+        &alpha_mcp_path,
+        &panels_sidecar,
+    ] {
+        let m = std::fs::symlink_metadata(file).unwrap();
+        assert!(m.is_file() && !m.file_type().is_symlink());
+        assert_eq!(m.nlink(), 1);
+        assert_eq!(
+            m.mode() & 0o7777,
+            0o600,
+            "expected 0600 on {}",
+            file.display()
+        );
+    }
+
+    let marker_val: Value = serde_json::from_slice(&std::fs::read(&mp_marker).unwrap()).unwrap();
+    assert_eq!(marker_val["owner"], "oh-my-setting");
+    assert_eq!(marker_val["marketplace"], "oms-host-panels");
+
+    let mp_val: Value = serde_json::from_slice(&std::fs::read(&mp_manifest_path).unwrap()).unwrap();
+    assert_eq!(
+        mp_val,
+        json!({
+            "name": "oms-host-panels",
+            "interface": { "displayName": "OMS project panels" },
+            "plugins": [{
+                "name": "oms-alpha-service",
+                "source": { "source": "local", "path": "./plugins/oms-alpha-service" },
+                "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+                "category": "Developer Tools",
+            }]
+        })
+    );
+
+    let alpha_plugin_val: Value =
+        serde_json::from_slice(&std::fs::read(&alpha_plugin_path).unwrap()).unwrap();
+    assert_eq!(alpha_plugin_val["name"], "oms-alpha-service");
+    assert_eq!(alpha_plugin_val["version"], expected_version);
+    assert_eq!(
+        alpha_plugin_val["extensions"]["com.openai"]["interface"]["displayName"],
+        "OMS · alpha-service"
+    );
+
+    let alpha_mcp_val: Value =
+        serde_json::from_slice(&std::fs::read(&alpha_mcp_path).unwrap()).unwrap();
+    assert_eq!(
+        alpha_mcp_val["mcpServers"]["oms-panel"],
+        json!({
+            "type": "stdio",
+            "command": expected_launcher,
+            "args": ["mcp-server"],
+            "env": {
+                "OMS_MCP_TOOL_PROFILE": "chatgpt-panel",
+                "OMS_PANEL_REPO": alpha_canon,
+                "OMS_MCP_PANEL_RESOURCE_VERSION": expected_res_ver,
+            }
+        })
+    );
+
+    let sidecar_val: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert_eq!(
+        sidecar_val,
+        json!({
+            "alpha-service": [{
+                "app": "codex",
+                "scope": "user",
+                "name": "oms-alpha-service@oms-host-panels",
+                "path": alpha_canon,
+            }]
+        })
+    );
+    assert_eq!(snapshot_tree(&alpha_canon), alpha_tree_before);
+
+    // 5. Second alias (`beta-service`) reuses the existing `oms-host-panels` marketplace without
+    //    running `marketplace add` again (also testing `codex` resolved on PATH).
+    let (code, beta_out, stderr) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "beta-service"],
+        false,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        beta_out.contains("installed codex panel oms-beta-service@oms-host-panels"),
+        "{beta_out}"
+    );
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": beta_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": beta_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": beta_canon, "argv": ["plugin", "add", "oms-beta-service@oms-host-panels"]}),
+        ],
+        "second alias must reuse marketplace without running `marketplace add`"
+    );
+    let mp_both: Value =
+        serde_json::from_slice(&std::fs::read(&mp_manifest_path).unwrap()).unwrap();
+    let plugin_names: Vec<&str> = mp_both["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(plugin_names, vec!["oms-alpha-service", "oms-beta-service"]);
+
+    // 6. Reinstalling an already-recorded identical Codex panel is a no-op (changed: false).
+    let sidecar_ino = std::fs::symlink_metadata(&panels_sidecar).unwrap().ino();
+    let mp_ino = std::fs::symlink_metadata(&mp_manifest_path).unwrap().ino();
+    let (code, noop_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let noop_json: Value = serde_json::from_str(&noop_raw).unwrap();
+    assert_eq!(noop_json["changed"], false);
+    assert_eq!(noop_json["action"], "install");
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+        ]
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&panels_sidecar).unwrap().ino(),
+        sidecar_ino
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&mp_manifest_path).unwrap().ino(),
+        mp_ino
+    );
+
+    // 7. `--unregister-project` with an installed codex panel is refused.
+    let (code, _, stderr) = run_panel(base, &["--unregister-project", "alpha-service"], true, &[]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("--uninstall-panel codex --project alpha-service"),
+        "{stderr}"
+    );
+    assert!(take_calls().is_empty());
+
+    // 8. Uninstall removes plugin, bundle and row; while another codex row remains, marketplace
+    //    stays configured and manifest lists only the remaining alias; last uninstall removes
+    //    marketplace and deletes the marked marketplace root.
+    let (code, un1_raw, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let un1_json: Value = serde_json::from_str(&un1_raw).unwrap();
+    assert_eq!(
+        un1_json,
+        json!({
+            "app": "codex",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-alpha-service@oms-host-panels",
+            "action": "uninstall",
+            "changed": true,
+        })
+    );
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "remove", "oms-alpha-service@oms-host-panels"]}),
+        ]
+    );
+    assert!(!alpha_bundle_dir.exists());
+    assert!(mp_root.join("plugins/oms-beta-service").exists());
+    let mp_rem: Value = serde_json::from_slice(&std::fs::read(&mp_manifest_path).unwrap()).unwrap();
+    assert_eq!(mp_rem["plugins"].as_array().unwrap().len(), 1);
+    assert_eq!(mp_rem["plugins"][0]["name"], "oms-beta-service");
+
+    // Uninstall dry-run on last alias writes and runs nothing.
+    let (code, un_dry, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "beta-service",
+            "--dry-run",
+        ],
+        false,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        un_dry.contains("codex plugin remove oms-beta-service@oms-host-panels")
+            && un_dry.contains("codex plugin marketplace remove oms-host-panels"),
+        "{un_dry}"
+    );
+    assert!(take_calls().is_empty());
+    assert!(mp_root.exists() && panels_sidecar.exists());
+
+    // Last uninstall removes plugin, removes `oms-host-panels` marketplace, deletes `codex-panels`
+    // root, unlinks empty sidecar, and preserves `oh-my-setting-local` + `oms` / `oh-my-setting`.
+    let (code, un2_raw, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "beta-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let un2_json: Value = serde_json::from_str(&un2_raw).unwrap();
+    assert_eq!(un2_json["action"], "uninstall");
+    assert_eq!(un2_json["changed"], true);
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": beta_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": beta_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": beta_canon, "argv": ["plugin", "remove", "oms-beta-service@oms-host-panels"]}),
+            json!({"cwd": beta_canon, "argv": ["plugin", "marketplace", "remove", "oms-host-panels"]}),
+        ]
+    );
+    assert!(
+        !mp_root.exists(),
+        "last uninstall must delete marked marketplace root"
+    );
+    assert!(!panels_sidecar.exists());
+    let after_last = read_codex_state();
+    assert!(after_last["marketplaces"].get("oms-host-panels").is_none());
+    assert_eq!(
+        after_last["marketplaces"]["oh-my-setting-local"],
+        "/srv/oms-source"
+    );
+    assert_eq!(
+        after_last["installed"]["oms@oh-my-setting-local"]["installed"],
+        true
+    );
+    assert_eq!(
+        after_last["installed"]["oh-my-setting@oh-my-setting-local"]["installed"],
+        true
+    );
+
+    // 9. Vendor failures roll back bundle, marketplace, and leave no row (and never leak secrets);
+    //    failed rollback surfaces `uncertain: true`.
+    set_control(json!({"failPluginAdd": true}));
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[("CUSTOM_ENV_EXAMPLE", "do-not-echo")],
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("rolled back"), "{stderr}");
+    assert!(
+        !stderr.contains("mcpServers")
+            && !stderr.contains("CUSTOM_ENV_EXAMPLE")
+            && !stderr.contains("do-not-echo"),
+        "{stderr}"
+    );
+    let fail_calls = take_calls();
+    assert_eq!(
+        fail_calls,
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "add", mp_root]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "add", "oms-alpha-service@oms-host-panels"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "remove", "oms-host-panels"]}),
+        ]
+    );
+    assert!(
+        !mp_root.exists(),
+        "rollback on first install must remove marketplace root"
+    );
+    assert!(!panels_sidecar.exists());
+
+    // Sidecar write race after `plugin add` rolls back plugin, marketplace, and bundle.
+    set_control(json!({"touchOnPluginAdd": panels_sidecar}));
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("rolled back"), "{stderr}");
+    let _ = take_calls();
+    assert!(!mp_root.exists());
+    assert!(
+        read_codex_state()["installed"]
+            .get("oms-alpha-service@oms-host-panels")
+            .is_none()
+    );
+    std::fs::remove_file(&panels_sidecar).unwrap();
+
+    // Timeout + rollback failure -> uncertain: true in JSON, exit nonzero.
+    set_control(json!({
+        "writeThenHangPluginAdd": true,
+        "failPluginRemove": true,
+    }));
+    let (code, unc_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[("OMS_CODEX_TIMEOUT_MS", "200")],
+    );
+    assert_ne!(code, 0);
+    let unc_json: Value = serde_json::from_str(&unc_raw).unwrap();
+    assert_eq!(unc_json["uncertain"], true, "{unc_json}");
+    assert_eq!(unc_json["changed"], false);
+    assert!(stderr.contains("uncertain"), "{stderr}");
+    let _ = take_calls();
+    set_control(json!({}));
+
+    // 10. Exact-match unrecorded plugin + bundle left behind after failed rollback is adopted!
+    let (code, adopt_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let adopt_json: Value = serde_json::from_str(&adopt_raw).unwrap();
+    assert_eq!(adopt_json["action"], "adopted");
+    assert_eq!(adopt_json["changed"], true);
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+        ]
+    );
+
+    // Second-alias failure rolls back ONLY the second alias's bundle & manifest entry, keeping alpha!
+    set_control(json!({"failPluginAdd": true}));
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "beta-service"],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(stderr.contains("rolled back"), "{stderr}");
+    let _ = take_calls();
+    assert!(!mp_root.join("plugins/oms-beta-service").exists());
+    assert!(mp_root.join("plugins/oms-alpha-service").exists());
+    let mp_after_rb2: Value =
+        serde_json::from_slice(&std::fs::read(&mp_manifest_path).unwrap()).unwrap();
+    assert_eq!(mp_after_rb2["plugins"].as_array().unwrap().len(), 1);
+    assert_eq!(mp_after_rb2["plugins"][0]["name"], "oms-alpha-service");
+    set_control(json!({}));
+
+    // Unparseable `codex plugin list --json` / `codex plugin marketplace list` fail closed.
+    for bad_ctl in [
+        json!({"listExitCode": 0, "listStdout": "{malformed"}),
+        json!({"listExitCode": 0, "listStdout": "{}"}),
+        json!({"mpListExitCode": 0, "mpListStdout": "unexpected prose without root"}),
+    ] {
+        set_control(bad_ctl.clone());
+        let (code, _, _) = run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "beta-service"],
+            true,
+            &[],
+        );
+        assert_ne!(code, 0, "install must fail closed on {bad_ctl}");
+        let (code, _, _) = run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        );
+        assert_ne!(code, 0, "uninstall must fail closed on {bad_ctl}");
+    }
+    set_control(json!({}));
+    let _ = take_calls();
+
+    // Clean up alpha before testing deleted-checkout forget (first verifying uninstall refuses
+    // to touch or delete `codex-panels` if its marker is missing or non-private 0644).
+    let saved_marker = std::fs::read(&mp_marker).unwrap();
+    std::fs::set_permissions(&mp_marker, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--uninstall-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0, "0644 marker must fail closed on uninstall");
+    assert!(stderr.contains("marker"), "{stderr}");
+    std::fs::remove_file(&mp_marker).unwrap();
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--uninstall-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(
+        code, 0,
+        "missing marker must refuse deleting marketplace root"
+    );
+    assert!(stderr.contains("ownership marker"), "{stderr}");
+    assert!(mp_root.exists());
+    write_private_file(&mp_marker, &saved_marker);
+    let _ = take_calls();
+
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+
+    // 11. Deleted checkout forgets (`action: "forgotten"`), cleans up Codex plugin/bundle/market,
+    //     and unblocks `--unregister-project`.
+    let gamma = base.join("checkouts/gamma-service");
+    std::fs::create_dir_all(gamma.join(".oms")).unwrap();
+    let gamma_canon = gamma.canonicalize().unwrap();
+    assert_eq!(run_panel(&gamma, &["--register-project"], true, &[]).0, 0);
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "gamma-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+    std::fs::remove_dir_all(&gamma).unwrap();
+
+    let (code, _, stderr) = run_panel(base, &["--unregister-project", "gamma-service"], true, &[]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("--uninstall-panel"), "{stderr}");
+
+    let (code, forget_raw, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "gamma-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let forget_json: Value = serde_json::from_str(&forget_raw).unwrap();
+    assert_eq!(
+        forget_json,
+        json!({
+            "app": "codex",
+            "alias": "gamma-service",
+            "path": gamma_canon,
+            "entry": "oms-gamma-service@oms-host-panels",
+            "action": "forgotten",
+            "changed": true,
+        })
+    );
+    assert!(!mp_root.exists() && !panels_sidecar.exists());
+    assert!(
+        read_codex_state()["installed"]
+            .get("oms-gamma-service@oms-host-panels")
+            .is_none()
+    );
+    let _ = take_calls();
+
+    assert_eq!(
+        run_panel(base, &["--unregister-project", "gamma-service"], true, &[]).0,
+        0
+    );
+
+    // 12. Checkout trees and Codex config sentinels remain completely untouched.
+    assert_eq!(snapshot_tree(&alpha_canon), alpha_tree_before);
+    assert_eq!(snapshot_tree(&beta_canon), beta_tree_before);
+    for ((path, expected_bytes), expected_ino) in sentinel_files.iter().zip(sentinel_inodes.iter())
+    {
+        let meta = std::fs::symlink_metadata(path).unwrap();
+        assert_eq!(
+            meta.ino(),
+            *expected_ino,
+            "sentinel replaced: {}",
+            path.display()
+        );
+        assert_eq!(
+            &std::fs::read(path).unwrap(),
+            expected_bytes,
+            "sentinel modified: {}",
+            path.display()
+        );
+    }
+}
+
 fn main() {
     if let Some(ready_path) = std::env::var_os("OMS_PANEL_PARITY_SLEEP_CHILD") {
         use std::io::Write;
@@ -5137,6 +6217,16 @@ fn main() {
         })
     {
         stub_claude_main(Path::new(&state_dir));
+    }
+    if let Some(state_dir) = std::env::var_os("OMS_PANEL_PARITY_CODEX_STUB")
+        && std::env::args().next().is_some_and(|arg0| {
+            Path::new(&arg0)
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name.contains("codex"))
+        })
+    {
+        stub_codex_main(Path::new(&state_dir));
     }
     if std::env::var_os("OMS_PANEL_PARITY_CLI").is_some() {
         use std::io::Write;
@@ -5210,7 +6300,7 @@ fn main() {
         .skip(1)
         .filter(|arg| !arg.starts_with('-') && arg != "panel_parity")
         .collect();
-    let cases: [(&str, fn()); 14] = [
+    let cases: [(&str, fn()); 15] = [
         (
             "chats_native_identity_binding",
             chats_native_identity_binding,
@@ -5222,6 +6312,10 @@ fn main() {
         (
             "project_panels_claude_lifecycle_parity",
             project_panels_claude_lifecycle_parity,
+        ),
+        (
+            "project_panels_codex_lifecycle_parity",
+            project_panels_codex_lifecycle_parity,
         ),
         (
             "missing_entry_refuses_before_mutation",
