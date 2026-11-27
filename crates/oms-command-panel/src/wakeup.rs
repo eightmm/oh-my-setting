@@ -545,13 +545,18 @@ mod tests {
         // Reset to missing <session>/, then create <session>/subagents/agent-*.jsonl in one burst.
         fs::remove_dir_all(&session_dir).unwrap();
         let burst = ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, None).unwrap();
-        wake.replace(Some(burst));
+        wake.replace(Some(Arc::clone(&burst)));
         DirBuilder::new().mode(0o700).create(&session_dir).unwrap();
         DirBuilder::new().mode(0o700).create(&subagents).unwrap();
         fs::write(&child, b"{}\n").unwrap();
         fs::set_permissions(&child, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(ready(&wake));
         assert!(wake.refresh(true, true, now + Duration::from_secs(1)));
+        assert!(burst.active());
+        assert!(ClaudeSubagentsWatch::prepare(&config, pid, birth, &repo, Some(&burst)).is_some());
+        // Any remaining retired project/session IN_IGNORED events drain without retiring the active watcher.
+        assert!(!wake.refresh(ready(&wake), true, now + Duration::from_secs(2)));
+        assert!(burst.active());
 
         // Symlinked or group-writable <session>/ fails closed.
         fs::remove_dir_all(&session_dir).unwrap();

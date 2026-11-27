@@ -452,8 +452,7 @@ pub(crate) fn claude_in(home: &Path, pid: u32, repo: &Path) -> Option<Vec<Value>
             let id = text(result, "agentId");
             if block["type"] != "tool_result"
                 || !tools.contains(text(block, "tool_use_id"))
-                || !(8..=40).contains(&id.len())
-                || !id.bytes().all(|b| b.is_ascii_hexdigit())
+                || !crate::claude_child_chat::agent_id(id)
             {
                 continue;
             }

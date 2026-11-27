@@ -59,7 +59,6 @@ enum Target {
         watch: i32,
         dir: OwnedFd,
         identity: (fs::Dev, u64),
-        retired_watch: Option<i32>,
     },
     Subagents {
         watch: i32,
@@ -67,13 +66,13 @@ enum Target {
         session_identity: (fs::Dev, u64),
         dir: OwnedFd,
         identity: (fs::Dev, u64),
-        retired_watch: Option<i32>,
     },
 }
 
 struct WatchState {
     target: Target,
     proven: VecDeque<String>,
+    retired_watches: Vec<i32>,
 }
 
 impl WatchState {
@@ -96,6 +95,22 @@ impl WatchState {
         if let Some(pos) = self.proven.iter().position(|entry| entry == id) {
             self.proven.remove(pos);
         }
+    }
+
+    fn retire_watch(&mut self, wd: i32) {
+        if !self.retired_watches.contains(&wd) {
+            self.retired_watches.push(wd);
+        }
+    }
+
+    fn consume_retired_event(&mut self, wd: i32, flags: ReadFlags) -> bool {
+        let Some(pos) = self.retired_watches.iter().position(|entry| *entry == wd) else {
+            return false;
+        };
+        if flags.contains(ReadFlags::IGNORED) {
+            self.retired_watches.swap_remove(pos);
+        }
+        true
     }
 }
 
@@ -211,10 +226,16 @@ impl SubagentsWatch {
 
         let fd = init(CreateFlags::NONBLOCK | CreateFlags::CLOEXEC).ok()?;
         let mut proven = VecDeque::new();
+        let mut retired_watches = Vec::new();
         let target = match session_entry {
             Some((session_dir, session_stat)) => {
-                let (target, existing) =
-                    arm_session_or_subagents(&fd, session_dir, session_stat, uid, None)?;
+                let (target, existing) = arm_session_or_subagents(
+                    &fd,
+                    session_dir,
+                    session_stat,
+                    uid,
+                    &mut retired_watches,
+                )?;
                 for id in existing {
                     remember_in(&mut proven, &id);
                 }
@@ -237,9 +258,12 @@ impl SubagentsWatch {
                             session_dir,
                             session_stat,
                             uid,
-                            Some(project_watch),
+                            &mut retired_watches,
                         )?;
                         let _ = remove_watch(&fd, project_watch);
+                        if !retired_watches.contains(&project_watch) {
+                            retired_watches.push(project_watch);
+                        }
                         for id in existing {
                             remember_in(&mut proven, &id);
                         }
@@ -260,7 +284,11 @@ impl SubagentsWatch {
             project_dir,
             project_identity,
             session_name,
-            state: Mutex::new(WatchState { target, proven }),
+            state: Mutex::new(WatchState {
+                target,
+                proven,
+                retired_watches,
+            }),
             lost: AtomicBool::new(false),
         });
         source.current().then_some(source)
@@ -388,6 +416,9 @@ impl ChildWakeSource for SubagentsWatch {
             if flags.is_empty() || flags.contains(ReadFlags::QUEUE_OVERFLOW) {
                 return None;
             }
+            if state.consume_retired_event(event.wd(), flags) {
+                continue;
+            }
             match &mut state.target {
                 Target::Project { watch } => {
                     let watch = *watch;
@@ -422,9 +453,10 @@ impl ChildWakeSource for SubagentsWatch {
                         session_dir,
                         session_stat,
                         self.uid,
-                        Some(watch),
+                        &mut state.retired_watches,
                     )?;
                     let _ = remove_watch(&self.fd, watch);
+                    state.retire_watch(watch);
                     for id in existing {
                         if state.remember_new(&id) {
                             changed = true;
@@ -435,17 +467,7 @@ impl ChildWakeSource for SubagentsWatch {
                         return None;
                     }
                 }
-                Target::Session {
-                    watch,
-                    retired_watch,
-                    ..
-                } => {
-                    if *retired_watch == Some(event.wd()) {
-                        if flags.contains(ReadFlags::IGNORED) {
-                            *retired_watch = None;
-                        }
-                        continue;
-                    }
+                Target::Session { watch, .. } => {
                     let watch = *watch;
                     if event.wd() != watch
                         || flags.intersects(
@@ -480,15 +502,10 @@ impl ChildWakeSource for SubagentsWatch {
                         unreachable!();
                     };
                     let (dir, stat) = open_child_dir(&session_dir, "subagents", self.uid)?;
-                    let (target, existing) = arm_subagents(
-                        &self.fd,
-                        session_dir,
-                        session_identity,
-                        dir,
-                        stat,
-                        Some(watch),
-                    )?;
+                    let (target, existing) =
+                        arm_subagents(&self.fd, session_dir, session_identity, dir, stat)?;
                     let _ = remove_watch(&self.fd, watch);
+                    state.retire_watch(watch);
                     for id in existing {
                         if state.remember_new(&id) {
                             changed = true;
@@ -499,17 +516,7 @@ impl ChildWakeSource for SubagentsWatch {
                         return None;
                     }
                 }
-                Target::Subagents {
-                    watch,
-                    retired_watch,
-                    ..
-                } => {
-                    if *retired_watch == Some(event.wd()) {
-                        if flags.contains(ReadFlags::IGNORED) {
-                            *retired_watch = None;
-                        }
-                        continue;
-                    }
+                Target::Subagents { watch, .. } => {
                     if event.wd() != *watch
                         || flags.intersects(
                             ReadFlags::IGNORED
@@ -564,11 +571,11 @@ fn arm_session_or_subagents(
     session_dir: OwnedFd,
     session_stat: Stat,
     uid: u32,
-    retired_watch: Option<i32>,
+    retired_watches: &mut Vec<i32>,
 ) -> Option<(Target, Vec<String>)> {
     let session_identity = (session_stat.st_dev, session_stat.st_ino);
     if let Some((dir, stat)) = inspect_child_dir(&session_dir, "subagents", uid)? {
-        return arm_subagents(fd, session_dir, session_identity, dir, stat, retired_watch);
+        return arm_subagents(fd, session_dir, session_identity, dir, stat);
     }
     let session_watch = add_watch(
         fd,
@@ -582,20 +589,15 @@ fn arm_session_or_subagents(
                 watch: session_watch,
                 dir: session_dir,
                 identity: session_identity,
-                retired_watch,
             },
             Vec::new(),
         )),
         Some(Some((dir, stat))) => {
-            let result = arm_subagents(
-                fd,
-                session_dir,
-                session_identity,
-                dir,
-                stat,
-                Some(session_watch),
-            );
+            let result = arm_subagents(fd, session_dir, session_identity, dir, stat);
             let _ = remove_watch(fd, session_watch);
+            if !retired_watches.contains(&session_watch) {
+                retired_watches.push(session_watch);
+            }
             result
         }
         None => {
@@ -611,7 +613,6 @@ fn arm_subagents(
     session_identity: (fs::Dev, u64),
     dir: OwnedFd,
     stat: Stat,
-    retired_watch: Option<i32>,
 ) -> Option<(Target, Vec<String>)> {
     let watch = add_watch(
         fd,
@@ -630,7 +631,6 @@ fn arm_subagents(
             session_identity,
             dir,
             identity: (stat.st_dev, stat.st_ino),
-            retired_watch,
         },
         existing,
     ))
