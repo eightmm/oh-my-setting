@@ -1,5 +1,5 @@
 use crate::model::*;
-use crate::storage::{Snapshot, Store, stable};
+use crate::storage::{Snapshot, Store, same, stable};
 use crate::value::{Value, array, encode, obj, strings};
 use crate::{
     App, DeliveryRequest, Error, Result, Services, Session, checkpoint, digest, now, unique,
@@ -255,21 +255,7 @@ impl<'a> Room<'a> {
                 .threads
                 .prefix_tail(&Store::name(id), budget.min(2 * crate::MAX_ROW), 0)?;
         store.check()?;
-        let mut out = Vec::new();
-        for line in first.split_inclusive(|b| *b == b'\n').take(2) {
-            if !line.ends_with(b"\n") || line.len() > crate::MAX_ROW {
-                return Err(Error::new("room header is oversized or incomplete"));
-            }
-            let r = crate::value::parse(line, crate::MAX_ROW)?;
-            if r.as_object().is_none()
-                || r.text("thread") != id
-                || r["seq"].as_i64().is_none()
-                || r.get("room_event").is_some_and(|e| e.as_object().is_none())
-            {
-                return Err(Error::new("invalid room header"));
-            }
-            out.push(r);
-        }
+        let out = parse_header_lines(id, &first)?;
         Ok((out, first.len()))
     }
     pub(crate) fn predecessor(&self, id: &str) -> Result<Option<String>> {
@@ -286,30 +272,7 @@ impl<'a> Room<'a> {
         store.check()?;
         let (_, tail, stat) = store.threads.prefix_tail(&Store::name(id), 0, TAIL_BYTES)?;
         store.check()?;
-        if tail.is_empty() || !tail.ends_with(b"\n") {
-            return Ok(None);
-        }
-        let start = tail[..tail.len() - 1]
-            .iter()
-            .rposition(|b| *b == b'\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        if start == 0 && stat.st_size as usize > tail.len() {
-            return Ok(None);
-        }
-        let row = match crate::value::parse(&tail[start..], TAIL_BYTES) {
-            Ok(v) => v,
-            Err(_) => return Ok(None),
-        };
-        let e = &row["room_event"];
-        if row.text("thread") == id
-            && e.text("kind") == "successor"
-            && identifier(e.text("target"), "room").is_ok()
-        {
-            Ok(Some(e.text("target").to_owned()))
-        } else {
-            Ok(None)
-        }
+        Ok(parse_tail_successor(id, &tail, stat.st_size as usize))
     }
     pub fn resolve(&self, id: &str) -> Result<String> {
         identifier(id, "room")?;
@@ -1647,60 +1610,125 @@ impl<'a> Room<'a> {
             })
             .unwrap_or(0);
             let result = (|| {
-                let (header, used) = self.header_bounded(id, byte_limit.saturating_sub(bytes))?;
+                identifier(id, "room")?;
+                let budget = byte_limit.saturating_sub(bytes);
+                if budget == 0 {
+                    return Err(Error::new("room discovery byte limit"));
+                }
+                let cached = self.snapshots.borrow().get(id).cloned();
+                if let Some(snapshot) = &cached {
+                    store.check()?;
+                    let stat = rustix::fs::statat(
+                        &store.threads.fd,
+                        Store::name(id),
+                        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                    )
+                    .map_err(|_| Error::new("room log unavailable"))?;
+                    if stable(&snapshot.stat, &stat) {
+                        let used = snapshot
+                            .ranges
+                            .iter()
+                            .take(2)
+                            .next_back()
+                            .map(|r| r.end)
+                            .unwrap_or(0);
+                        if used > budget {
+                            return Err(Error::new("room discovery byte limit"));
+                        }
+                        bytes += used;
+                        if bytes > byte_limit {
+                            return Err(Error::new("room discovery byte limit"));
+                        }
+                        let Some((created, e)) = classify_room_header(id, &snapshot.rows)? else {
+                            return Ok(None);
+                        };
+                        let tail =
+                            &snapshot.bytes[snapshot.bytes.len().saturating_sub(TAIL_BYTES)..];
+                        if let Some(next) = parse_tail_successor(id, tail, snapshot.bytes.len()) {
+                            return Ok(Some(sealed_room_summary(id, created, e, next)));
+                        }
+                        if active >= MAX_ROOMS {
+                            return Err(Error::new("room discovery count limit"));
+                        }
+                        if snapshot.stat.st_size < 0
+                            || (snapshot.stat.st_size as usize).saturating_sub(used)
+                                > byte_limit.saturating_sub(bytes)
+                        {
+                            return Err(Error::new("room discovery byte limit"));
+                        }
+                        self.checkpoint()?;
+                        store.check()?;
+                        let after = rustix::fs::statat(
+                            &store.threads.fd,
+                            Store::name(id),
+                            rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+                        )
+                        .map_err(|_| Error::new("room discovery log unavailable"))?;
+                        if !stable(&snapshot.stat, &after) {
+                            return Err(Error::new("room log changed"));
+                        }
+                        bytes += snapshot.bytes.len().saturating_sub(used);
+                        let state = project(&snapshot.rows)?;
+                        if !self.published_room(&state)? {
+                            return Ok(None);
+                        }
+                        active += 1;
+                        return Ok(Some(state));
+                    }
+                }
+                store.check()?;
+                let (mut reader, opened) =
+                    crate::storage::LogReader::open_pinned(&store.threads, Store::name(id))?;
+                let first = reader.read_prefix(&opened, budget.min(2 * crate::MAX_ROW))?;
+                store.check()?;
+                let header = parse_header_lines(id, &first)?;
+                let used = first.len();
                 bytes += used;
                 if bytes > byte_limit {
                     return Err(Error::new("room discovery byte limit"));
                 }
-                if header.first().is_none_or(|r| r.text("thread") != id) {
-                    return Err(Error::new("invalid discovery header"));
-                }
-                let Some(created) = header.get(1) else {
+                let Some((created, e)) = classify_room_header(id, &header)? else {
                     return Ok(None);
                 };
-                let e = &created["room_event"];
-                if e.is_null() || e.as_object().is_some_and(Vec::is_empty) {
-                    return Ok(None);
-                }
-                if e.text("kind") != "created" {
-                    return Err(Error::new("missing room creation event"));
-                }
-                if let Some(next) = self.tail_successor(id)? {
-                    return Ok(Some(obj([
-                        ("schema", 1u64.into()),
-                        ("kind", "oms-room".into()),
-                        ("id", id.into()),
-                        ("title", created["text"].clone()),
-                        ("task_id", e["task_id"].clone()),
-                        ("creator", e["participant"].clone()),
-                        ("predecessor", e["predecessor"].clone()),
-                        ("successor", next.into()),
-                        ("owner", Value::Null),
-                        ("closed", false.into()),
-                        ("sealed", true.into()),
-                        ("participants", array([])),
-                        ("messages", array([])),
-                        ("publication", Value::Null),
-                        ("publications", obj([])),
-                        ("delivery", DELIVERY.into()),
-                    ])));
+                store.check()?;
+                let tail = reader.read_tail(&opened, TAIL_BYTES)?;
+                store.check()?;
+                if let Some(next) = parse_tail_successor(id, &tail, opened.st_size as usize) {
+                    return Ok(Some(sealed_room_summary(id, created, e, next)));
                 }
                 if active >= MAX_ROOMS {
                     return Err(Error::new("room discovery count limit"));
                 }
-                let stat = rustix::fs::statat(
-                    &store.threads.fd,
-                    Store::name(id),
-                    rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-                )
-                .map_err(|_| Error::new("room discovery log unavailable"))?;
-                if stat.st_size < 0
-                    || (stat.st_size as usize).saturating_sub(used)
+                if opened.st_size < 0
+                    || (opened.st_size as usize).saturating_sub(used)
                         > byte_limit.saturating_sub(bytes)
                 {
                     return Err(Error::new("room discovery byte limit"));
                 }
-                let snap = self.snapshot(id)?;
+                self.checkpoint()?;
+                store.check()?;
+                let tail_offset = opened.st_size as usize - tail.len();
+                // A growing inode may also have changed bytes we just probed.
+                let snap = if let Some(old) = cached.filter(|old| {
+                    same(&old.stat, &opened)
+                        && old.stat.st_size < opened.st_size
+                        && old.bytes.starts_with(&first)
+                        && old
+                            .bytes
+                            .get(tail_offset..)
+                            .is_none_or(|previous_tail| tail.starts_with(previous_tail))
+                }) {
+                    reader.refresh_pinned(&old, &opened)?
+                } else {
+                    let raw = reader.read_all(&opened)?;
+                    Snapshot::decode(id, raw, opened)?
+                };
+                drop(reader);
+                store.check()?;
+                let snap = Arc::new(snap);
+                self.snapshots
+                    .borrow_mut()
+                    .insert(id.to_owned(), Arc::clone(&snap));
                 bytes += snap.bytes.len().saturating_sub(used);
                 let state = project(&snap.rows)?;
                 if !self.published_room(&state)? {
@@ -1921,6 +1949,90 @@ impl<'a> Room<'a> {
         Ok(selected.len().into())
     }
 }
+fn classify_room_header<'v>(
+    id: &str,
+    header: &'v [Value],
+) -> Result<Option<(&'v Value, &'v Value)>> {
+    if header.first().is_none_or(|r| r.text("thread") != id) {
+        return Err(Error::new("invalid discovery header"));
+    }
+    let Some(created) = header.get(1) else {
+        return Ok(None);
+    };
+    let e = &created["room_event"];
+    if e.is_null() || e.as_object().is_some_and(Vec::is_empty) {
+        return Ok(None);
+    }
+    if e.text("kind") != "created" {
+        return Err(Error::new("missing room creation event"));
+    }
+    Ok(Some((created, e)))
+}
+
+fn parse_header_lines(id: &str, first: &[u8]) -> Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for line in first.split_inclusive(|b| *b == b'\n').take(2) {
+        if !line.ends_with(b"\n") || line.len() > crate::MAX_ROW {
+            return Err(Error::new("room header is oversized or incomplete"));
+        }
+        let r = crate::value::parse(line, crate::MAX_ROW)?;
+        if r.as_object().is_none()
+            || r.text("thread") != id
+            || r["seq"].as_i64().is_none()
+            || r.get("room_event").is_some_and(|e| e.as_object().is_none())
+        {
+            return Err(Error::new("invalid room header"));
+        }
+        out.push(r);
+    }
+    Ok(out)
+}
+
+fn parse_tail_successor(id: &str, tail: &[u8], file_size: usize) -> Option<String> {
+    if tail.is_empty() || !tail.ends_with(b"\n") {
+        return None;
+    }
+    let start = tail[..tail.len() - 1]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if start == 0 && file_size > tail.len() {
+        return None;
+    }
+    let row = crate::value::parse(&tail[start..], TAIL_BYTES).ok()?;
+    let e = &row["room_event"];
+    if row.text("thread") == id
+        && e.text("kind") == "successor"
+        && identifier(e.text("target"), "room").is_ok()
+    {
+        Some(e.text("target").to_owned())
+    } else {
+        None
+    }
+}
+
+fn sealed_room_summary(id: &str, created: &Value, event: &Value, next: String) -> Value {
+    obj([
+        ("schema", 1u64.into()),
+        ("kind", "oms-room".into()),
+        ("id", id.into()),
+        ("title", created["text"].clone()),
+        ("task_id", event["task_id"].clone()),
+        ("creator", event["participant"].clone()),
+        ("predecessor", event["predecessor"].clone()),
+        ("successor", next.into()),
+        ("owner", Value::Null),
+        ("closed", false.into()),
+        ("sealed", true.into()),
+        ("participants", array([])),
+        ("messages", array([])),
+        ("publication", Value::Null),
+        ("publications", obj([])),
+        ("delivery", DELIVERY.into()),
+    ])
+}
+
 fn truncate_text(v: &Value, limit: usize) -> Value {
     if let Some(s) = v.as_str() {
         s.chars().take(limit).collect::<String>().into()
@@ -2046,6 +2158,297 @@ mod optimization_tests {
             );
         });
         std::fs::remove_dir_all(path).unwrap();
+        result.unwrap();
+    }
+
+    #[test]
+    fn discover_reuses_single_descriptor_and_preserves_contracts() {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+
+        let write_private = |path: &Path, body: &[u8]| {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .unwrap();
+            file.write_all(body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+
+        struct Fixture;
+        impl Services for Fixture {
+            fn canonical_provider(&self, value: &str) -> Result<String> {
+                Ok(value.to_owned())
+            }
+            fn state_repository(&self, path: &Path) -> Result<PathBuf> {
+                Ok(path.to_owned())
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("oms-room-discover-{}", unique().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let stop = AtomicBool::new(false);
+
+            // 1. Healthy mixed inventory: 3 active Rooms, 1 sealed Room, 2 non-Room threads.
+            let healthy = root.join("healthy");
+            std::fs::create_dir(&healthy).unwrap();
+            let writer =
+                Room::open(&healthy, Session::default(), &Fixture, &stop, true, false).unwrap();
+            for id in ["room-a", "room-b", "room-c"] {
+                writer
+                    .create(Some(id), &format!("Title {id}"), None, Some("owner"), None)
+                    .unwrap();
+                let mut join = Join::new("owner", "codex");
+                join.role = "main".into();
+                writer.join(id, join).unwrap();
+                let mut worker = Join::new("helper", "codex");
+                worker.role = "worker".into();
+                writer.join(id, worker).unwrap();
+            }
+            writer
+                .send("room-a", Send::note("owner", "helper", "hello"))
+                .unwrap();
+
+            writer
+                .create(Some("room-sealed"), "Sealed", None, Some("owner"), None)
+                .unwrap();
+            let sealed_path = healthy.join(".oms/threads/room-sealed.jsonl");
+            let mut sealed_bytes = std::fs::read(&sealed_path).unwrap();
+            sealed_bytes.extend_from_slice(
+                b"{\"schema\":1,\"ts\":\"2026-11-27T00:00:00Z\",\"thread\":\"room-sealed\",\"seq\":3,\"role\":\"note\",\"agent\":\"agent\",\"text\":\"Rolled over\",\"room_event\":{\"kind\":\"successor\",\"target\":\"room-a\"}}\n",
+            );
+            std::fs::write(&sealed_path, sealed_bytes).unwrap();
+
+            write_private(
+                &healthy.join(".oms/threads/thread-one.jsonl"),
+                b"{\"schema\":1,\"thread\":\"thread-one\",\"seq\":1,\"role\":\"topic\",\"text\":\"Plain\"}\n",
+            );
+            write_private(
+                &healthy.join(".oms/threads/thread-two.jsonl"),
+                b"{\"schema\":1,\"thread\":\"thread-two\",\"seq\":1,\"role\":\"topic\",\"text\":\"Plain 2\"}\n\
+                  {\"schema\":1,\"thread\":\"thread-two\",\"seq\":2,\"role\":\"note\",\"text\":\"No event\"}\n\
+                  {\"schema\":1,\"thread\":\"thread-two\",\"seq\":3,\"role\":\"note\",\"room_event\":{\"kind\":\"successor\",\"target\":\"room-a\"}}\n",
+            );
+
+            let reader =
+                Room::open(&healthy, Session::default(), &Fixture, &stop, false, false).unwrap();
+            crate::storage::reset_test_io_counters();
+            let first = reader.list().unwrap();
+            assert_eq!(crate::storage::test_open_count(), 6);
+            assert_eq!(crate::storage::test_tail_read_count(), 4);
+            assert!(!first.flag("incomplete"));
+            assert_eq!(first.list("rooms").len(), 4);
+
+            // Second list on the same Room reuses cached active snapshots with 0 opens.
+            crate::storage::reset_test_io_counters();
+            let second = reader.list().unwrap();
+            assert_eq!(crate::storage::test_open_count(), 3);
+            assert_eq!(crate::storage::test_tail_read_count(), 1);
+            assert_eq!(second, first);
+
+            // Mutate room-a via separate writer and atomically replace room-b.
+            writer
+                .send("room-a", Send::note("helper", "owner", "reply"))
+                .unwrap();
+            let room_b_path = healthy.join(".oms/threads/room-b.jsonl");
+            let mut room_b_bytes = std::fs::read(&room_b_path).unwrap();
+            room_b_bytes.extend_from_slice(
+                b"{\"schema\":1,\"ts\":\"2026-11-27T00:00:00Z\",\"thread\":\"room-b\",\"seq\":5,\"role\":\"note\",\"agent\":\"agent\",\"text\":\"replaced\",\"room_event\":{\"kind\":\"message\",\"id\":\"msg-rep-1\",\"sender\":\"owner\",\"recipient\":\"helper\",\"message_kind\":\"note\"}}\n",
+            );
+            let tmp_b = healthy.join(".oms/threads/.tmp-room-b");
+            write_private(&tmp_b, &room_b_bytes);
+            std::fs::rename(&tmp_b, &room_b_path).unwrap();
+
+            crate::storage::reset_test_io_counters();
+            let third = reader.list().unwrap();
+            assert_eq!(crate::storage::test_open_count(), 5);
+            assert_eq!(crate::storage::test_tail_read_count(), 3);
+            let msg_count = |list: &Value, target: &str| {
+                list.list("rooms")
+                    .iter()
+                    .find(|r| r.text("id") == target)
+                    .unwrap()
+                    .number("message_count")
+            };
+            assert_eq!(msg_count(&third, "room-a"), 2);
+            assert_eq!(msg_count(&third, "room-b"), 1);
+
+            // 2. Malformed, oversize, symlink, and hardlink entries fail safely and signal incomplete.
+            let bad = root.join("bad");
+            std::fs::create_dir(&bad).unwrap();
+            let bad_writer =
+                Room::open(&bad, Session::default(), &Fixture, &stop, true, false).unwrap();
+            bad_writer
+                .create(Some("good-room"), "Good", None, Some("owner"), None)
+                .unwrap();
+            let threads = bad.join(".oms/threads");
+            symlink(
+                threads.join("good-room.jsonl"),
+                threads.join("sym-room.jsonl"),
+            )
+            .unwrap();
+            let plain = threads.join("plain.txt");
+            write_private(&plain, b"plain\n");
+            std::fs::hard_link(&plain, threads.join("hard-room.jsonl")).unwrap();
+            write_private(&threads.join("bad-head.jsonl"), b"{bad\n");
+            let mut bad_body =
+                String::from_utf8(std::fs::read(threads.join("good-room.jsonl")).unwrap())
+                    .unwrap()
+                    .replace("good-room", "bad-body")
+                    .into_bytes();
+            bad_body.extend_from_slice(b"{bad\n");
+            write_private(&threads.join("bad-body.jsonl"), &bad_body);
+            let huge = threads.join("huge-room.jsonl");
+            write_private(&huge, b"");
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&huge)
+                .unwrap()
+                .set_len(crate::MAX_FILE as u64 + 1)
+                .unwrap();
+
+            let bad_reader =
+                Room::open(&bad, Session::default(), &Fixture, &stop, false, false).unwrap();
+            crate::storage::reset_test_io_counters();
+            let (found, incomplete) = bad_reader.discover().unwrap();
+            assert!(incomplete);
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].text("id"), "good-room");
+            assert_eq!(crate::storage::test_open_count(), 3);
+            assert_eq!(crate::storage::test_tail_read_count(), 2);
+
+            // 3. Budget boundaries and large sealed fallback.
+            let budget_dir = root.join("budget");
+            std::fs::create_dir(&budget_dir).unwrap();
+            let budget_writer = Room::open(
+                &budget_dir,
+                Session::default(),
+                &Fixture,
+                &stop,
+                true,
+                false,
+            )
+            .unwrap();
+            budget_writer
+                .create(Some("exact-room"), "Exact", None, Some("owner"), None)
+                .unwrap();
+            let exact_path = budget_dir.join(".oms/threads/exact-room.jsonl");
+            let mut ws = vec![b' '; 32 * 1024];
+            *ws.last_mut().unwrap() = b'\n';
+            let mut exact_bytes = std::fs::read(&exact_path).unwrap();
+            let header_len = exact_bytes.len();
+            exact_bytes.extend_from_slice(&ws);
+            std::fs::write(&exact_path, &exact_bytes).unwrap();
+            let exact_len = exact_bytes.len();
+
+            let budget_reader = Room::open(
+                &budget_dir,
+                Session::default(),
+                &Fixture,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap();
+            crate::storage::reset_test_io_counters();
+            let (exact_fit, incomplete) =
+                budget_reader.discover_with_byte_limit(exact_len).unwrap();
+            assert!(!incomplete);
+            assert_eq!(exact_fit.len(), 1);
+            assert_eq!(crate::storage::test_open_count(), 1);
+
+            let cold_reader = Room::open(
+                &budget_dir,
+                Session::default(),
+                &Fixture,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap();
+            crate::storage::reset_test_io_counters();
+            let (short_fit, incomplete) =
+                cold_reader.discover_with_byte_limit(exact_len - 1).unwrap();
+            assert!(incomplete);
+            assert!(short_fit.is_empty());
+            assert_eq!(crate::storage::test_open_count(), 1);
+
+            crate::storage::reset_test_io_counters();
+            let (zero_fit, incomplete) = cold_reader.discover_with_byte_limit(0).unwrap();
+            assert!(incomplete);
+            assert!(zero_fit.is_empty());
+            assert_eq!(crate::storage::test_open_count(), 0);
+
+            budget_writer
+                .append_at(
+                    "exact-room",
+                    &obj([("kind", "closed".into()), ("participant", "owner".into())]),
+                    "Closed",
+                    Carry::No,
+                )
+                .unwrap();
+            let grown_len = std::fs::metadata(&exact_path).unwrap().len() as usize;
+            crate::storage::reset_test_io_counters();
+            let (short_growth, incomplete) = budget_reader
+                .discover_with_byte_limit(grown_len - 1)
+                .unwrap();
+            assert!(incomplete);
+            assert!(short_growth.is_empty());
+            assert_eq!(crate::storage::test_read_bytes(), header_len + TAIL_BYTES);
+
+            crate::storage::reset_test_io_counters();
+            let (grown, incomplete) = budget_reader.discover_with_byte_limit(grown_len).unwrap();
+            assert!(!incomplete);
+            assert_eq!(grown.len(), 1);
+            assert!(grown[0].flag("closed"));
+            assert_eq!(crate::storage::test_open_count(), 1);
+            assert_eq!(
+                crate::storage::test_read_bytes(),
+                header_len + TAIL_BYTES + 512 + grown_len - exact_len
+            );
+
+            // Sealed Room whose padded body exceeds byte_limit still resolves as sealed in 1 open.
+            budget_writer
+                .create(Some("sealed-big"), "Big Sealed", None, Some("owner"), None)
+                .unwrap();
+            let sealed_big_path = budget_dir.join(".oms/threads/sealed-big.jsonl");
+            let mut padded = std::fs::read(&sealed_big_path).unwrap();
+            for _ in 0..8 {
+                padded.extend_from_slice(&ws);
+            }
+            padded.extend_from_slice(
+                b"{\"schema\":1,\"ts\":\"2026-11-27T00:00:00Z\",\"thread\":\"sealed-big\",\"seq\":3,\"role\":\"note\",\"agent\":\"agent\",\"text\":\"Rolled over\",\"room_event\":{\"kind\":\"successor\",\"target\":\"exact-room\"}}\n",
+            );
+            std::fs::write(&sealed_big_path, padded).unwrap();
+
+            let final_reader = Room::open(
+                &budget_dir,
+                Session::default(),
+                &Fixture,
+                &stop,
+                false,
+                false,
+            )
+            .unwrap();
+            crate::storage::reset_test_io_counters();
+            let (both, incomplete) = final_reader
+                .discover_with_byte_limit(exact_len + 16384)
+                .unwrap();
+            assert!(!incomplete);
+            assert_eq!(both.len(), 2);
+            assert_eq!(crate::storage::test_open_count(), 2);
+            assert!(
+                both.iter()
+                    .find(|r| r.text("id") == "sealed-big")
+                    .unwrap()
+                    .flag("sealed")
+            );
+        });
+        std::fs::remove_dir_all(root).unwrap();
         result.unwrap();
     }
 }
