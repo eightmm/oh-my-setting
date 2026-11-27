@@ -1802,6 +1802,7 @@ pub fn visible(report: &Value, nav: &navigation::Navigation) -> Vec<Value> {
     if nav.attention_only {
         all.extend(attention_extra_rows(report, &all, &attention));
     }
+    fold_repeats(report, nav, main_id.as_ref(), &mut all);
     let main = main_id.as_ref().and_then(|(participant, attempt)| {
         all.iter().find(|call| {
             call["role"] == "main"
@@ -2918,6 +2919,83 @@ fn room_stages(
     out
 }
 
+/// Overview only: an attempt whose printed row repeats an earlier one's (same
+/// provider, role, label, title, state and model) folds into it, which shows
+/// `×N`; Tab All, filters and the Attention list still list every attempt.
+/// A folded group that needs attention keeps its oldest attempt in view, so
+/// the row shows how long the oldest one has waited. Native children never
+/// fold because identical ones mark an ambiguous roster match.
+fn fold_repeats(
+    report: &Value,
+    nav: &navigation::Navigation,
+    main_id: Option<&(String, String)>,
+    all: &mut [Value],
+) {
+    if !default_overview(nav) {
+        return;
+    }
+    let folds = {
+        let main = main_id.and_then(|(participant, attempt)| {
+            all.iter().find(|call| {
+                call["role"] == "main"
+                    && text(call, "participant") == participant
+                    && text(call, "attempt") == attempt
+            })
+        });
+        let direct = direct_work(report, all, main);
+        let mut first = BTreeMap::new();
+        let mut folds = Vec::new();
+        for (index, call) in all.iter().enumerate() {
+            if call["role"] == "main"
+                || call["native_child"] == true
+                || collapsed_history(nav, call)
+                || fold_inactive(nav, call)
+            {
+                continue;
+            }
+            let display = call_display(call);
+            let key = (
+                is_direct_work(call, &direct),
+                attention_pass(call, &BTreeSet::new()),
+                provider_bucket(call),
+                display.role.to_owned(),
+                display.name,
+                display.title.to_owned(),
+                text(call, "state").to_owned(),
+                model_label(call),
+            );
+            let key_attention = key.1;
+            match first.entry(key) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(index);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let kept = *entry.get();
+                    let started = |at: usize| {
+                        oms_panel_core::metrics::stamp(&all[at]["started_at"]).unwrap_or(f64::MAX)
+                    };
+                    if key_attention && started(index) < started(kept) {
+                        entry.insert(index);
+                        folds.push((index, kept));
+                    } else {
+                        folds.push((kept, index));
+                    }
+                }
+            }
+        }
+        folds
+    };
+    let mut repeats = BTreeMap::new();
+    for (kept, folded) in folds {
+        all[folded]["board_repeat_folded"] = json!(true);
+        let merged = repeats.remove(&folded).unwrap_or(1);
+        *repeats.entry(kept).or_insert(1) += merged;
+    }
+    for (kept, count) in repeats {
+        all[kept]["board_repeats"] = json!(count);
+    }
+}
+
 fn visible_from<'a>(
     all: &'a [Value],
     nav: &navigation::Navigation,
@@ -2931,6 +3009,7 @@ fn visible_from<'a>(
         .iter()
         .filter(|v| !main.is_some_and(|main| std::ptr::eq(*v, main)))
         .filter(|v| !collapsed_history(nav, v) && !fold_inactive(nav, v))
+        .filter(|v| v["board_repeat_folded"] != true)
         .filter(|v| navigation::matches_words(v, &words))
         .filter(|v| !nav.attention_only || attention_pass(v, attention_calls))
         .collect();
@@ -3153,6 +3232,7 @@ fn frame_with_capacity(
     if nav.attention_only {
         all.extend(attention_extra_rows(report, &all, &attention));
     }
+    fold_repeats(report, nav, main_id.as_ref(), &mut all);
     let pinned = main_id.as_ref().and_then(|(participant, attempt)| {
         all.iter().find(|call| {
             call["role"] == "main"
@@ -3171,7 +3251,7 @@ fn frame_with_capacity(
     let inactive = all
         .iter()
         .filter(|call| !pinned.is_some_and(|main| std::ptr::eq(*call, main)))
-        .filter(|call| fold_inactive(nav, call))
+        .filter(|call| fold_inactive(nav, call) || call["board_repeat_folded"] == true)
         .count();
     let attention_calls = attention_call_ids(&attention);
     let filtered = visible_from(&all, nav, pinned, &direct, &attention_calls);
@@ -3904,6 +3984,10 @@ fn render_card_row(
 ) -> String {
     count_row_render();
     let placeholder = !quiet_tokens;
+    let repeated = call["board_repeats"]
+        .as_u64()
+        .map_or_else(|| suffix.to_owned(), |count| format!(" ×{count}{suffix}"));
+    let suffix = repeated.as_str();
     let inner = columns - if use_cards { 4 } else { 0 };
     let display = call_display(call);
     let child = uses_observed_model(call);
@@ -8698,6 +8782,78 @@ mod tests {
         assert!(
             board.contains("Seen child") && !board.contains("seen "),
             "{board}"
+        );
+    }
+
+    #[test]
+    fn overview_folds_rows_that_repeat_an_earlier_row_until_tab_all() {
+        let worker = |id: &str, title: &str, state: &str, started: u64| {
+            json!({"participant": id, "alias": "patch-admit", "role": "worker", "provider": "codex",
+                "state": state, "title": title, "joined": true, "attempt": format!("a-{id}"),
+                "created_at": started})
+        };
+        let report = json!({"generated_at": 10_000, "collection": {"ok": true}, "capacity_stale": false,
+        "room": {"id": "room-r", "owner": "main-1", "participants": [
+            {"participant": "main-1", "role": "main", "provider": "codex", "joined": true},
+            worker("w-1", "Same task", "running", 9_000), worker("w-2", "Other task", "running", 9_000),
+            worker("w-3", "Same task", "running", 9_000), worker("w-4", "Same task", "running", 9_000),
+            worker("w-5", "Held task", "blocked", 9_500), worker("w-6", "Held task", "blocked", 9_100),
+            worker("w-7", "Held task", "waiting_input", 9_000),
+        ]}});
+        let read = BTreeMap::new();
+        let overview = frame(&report, &Default::default(), 120, 30, &read);
+        let board = overview.join("\n");
+        let same: Vec<_> = overview
+            .iter()
+            .filter(|line| line.contains("● Worker") && line.contains("Same task"))
+            .collect();
+        assert_eq!(same.len(), 1, "{board}");
+        assert!(same[0].contains("Same task ×3"), "{board}");
+        assert!(!board.contains("Other task ×"), "{board}");
+        // Identical rows that need attention fold too, keeping the oldest in
+        // view; a different state never merges into them.
+        let held: Vec<_> = overview
+            .iter()
+            .filter(|line| line.contains("● Worker") && line.contains("Held task"))
+            .collect();
+        assert_eq!(held.len(), 2, "{board}");
+        assert_eq!(
+            held.iter()
+                .filter(|line| line.contains("Held task ×2"))
+                .count(),
+            1,
+            "{board}"
+        );
+        let rows = visible(&report, &Default::default());
+        let kept = rows
+            .iter()
+            .find(|call| text(call, "title") == "Held task" && call["state"] == "blocked")
+            .unwrap();
+        assert_eq!(text(kept, "participant"), "w-6");
+        assert!(board.contains("3 folded (Tab all)"), "{board}");
+        // Selection walks the same folded rows the board paints.
+        let rows = visible(&report, &Default::default());
+        assert_eq!(
+            rows.iter()
+                .filter(|call| text(call, "title") == "Same task")
+                .count(),
+            1
+        );
+        let tab = navigation::Navigation {
+            view: View::Auto.next(),
+            ..Default::default()
+        };
+        let all = visible(&report, &tab);
+        assert_eq!(
+            all.iter()
+                .filter(|call| text(call, "title") == "Same task")
+                .count(),
+            3
+        );
+        assert!(
+            !frame(&report, &tab, 120, 30, &read)
+                .join("\n")
+                .contains("task ×")
         );
     }
 

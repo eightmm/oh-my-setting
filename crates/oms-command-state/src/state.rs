@@ -297,14 +297,13 @@ fn collect_snapshot(
         .iter()
         .filter(|r| !r.get("terminal").truth())
         .rev()
-        .cloned()
         .collect();
+    // Stable sorting preserves reverse traversal order for equal rank and timestamp.
     active_latest.sort_by(|a, b| {
         oms_command_operations::activity_rank(a.text("state"))
             .cmp(&oms_command_operations::activity_rank(b.text("state")))
             .then_with(|| b.text("updated_at").cmp(a.text("updated_at")))
     });
-    active_latest.truncate(8);
     state.set(
         "agent_operations",
         object([
@@ -324,7 +323,10 @@ fn collect_snapshot(
                 "recent",
                 Value::Array(event_rows.iter().rev().take(8).rev().cloned().collect()),
             ),
-            ("active_latest", Value::Array(active_latest)),
+            (
+                "active_latest",
+                Value::Array(active_latest.into_iter().take(8).cloned().collect()),
+            ),
         ]),
     )?;
     let approvals = decoded(oms_command_operations::run(

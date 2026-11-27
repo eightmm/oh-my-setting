@@ -1755,6 +1755,9 @@ fn transport(
             cmd.args(&["--output-format", "stream-json", "--verbose", "-p"]);
         }
         "antigravity" => {
+            if let Some(resume) = nonempty_env("OMS_RESUME_SESSION") {
+                cmd.option("--conversation", resume);
+            }
             cmd.model(route);
             cmd.option("--add-dir", cwd);
             cmd.effort(route, "--effort");
@@ -4268,6 +4271,8 @@ mod bridge_route_tests {
                                     + "resume|--all|fixture-session|-";
                             } else if provider == "claude" {
                                 expanded = "--resume|fixture-session|".to_owned() + &expanded;
+                            } else if provider == "antigravity" {
+                                expanded = "--conversation|fixture-session|".to_owned() + &expanded;
                             }
                         }
                         let expected: Vec<OsString> = expanded

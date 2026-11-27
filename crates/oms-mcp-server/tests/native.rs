@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 const META: &str = "io.modelcontextprotocol/protocolVersion";
 const CAPS: &str = "io.modelcontextprotocol/clientCapabilities";
 const EXT: &str = "io.modelcontextprotocol/tasks";
+// A size budget, not a host limit: it began as 240 KiB when the server stripped indentation, and
+// now covers the verbatim panel with the #631 More sections and new-goal window.
+const PANEL_BUDGET: usize = 256 * 1024;
 fn timeout() -> Duration {
     Duration::from_secs(
         std::env::var("OMS_TEST_CALL_TIMEOUT")
@@ -361,11 +364,11 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v35.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v37.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
-        assert!(html.len() < 240 * 1024);
+        assert!(html.len() < PANEL_BUDGET);
         assert_eq!(
             html.as_bytes(),
             include_bytes!("../src/conversation-panel.html")
@@ -1440,6 +1443,7 @@ fn desktop_lead_conversations() {
             open,
             read,
             "oms_send_lead_message",
+            "oms_stop_lead_message",
             "oms_worker_output",
             "oms_lead_settings",
             "oms_update_lead_settings",
@@ -1839,7 +1843,7 @@ fn desktop_lead_conversations() {
         } else {
             assert_eq!(
                 settings["nativeSession"],
-                json!({"source":"provider-result","scope":"invocation","resumable":false,"id":"a1000000-0000-4000-8000-000000000001"})
+                json!({"source":"provider-result","scope":"invocation","resumable":true,"id":"a1000000-0000-4000-8000-000000000001"})
             );
             for visible in [
                 &view["result"]["structuredContent"],
@@ -2509,6 +2513,45 @@ fn lead_turn_failure_degrades_per_row() {
     );
     assert_eq!(leads[2]["status"], "ready");
     assert_eq!(leads[2]["latestTurn"], Value::Null);
+
+    // Stop: only the latest running message is cancelled, the stop is shown as
+    // such, and the next message starts a fresh native session.
+    let stop = "oms_stop_lead_message";
+    fixture_settings(&source, json!({"leadRoom":true,"gate":true}));
+    let turn = "20000000-0000-4000-8000-000000000003";
+    let agy = json!({"room":"lead-room","projectKey":key,"provider":"agy",
+        "leadRequestId":ready["leads"][2]["requestId"],"turnId":turn});
+    let mut first = agy.clone();
+    first["text"] = json!("Check seat 3");
+    good(&call(&mut c, send, &first));
+    let status = |c: &mut Client| {
+        payload(&call(
+            c,
+            read,
+            &json!({"room":"lead-room","provider":"agy","turnId":turn}),
+        ))["turn"]["status"]
+            .clone()
+    };
+    until(|| status(&mut c) == "running");
+    let mut stale = agy.clone();
+    stale["turnId"] = json!(codex_turn);
+    bad(&call(&mut c, stop, &stale), "latest");
+    let mut unbound = agy.clone();
+    unbound.as_object_mut().unwrap().remove("projectKey");
+    bad(&call(&mut c, stop, &unbound), "exact project");
+    good(&call(&mut c, stop, &agy));
+    good(&call(&mut c, stop, &agy));
+    until(|| status(&mut c) == "stopped");
+    good(&call(&mut c, stop, &agy));
+    assert_eq!(status(&mut c), "stopped");
+    fixture_settings(&source, json!({"leadRoom":true}));
+    send_turn(&mut c, 2, 4);
+    // Kickoff: no session; first follow-up resumes the kickoff's own session;
+    // the one after a stop has no verified session to continue.
+    assert_eq!(
+        std::fs::read_to_string(source.join("resumed-antigravity")).unwrap(),
+        "\na1000000-0000-4000-8000-000000000001\n\n"
+    );
 }
 
 // Provider assignment: the Room store is proven in room_contract; here the
@@ -3118,7 +3161,7 @@ fn conversation_panel() {
     let repo = t.repo();
     let mut c = Client::with_depth(&source, &repo, "chatgpt-panel", true, false, "0".as_ref());
     let tools = c.call("tools/list", json!({}))["result"]["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 25);
+    assert_eq!(tools.as_array().unwrap().len(), 26);
     assert_eq!(tools[0]["name"], "oms_open_panel");
     assert_eq!(
         tools[0]["description"],
@@ -3129,7 +3172,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v35.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v37.html");
     for name in [
         "oms_panel_usage",
         "oms_panel_project_graph",
@@ -3170,7 +3213,7 @@ fn conversation_panel() {
     let current = read(&mut c, uri);
     assert_eq!(current["uri"], *uri);
     let html = current["text"].as_str().unwrap();
-    assert!(html.len() < 240 * 1024);
+    assert!(html.len() < PANEL_BUDGET);
     assert_eq!(
         html.as_bytes(),
         include_bytes!("../src/conversation-panel.html")
@@ -3216,6 +3259,8 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v32.html"),
         json!("ui://oms/conversation-panel/v33.html"),
         json!("ui://oms/conversation-panel/v34.html"),
+        json!("ui://oms/conversation-panel/v35.html"),
+        json!("ui://oms/conversation-panel/v36.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);
@@ -7484,6 +7529,16 @@ fn fake_oms() {
             PathBuf::from(&args[args.iter().position(|s| s == "--artifact-dir").unwrap() + 1]);
         std::fs::create_dir_all(&out).unwrap();
         let run = out.parent().unwrap();
+        if cfg["leadRoom"] == true {
+            let provider = args.windows(2).find(|a| a[0] == "--providers").unwrap()[1]
+                .to_string_lossy()
+                .into_owned();
+            let resumed = std::env::var("OMS_RESUME_SESSION").unwrap_or_default();
+            let mut log = std::fs::read_to_string(source.join(format!("resumed-{provider}")))
+                .unwrap_or_default();
+            log.push_str(&format!("{resumed}\n"));
+            std::fs::write(source.join(format!("resumed-{provider}")), log).unwrap();
+        }
         if cfg["gate"] == true {
             std::fs::write(run.join("fixture-ready"), "ready").unwrap();
             until(|| source.join("release").exists() || run.join("cancel-request.json").exists());
@@ -7494,6 +7549,10 @@ fn fake_oms() {
                     json!({"schema":1,"task_id":op,"kind":"mcp-task-cancel-observed"}).to_string(),
                 )
                 .unwrap();
+                if cfg["leadRoom"] == true {
+                    // A stopped Lead turn ends without publishing an answer.
+                    std::process::exit(130);
+                }
             }
         }
         let artifact = out.join("fixture.md");

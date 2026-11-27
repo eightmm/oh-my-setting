@@ -1246,6 +1246,7 @@ fn owns_invocation(argv: &[OsString]) -> bool {
         "slurm-submit" => oms_command_slurm_submit::owns(local),
         "agent-task" => oms_command_task::owns(local),
         "room" => oms_command_room::owns(local),
+        "intake" => oms_command_intake::owns(local),
         "journal" => oms_command_journal::owns(local),
         "graph" => oms_command_graph::owns(local),
         _ => {
@@ -1270,6 +1271,17 @@ fn frontdoor_error(err: oms_bootstrap::Error) -> ! {
     let _ = stderr.write_all(b"\n");
     let _ = stderr.flush();
     std::process::exit(err.status);
+}
+
+fn unowned_dispatch_exit(argv: &[OsString]) -> ! {
+    use std::io::Write;
+    let tool = argv.first().map_or(OsStr::new(""), OsString::as_os_str);
+    let mut msg = oms_bootstrap::unknown_tool(tool).diagnostic().to_vec();
+    msg.push(b'\n');
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(&msg);
+    let _ = stderr.flush();
+    std::process::exit(2);
 }
 
 fn prepare_frontdoor(argv: &[OsString]) -> (Vec<OsString>, PathBuf) {
@@ -1490,6 +1502,35 @@ fn dispatch_owned(
             None => oms_command_room::run(local, &cwd, interrupted),
         };
         dispatch_exit(tool, local, &cwd, result);
+    }
+    if tool == "intake" {
+        use std::io::Write as _;
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        let code = match source_root {
+            Some(source) => match services_collab::CollabServices::new(interrupted, source) {
+                Ok(services) => oms_command_intake::run_streaming_with_services(
+                    local,
+                    &cwd,
+                    interrupted,
+                    &services,
+                    &mut stdout,
+                    &mut stderr,
+                ),
+                Err(error) => {
+                    let _ = writeln!(stderr, "error: {error}");
+                    2
+                }
+            },
+            None => oms_command_intake::run_streaming(
+                local,
+                &cwd,
+                interrupted,
+                &mut stdout,
+                &mut stderr,
+            ),
+        };
+        dispatch_streaming_exit(tool, local, &cwd, code, &mut stdout, &mut stderr);
     }
     if tool == "input" {
         let result = match source_root {
@@ -1896,8 +1937,11 @@ fn main() {
         .map(str::to_owned)
     {
         if !owns_invocation(&argv) {
-            if dispatch {
+            if select {
                 std::process::exit(75);
+            }
+            if dispatch {
+                unowned_dispatch_exit(&argv);
             }
         } else {
             if select {
@@ -1914,7 +1958,10 @@ fn main() {
         }
     }
     if dispatch && argv.first().is_none_or(|v| v != "runtime") {
-        std::process::exit(75);
+        if select {
+            std::process::exit(75);
+        }
+        unowned_dispatch_exit(&argv);
     }
     let mut subcommand = false;
     let mut legacy = false;

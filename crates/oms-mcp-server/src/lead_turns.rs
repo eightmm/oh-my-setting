@@ -1,7 +1,7 @@
 //! User messages in an existing Room-bound OMS Lead conversation. The original
 //! private operation owns the index. Each turn has one immutable reservation
 //! and a distinct peer operation, even when the same text is sent twice.
-use super::{PanelResult, SEND_LEAD, assignment_address, checked_peer_directory, uuid};
+use super::{PanelResult, SEND_LEAD, STOP_LEAD, assignment_address, checked_peer_directory, uuid};
 use crate::storage::{Directory, byte_prefix, hash};
 use crate::value::Value;
 use crate::{RUN_ROOT, Server};
@@ -174,6 +174,14 @@ pub(super) fn validate(name: &str, args: &Value, provider: Option<&str>) -> Pane
         }
         crate::output::outbound(args["text"].as_str().unwrap().as_bytes(), &Value::Null)
             .map_err(|_| "OMS withheld this message during its outbound scan.")?;
+    }
+    if name == STOP_LEAD
+        && (provider.is_none()
+            || !args["projectKey"].is_string()
+            || !args["leadRequestId"].as_str().is_some_and(uuid)
+            || args.get("turnId").is_none())
+    {
+        return Err("An exact project, Lead and message ID are required.".into());
     }
     Ok(())
 }
@@ -476,6 +484,10 @@ impl<'a> Conversation<'a> {
                     Ok(("unconfirmed", None))
                 }
             }
+            // Only the panel's own cancellation receipt turns an exit into a stop.
+            ("done", Some(_)) if crate::storage::cancel_request(&dir).is_some() => {
+                Ok(("stopped", None))
+            }
             ("done", Some(_)) => Ok(("failed", None)),
             _ => Ok(("unconfirmed", None)),
         }
@@ -511,10 +523,18 @@ impl<'a> Conversation<'a> {
         let previous = self.head()?;
         if let Some(head) = &previous {
             let last = self.record(head)?.ok_or(INVALID)?;
-            if !matches!(self.observe(server, &last)?.0, "replied" | "failed") {
+            if !matches!(
+                self.observe(server, &last)?.0,
+                "replied" | "failed" | "stopped"
+            ) {
                 return Err("The previous message still has an unresolved delivery. Check its status first.".into());
             }
         }
+        // Continue the previous turn's verified native session, read before this
+        // record moves the head. No observation means a fresh native session.
+        let resume = self
+            .native_invocation(server)
+            .and_then(|(session, _)| session["id"].as_str().map(str::to_owned));
         let digest = hash(text);
         let route = self.current_settings()?["selection"].clone();
         let settings = settings::selection(self.provider, &route)?;
@@ -555,6 +575,7 @@ impl<'a> Conversation<'a> {
             self.thread,
             &binding,
             settings,
+            resume.as_deref(),
         );
         // A physical launch requires mkdir of this operation before spawn; that
         // helper never removes it. Only the original writer may attest a synchronous
@@ -570,6 +591,33 @@ impl<'a> Conversation<'a> {
                 )
                 .map_err(|_| INVALID)?;
         }
+        Ok(())
+    }
+    fn stop(
+        &self,
+        server: &Server<'_>,
+        args: &Value,
+        check: &impl Fn() -> PanelResult<()>,
+    ) -> PanelResult<()> {
+        let id = args["turnId"].as_str().ok_or(INVALID)?;
+        let _guard = self.dir.lock().map_err(
+            |_| "Another Lead message is being checked. Read the original request status.",
+        )?;
+        check()?;
+        // Only the latest message can still be running; an older one is settled.
+        if self.head()?.as_deref() != Some(id) {
+            return Err("Only the latest Lead message can be stopped.".into());
+        }
+        let record = self.record(id)?.ok_or(INVALID)?;
+        if self.observe(server, &record)?.0 != "running" {
+            return Ok(());
+        }
+        let binding = record["binding"].as_str().ok_or(INVALID)?;
+        let op = assignment_address(self.lead, binding).ok_or(INVALID)?;
+        let row = json!({"schema":1,"kind":"mcp-task-cancel-request","task_id":op,"requested_at":crate::storage::now()});
+        crate::storage::Directory::run(self.repo, &op, true)
+            .and_then(|dir| dir.record_cancel_request(format!("{row}\n").as_bytes()))
+            .map_err(|_| "OMS could not record the stop request.")?;
         Ok(())
     }
     pub fn latest(
@@ -800,6 +848,9 @@ impl<'a> Conversation<'a> {
     ) -> PanelResult<Option<Value>> {
         if name == SEND_LEAD {
             self.submit(server, args, &check)?;
+        }
+        if name == STOP_LEAD {
+            self.stop(server, args, &check)?;
         }
         let selected = args["turnId"]
             .as_str()

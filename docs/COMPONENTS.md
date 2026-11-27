@@ -45,6 +45,7 @@ explains overlapping entrypoints.
 | `dashboard` | Read a terminal view of OMS collaboration state. | `oms dashboard` | [Panel and collaboration](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) |
 | `inbox` | Prioritize attention from shared state. | `oms inbox` | [State, memory, and handoff](#state-memory-and-handoff) |
 | `room` | Share task-scoped messages and room snapshots. | `oms room` | [Work rooms](TERMINAL-PANEL.md#shared-work-rooms-and-the-graph) |
+| `intake` | Receive external tracker webhooks into an OMS Room and send outbound-scanned replies with retry-safe receipts. | `oms intake` | [External tracker intake](INTAKE.md) |
 | `lease` | Declare time-limited, advisory intent to edit paths. | `oms lease` | [Delegating writes](#delegating-writes) |
 | `input` | Capture source-aware attachments, edit steer/next inputs and deliver them explicitly through enrolled rooms; queue imported view feedback. | `oms input` | [Input queue](INPUT-QUEUE.md) |
 | `thread` | Read and deliver shared conversation turns. | `oms thread` | [Asking other agents](#asking-other-agents) |
@@ -1758,7 +1759,9 @@ The detailed operating contract is in the harness state-memory reference.
 
 `oms plan-from-spec` proposes tasks from an active `PROJECT.md`; it refuses a
 draft spec and does not alter the plan until the proposal is explicitly
-applied. `oms plan-run` claims and executes at most one ready task. `oms
+applied. `oms plan-run` claims and executes at most one ready task; each
+provider and landing call is bounded by `OMS_PEER_TIMEOUT` (default 20 minutes,
+the same as `peer-delegate`). `oms
 goal-drive` repeats within a cycle cap and acceptance command; the cap counts
 task attempts across resumes of one autopilot contract, bounds attempts rather
 than provider cost, and an exhausted contract is retired with `oms autopilot

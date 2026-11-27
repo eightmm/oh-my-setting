@@ -697,7 +697,7 @@ test('Lead settings are private and lazy, with model-specific effort and explici
 
 test('Lead settings show only private provider evidence for the observed request',async()=>{
   const id='531cb793-8e16-4761-82c8-064497585548',model='claude-opus-4-6';
-  const observed={lastServed:{model,effort:null},nativeSession:{id,source:'provider-result',scope:'invocation',resumable:false}};
+  const observed={lastServed:{model,effort:null},nativeSession:{id,source:'provider-result',scope:'invocation',resumable:true}};
   let evidence=observed,turns=[];
   const p=await panel(['one'],dashboard,{locale:'en',tools:{
     [managedRead]:a=>{const v=leadStatus(a,'ready');if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns}};return v;},
@@ -710,18 +710,18 @@ test('Lead settings show only private provider evidence for the observed request
     button.dispatchEvent(new Event('click'));await setImmediate();await p.event('settings-toggle','click');
   };
   await open(1);
-  assert.ok(!details.hidden);assert.match(details.textContent,/Reply model reported by Claude · claude-opus-4-6\nClaude session observed for this request/);
+  assert.ok(!details.hidden);assert.match(details.textContent,/Reply model reported by Claude · claude-opus-4-6\nThe next message continues this Claude session/);
   assert.ok(!p.get('chat-settings').textContent.includes(id));
-  await choose(p,'ko');assert.match(details.textContent,/보고한 응답 모델 · claude-opus-4-6\n이 요청에 사용된 Claude 세션 확인/);
+  await choose(p,'ko');assert.match(details.textContent,/보고한 응답 모델 · claude-opus-4-6\n다음 메시지는 이 Claude 세션에서 이어짐/);
   turns=[{role:'user',turnId:id,text:'A later request',status:'failed'}];await p.event('chat-refresh','click');
   assert.ok(details.hidden);assert.ok(!p.get('settings-fields').hidden);
   await p.event('settings-toggle','click');
-  evidence={lastServed:{model:'provider-default',effort:null},nativeSession:{...observed.nativeSession,resumable:true}};
+  evidence={lastServed:{model:'provider-default',effort:null},nativeSession:{...observed.nativeSession,resumable:false}};
   await p.event('settings-toggle','click');assert.ok(!details.hidden);assert.equal(details.textContent,'실제 사용 모델 미확인');
   await p.event('settings-toggle','click');evidence={};
   await p.event('settings-toggle','click');assert.ok(!details.hidden);assert.equal(details.textContent,'실제 사용 모델 미확인');
   await p.event('chat-back','click');evidence=observed;await open(2);
-  assert.equal(details.textContent,'실제 사용 모델 미확인\n이 요청에 사용된 AGY 세션 확인');assert.ok(!details.hidden);
+  assert.equal(details.textContent,'실제 사용 모델 미확인\n다음 메시지는 이 AGY 세션에서 이어짐');assert.ok(!details.hidden);
   await p.event('chat-back','click');await open(0);assert.ok(!details.hidden);assert.equal(details.textContent,'실제 사용 모델 미확인');
   assert.equal(p.host.messages.length,0);assert.equal(p.host.contexts.length,0);
 });
@@ -756,7 +756,7 @@ test('recorded Lead turns poll reads only while open and keep a draft typed whil
     },
     oms_send_lead_message:a=>{sent={...a};return {...leadStatus(a,'ready'),turn:{turnId:a.turnId,status:state}};}
   }});
-  const polls=()=>[...timers.values()].filter(v=>v.ms===8000);
+  const polls=()=>[...timers.values()].filter(v=>v.ms===4000);
   const open=p.get('leads').children[2].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
   p.host.delayTool='oms_send_lead_message';p.get('chat-text').value='First';await p.event('chat-text','input');
   await p.event('chat-compose','submit');await p.event('chat-compose','submit');
@@ -768,6 +768,34 @@ test('recorded Lead turns poll reads only while open and keep a draft typed whil
   state='failed';open.dispatchEvent(new Event('click'));await setImmediate();assert.match(p.get('chat-delivery').textContent,/ended without a reply/);
   assert.equal(p.get('chat-text').value,'Next');assert.equal(polls().length,0);
   assert.equal(p.calls.filter(c=>c.name==='oms_send_lead_message').length,1);
+});
+
+test('a Lead reply renders as Markdown nodes, Enter sends, and Stop ends a running reply',async()=>{
+  const id=randomUUID();let state='running',sent,stopped;
+  const reply='## Plan\nUse `oms land` **now**.\n- one\n- two\n```\n<b>raw</b>\n```';
+  const p=await panel(['one'],dashboard,{locale:'en',timers:{setTimeout:()=>0,clearTimeout(){}},tools:{
+    [managedRead]:a=>{const v=leadStatus(a,'ready');
+      if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Old',turnId:id,status:'replied'},{role:'antigravity',text:reply,turnId:id}]}};
+      if(a.turnId)v.turn={turnId:a.turnId,status:state};return v;},
+    oms_send_lead_message:a=>{sent={...a};return {...leadStatus(a,'ready'),turn:{turnId:a.turnId,status:state}};},
+    oms_stop_lead_message:a=>{stopped={...a};state='stopped';return {...leadStatus(a,'ready'),turn:{turnId:a.turnId,status:state}};}
+  }});
+  p.get('leads').children[2].children[1].children.find(e=>e.type==='button').dispatchEvent(new Event('click'));await setImmediate();
+  const md=kids(kids(p.get('chat-messages'))[1])[1];
+  assert.deepEqual(kids(md).map(e=>e.tagName.toLowerCase()),['p','p','ul','pre']);
+  assert.equal(md.textContent,'PlanUse oms land now.onetwo<b>raw</b>');assert.ok(!kids(md).some(e=>/^b$/i.test(e.tagName)));
+  assert.equal(kids(kids(md)[1]).map(e=>e.tagName?.toLowerCase()).filter(Boolean).join(),'code,strong');
+  assert.match(p.get('chat-text').placeholder,/Message AGY · Enter to send/);
+  const key=async extra=>{p.get('chat-text').dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'Enter',...extra}));await setImmediate();};
+  p.get('chat-text').value='Go';await p.event('chat-text','input');
+  await key({shiftKey:true});assert.equal(sent,undefined);
+  await key({});assert.equal(sent.text,'Go');
+  assert.ok(!p.get('chat-typing').hidden);assert.match(p.get('chat-typing-text').textContent,/AGY is replying/);
+  assert.ok(!p.get('chat-stop').hidden);assert.ok(p.get('chat-send').hidden);
+  await p.event('chat-stop','click');
+  assert.equal(stopped.turnId,sent.turnId);assert.equal(stopped.leadRequestId,sent.leadRequestId);
+  assert.ok(p.get('chat-typing').hidden);assert.ok(p.get('chat-stop').hidden);assert.ok(!p.get('chat-send').hidden);
+  assert.match(p.get('chat-delivery').textContent,/Stopped/);
 });
 
 test('a verified unresolved message from another view blocks a new dispatch until its turn settles',async()=>{
@@ -1987,7 +2015,11 @@ function moreFixture(state){
       pullRequests:[{number:1,title:'Pass',checks:{passed:2},url:'https://github.com/o/r/pull/1'},
         {number:2,title:'Broken',baseBranch:'dev',checks:{failed:1,passed:1,items:[{name:'lint',status:'failed'}]},url:'https://evil.example/o/r/pull/2'},
         {number:3,title:'Running',checks:{pending:1}}]}}),
-  };
+    oms_panel_work_items:()=>({schema:1,availability:'partial',items:[{id:'t1',title:'Running one',state:'running',owner:null},{id:'bad id',title:'Spaced',state:'running'},
+      {id:'t2',title:'Stuck',state:'blocked'},{id:'t3',state:'weird'},{id:'t4',state:'cancelled'},{id:'t5',title:'Old',state:'done'}]}),
+    oms_panel_tui_view:a=>({view:'results',page:a.page,status:'ready',nextPage:null,incomplete:false,rows:[
+      {taskId:'t1',implement:'passed',verify:'failed',review:'not_run',delivery:'not_run'},
+      {taskId:'zz',implement:'passed',verify:'passed',review:'not_requested',delivery:'not_run'}]})};
   const fire=async ms=>{for(const [id,j] of jobs)if(j.ms===ms){jobs.delete(id);j.fn();}for(let i=0;i<4;i++)await setImmediate();};
   return {jobs,timers,tools,fire};
 }
@@ -2015,7 +2047,7 @@ test('v35 usage strip reads once after the first screen, shows only recorded win
   assert.equal(p.get('usage-rows').textContent,'No record');assert.match(p.get('usage-strip').getAttribute('aria-label'),/No record/);
 });
 
-test('v34 More PR · CI reads on first expand, sorts PRs by failure and keeps the read across auto refresh',async()=>{
+test('v34 More sections read on first expand, sort PRs by failure and join result titles from work',async()=>{
   const state={key:'b'.repeat(64)},f=moreFixture(state),p=await panel(['one','two'],dashboard,{locale:'en',timers:f.timers,tools:f.tools,openLinks:true});
   await p.open('input',{arguments:{project:'one'}});await settle();
   await p.event('more-pr','click');await settle();
@@ -2027,11 +2059,27 @@ test('v34 More PR · CI reads on first expand, sorts PRs by failure and keeps th
   assert.equal(link(kids(list)[0]).tagName,'span');assert.equal(link(kids(list)[2]).tagName,'button');
   await p.event('more-pr','click');await p.event('more-pr','click');await settle();assert.equal(count(p,'oms_panel_git_status'),1);
   kids(kids(pr)[0])[1].dispatchEvent(new Event('click'));await settle();assert.equal(count(p,'oms_panel_git_status'),2);
-  assert.equal(p.get('more-work'),undefined);assert.equal(p.get('more-results'),undefined);
+  await p.event('more-work','click');await settle();
+  const work=p.get('more-work-body').textContent;assert.match(work,/ · partial/);assert.match(work,/1 cancelled/);
+  assert.match(work,/Active●Running oneUnassigned/);assert.match(work,/Other○t3/);assert.doesNotMatch(work,/Old/);
+  assert.match(p.get('more-work-chip').textContent,/Blocked 1/);
+  // A draft from a work row names the task only when its id is a valid task id.
+  const rowOf=title=>{const walk=e=>e.row && e.head?.textContent===title?e:(e.children?kids(e):[]).map(walk).find(Boolean);return walk(p.get('more-work-body'));};
+  for(const [title,task] of [['Spaced',null],['Running one','t1']]){
+    // A real empty element has no children; the fake DOM keeps an empty text child that would block the first open.
+    const li=rowOf(title);kids(li)[1].children=[];li.row.dispatchEvent(new Event('click'));await settle();
+    kids(kids(kids(li)[1])[1])[0].dispatchEvent(new Event('click'));await settle();
+    const text=p.get('followup-text').value;assert.match(text,new RegExp(title));
+    if(task)assert.match(text,/^Task: t1$/m);else assert.doesNotMatch(text,/^Task:|bad id/m);}
+  await p.event('more-results','click');await settle();assert.equal(count(p,'oms_panel_work_items'),1);
+  const res=p.get('more-results-body');assert.match(res.textContent,/Failed · timed out 1.*Running one.*t1/);assert.match(res.textContent,/zz/);
+  const rowButtons=res.children.filter(e=>e.className==='group').flatMap(g=>kids(g.children.at(-1)).map(li=>li.row));
+  assert.equal(rowButtons[0].getAttribute('aria-label'),'Running one: Implement passed, Verify failed, Review not run, Delivery not run');
+  assert.match(rowButtons[1].getAttribute('aria-label'),/^zz: /);
   await p.event('refresh','click');await settle();
-  assert.equal(p.get('more-pr').getAttribute('aria-expanded'),'true');assert.equal(count(p,'oms_panel_git_status'),2);assert.match(pr.textContent,/Broken/);
+  assert.equal(p.get('more-results').getAttribute('aria-expanded'),'true');assert.equal(count(p,'oms_panel_tui_view'),1);assert.match(res.textContent,/Running one/);
   await p.open('input',{arguments:{project:'two'}});await settle();
-  for(const k of ['pr']){assert.equal(p.get('more-'+k).getAttribute('aria-expanded'),'false',k);assert.equal(p.get('more-'+k+'-body').hidden,true,k);
+  for(const k of ['pr','work','results']){assert.equal(p.get('more-'+k).getAttribute('aria-expanded'),'false',k);assert.equal(p.get('more-'+k+'-body').hidden,true,k);
     assert.equal(kids(p.get('more-'+k+'-body')).length,0,k);}
 });
 
@@ -2048,7 +2096,7 @@ test('pending-turn polling pauses visibly and slot badges change only after a co
     if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Recorded question',turnId:id,status:state},...(state==='replied'?[{role:'claude',text:'Recorded reply',turnId:id}]:[])]}};
     return v;
   }}});
-  assert.equal([...jobs.values()].filter(v=>v.ms>=8000 && v.ms<=15000).length,0);
+  assert.equal([...jobs.values()].filter(v=>v.ms>=4000 && v.ms<=15000).length,0);
   assert.match(p.get('leads').children[0].textContent,/Ask Codex/);
   assert.match(p.get('leads').children[1].textContent,/Reply pending/);
   assert.match(p.get('leads').children[2].textContent,/Ask AGY.*Answer withheld by the safety scan/);
@@ -2065,10 +2113,10 @@ test('pending-turn polling pauses visibly and slot badges change only after a co
     await choose(p,'en');
   }
   const open=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
-  const poll=[...jobs].find(([,v])=>v.ms===8000);jobs.delete(poll[0]);now=130000;poll[1].fn();await setImmediate();
-  assert.match(p.get('chat-delivery').textContent,/Automatic checks paused/);assert.equal([...jobs.values()].filter(v=>v.ms===8000).length,0);
+  const poll=[...jobs].find(([,v])=>v.ms===4000);jobs.delete(poll[0]);now=130000;poll[1].fn();await setImmediate();
+  assert.match(p.get('chat-delivery').textContent,/Automatic checks paused/);assert.equal([...jobs.values()].filter(v=>v.ms===4000).length,0);
   const mark=p.calls.length;await p.event('chat-check','click');assert.equal(p.calls.length,mark+1);assert.equal(p.calls.at(-1).name,managedRead);
-  await p.event('chat-back','click');assert.equal([...jobs.values()].filter(v=>v.ms>=8000 && v.ms<=15000).length,0);
+  await p.event('chat-back','click');assert.equal([...jobs.values()].filter(v=>v.ms>=4000 && v.ms<=15000).length,0);
   state='replied';agyTurnState=null;await p.event('lead-refresh','click');assert.match(p.get('leads').children[1].textContent,/New reply/);
   assert.doesNotMatch(p.get('leads').children[2].textContent,/withheld|unreadable|unconfirmed/);
   open.dispatchEvent(new Event('click'));await setImmediate();await p.event('chat-back','click');assert.match(p.get('leads').children[1].textContent,/Reply read/);
