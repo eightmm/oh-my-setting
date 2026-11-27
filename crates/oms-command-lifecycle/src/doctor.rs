@@ -299,9 +299,15 @@ fn sandbox(paths: &Paths, options: &Options, flag: &AtomicBool) -> Result<Vec<Va
                 .unwrap_or("unknown");
             rows.push(finding("sandbox", "info", format!("{name}: {state}")));
         }
+        // An explicit OMS_BWRAP_BIN is what workers use; never report a PATH bwrap in its place.
         let available = oms_supervisor::sandbox::find_bwrap()
             .map(PathBuf::from)
-            .or_else(|| r::find("bwrap", &paths.cwd));
+            .or_else(|| {
+                std::env::var_os("OMS_BWRAP_BIN")
+                    .is_none()
+                    .then(|| r::find("bwrap", &paths.cwd))
+                    .flatten()
+            });
         rows.push(finding(
             "sandbox",
             "info",
@@ -375,11 +381,7 @@ fn sandbox_ssh_probe(binary: &Path, paths: &Paths, flag: &AtomicBool) -> Result<
     let auth_sock = std::env::var_os("SSH_AUTH_SOCK")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from);
-    let check_sock_path = auth_sock
-        .as_deref()
-        .filter(|p| p.is_absolute())
-        .and_then(Path::parent)
-        .is_some_and(|dir| !oms_supervisor::sandbox::in_worktree(dir, &paths.cwd));
+    let check_sock_path = auth_sock.as_deref().is_some_and(Path::is_absolute);
     let script = concat!(
         "empty_or_absent() {\n",
         "  [ ! -e \"$1\" ] && [ ! -L \"$1\" ] && return 0\n",
@@ -391,7 +393,7 @@ fn sandbox_ssh_probe(binary: &Path, paths: &Paths, flag: &AtomicBool) -> Result<
         "}\n",
         "if empty_or_absent \"$1\"; then printf 'openssh=ok\\n'; else printf 'openssh=exposed\\n'; fi\n",
         "if ( [ -z \"$2\" ] || empty_or_absent \"$2\" ) && empty_or_absent \"$3\"; then printf 'control=ok\\n'; else printf 'control=exposed\\n'; fi\n",
-        "if [ -z \"${SSH_AUTH_SOCK+x}\" ] && ( [ \"$5\" != \"1\" ] || ( [ ! -e \"$4\" ] && [ ! -L \"$4\" ] ) ); then printf 'agent=ok\\n'; else printf 'agent=exposed\\n'; fi\n",
+        "if [ -z \"${SSH_AUTH_SOCK+x}\" ] && ( [ \"$5\" != \"1\" ] || ( [ ! -e \"$4\" ] && [ ! -L \"$4\" ] ) || [ -c \"$4\" ] ); then printf 'agent=ok\\n'; else printf 'agent=exposed\\n'; fi\n",
     );
     let sh_args: Vec<OsString> = vec![
         "-c".into(),

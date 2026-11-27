@@ -185,22 +185,22 @@ pub fn bwrap_args(program: &OsStr, args: &[OsString], spec: &SandboxSpec) -> Vec
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         && let Some(agent_dir) = sock.parent()
-        && !in_worktree(agent_dir, &spec.worktree)
     {
         // A socket placed directly in a shared directory (home, the runtime dir, an ancestor of a
         // writable bind) is masked on its own; an empty tmpfs there would hide unrelated state.
-        let shared = ["HOME", "XDG_RUNTIME_DIR"]
-            .into_iter()
-            .filter_map(nonempty_env)
-            .map(PathBuf::from)
-            .any(|dir| same_dir(&dir, agent_dir))
+        // A socket inside a writable bind is masked alone too, so the bind itself stays visible.
+        let shared = in_worktree(agent_dir, &spec.worktree)
+            || ["HOME", "XDG_RUNTIME_DIR"]
+                .into_iter()
+                .filter_map(nonempty_env)
+                .map(PathBuf::from)
+                .any(|dir| same_dir(&dir, agent_dir))
             || std::iter::once(&spec.worktree)
                 .chain(spec.extra_rw_dirs.iter())
                 .any(|dir| in_worktree(dir, agent_dir));
         if !shared {
             push_hidden_dir(&mut hidden, agent_dir.to_path_buf());
-        } else if !in_worktree(&sock, Path::new("/tmp")) && std::fs::symlink_metadata(&sock).is_ok()
-        {
+        } else if !in_worktree(&sock, Path::new("/tmp")) && std::fs::metadata(&sock).is_ok() {
             masked_socket = Some(sock);
         }
     }
