@@ -5349,6 +5349,13 @@ fn stub_codex_main(state_dir: &Path) -> ! {
                 serde_json::from_slice(&std::fs::read(bundle_dir.join("mcp.json")).unwrap())
                     .unwrap();
             assert_eq!(plugin_json["name"], plugin_name);
+            if control["noopRollbackPluginAdd"] == true {
+                let first_done = state_dir.join("plugin-add-ran-once");
+                if first_done.exists() {
+                    std::process::exit(0);
+                }
+                write_private_file(&first_done, b"1\n");
+            }
             state["installed"].as_object_mut().unwrap().insert(
                 (*plugin_id).to_owned(),
                 json!({
@@ -5367,6 +5374,14 @@ fn stub_codex_main(state_dir: &Path) -> ! {
             save_state(&state);
             if let Some(conflict) = control["touchOnPluginAdd"].as_str() {
                 write_private_file(Path::new(conflict), b"{}\n");
+            }
+            if control["installOnceThenFailPluginAdd"] == true {
+                let once_marker = state_dir.join("plugin-add-failed-once");
+                if !once_marker.exists() {
+                    write_private_file(&once_marker, b"1\n");
+                    eprintln!("simulated one-shot post-install failure in codex plugin add");
+                    std::process::exit(1);
+                }
             }
             if control["installThenFailPluginAdd"] == true {
                 eprintln!("simulated post-install failure in codex plugin add");
@@ -7118,7 +7133,395 @@ fn project_panels_codex_lifecycle_parity() {
     std::fs::remove_dir_all(&mp_root).unwrap();
     reset_codex_state();
 
-    // 18. Checkout trees and Codex config sentinels remain completely untouched.
+    // 18. Disabled OMS plugin in Codex (`enabled: false` in `codex plugin list`):
+    //     - Reinstall with a recorded row and current bundle is accepted (not refused as unmanaged),
+    //       preserves `enabled: false`, and reports `"disabled": true` in JSON.
+    //     - Reinstall with NO row (adoption) is accepted (`action: "adopted"`), preserves
+    //       `enabled: false`, records the row, and reports `"disabled": true` in JSON.
+    //     - Reinstall across an OMS version upgrade (refresh) is accepted (not refused as
+    //       unmanaged), refreshes the bundle, and runs `codex plugin add` (which re-enables the
+    //       plugin in both the stub and real `codex` CLI, so `"disabled"` is omitted afterwards).
+    //     - Uninstall of a disabled OMS plugin runs `codex plugin remove`, cleans up the bundle,
+    //       marketplace entry/root, and row, and reports `"disabled": true` in JSON.
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+    let set_alpha_enabled = |enabled: bool| {
+        let mut st = read_codex_state();
+        st["installed"]["oms-alpha-service@oms-host-panels"]["enabled"] = json!(enabled);
+        write_private_file(&state_file, &serde_json::to_vec(&st).unwrap());
+    };
+    set_alpha_enabled(false);
+
+    // 18(a): Reinstall with recorded row + current bundle keeps `enabled: false` and reports `disabled: true`.
+    let (code, dis_noop_raw, dis_noop_err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{dis_noop_err}");
+    let dis_noop_json: Value = serde_json::from_str(&dis_noop_raw).unwrap();
+    assert_eq!(
+        dis_noop_json,
+        json!({
+            "app": "codex",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-alpha-service@oms-host-panels",
+            "action": "install",
+            "changed": false,
+            "disabled": true,
+        })
+    );
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+        ],
+        "no-op reinstall of disabled plugin must not call `codex plugin add`"
+    );
+    assert_eq!(
+        read_codex_state()["installed"]["oms-alpha-service@oms-host-panels"]["enabled"],
+        false
+    );
+
+    // 18(b): Reinstall with no sidecar row adopts the disabled OMS plugin and keeps `enabled: false`.
+    std::fs::remove_file(&panels_sidecar).unwrap();
+    let (code, dis_adopt_raw, dis_adopt_err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{dis_adopt_err}");
+    let dis_adopt_json: Value = serde_json::from_str(&dis_adopt_raw).unwrap();
+    assert_eq!(
+        dis_adopt_json,
+        json!({
+            "app": "codex",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-alpha-service@oms-host-panels",
+            "action": "adopted",
+            "changed": true,
+            "disabled": true,
+        })
+    );
+    assert!(panels_sidecar.exists());
+    assert_eq!(
+        read_codex_state()["installed"]["oms-alpha-service@oms-host-panels"]["enabled"],
+        false
+    );
+    let _ = take_calls();
+
+    // 18(c): Uninstall of a disabled OMS plugin runs `codex plugin remove` and cleans up bundle,
+    //        marketplace entry/root, and row.
+    let (code, dis_un_raw, dis_un_err) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{dis_un_err}");
+    let dis_un_json: Value = serde_json::from_str(&dis_un_raw).unwrap();
+    assert_eq!(
+        dis_un_json,
+        json!({
+            "app": "codex",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-alpha-service@oms-host-panels",
+            "action": "uninstall",
+            "changed": true,
+            "disabled": true,
+        })
+    );
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "remove", "oms-alpha-service@oms-host-panels"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "remove", "oms-host-panels"]}),
+        ]
+    );
+    assert!(!alpha_bundle_dir.exists() && !mp_root.exists() && !panels_sidecar.exists());
+    assert!(
+        read_codex_state()["installed"]
+            .get("oms-alpha-service@oms-host-panels")
+            .is_none()
+    );
+
+    // 18(d): Upgrade refresh of a disabled OMS plugin is accepted (not refused as unmanaged) and
+    //        runs `codex plugin add` (which re-enables it in both stub and real `codex` CLI).
+    let _ = seed_version_a_alpha(true);
+    set_alpha_enabled(false);
+    let (code, dis_ref_raw, dis_ref_err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{dis_ref_err}");
+    let dis_ref_json: Value = serde_json::from_str(&dis_ref_raw).unwrap();
+    assert_eq!(
+        dis_ref_json,
+        json!({
+            "app": "codex",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-alpha-service@oms-host-panels",
+            "action": "install",
+            "changed": true,
+        })
+    );
+    assert_eq!(
+        read_codex_state()["installed"]["oms-alpha-service@oms-host-panels"]["enabled"],
+        true
+    );
+    let _ = take_calls();
+    assert_eq!(
+        run_panel(
+            base,
+            &["--uninstall-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+
+    // 19. Uninstall that leaves the plugin installed in Codex (both when `codex plugin remove`
+    //     fails AND when uninstall skips `plugin remove` because the installed Codex entry was
+    //     modified outside OMS) keeps the bundle directory and its `marketplace.json` entry.
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "alpha-service"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let _ = take_calls();
+    set_control(json!({"failPluginRemove": true}));
+    let (code, _, fail_rm_err) = run_panel(
+        base,
+        &["--uninstall-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0, "failed plugin remove must return non-zero");
+    assert!(fail_rm_err.contains("remove failed"), "{fail_rm_err}");
+    assert!(
+        alpha_bundle_dir.exists() && alpha_plugin_path.exists() && alpha_mcp_path.exists(),
+        "failed plugin remove must keep the plugin bundle directory"
+    );
+    let mp_after_fail_rm: Value =
+        serde_json::from_slice(&std::fs::read(&mp_manifest_path).unwrap()).unwrap();
+    assert_eq!(mp_after_fail_rm["plugins"][0]["name"], "oms-alpha-service");
+    assert!(panels_sidecar.exists());
+    set_control(json!({}));
+    let _ = take_calls();
+
+    // Also test when Codex's installed entry has a foreign `source.path` while the on-disk bundle
+    // still matches OMS hashes: uninstall skips `plugin remove`, drops the row, and STILL keeps
+    // both the bundle directory and its `marketplace.json` entry.
+    let mut mod_src_state = read_codex_state();
+    mod_src_state["installed"]["oms-alpha-service@oms-host-panels"]["source"]["path"] =
+        json!(base.join("custom-source-dir"));
+    write_private_file(&state_file, &serde_json::to_vec(&mod_src_state).unwrap());
+    let (code, keep_src_raw, keep_src_err) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{keep_src_err}");
+    let keep_src_json: Value = serde_json::from_str(&keep_src_raw).unwrap();
+    assert_eq!(
+        keep_src_json["retainedMarketplacePlugins"],
+        json!(["oms-alpha-service@oms-host-panels"])
+    );
+    assert!(
+        alpha_bundle_dir.exists() && alpha_plugin_path.exists() && alpha_mcp_path.exists(),
+        "uninstall leaving plugin installed in Codex must keep its bundle directory"
+    );
+    let mp_after_keep_src: Value =
+        serde_json::from_slice(&std::fs::read(&mp_manifest_path).unwrap()).unwrap();
+    assert_eq!(
+        mp_after_keep_src["plugins"][0]["name"], "oms-alpha-service",
+        "uninstall leaving plugin installed in Codex must keep its marketplace.json entry"
+    );
+    assert!(!panels_sidecar.exists());
+    let _ = take_calls();
+    std::fs::remove_dir_all(&mp_root).unwrap();
+    reset_codex_state();
+
+    // 20. Refresh rollback:
+    //     (a) Refresh `codex plugin add` fails AND rollback `codex plugin add` also fails ->
+    //         reruns `plugin add` during rollback, restores old bundle bytes on disk, and reports
+    //         `uncertain: true` (not `rolled back`).
+    //     (b) Refresh updates Codex to version B then fails once -> rollback restores old bundle
+    //         bytes on disk, reruns `codex plugin add`, confirms Codex is back at version A, and
+    //         reports `rolled back`.
+    //     (c) Refresh updates Codex to version B then sidecar write fails, and rollback's
+    //         `codex plugin add` exits 0 without restoring version A -> cached state cannot be
+    //         confirmed, so reports `uncertain: true` (not `rolled back`).
+    let (old_p_bytes_rb, old_m_bytes_rb, old_p_sha_rb, old_m_sha_rb) = seed_version_a_alpha(true);
+    set_control(json!({"failPluginAdd": true}));
+    let (code, ref_unc_raw, ref_unc_err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0);
+    let ref_unc_json: Value = serde_json::from_str(&ref_unc_raw).unwrap();
+    assert_eq!(ref_unc_json["uncertain"], true, "{ref_unc_json}");
+    assert_eq!(ref_unc_json["changed"], false);
+    assert!(ref_unc_err.contains("uncertain"), "{ref_unc_err}");
+    assert!(!ref_unc_err.contains("rolled back"), "{ref_unc_err}");
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "add", "oms-alpha-service@oms-host-panels"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "add", "oms-alpha-service@oms-host-panels"]}),
+        ],
+        "refresh rollback must rerun `codex plugin add` after restoring old bundle bytes"
+    );
+    assert_eq!(std::fs::read(&alpha_plugin_path).unwrap(), old_p_bytes_rb);
+    assert_eq!(std::fs::read(&alpha_mcp_path).unwrap(), old_m_bytes_rb);
+    let sidecar_after_ref_unc: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert_eq!(
+        sidecar_after_ref_unc["alpha-service"][0]["plugin_sha256"],
+        old_p_sha_rb
+    );
+    assert_eq!(
+        sidecar_after_ref_unc["alpha-service"][0]["mcp_sha256"],
+        old_m_sha_rb
+    );
+    set_control(json!({}));
+
+    // 20(b): First `plugin add` writes version B to Codex state then exits 1; rollback restores
+    //        version A bundle, reruns `plugin add` (which succeeds), confirms version A via
+    //        `plugin list --json`, and reports `rolled back`.
+    let once_marker = stub_state.join("plugin-add-failed-once");
+    let _ = std::fs::remove_file(&once_marker);
+    set_control(json!({"installOnceThenFailPluginAdd": true}));
+    let (code, ref_rb_out, ref_rb_err) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "alpha-service"],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(ref_rb_out.is_empty(), "{ref_rb_out}");
+    assert!(ref_rb_err.contains("rolled back"), "{ref_rb_err}");
+    assert!(!ref_rb_err.contains("uncertain"), "{ref_rb_err}");
+    assert_eq!(
+        take_calls(),
+        vec![
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "marketplace", "list"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "add", "oms-alpha-service@oms-host-panels"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "add", "oms-alpha-service@oms-host-panels"]}),
+            json!({"cwd": alpha_canon, "argv": ["plugin", "list", "--json"]}),
+        ]
+    );
+    assert_eq!(
+        read_codex_state()["installed"]["oms-alpha-service@oms-host-panels"]["version"],
+        old_pkg_version,
+        "refresh rollback must restore Codex's cached plugin back to version A"
+    );
+    assert_eq!(std::fs::read(&alpha_plugin_path).unwrap(), old_p_bytes_rb);
+    let _ = std::fs::remove_file(&once_marker);
+    set_control(json!({}));
+
+    // 20(c): Sidecar write fails after refresh `plugin add` updated Codex to version B, and
+    //        rollback's `plugin add` exits 0 without restoring version A -> confirmation catches
+    //        the unconfirmed cached state and reports `uncertain: true`.
+    let ran_once_marker = stub_state.join("plugin-add-ran-once");
+    let _ = std::fs::remove_file(&ran_once_marker);
+    set_control(json!({
+        "noopRollbackPluginAdd": true,
+        "touchOnPluginAdd": panels_sidecar,
+    }));
+    let (code, unconf_raw, unconf_err) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_ne!(code, 0);
+    let unconf_json: Value = serde_json::from_str(&unconf_raw).unwrap();
+    assert_eq!(unconf_json["uncertain"], true, "{unconf_json}");
+    assert!(unconf_err.contains("uncertain"), "{unconf_err}");
+    assert!(!unconf_err.contains("rolled back"), "{unconf_err}");
+    set_control(json!({}));
+    let _ = take_calls();
+    std::fs::remove_dir_all(&mp_root).unwrap();
+    let _ = std::fs::remove_file(&panels_sidecar);
+    reset_codex_state();
+
+    // 21. Checkout trees and Codex config sentinels remain completely untouched.
     assert_eq!(snapshot_tree(&alpha_canon), alpha_tree_before);
     assert_eq!(snapshot_tree(&beta_canon), beta_tree_before);
     for ((path, expected_bytes), expected_ino) in sentinel_files.iter().zip(sentinel_inodes.iter())
