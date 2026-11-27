@@ -757,6 +757,7 @@ pub(crate) struct Seat {
     pub answer: String,
     pub shown_answer: String,
     pub redacted_lines: usize,
+    pub answer_withheld: bool,
     pub findings: Option<crate::review::ParsedFindings>,
     pub code: i32,
     pub complete: bool,
@@ -992,6 +993,7 @@ fn call_routed(
             answer: String::new(),
             shown_answer: String::new(),
             redacted_lines: 0,
+            answer_withheld: false,
             findings: None,
             code: 0,
             complete: false,
@@ -1236,13 +1238,10 @@ fn call_routed(
             );
         }
     }
-    let answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
-    let (shown_answer, redacted_lines) = if tool == "peer-review" {
-        (answer.clone(), 0)
-    } else {
-        let (redacted, count) = safety::redact_outbound(&result.stdout)?;
-        (String::from_utf8_lossy(&redacted).into_owned(), count)
-    };
+    let answer = safety::redact(&result.stdout).map_or_else(
+        |_| "[oms-redacted:scan-failed]\n".to_owned(),
+        |redacted| String::from_utf8_lossy(&redacted).into_owned(),
+    );
     let findings = if tool == "peer-review" {
         Some(crate::review::seat_findings(&String::from_utf8_lossy(
             &result.stdout,
@@ -1257,13 +1256,16 @@ fn call_routed(
     };
     let timed_out = !result.complete && result.code == 124;
     let interrupted_seat = !result.complete && result.code == 130;
+    let redact_stderr = |raw: &[u8]| {
+        safety::redact(raw).unwrap_or_else(|_| b"[oms-redacted:scan-failed]\n".to_vec())
+    };
     let mut diagnostics = Vec::new();
     if timed_out {
         diagnostics.extend_from_slice(
             format!("error: {}\n", timeout_message(timeout_secs, diff_bytes)).as_bytes(),
         );
         // Strip bare interruption lines emitted when a timed-out child handles SIGTERM/SIGINT.
-        let redacted = safety::redact(&result.stderr)?;
+        let redacted = redact_stderr(&result.stderr);
         for line in String::from_utf8_lossy(&redacted).lines() {
             if line.trim().is_empty() || is_interrupted_line(line) {
                 continue;
@@ -1273,7 +1275,7 @@ fn call_routed(
         }
     } else if interrupted_seat {
         diagnostics.extend_from_slice(b"error: interrupted\n");
-        let redacted = safety::redact(&result.stderr)?;
+        let redacted = redact_stderr(&result.stderr);
         for line in String::from_utf8_lossy(&redacted).lines() {
             if line.trim().is_empty() || is_interrupted_line(line) {
                 continue;
@@ -1282,7 +1284,7 @@ fn call_routed(
             diagnostics.push(b'\n');
         }
     } else if !result.stderr.is_empty() {
-        diagnostics.extend_from_slice(&safety::redact(&result.stderr)?);
+        diagnostics.extend_from_slice(&redact_stderr(&result.stderr));
     }
     // Only a completed answer can lose its verdict to redaction; timeouts keep the diagnostics path.
     let verdict = (tool == "peer-review" && result.complete).then(|| {
@@ -1342,16 +1344,35 @@ fn call_routed(
         context,
     )
     .map_err(publication_error("artifact index write"))?;
+    let (shown_answer, redacted_lines, answer_withheld) =
+        match safety::redact_outbound(&result.stdout) {
+            Ok((redacted, count)) => (
+                String::from_utf8_lossy(&redacted).into_owned(),
+                count,
+                false,
+            ),
+            Err(_) => ("[oms-redacted:withheld]\n".to_owned(), 0, true),
+        };
     if args.has("thread") {
         let role = if quality == "ok" { "answer" } else { "note" };
-        let quoted = if quality == "ok" {
-            shown_answer.clone()
-        } else {
+        let quoted = if quality != "ok" {
             format!(
                 "{} returned {quality}; see {}",
                 route.provider,
                 artifact.display()
             )
+        } else if answer_withheld {
+            let candidate = format!(
+                "[oms-redacted:withheld] answer withheld by the shared content scan; see {}",
+                artifact.display()
+            );
+            if safety::outbound(candidate.as_bytes()).is_ok() {
+                candidate
+            } else {
+                shown_answer.clone()
+            }
+        } else {
+            shown_answer.clone()
         };
         thread::append(
             repo,
@@ -1382,6 +1403,7 @@ fn call_routed(
         answer,
         shown_answer,
         redacted_lines,
+        answer_withheld,
         findings,
         code: result.code,
         complete: result.complete,
@@ -1738,7 +1760,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
                 if synthesis_json {
                     debate.push_str(&discussion::council_peer_answer(
                         &seat.target.provider,
-                        &seat.answer,
+                        &seat.shown_answer,
                         budget,
                         &crate::id("")?,
                     ));
@@ -1801,8 +1823,14 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
     for seat in &seats {
         let artifact_path = repo.join(&seat.artifact);
         output.push_str(&format!("{}\n", artifact_path.display()));
-        if !args.has("quiet") && !seat.shown_answer.is_empty() {
-            if seat.redacted_lines > 0 {
+        if !args.has("quiet") && (!seat.shown_answer.is_empty() || seat.answer_withheld) {
+            if seat.answer_withheld {
+                output.push_str(&format!(
+                    "\n{}:\n[oms-redacted:withheld] answer withheld by the shared content scan; recorded artifact: {}\n",
+                    seat.target.provider,
+                    artifact_path.display()
+                ));
+            } else if seat.redacted_lines > 0 {
                 output.push_str(&format!(
                     "\n{}:\n{}\nnote: {} line(s) redacted by the shared content scan; recorded artifact: {}\n",
                     seat.target.provider,
@@ -1827,7 +1855,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             if synthesis_json {
                 synthesis.push_str(&discussion::council_peer_answer(
                     &seat.target.provider,
-                    &seat.answer,
+                    &seat.shown_answer,
                     discussion::COUNCIL_SYNTHESIS_BYTES,
                     &crate::id("")?,
                 ));
@@ -1896,7 +1924,13 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
             .map_err(|e| Error::new(e.code, e.message))?;
             return Ok((0, raw, warnings));
         }
-        if result.redacted_lines > 0 {
+        if result.answer_withheld {
+            output.push_str(&format!(
+                "synthesis: {}\n[oms-redacted:withheld] answer withheld by the shared content scan; recorded artifact: {}\n",
+                result.artifact.display(),
+                repo.join(&result.artifact).display()
+            ));
+        } else if result.redacted_lines > 0 {
             output.push_str(&format!(
                 "synthesis: {}\n{}\nnote: {} line(s) redacted by the shared content scan; recorded artifact: {}\n",
                 result.artifact.display(),

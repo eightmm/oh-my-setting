@@ -80,21 +80,7 @@ pub(crate) fn redact_outbound(bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
             }
         }
     }
-    let residual =
-        oms_scrub::scan(&out, &refs).map_err(|_| Error::new(2, "output could not be scanned"))?;
-    if !residual.is_empty() {
-        let lines: std::collections::BTreeSet<usize> =
-            residual.into_iter().map(|hit| hit.line).collect();
-        let mut scrubbed = Vec::with_capacity(out.len());
-        for (i, part) in out.split_inclusive(|b| *b == b'\n').enumerate() {
-            if lines.contains(&(i + 1)) {
-                scrubbed.extend_from_slice(b"[scrub]\n");
-            } else {
-                scrubbed.extend_from_slice(part);
-            }
-        }
-        out = scrubbed;
-    }
+    outbound(&out)?;
     Ok((out, redacted.count + extra))
 }
 pub fn child() -> bool {
@@ -146,4 +132,42 @@ pub fn truncate(text: &str, budget: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{outbound, redact_outbound};
+
+    #[test]
+    fn redact_outbound_handles_mixed_lines_without_trailing_newline() {
+        let first_hit = ["api_to", "ken=example123"].concat();
+        let second_hit = ["/ho", "me/person/src/lib.rs"].concat();
+
+        let mixed = format!("intro\n{first_hit}\nsee {second_hit}\ntail without newline");
+        let (bytes, count) = redact_outbound(mixed.as_bytes()).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            "intro\n[oms-redacted:token-assignment]\n[oms-redacted:home-path]\ntail without newline\n"
+        );
+        outbound(&bytes).unwrap();
+
+        let machine_mid = format!("intro\nsee {second_hit}\ntail without newline");
+        let (bytes, count) = redact_outbound(machine_mid.as_bytes()).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            "intro\n[oms-redacted:home-path]\ntail without newline\n"
+        );
+        outbound(&bytes).unwrap();
+
+        let machine_eof = format!("intro\nsee {second_hit}");
+        let (bytes, count) = redact_outbound(machine_eof.as_bytes()).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            std::str::from_utf8(&bytes).unwrap(),
+            "intro\n[oms-redacted:home-path]\n"
+        );
+        outbound(&bytes).unwrap();
+    }
 }

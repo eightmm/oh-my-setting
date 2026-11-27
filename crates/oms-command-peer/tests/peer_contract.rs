@@ -3025,11 +3025,36 @@ fn provider_private_prompt_cleanup_and_read_boundaries() {
                 .join(".oms/artifacts/consult")
                 .join(&consult_artifacts[0]);
             assert!(recorded_artifact.is_file());
+            let recorded_raw = fs::read_to_string(&recorded_artifact).unwrap();
+            assert!(
+                recorded_raw.contains(&home_first) && recorded_raw.contains(&home_second),
+                "{recorded_raw}"
+            );
             let expected_block = format!(
                 "\nclaude:\nSummary of findings.\n[oms-redacted:home-path]\n[oms-redacted:home-path]\nConclusion: safe to proceed.\nnote: 2 line(s) redacted by the shared content scan; recorded artifact: {}\n",
                 recorded_artifact.display()
             );
             assert!(printed.contains(&expected_block), "{printed}");
+            let consult_threads = oms_command_peer::storage::names(
+                &consult_repo.0,
+                Path::new(".oms/threads"),
+                ".jsonl",
+            )
+            .unwrap();
+            assert_eq!(consult_threads.len(), 1);
+            let consult_thread_log = fs::read_to_string(
+                consult_repo
+                    .0
+                    .join(".oms/threads")
+                    .join(&consult_threads[0]),
+            )
+            .unwrap();
+            assert!(
+                consult_thread_log.contains("[oms-redacted:home-path]")
+                    && !consult_thread_log.contains(&home_first)
+                    && !consult_thread_log.contains(&home_second),
+                "{consult_thread_log}"
+            );
             let follow_up = oms_command_peer::run_with_executor(
                 "consult",
                 &args(&[
@@ -3046,6 +3071,337 @@ fn provider_private_prompt_cleanup_and_read_boundaries() {
                 &ProviderProbe::default(),
             );
             assert_eq!(follow_up.0, 0, "{}", message(&follow_up));
+
+            struct CouncilAnswerProbe {
+                probe: ProviderProbe,
+                home_line: String,
+                native: bool,
+            }
+            impl Executor for CouncilAnswerProbe {
+                fn council_parallelism(&self) -> usize {
+                    self.probe.council_parallelism()
+                }
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    let binary = request.argv[0].clone();
+                    let git = binary == "git";
+                    let workdir = request.cwd.clone();
+                    let mut result = self.probe.execute(request, stop)?;
+                    if git {
+                        return Ok(result);
+                    }
+                    let prompt = {
+                        let calls = self.probe.calls.lock().unwrap();
+                        let own = calls
+                            .iter()
+                            .find(|call| call.request.cwd == workdir)
+                            .unwrap();
+                        String::from_utf8_lossy(&own.prompt).into_owned()
+                    };
+                    let synthesis = prompt.contains("Synthesize these independent answers.");
+                    result.stdout = if synthesis {
+                        b"Decision: proceed safely\nEvidence: tracked contract\nRemaining disagreements: none\nVerification: cargo test\n".to_vec()
+                    } else if binary == "claude" {
+                        format!(
+                            "Alternatives: keep or refactor\nEvidence: tracked contract\nSee {}\nCounterargument: edge cases\nVerification: cargo test\nChanged from previous round: none\nRemaining disagreements: none\n",
+                            self.home_line
+                        )
+                        .into_bytes()
+                    } else {
+                        b"Alternatives: keep current API\nEvidence: unit tests\nCounterargument: migration cost\nVerification: cargo test\nChanged from previous round: none\nRemaining disagreements: none\n".to_vec()
+                    };
+                    if self.native {
+                        result.stdout = native_provider_answer(&binary, &result.stdout);
+                    }
+                    Ok(result)
+                }
+            }
+            let council_repo = provider_repo();
+            let council_probe = CouncilAnswerProbe {
+                probe: ProviderProbe::default(),
+                home_line: home_first.clone(),
+                native: false,
+            };
+            let council_out = oms_command_peer::run_with_executor(
+                "peer-ask",
+                &args(&[
+                    "--providers",
+                    "codex,claude",
+                    "--debate",
+                    "1",
+                    "--synthesize",
+                    "claude",
+                    "--thread",
+                    "th-council-redacted",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "council clean question",
+                ]),
+                &council_repo.0,
+                source,
+                &STOP,
+                &council_probe,
+            );
+            assert_eq!(council_out.0, 0, "{}", message(&council_out));
+            let council_stdout = std::str::from_utf8(&council_out.1).unwrap();
+            let council_stderr = std::str::from_utf8(&council_out.2).unwrap();
+            assert!(!council_stdout.contains("rephrase"), "{council_stdout}");
+            assert!(!council_stderr.contains("rephrase"), "{council_stderr}");
+            assert!(!council_stdout.contains(&home_first), "{council_stdout}");
+            assert!(
+                council_stdout.contains("[oms-redacted:home-path]"),
+                "{council_stdout}"
+            );
+            assert!(council_stdout.contains("synthesis:"), "{council_stdout}");
+            for observed in council_probe.probe.calls.lock().unwrap().iter() {
+                let sent = std::str::from_utf8(&observed.prompt).unwrap();
+                assert!(!sent.contains(&home_first), "{sent}");
+            }
+            let council_thread_log = fs::read_to_string(
+                council_repo
+                    .0
+                    .join(".oms/threads/th-council-redacted.jsonl"),
+            )
+            .unwrap();
+            assert!(
+                council_thread_log.contains("[oms-redacted:home-path]")
+                    && !council_thread_log.contains(&home_first)
+                    && !council_thread_log.contains("rephrase"),
+                "{council_thread_log}"
+            );
+            let ask_artifacts = oms_command_peer::storage::names(
+                &council_repo.0,
+                Path::new(".oms/artifacts/ask"),
+                ".md",
+            )
+            .unwrap();
+            let claude_artifacts: Vec<_> = ask_artifacts
+                .iter()
+                .filter(|name| name.starts_with("claude-"))
+                .collect();
+            assert!(!claude_artifacts.is_empty(), "{ask_artifacts:?}");
+            for name in claude_artifacts {
+                let raw = fs::read_to_string(council_repo.0.join(".oms/artifacts/ask").join(name))
+                    .unwrap();
+                assert!(raw.contains(&home_first), "{name}: {raw}");
+            }
+
+            let typed_council_repo = provider_repo();
+            let typed_council_probe = CouncilAnswerProbe {
+                probe: ProviderProbe::default(),
+                home_line: home_first.clone(),
+                native: true,
+            };
+            let typed_council_out = oms_command_peer::run_with_executor(
+                "peer-ask",
+                &args(&[
+                    "--providers",
+                    "codex:model=first,claude:model=second",
+                    "--debate",
+                    "1",
+                    "--deliberation",
+                    "--require-complete",
+                    "--synthesis-json",
+                    "--synthesize",
+                    "codex:model=exact-synthesis",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "typed council clean question",
+                ]),
+                &typed_council_repo.0,
+                source,
+                &STOP,
+                &typed_council_probe,
+            );
+            assert_eq!(typed_council_out.0, 0, "{}", message(&typed_council_out));
+            let typed_stdout = std::str::from_utf8(&typed_council_out.1).unwrap();
+            let typed_stderr = std::str::from_utf8(&typed_council_out.2).unwrap();
+            assert!(!typed_stdout.contains("rephrase"), "{typed_stdout}");
+            assert!(!typed_stderr.contains("rephrase"), "{typed_stderr}");
+            assert!(!typed_stdout.contains(&home_first), "{typed_stdout}");
+            let typed_report: serde_json::Value =
+                serde_json::from_slice(&typed_council_out.1).unwrap();
+            assert_eq!(typed_report["kind"], "oms-council-synthesis");
+            for observed in typed_council_probe.probe.calls.lock().unwrap().iter() {
+                let sent = std::str::from_utf8(&observed.prompt).unwrap();
+                assert!(!sent.contains(&home_first), "{sent}");
+                if sent.contains("Critique the previous positions")
+                    || sent.contains("Synthesize these independent answers.")
+                {
+                    assert!(sent.contains("[oms-redacted:home-path]"), "{sent}");
+                }
+            }
+            let typed_claude_artifacts: Vec<_> = oms_command_peer::storage::names(
+                &typed_council_repo.0,
+                Path::new(".oms/artifacts/ask"),
+                ".md",
+            )
+            .unwrap()
+            .into_iter()
+            .filter(|name| name.starts_with("claude-"))
+            .collect();
+            assert_eq!(typed_claude_artifacts.len(), 2);
+            for name in &typed_claude_artifacts {
+                let raw =
+                    fs::read_to_string(typed_council_repo.0.join(".oms/artifacts/ask").join(name))
+                        .unwrap();
+                assert!(raw.contains(&home_first), "{name}: {raw}");
+            }
+
+            struct ReviewAuditProbe {
+                probe: ProviderProbe,
+                home_line: String,
+            }
+            impl Executor for ReviewAuditProbe {
+                fn execute(
+                    &self,
+                    request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    let binary = request.argv[0].clone();
+                    let git = binary == "git";
+                    let mut result = self.probe.execute(request, stop)?;
+                    if git {
+                        return Ok(result);
+                    }
+                    result.stdout = if binary == "codex" {
+                        format!(
+                            "See {}\n```findings\n{{\"file\":\"hooks/pre-commit\",\"line\":1,\"severity\":\"blocking\",\"summary\":\"check hook\",\"quote\":\"changed\"}}\n```\nChanged from previous round:\nnone\nCONFIDENCE: 0.9\nGATE: fail\n",
+                            self.home_line
+                        )
+                        .into_bytes()
+                    } else {
+                        b"Advisory security check complete.\n".to_vec()
+                    };
+                    Ok(result)
+                }
+            }
+            let review_repo = provider_repo();
+            review_repo.write("hooks/pre-commit", "baseline\n");
+            review_repo.git(&["add", "hooks/pre-commit"]);
+            review_repo.git(&[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "add hook",
+            ]);
+            review_repo.write("hooks/pre-commit", "changed\n");
+            let review_probe = ReviewAuditProbe {
+                probe: ProviderProbe::default(),
+                home_line: home_first.clone(),
+            };
+            let review_out = oms_command_peer::run_with_executor(
+                "peer-review",
+                &args(&[
+                    "--providers",
+                    "codex",
+                    "--debate",
+                    "1",
+                    "--gate",
+                    "--no-verify",
+                    "--security-audit",
+                    "claude",
+                    "--writer",
+                    "antigravity",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "--no-graph-context",
+                    "check review redaction",
+                ]),
+                &review_repo.0,
+                source,
+                &STOP,
+                &review_probe,
+            );
+            assert_eq!(review_out.0, 1, "{}", message(&review_out));
+            let review_stdout = std::str::from_utf8(&review_out.1).unwrap();
+            let review_stderr = std::str::from_utf8(&review_out.2).unwrap();
+            assert!(!review_stdout.contains("rephrase"), "{review_stdout}");
+            assert!(!review_stderr.contains("rephrase"), "{review_stderr}");
+            assert!(!review_stdout.contains(&home_first), "{review_stdout}");
+            assert!(
+                review_stdout.contains("[oms-redacted:home-path]")
+                    && review_stdout.contains("security: recorded (advisory)"),
+                "{review_stdout}"
+            );
+            for observed in review_probe.probe.calls.lock().unwrap().iter() {
+                let sent = std::str::from_utf8(&observed.prompt).unwrap();
+                assert!(!sent.contains(&home_first), "{sent}");
+            }
+            let finding_logs = oms_command_peer::storage::names(
+                &review_repo.0,
+                Path::new(".oms/artifacts/review"),
+                ".jsonl",
+            )
+            .unwrap();
+            assert_eq!(finding_logs.len(), 1);
+            let finding_rows = oms_command_peer::storage::load(
+                &review_repo.0,
+                &Path::new(".oms/artifacts/review").join(&finding_logs[0]),
+            )
+            .unwrap();
+            assert_eq!(finding_rows.len(), 1);
+            assert_eq!(finding_rows[0].get("file").text(), Some("hooks/pre-commit"));
+
+            let withheld_repo = provider_repo();
+            let overflow_answer = format!("See {home_first}\n").repeat(oms_scrub::MAX_HITS + 1);
+            let withheld_probe = ProviderProbe {
+                answer: Some(overflow_answer.into_bytes()),
+                ..Default::default()
+            };
+            let withheld_out = oms_command_peer::run_with_executor(
+                "consult",
+                &args(&[
+                    "--to",
+                    "claude",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "overflow answer question",
+                ]),
+                &withheld_repo.0,
+                source,
+                &STOP,
+                &withheld_probe,
+            );
+            assert_eq!(withheld_out.0, 0, "{}", message(&withheld_out));
+            let withheld_stdout = std::str::from_utf8(&withheld_out.1).unwrap();
+            let withheld_stderr = std::str::from_utf8(&withheld_out.2).unwrap();
+            assert!(!withheld_stdout.contains("rephrase"), "{withheld_stdout}");
+            assert!(!withheld_stderr.contains("rephrase"), "{withheld_stderr}");
+            assert!(!withheld_stdout.contains(&home_first), "{withheld_stdout}");
+            let withheld_artifacts = oms_command_peer::storage::names(
+                &withheld_repo.0,
+                Path::new(".oms/artifacts/consult"),
+                ".md",
+            )
+            .unwrap();
+            assert_eq!(withheld_artifacts.len(), 1);
+            let withheld_artifact = withheld_repo
+                .0
+                .join(".oms/artifacts/consult")
+                .join(&withheld_artifacts[0]);
+            assert!(
+                fs::read_to_string(&withheld_artifact)
+                    .unwrap()
+                    .contains(&home_first)
+            );
+            assert!(
+                withheld_stdout.contains(&format!(
+                    "[oms-redacted:withheld] answer withheld by the shared content scan; recorded artifact: {}",
+                    withheld_artifact.display()
+                )),
+                "{withheld_stdout}"
+            );
             for extra in [&[][..], &["--dry-run"][..]] {
                 let blocked_probe = ProviderProbe::default();
                 let mut blocked_args = vec![
