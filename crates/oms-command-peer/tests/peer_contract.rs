@@ -243,6 +243,7 @@ impl Executor for ProviderProbe {
         stop: &AtomicBool,
     ) -> oms_command_peer::Result<Completed> {
         if request.argv[0] == "git" {
+            assert!(request.heartbeat.is_none());
             return Native.execute(request, stop);
         }
         let file = ["--prompt-file", "--message-file", "-f"]
@@ -4820,10 +4821,12 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
             env_override: Option<PathBuf>,
             effective_stdout: String,
             slot_lock_busy: bool,
+            heartbeat: Option<oms_command_peer::process::AttemptHeartbeat>,
         }
         struct EnvRecorder {
             repo: PathBuf,
             mutate: AtomicBool,
+            git_calls: std::sync::atomic::AtomicUsize,
             calls: Mutex<Vec<ObservedCall>>,
         }
         impl Executor for EnvRecorder {
@@ -4839,8 +4842,14 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                     .unwrap_or("")
                     .to_owned();
                 if prog.ends_with("git") {
+                    assert!(
+                        request.heartbeat.is_none(),
+                        "git helper invocation must not carry attempt heartbeat"
+                    );
+                    self.git_calls.fetch_add(1, Ordering::SeqCst);
                     return oms_command_peer::process::Native.execute(request, interrupted);
                 }
+                let heartbeat = request.heartbeat.clone();
                 let env_override = request
                     .environment
                     .iter()
@@ -4885,6 +4894,7 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
                     env_override,
                     effective_stdout,
                     slot_lock_busy,
+                    heartbeat,
                 });
                 Ok(completed)
             }
@@ -4994,6 +5004,7 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
         let recorder = EnvRecorder {
             repo: repo.0.clone(),
             mutate: AtomicBool::new(true),
+            git_calls: std::sync::atomic::AtomicUsize::new(0),
             calls: Mutex::new(Vec::new()),
         };
         let verify_cmd = "printf '%s' \"${CARGO_TARGET_DIR-<unset>}\"";
@@ -5092,6 +5103,24 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
 
         let is_temp_tree =
             |cwd: &Path| cwd.starts_with(repo.0.join(".oms/tmp")) && cwd.ends_with("tree");
+        assert!(recorder.git_calls.load(Ordering::SeqCst) > 0);
+        let (_, attempts) = oms_command_operations::load_projection(&repo.0).unwrap();
+        let attempt_for = |tool: &str| {
+            attempts
+                .iter()
+                .find(|row| row.get("tool").text() == Some(tool))
+                .and_then(|row| row.get("attempt_id").text())
+                .unwrap()
+                .to_owned()
+        };
+        let delegate_attempt = oms_command_peer::process::AttemptHeartbeat {
+            repo: repo.0.clone(),
+            attempt: attempt_for("peer-delegate"),
+        };
+        let review_attempt = oms_command_peer::process::AttemptHeartbeat {
+            repo: repo.0.clone(),
+            attempt: attempt_for("peer-review"),
+        };
         let calls = recorder.calls.lock().unwrap();
         assert_eq!(
             calls.len(),
@@ -5104,6 +5133,12 @@ fn delegate_warm_cargo_slot_cache_and_opt_out() {
         assert_eq!(calls[3].prog, "bash");
         assert_eq!(calls[4].prog, "bash");
         assert_eq!(calls[5].prog, "bash");
+        assert_eq!(calls[0].heartbeat.as_ref(), Some(&delegate_attempt));
+        assert_eq!(calls[1].heartbeat.as_ref(), Some(&delegate_attempt));
+        assert_eq!(calls[2].heartbeat.as_ref(), Some(&review_attempt));
+        assert_eq!(calls[3].heartbeat, None);
+        assert_eq!(calls[4].heartbeat, None);
+        assert_eq!(calls[5].heartbeat, None);
         assert_eq!(calls[0].cwd, calls[1].cwd);
         for idx in [0, 1, 2, 4, 5] {
             assert!(

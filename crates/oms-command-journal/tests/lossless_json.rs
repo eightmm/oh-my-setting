@@ -266,6 +266,108 @@ fn adapter_store_dedupe_sqlite_and_cold_replay_keep_exact_decimal_numbers() {
 }
 
 #[test]
+fn storage_health_and_unsealed_count_follow_seal_dry_run() {
+    use oms_command_journal::cold::{
+        PendingSeal, journal_storage, journal_storage_with_unsealed_count, load_cold_manifest,
+        save_cold_manifest,
+    };
+    use oms_command_journal::sanitize::sha256_hex;
+
+    let scratch = Scratch::new();
+    let check_in = |zone, at, expected, healthy| {
+        let at = parse_rfc3339_utc(at).unwrap();
+        let before = disk_snapshot(&scratch.0);
+        let previous_health = journal_storage(&scratch.0);
+        let (health, count) = journal_storage_with_unsealed_count(&scratch.0, Some(zone), at);
+        assert_eq!(count, expected);
+        assert_eq!(health.healthy, healthy);
+        assert_eq!(health.error, previous_health.error);
+        assert!(oms_json::ordered_values_equal(
+            &health.to_json(),
+            &previous_health.to_json()
+        ));
+        assert_eq!(disk_snapshot(&scratch.0), before);
+        let dry_run = JournalStore::open_for_read(&scratch.0, Some(zone))
+            .and_then(|store| store.seal(false, at));
+        assert_eq!(dry_run.unwrap_or(0), expected);
+    };
+    let check = |at, expected, healthy| check_in("UTC", at, expected, healthy);
+    let august = "2026-08-01T03:00:00Z";
+    let september = "2026-09-01T03:00:00Z";
+    check(august, 0, true);
+
+    let now = parse_rfc3339_utc(august).unwrap();
+    let store = JournalStore::open_for_write(&scratch.0, Some("UTC")).unwrap();
+    store.record_event(&event("1"), now).unwrap();
+    let current = parse(
+        r#"{"event_type":"run","occurred_at":"2026-08-01T02:00:00Z","source":{"type":"run-ledger"},"verification_status":"not_verified","provenance":{"seed":2}}"#,
+    );
+    store.record_event(&current, now).unwrap();
+    let live = store.root.join("events.jsonl");
+    let before_seal = fs::read(&live).unwrap();
+    check(august, 1, true);
+    check("2026-07-31T20:00:00Z", 0, true);
+    // The cutoff is the journal-local month, which is already August at UTC+9.
+    check_in("Etc/GMT-9", "2026-07-31T20:00:00Z", 1, true);
+    check(september, 2, true);
+
+    assert_eq!(store.seal(true, now).unwrap(), 1);
+    let after_seal = fs::read(&live).unwrap();
+    check(august, 0, true);
+    check(september, 1, true);
+
+    let mut manifest = load_cold_manifest(&store.root).unwrap();
+    manifest.pending = Some(PendingSeal {
+        before: sha256_hex(&before_seal),
+        after: sha256_hex(&after_seal),
+        cutoff: "2026-08".into(),
+    });
+    save_cold_manifest(&store.root, &manifest).unwrap();
+    for bytes in [&before_seal, &after_seal] {
+        fs::write(&live, bytes).unwrap();
+        check(august, 0, true);
+        check(september, 1, true);
+    }
+    fs::write(&live, b"unexpected live digest\n").unwrap();
+    check(september, 0, false);
+
+    manifest.pending = None;
+    save_cold_manifest(&store.root, &manifest).unwrap();
+    fs::write(&live, [before_seal.as_slice(), b"malformed\n"].concat()).unwrap();
+    check(september, 2, true);
+    fs::write(
+        &live,
+        [before_seal.as_slice(), b"incomplete live line"].concat(),
+    )
+    .unwrap();
+    check(september, 2, false);
+
+    // A refused storage scan must not recommend a seal, even though replay works.
+    let link = store.root.join("unexpected-link");
+    std::os::unix::fs::symlink(&live, &link).unwrap();
+    let (health, count) = journal_storage_with_unsealed_count(&scratch.0, Some("UTC"), now);
+    assert!(!health.healthy);
+    assert_eq!(count, 0);
+    assert!(
+        JournalStore::open_for_read(&scratch.0, Some("UTC"))
+            .and_then(|store| store.seal(false, now))
+            .is_err()
+    );
+    fs::remove_file(link).unwrap();
+
+    fs::write(&live, &before_seal).unwrap();
+    let (health, count) = journal_storage_with_unsealed_count(&scratch.0, Some("../invalid"), now);
+    assert!(health.healthy);
+    assert_eq!(count, 0);
+    fs::write(
+        store.root.join("cold").join(&manifest.segments[0].file),
+        b"invalid cold segment\n",
+    )
+    .unwrap();
+    check(september, 0, false);
+}
+
+#[test]
 fn cold_manifest_validation_keeps_null_and_numeric_bounds_explicit() {
     use oms_command_journal::cold::{cold_manifest_path, load_cold_manifest, save_cold_manifest};
     let scratch = Scratch::new();

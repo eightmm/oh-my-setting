@@ -728,8 +728,13 @@ pub(super) fn enrich(
             ),
         ]),
     )?;
-    let storage_health = oms_command_journal::cold::journal_storage(&ctx.repo).to_json();
+    let (storage_health, unsealed) = oms_command_journal::cold::journal_storage_with_unsealed_count(
+        &ctx.repo,
+        None,
+        oms_command_journal::tz::current_utc_now(),
+    );
     let storage_value = storage_health
+        .to_json()
         .into_value()
         .map_err(|e| error(2, format!("{e:?}")))?;
     let storage_bytes =
@@ -739,22 +744,6 @@ pub(super) fn enrich(
     for (k, v) in status.object().unwrap_or(&[]) {
         journal.set(std::str::from_utf8(k).unwrap_or(""), v.clone())?;
     }
-    let unsealed = oms_command_journal::cold::replay_snapshot(&ctx.repo.join(".oms/work-journal"))
-        .ok()
-        .map(|(_, rows, _)| {
-            rows.iter()
-                .filter(|r| {
-                    r.get("local_date")
-                        .and_then(|v| v.as_string())
-                        .and_then(|s| s.to_str_checked())
-                        .is_some_and(|date| {
-                            date.get(..7)
-                                .is_some_and(|m| m < &timestamp(epoch()).unwrap_or_default()[..7])
-                        })
-                })
-                .count()
-        })
-        .unwrap_or(0);
     journal.set("unsealed", number(unsealed))?;
     state.set("work_journal", journal)?;
     let mut failure = state.get("failures").clone();

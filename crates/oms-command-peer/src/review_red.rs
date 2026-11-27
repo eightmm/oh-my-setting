@@ -91,6 +91,7 @@ fn command(
             max_bytes: 1024 * 1024,
             physical_call: None,
             launch_fence: None,
+            heartbeat: None,
             merge: true,
         },
         context.interrupted,

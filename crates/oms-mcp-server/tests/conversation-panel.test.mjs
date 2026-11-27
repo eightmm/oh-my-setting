@@ -378,10 +378,10 @@ test('project registry distinguishes unbound setup from pinned, cwd and catalog 
   let registry={binding:'unbound',projects:[],readOnly:true};
   const p=await panel([],{}, {locale:'en',tools:{oms_list_projects:()=>registry}});
   assert.equal(p.get('view').hidden,true);
-  assert.match(p.get('status').textContent,/No project is bound/);
+  assert.match(p.get('status').textContent,/No project linked/);
   await p.event('refresh','click');
   assert.ok(p.calls.every(c=>c.name==='oms_list_projects'));
-  await choose(p,'ko'); assert.match(p.get('status').textContent,/프로젝트가 없습니다/);
+  await choose(p,'ko'); assert.match(p.get('status').textContent,/연결된 프로젝트 없음/);
   for (const binding of ['cwd','pinned','catalog']) {
     registry={binding,projects:binding==='catalog'?['bound']:[],readOnly:true};
     await p.event('refresh','click');
@@ -394,7 +394,7 @@ test('project registry distinguishes unbound setup from pinned, cwd and catalog 
   assert.equal(p.get('project').textContent,'');
   assert.deepEqual(p.calls.slice(mark).map(c=>c.name),['oms_list_projects']);
   for (const invalid of [{binding:'new',projects:[]},{binding:'catalog',projects:[]}]) {
-    registry=invalid;await p.event('refresh','click');assert.match(p.get('status').textContent,/프로젝트를 확인할 수 없습니다/);
+    registry=invalid;await p.event('refresh','click');assert.match(p.get('status').textContent,/OMS에 연결하지 못했습니다/);
   }
   assert.ok(!p.calls.some(c=>c.name==='oms_list_approvals'));
 });
@@ -556,7 +556,7 @@ test('the first screen shows proven participants and only requests registry, sna
   assert.deepEqual(generic.calls.map(c=>c.name),startup.slice(0,2));
   assert.equal(generic.get('new-goal').hidden,true);assert.equal(generic.get('header-main').hidden,true);
   assert.equal(generic.get('leads').children.length,3);
-  assert.ok(generic.get('leads').children.every(slot=>slot.textContent.includes('Assignment unknown') && slot.children.length===2));
+  assert.ok(generic.get('leads').children.every(slot=>!slot.textContent.includes('Assignment unknown') && slot.children.length===2));
 });
 test('Main identity and conversation use the recorded harness without treating the dispatch owner as the harness',async()=>{
   const d={...dashboard,conversationMain:{...main,harness:'pi'}};
@@ -907,19 +907,21 @@ test('OMS Main · Pi keeps its run and parent-linked Leads without adopting anot
     assert.doesNotMatch(p.get('leads').textContent,/foreign/);
   }
 });
-test('a degraded, partial or trimmed snapshot keeps a visible status until a clean read',async()=>{
+test('a degraded snapshot keeps a visible status and a partial one only marks the observed time',async()=>{
   const d={};
   const p=await panel(['one'],d,{locale:'en'});
   assert.equal(p.get('status').textContent,'');
-  for(const [fields,expected] of [[{degraded:true},/could not be collected/],[{observation:{completeness:'unknown'}},/could not be collected/],
-    [{observation:{completeness:'partial'}},/partial status/],[{conversationAttemptsOmitted:2},/partial status/],
-    [{activeAttemptsTrimmed:1},/partial status/],
+  for(const [fields,expected] of [[{degraded:true},/not collected/],[{observation:{completeness:'unknown'}},/not collected/],
+    [{observation:{completeness:'partial'}},/^$/],[{conversationAttemptsOmitted:2},/^$/],
+    [{activeAttemptsTrimmed:1},/^$/],
     [{degraded:false,planProgress:{total:9,verified:9},planReadiness:{available:true,scope:'repository',omitted:1,tasks:Array.from({length:8},(_,i)=>({id:'t'+i,title:'Done '+i,reason:'recorded-done'}))},observation:{completeness:'complete',sources:{plan:'ok',acceptance:'ok'},evidence:{omitted:0,trimmed:0,readinessOmitted:1,evidenceOmitted:2}}},/^$/],
     [{degraded:false,observation:{completeness:'complete'}},/^$/]]) {
     for(const key of Object.keys(d))delete d[key];
     Object.assign(d,fields);await p.event('refresh','click');
     assert.match(p.get('status').textContent,expected);
   }
+  d.updated='2026-06-01T09:18:00Z';d.activeAttemptsTrimmed=1;await p.event('refresh','click');
+  assert.equal(p.get('status').textContent,'');assert.match(p.get('observed-at').textContent,/ · partial$/);
   d.degraded=true;await p.event('refresh','click');await choose(p,'ko');
   assert.match(p.get('status').textContent,/수집하지 못했습니다/);
 });
@@ -932,7 +934,7 @@ test('a stored Issue receipt is not reported as delivered without a confirmed co
     p.host.rejectContext=true;
     await p.event('new-goal','click');p.get('brief').value=reference;await p.event('brief','input');
     await p.event('issue-review','click');await setImmediate();
-    assert.match(p.get('issue-evidence').textContent,/Receipt saved only.*not confirmed/);
+    assert.match(p.get('issue-evidence').textContent,/Receipt recorded · delivery to Main not confirmed/);
     assert.doesNotMatch(p.get('issue-evidence').textContent,/added to|unconfirmed/);
     assert.equal(p.get('issue-record').disabled,false);
     if(context) {
@@ -951,7 +953,7 @@ test('the team respects parent, provider, terminal membership and partial visibi
     ['lead-one','left','other'].map(participant=>({room:main.room,participant,id:participant,role:'lead',provider:'claude',state:'running'}))};
   const p=await panel(['one'],d,{locale:'en'});
   assert.equal(p.get('leads').children.length,3);
-  assert.ok(p.get('leads').children.every(slot=>slot.textContent.includes('Assignment unknown')));assert.match(p.get('lead-note').textContent,/part of/);
+  assert.ok(p.get('leads').children.every(slot=>!slot.textContent.includes('Assignment unknown')));assert.match(p.get('lead-note').textContent,/part of/);
   assert.match(p.get('main-status').textContent,/Joined this room/);
   d.conversationMain.participantsOmitted=0;await p.event('refresh','click');
   assert.ok(p.get('leads').children.every(slot=>slot.textContent.includes('Waiting for assignment')));
@@ -977,7 +979,7 @@ test('fixed roles keep distinct conversations together and leave unknown or unbo
   }
   const unconfirmed=await panel(['one'],{conversationBinding:'unconfirmed',activeAttempts:d.conversationAttempts},{locale:'ko'});
   assert.deepEqual(unconfirmed.calls.map(c=>c.name),startup.slice(0,3));
-  assert.ok(unconfirmed.get('leads').children.every(slot=>slot.textContent.endsWith('배정 미확인') && slot.children.length===2));
+  assert.ok(unconfirmed.get('leads').children.every(slot=>!slot.textContent.includes('미확인') && slot.children.length===2));
   const unbound=await panel([],{}, {tools:{oms_list_projects:()=>({binding:'unbound',projects:[]})}});
   assert.equal(unbound.get('view').hidden,true);assert.equal(unbound.get('leads').children.length,0);
   assert.deepEqual(unbound.calls.map(c=>c.name),['oms_list_projects']);
@@ -1127,8 +1129,8 @@ test('progress and goal missing states are independent of repository acceptance 
   assert.equal(p.get('goal').textContent,'No goal recorded');assert.equal(p.get('progress').hidden,true);
   d.planProgress={total:3,verified:2};await p.event('refresh','click');
   assert.equal(p.get('progress').textContent,'Plan tasks 2 / 3');
-  // Unconfirmed criteria leave the bar to the plan and say so instead of counting zero.
-  assert.equal(p.get('progress-track').hidden,false);assert.match(p.get('criteria-summary').textContent,/unconfirmed/);
+  // Unconfirmed criteria leave the bar to the plan and show no count rather than zero.
+  assert.equal(p.get('progress-track').hidden,false);assert.equal(p.get('criteria-summary').textContent,'');
   assert.equal(p.get('outcome').hidden,true);
 });
 test('language persists on reopen without fetching or replacing the focused draft',async()=>{
@@ -1142,7 +1144,7 @@ test('language persists on reopen without fetching or replacing the focused draf
 });
 test('partial approval retrieval stays visible without a decision button or a false empty state',async()=>{
   const p=await panel(['one'],{},{locale:'en',tools:{oms_list_approvals:()=>({approvals:[],incomplete:true})}});
-  assert.equal(p.get('approval-card').hidden,false);assert.match(p.get('approvals').textContent,/Only part of the approval list/);
+  assert.equal(p.get('approval-card').hidden,false);assert.match(p.get('approvals').textContent,/Approval list partly read/);
   assert.ok(p.get('approvals').children.every(child=>child.tagName!=='details'));
   p.host.tools.oms_list_approvals=()=>{throw Error('failed read');};await p.event('refresh','click');
   assert.equal(p.get('approval-card').hidden,false);assert.equal(p.get('approvals').children[0].tagName,'p');
@@ -1397,13 +1399,15 @@ test('goal evidence separates repository criteria, task readiness and a scoped c
   assert.equal(context.kind,'oms-followup-draft');assert.equal(context.project,'one');assert.equal(context.task,'task-review');
   assert.match(context.summary,/Review error guidance/);assert.ok(!JSON.stringify(p.host.contexts.at(-1)).includes(key));
   assert.equal(Object.hasOwn(context,'projectKey'),false);assert.equal(Object.hasOwn(context,'room'),false);assert.equal(Object.hasOwn(context,'owner'),false);
-  assert.match(p.get('followup-status').textContent,/context.*Main receipt and execution are unconfirmed/);
+  assert.match(p.get('followup-status').textContent,/context · Main receipt unconfirmed/);
   assert.equal(p.host.messages.length,0);assert.equal(p.calls.length,mark);
   d.acceptance.criteria[0].label='Long criterion '.padEnd(2000,'x');d.nextStep.summary='Long next step '.padEnd(1200,'y');
   await p.event('refresh','click');if(p.get('goal-evidence').hidden)await p.event('evidence-toggle','click');
   assert.ok(p.get('criteria-list').textContent.includes(d.acceptance.criteria[0].label));assert.ok(p.get('next-step').textContent.includes(d.nextStep.summary));
+  d.nextStep.id='resolve_blocker';d.nextStep.summary='An unresolved unknown_failure failure is recorded.';await p.event('refresh','click');
+  assert.match(p.get('next-step').textContent,/Resolve the recorded failure/);assert.doesNotMatch(p.get('next-step').textContent,/unknown_failure/);
   d.acceptance.scope='room';d.acceptance.complete=true;d.acceptance.verified=3;await p.event('refresh','click');
-  assert.match(p.get('criteria-summary').textContent,/unconfirmed/);assert.equal(p.get('outcome').hidden,true);
+  assert.equal(p.get('criteria-summary').textContent,'');assert.equal(p.get('outcome').hidden,true);
   await p.open('input',{arguments:{project:'two'}});
   assert.equal(p.get('followup-panel').hidden,true);assert.equal(p.get('followup-text').value,'');
 });
@@ -1467,7 +1471,7 @@ test('only an independently confirmed physical binding retains a public stale sn
   const open=p.get('leads').children[1].children[1].children.find(e=>e.type==='button');open.dispatchEvent(new Event('click'));await setImmediate();
   p.get('chat-text').value='Private draft';await p.event('chat-text','input');
   failing=true;await p.event('refresh','click');
-  assert.equal(p.get('view').hidden,false);assert.equal(p.get('goal').textContent,'Last confirmed goal');assert.match(p.get('status').textContent,/last confirmed/);
+  assert.equal(p.get('view').hidden,false);assert.equal(p.get('goal').textContent,'Last confirmed goal');assert.match(p.get('status').textContent,/Last confirmed state/);
   assert.match(p.get('observed-at').textContent,/Last confirmed.*refresh unconfirmed/);
   assert.equal(p.get('conversation').open,false);assert.equal(p.get('chat-text').value,'');assert.equal(p.get('chat-messages').textContent,'');
   assert.equal(p.get('new-goal').disabled,true);assert.equal(p.get('controls').disabled,true);
@@ -1837,7 +1841,7 @@ test('Inspect reads only the selected view and renders usage, paged routes, cata
   assert.match(content.textContent,/tokens in the last 7 days/);assert.match(content.textContent,/Reported tokens0SourceUsage receipt/);
   assert.match(content.textContent,/Reported cost \(USD\)1.5/);assert.match(content.textContent,/Reported tokensStatus unknown/);
   assert.doesNotMatch(content.textContent,/PRIVATE DEBUG JSON|"providers"|"scope"/);
-  assert.match(p.get('inspect-status').textContent,/Only part/);assert.match(p.get('inspect-note').textContent,/not totals for this Room/);
+  assert.match(p.get('inspect-status').textContent,/Only part/);assert.match(p.get('inspect-note').textContent,/not this Room alone/);
   p.get('inspect-kind').value='routes';await p.event('inspect-kind','change');
   assert.match(content.textContent,/reviewer 1/);assert.equal(p.get('inspect-prev').hidden,true);assert.equal(p.get('inspect-next').hidden,false);
   assert.match(p.get('inspect-note').textContent,/proposals/);await p.event('inspect-next','click');
@@ -1845,7 +1849,7 @@ test('Inspect reads only the selected view and renders usage, paged routes, cata
   await p.event('inspect-prev','click');assert.match(content.textContent,/reviewer 1/);
   p.get('inspect-kind').value='modelcatalog';await p.event('inspect-kind','change');
   assert.match(content.textContent,/cached-model/);assert.match(content.textContent,/Model-specific effortsStatus unknownProvider-wide effortslow, high/);
-  assert.match(p.get('inspect-note').textContent,/does not confirm current account access/);assert.equal(p.get('inspect-next').hidden,true);
+  assert.match(p.get('inspect-note').textContent,/does not guarantee account access/);assert.equal(p.get('inspect-next').hidden,true);
   p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
   assert.equal(p.get('inspect-graph-form').hidden,false);assert.match(content.textContent,/Cached project relationships/);
   assert.match(content.textContent,/imports · Extracted/);assert.match(content.textContent,/related · Inferred/);
@@ -1870,7 +1874,7 @@ test('Inspect drops late views and private scope changes, and clears unverifiabl
   assert.match(p.get('inspect-content').textContent,/reviewer 1/);assert.doesNotMatch(p.get('inspect-content').textContent,/a.rs|Cached project/);
   p.host.delayTool='oms_panel_usage';p.get('inspect-kind').value='usage';await p.event('inspect-kind','change');
   state.key='d'.repeat(64);p.host.release();await setImmediate();
-  assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Could not verify/);
+  assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Read result unconfirmed/);
   state.key='b'.repeat(64);await p.event('inspect-refresh','click');assert.match(p.get('inspect-content').textContent,/provider observation/);
   p.host.delayTool='oms_panel_usage';await p.event('inspect-refresh','click');const before=p.calls.length;
   await p.event('inspect-close','click');p.host.release();await setImmediate();
@@ -1884,12 +1888,12 @@ test('Inspect drops late views and private scope changes, and clears unverifiabl
     p.host.tools.oms_panel_tui_view=a=>{const v=good(a);if(fault==='view')v.view='plan';if(fault==='page')v.page++;
       if(fault==='nextPage')v.nextPage=999;if(fault==='rows')v.rows=Array(21).fill(v.rows[0]);return v;};
     p.get('inspect-kind').value='routes';await p.event('inspect-kind','change');
-    assert.equal(p.get('inspect-content').textContent,'',fault);assert.match(p.get('inspect-status').textContent,/Could not verify/,fault);
+    assert.equal(p.get('inspect-content').textContent,'',fault);assert.match(p.get('inspect-status').textContent,/Read result unconfirmed/,fault);
     assert.equal(p.get('inspect-next').hidden,true,fault);
   }
   const graph=p.host.tools.oms_panel_project_graph;p.host.tools.oms_panel_project_graph=a=>({...graph(a),scope:{focusNode:'different',query:null}});
   p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
-  assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Could not verify/);
+  assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Read result unconfirmed/);
   p.host.tools.oms_panel_usage=()=>({scope:'repository-recent-attempts',providers:[],attempts:[]});
   p.get('inspect-kind').value='usage';await p.event('inspect-kind','change');assert.match(p.get('inspect-content').textContent,/No records/);
 });
@@ -1990,25 +1994,25 @@ function moreFixture(state){
 const count=(p,name)=>p.calls.filter(c=>c.name===name).length,kids=e=>e.children.filter(c=>typeof c!=='string');
 const settle=async()=>{for(let i=0;i<4;i++)await setImmediate();};
 
-test('v34 usage card reads once after the first screen, warns low and keeps no record apart from zero',async()=>{
+test('v35 usage strip reads once after the first screen, shows only recorded windows and opens Inspect usage',async()=>{
   const state={key:'b'.repeat(64)},f=moreFixture(state),p=await panel(['one','two'],dashboard,{locale:'en',timers:f.timers,tools:f.tools});
   await p.open('input',{arguments:{project:'one'}});await settle();
   assert.ok(!p.calls.some(c=>/^oms_panel_(usage|git_status|work_items|tui_view)$/.test(c.name)));
+  assert.equal(p.get('usage-strip').hidden,false);
   await f.fire(1500);assert.equal(count(p,'oms_panel_usage'),1);
-  const rows=p.get('usage-rows').children.map(li=>kids(li)[0]);
-  assert.deepEqual(rows.map(r=>r.getAttribute('data-tone')),['warn','plain',null,null]);
-  assert.equal(rows[0].getAttribute('data-stale'),'true');assert.match(rows[0].textContent,/14%Stale · 45m/);
-  assert.match(rows[0].getAttribute('aria-label'),/^Codex Weekly 14% left, Stale · 45/);
-  assert.equal(kids(rows[2])[2].getAttribute('data-known'),'false');assert.match(rows[2].textContent,/No record/);assert.doesNotMatch(rows[2].textContent,/0%/);
-  assert.match(rows[2].getAttribute('aria-label'),/has no recorded limit/);
-  rows[0].dispatchEvent(new Event('click'));const detail=kids(p.get('usage-rows').children[0])[1];
-  assert.equal(detail.hidden,false);assert.match(detail.textContent,/86% used · 14% left/);assert.match(detail.textContent,/Stale value/);
+  // Codex and Claude have windows; AGY and Pi have none and are left out rather than drawn as 0%.
+  const uses=kids(p.get('usage-rows'));
+  assert.deepEqual(uses.map(u=>[u.getAttribute('data-tone'),u.getAttribute('data-stale')]),[['warn','true'],['plain','false']]);
+  assert.equal(uses[0].textContent,'14%Stale');assert.equal(uses[1].textContent,'62%');assert.doesNotMatch(p.get('usage-rows').textContent,/0%$|No record/);
+  assert.match(p.get('usage-strip').getAttribute('aria-label'),/^Usage left · Codex Weekly 14% left, Stale · 45m ago · Claude Weekly 62% left, 2m ago · open for detail$/);
   await p.event('refresh','click');await settle();assert.equal(count(p,'oms_panel_usage'),1);
-  assert.equal(kids(p.get('usage-rows').children[0])[1].hidden,false);
-  await p.event('usage-refresh','click');await settle();assert.equal(count(p,'oms_panel_usage'),2);
+  await p.event('usage-strip','click');await settle();assert.equal(count(p,'oms_panel_usage'),2);
+  assert.equal(p.get('inspection').open,true);assert.equal(p.get('inspect-kind').value,'usage');
+  p.get('inspection').close();await settle();assert.ok(p.get('usage-strip').focused);
+  f.tools.oms_panel_usage=()=>({scope:'repository-recent-attempts',providers:[],attempts:[]});
   await p.open('input',{arguments:{project:'two'}});await settle();
-  assert.equal(p.get('usage-rows').children.length,0);await f.fire(1500);assert.equal(count(p,'oms_panel_usage'),3);
-  assert.equal(kids(p.get('usage-rows').children[0])[1].hidden,true);
+  assert.equal(kids(p.get('usage-rows')).length,0);await f.fire(1500);assert.equal(count(p,'oms_panel_usage'),3);
+  assert.equal(p.get('usage-rows').textContent,'No record');assert.match(p.get('usage-strip').getAttribute('aria-label'),/No record/);
 });
 
 test('v34 More PR · CI reads on first expand, sorts PRs by failure and keeps the read across auto refresh',async()=>{
@@ -2208,16 +2212,16 @@ test('hostToolsUnavailable sets only for host transport refusal before any tools
   assert.equal(p.get('header-main').disabled,true);
   assert.equal(p.get('inspect-open').disabled,true);
   assert.equal(p.get('open-leads').disabled,true);
-  // The usage card and More never read through a host that refuses tools/call.
-  assert.equal(p.get('more-pr').disabled,true);assert.equal(p.get('usage-refresh').disabled,true);
+  // The usage strip and More never read through a host that refuses tools/call.
+  assert.equal(p.get('more-pr').disabled,true);assert.equal(p.get('usage-strip').hidden,true);
   assert.equal([...timers.values()].filter(t=>t.ms===1500).length,0);
   const memberButton=p.get('leads').children[1].children[2];
   assert.equal(memberButton.disabled,true);
   assert.equal([...timers.values()].filter(t=>t.ms===20000).length,0);
-  assert.match(p.get('status').textContent,/Refresh and actions are unavailable in this host.*Request a refresh in the conversation/);
+  assert.match(p.get('status').textContent,/This host cannot refresh or act here · ask in the conversation/);
   await choose(p,'ko');
   assert.equal(p.get('host-retry').textContent,'다시 시도');
-  assert.match(p.get('status').textContent,/새로고침과 작업을 사용할 수 없습니다.*대화에서 새로고침을 요청하세요/);
+  assert.match(p.get('status').textContent,/새로고침·작업을 쓸 수 없습니다 · 대화에서 요청하세요/);
   await choose(p,'en');
 
   const mark=attempts.length;

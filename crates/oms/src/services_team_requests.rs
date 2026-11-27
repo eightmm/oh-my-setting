@@ -1,6 +1,6 @@
 //! Native-owned read-only request channel. Public locators and capability declarations
 //! select data; only this actual New/child/pipe issuer creates a session.
-use super::{CollabServices, Job, prelaunch_error, supervise};
+use super::{CollabServices, Job, peer_activity_heartbeat, prelaunch_error, supervise_flags};
 use oms_command_peer::process::{
     Completed, Invocation, NATIVE_ADMISSION_BUDGET, TeamLaunchBinding, TeamRequestAction,
 };
@@ -1086,9 +1086,12 @@ impl CollabServices<'_> {
         if let Err(error) = binding.check(self, stop) {
             return Err(channel.fail_before_spawn(error));
         }
-        let (done, protocol_failed) = match supervise(
+        let heartbeat = peer_activity_heartbeat(input.heartbeat.as_ref());
+        // A failed activity heartbeat is observability, not a protocol failure.
+        let (done, _, protocol_failed) = match supervise_flags(
             Job {
                 stdin: None,
+                heartbeat: heartbeat.as_ref(),
                 environment: input.environment,
                 remove_environment: input.remove_environment,
                 merged: false,
