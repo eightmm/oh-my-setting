@@ -511,14 +511,7 @@ pub(crate) fn owned_mcp_entry(current: &Value, paths: &Paths, executable: &Path)
         paths
             .load()?
             .and_then(|row| {
-                let revision = row["native"]["revision"].as_str()?;
-                if revision.len() != 40
-                    || !revision
-                        .bytes()
-                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-                {
-                    return None;
-                }
+                let revision = crate::receipt::native_revision(&row)?;
                 let root = crate::receipt::owner(&row).ok()?;
                 Some(
                     root.join("target/oms-native").join(revision).join("oms") == cmd_path
