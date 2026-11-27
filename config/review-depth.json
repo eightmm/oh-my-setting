@@ -5,8 +5,16 @@
   "gate_files": 10,
   "council_lines": 800,
   "council_files": 30,
+  "risk_paths": [
+    "crates/oms-command-autonomy/*", "crates/oms-command-room/*",
+    "crates/oms-command-plan/*", "crates/oms-command-state/*",
+    "crates/oms-command-peer/*", "crates/oms-command-landing/*",
+    "crates/oms-command-hooks/*", "crates/oms-runtime/*",
+    "crates/oms-panel-core/*", "crates/oms-safe-fs/*", "crates/oms-scrub/*"
+  ],
   "contract_paths": [
     "AGENTS.md", "*/AGENTS.md", "CLAUDE.md", "*/CLAUDE.md", "GEMINI.md", "*/GEMINI.md",
-    "PROJECT.md", "SECURITY.md", "config/*", "scripts/oms", "*.schema.json"
+    "PROJECT.md", "SECURITY.md", "config/*", "scripts/oms", "*.schema.json",
+    "custom-skills/*", "roles/*", "templates/*"
   ]
 }

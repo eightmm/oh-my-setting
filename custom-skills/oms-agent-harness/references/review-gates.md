@@ -70,10 +70,25 @@ providers. If all are unavailable, perform a current-agent review and state
 that no independent signal was obtained.
 
 ```bash
-oms peer-review --repo . --prompt "Review this diff for blocking findings."
-oms peer-review --repo . --base origin/main --gate \
+oms peer-review --repo . --adaptive --writer codex \
+  --prompt "Review this diff for blocking findings."
+oms peer-review --repo . --base origin/main --adaptive --writer codex --gate \
+  --prompt "Review this diff for blocking findings." \
   --verify "bash scripts/check-python.sh"
 ```
+
+Use the actual writer provider with `--adaptive`. The existing risk adviser
+selects up to two independent reviewers: small ordinary docs or an empty diff
+may skip, other changes need at least one, and high-risk changes need two.
+An explicit `--providers` list overrides the automatic count without changing
+its exact model pins or the independence requirement. Unknown reviewer, fallback
+or confirm model families are refused; supported native aliases remain valid.
+`--gate` always keeps a reviewer and the mechanical check; a zero-review skip is
+advisory, never pass
+evidence. Missing required reviewers stop before calls. Adaptive review refuses
+incremental/no-diff review, `--no-verify`, debate, synthesis and a separate
+security audit. For conflicting blocking findings, request at most the existing
+one `--confirm PROVIDER` call; its labels never override a verdict.
 
 Without a declared fast mode, `peer-review --gate` requires an explicit
 `--verify` instead of automatically repeating the full release suite.
@@ -103,6 +118,17 @@ another council for routine fixes. If the repair bound is exhausted, report the
 remaining blocker. Use `oms advise` only within explicit user authorization
 when additional judgment is needed; concrete mechanical failures need diagnosis,
 not more reviewer votes.
+
+An adaptive gate keeps earlier same-base blocking findings in the current
+file/task scope incomplete while they are `open` or `fixed`, including prior
+indexed review directories. Record a verified fix through the existing
+`findings fix ID --commit SHA` and `findings verify ID --run REF` receipt workflow,
+or an owner's reasoned `dismiss`/`out-of-scope` disposition. Advisory-only findings
+do not block this check; later advisory labels cannot erase an earlier blocker.
+A verified disposition leaves an earlier incomplete gate unchanged; rerun a
+standalone gate when a final pass is needed.
+Preserve the existing exact autopilot review replay; do not request another
+model call for the same retained review or invent a broader cache identity.
 
 When direct calls are prohibited, use `--export-only`, run the sanitized prompt
 inside the approved boundary, and import it with `oms artifact-index import

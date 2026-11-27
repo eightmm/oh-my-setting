@@ -9,6 +9,7 @@ use std::{
 };
 
 pub(crate) const GATE_INSTRUCTION: &str = "\nGate verdict:\nImmediately before the final line, emit CONFIDENCE: <value between 0.0 and 1.0>.\nEnd with exactly one final line: GATE: pass or GATE: fail. A pass requires no blocking bug, regression, unclear contract or unsafe operation.\nReport findings before confidence in one fenced block opened by ```findings, one JSON object per line with file (repository-relative), line (positive integer), severity (blocking or advisory), summary, quote (exact source text), and optional rule. Omit the block if there are no findings.\n";
+pub(crate) const ADAPTIVE_FINDINGS_INSTRUCTION: &str = "\nThis is an advisory review, not a gate. Report findings in one fenced block opened by ```findings, one JSON object per line with file (repository-relative), line (positive integer), severity (blocking or advisory), summary, quote (exact source text), and optional rule. Omit the block if there are no findings; state that briefly. Do not claim verification from agreement or from a reported fix.\n";
 
 pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     if argv.first().is_some_and(|s| s == "verdicts") {
@@ -43,6 +44,11 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     if args.has("gate") {
         let repo = storage::repository(context, &args.path("repo", context.cwd))?;
         let verify = crate::delegate::verification(&args, &repo, false)?;
+        if args.has("adaptive") && verify.is_none() {
+            return fail(
+                "--adaptive --gate requires a mechanical verify command; give --verify CMD",
+            );
+        }
         if args.has("covers") {
             if verify.is_none() {
                 return fail("--covers requires a gate verify command");
@@ -82,7 +88,234 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         let directory = peer::directory(&args, &repo, "review")?;
         incremental(&mut args, &repo, &directory, context)?;
     }
+    if args.has("adaptive") {
+        let repo = storage::repository(context, &args.path("repo", context.cwd))?;
+        if let Some(output) = adaptive(&mut args, &repo, context)? {
+            return Ok(output);
+        }
+    }
     peer::council("peer-review", &args, context)
+}
+
+fn adaptive(args: &mut Args, repo: &Path, context: &Context<'_>) -> Result<Option<Output>> {
+    safety::parent()?;
+    peer::question(args, context)?;
+    for option in [
+        "no-diff",
+        "no-verify",
+        "since-last",
+        "debate",
+        "until-agreement",
+        "max-rounds",
+        "deliberation",
+        "synthesize",
+        "synthesis-json",
+        "security-audit",
+        "output-json",
+        "team-requests",
+        "to",
+        "all",
+    ] {
+        if args.has(option) {
+            return fail(format!(
+                "--adaptive cannot combine with --{option}; use one review pass and at most --confirm"
+            ));
+        }
+    }
+    if !peer::dry(args, "peer-review") && !args.has("export-only") {
+        let untracked = process::git(
+            context,
+            repo,
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+        )?;
+        if untracked
+            .split(|b| *b == 0)
+            .any(|path| !path.is_empty() && !path.starts_with(b".oms/"))
+        {
+            return fail(
+                "adaptive review cannot classify untracked content; stage it or add intent-to-add first",
+            );
+        }
+    }
+    let writer = providers::normalize(args.required("writer")?)?;
+    if !matches!(writer.as_str(), "codex" | "claude" | "antigravity") {
+        return fail(
+            "--adaptive requires a native codex, claude or antigravity writer with its default model family",
+        );
+    }
+    args.set_value("writer", &writer);
+    peer::timeout(args, "peer-review")?;
+    if args.has("model") {
+        providers::model_name(args.required("model")?)?;
+    }
+    if args.has("reasoning-effort")
+        && !["auto", "low", "medium", "high", "xhigh", "max", "ultra"]
+            .contains(&args.required("reasoning-effort")?)
+    {
+        return fail("unsupported adaptive reasoning effort");
+    }
+    let base = pin_base(args, repo, context)?;
+    let captured = scope(args, repo, context)?.0;
+    let (depth, _) = review_depth(repo, &base, context)?;
+    if captured.get("diff_sha256") != depth.get("diff_sha256") {
+        return fail("review source changed during adaptive selection; no reviewer started");
+    }
+    let ordinary_prose = depth.get("paths").array().iter().all(|path| {
+        let path = path.text().unwrap_or("");
+        matches!(
+            path,
+            "README" | "README.md" | "README.rst" | "CHANGELOG.md" | "CHANGELOG.rst"
+        ) || path.starts_with("docs/")
+            && [".md", ".rst", ".txt"]
+                .iter()
+                .any(|suffix| path.ends_with(suffix))
+    });
+    let count = match text(&depth, "depth") {
+        "none" if ordinary_prose && !depth.get("opaque").truth() => 0,
+        "none" | "single" => 1,
+        _ => 2,
+    }
+    .max(usize::from(
+        args.has("gate") || args.has("model") || args.has("fallback-model") || args.has("account"),
+    ));
+    let explicit = args.has("providers");
+    let writer_family = providers::family(&writer, "");
+    if args.has("fallback-model") {
+        let model = args.required("fallback-model")?;
+        providers::model_name(model)?;
+    }
+    if args.has("confirm") {
+        let target = providers::Target::parse(args.required("confirm")?)?;
+        let route = providers::route(context, &target, "", "auto", "reviewer")?;
+        let family = adaptive_family(&route.provider, &route.model);
+        if target.optional || family.is_none() || family == Some(writer_family.as_str()) {
+            return fail(
+                "adaptive confirming reviewer must have a known model family independent of the writer",
+            );
+        }
+    }
+    let mut families = BTreeSet::new();
+    let mut selected = Vec::new();
+    let candidates = if explicit {
+        args.get("providers")
+            .split(',')
+            .map(str::trim)
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    } else {
+        ["codex", "claude", "antigravity"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    };
+    for candidate in candidates {
+        if !explicit && selected.len() == count {
+            break;
+        }
+        let target = providers::Target::parse(&candidate)?;
+        if !explicit && (target.provider == writer || !providers::discovered(&target.provider)) {
+            continue;
+        }
+        let route = providers::route(
+            context,
+            &target,
+            args.get("model"),
+            args.value("reasoning-effort", "auto"),
+            "reviewer",
+        )?;
+        let family = adaptive_family(&route.provider, &route.model);
+        let fallback = args
+            .has("fallback-model")
+            .then(|| adaptive_family(&route.provider, args.get("fallback-model")));
+        if target.optional
+            || family.is_none()
+            || family == Some(writer_family.as_str())
+            || fallback
+                .is_some_and(|family| family.is_none() || family == Some(writer_family.as_str()))
+        {
+            if explicit {
+                return fail(
+                    "adaptive reviewer pins must be required seats with a known model family independent of the writer",
+                );
+            }
+            continue;
+        }
+        if !explicit && !families.insert(family) {
+            continue;
+        }
+        selected.push(candidate);
+    }
+    if (!explicit && selected.len() != count) || explicit && selected.is_empty() {
+        return fail(format!(
+            "adaptive review requires {count} independent reviewer(s); available seats are insufficient; no reviewer started"
+        ));
+    }
+    let dir = peer::directory(args, repo, "review")?;
+    let note = format!(
+        "adaptive review: depth {}, {} required reviewer(s){}\n",
+        text(&depth, "depth"),
+        selected.len(),
+        if explicit {
+            " (explicit providers preserved)"
+        } else {
+            ""
+        }
+    );
+    if selected.is_empty() {
+        let blockers = blocking_findings(repo, &dir, &captured)?;
+        let after = scope(args, repo, context)?.0;
+        if scope_changed(&captured, &after) {
+            return fail("review source changed during adaptive selection; no reviewer started");
+        }
+        let mut output = format!("{note}review: skipped (advisory; no gate evidence)\n");
+        output.push_str(&blocking_note(&blockers)?);
+        return Ok(Some((
+            if blockers.is_empty() { 0 } else { 2 },
+            output.into_bytes(),
+            Vec::new(),
+        )));
+    }
+    args.set_value("providers", selected.join(","));
+    args.set_value("_review-policy-note", note);
+    args.set_value("_review-policy-depth", text(&depth, "depth"));
+    args.set_value("_review-policy-diff", text(&depth, "diff_sha256"));
+    if explicit {
+        args.set_flag("_review-policy-pinned");
+    }
+    Ok(None)
+}
+
+fn adaptive_family(provider: &str, model: &str) -> Option<&'static str> {
+    let model = model.to_ascii_lowercase();
+    let model = model.rsplit('/').next().unwrap_or(&model);
+    if model.is_empty() || model == "provider-default" {
+        return match provider {
+            "codex" => Some("openai"),
+            "claude" => Some("anthropic"),
+            "antigravity" => Some("google"),
+            _ => None,
+        };
+    }
+    if model.starts_with("gpt-")
+        || model.starts_with("gpt ")
+        || ["o1", "o3", "o4"]
+            .iter()
+            .any(|prefix| model.starts_with(prefix))
+    {
+        Some("openai")
+    } else if model.starts_with("claude-")
+        || model.starts_with("claude ")
+        || provider == "claude" && matches!(model, "opus" | "sonnet" | "fable" | "haiku")
+    {
+        Some("anthropic")
+    } else if model.starts_with("gemini-")
+        || model.starts_with("gemini ")
+        || provider == "antigravity" && model.starts_with("orchestrator")
+    {
+        Some("google")
+    } else {
+        None
+    }
 }
 fn base(repo: &Path, value: &str, context: &Context<'_>) -> Result<String> {
     if value.starts_with('-') || value.is_empty() {
@@ -861,7 +1094,7 @@ pub(crate) fn finish(
     mut output: String,
     context: &Context<'_>,
 ) -> Result<Output> {
-    if !args.has("gate") {
+    if !args.has("gate") && !args.has("adaptive") {
         let mut code = i32::from(
             !seats
                 .iter()
@@ -917,9 +1150,13 @@ pub(crate) fn finish(
     let mut seat_rows = Vec::new();
     let mut finding_rows = Vec::new();
     for seat in seats {
-        let (state, confidence) = seat
-            .verdict
-            .unwrap_or_else(|| verdict(&seat.answer, Some(seat.code), seat.complete));
+        let (state, confidence) =
+            if !args.has("gate") && seat.complete && seat.code == 0 && seat.quality == "ok" {
+                ("ok", None)
+            } else {
+                seat.verdict
+                    .unwrap_or_else(|| verdict(&seat.answer, Some(seat.code), seat.complete))
+            };
         states.push(state);
         let elapsed_secs = peer::rounded_secs(seat.elapsed);
         let detail = if state == "timed_out" {
@@ -961,7 +1198,7 @@ pub(crate) fn finish(
             seat_row.set("detail", detail);
         }
         seat_rows.push(seat_row);
-        let (findings, _) = if matches!(state, "pass" | "fail") {
+        let (findings, _) = if matches!(state, "pass" | "fail" | "ok") {
             match &seat.findings {
                 Some(findings) => findings.clone(),
                 None => seat_findings(&seat.answer),
@@ -1050,12 +1287,49 @@ pub(crate) fn finish(
             context.interrupted,
         )?;
     }
-    let mut code = overall(&states);
+    let mut code = if args.has("gate") {
+        overall(&states)
+    } else if states.iter().all(|state| *state == "ok") && !states.is_empty() {
+        0
+    } else {
+        2
+    };
+    if args.has("adaptive")
+        && seats.iter().any(|seat| {
+            let family = adaptive_family(&seat.route.provider, &seat.route.model);
+            family.is_none() || family == Some(providers::family(args.get("writer"), "").as_str())
+        })
+    {
+        code = 2;
+        output.push_str(
+            "reviewer model family was not independent of the writer; review incomplete\n",
+        );
+    }
+    if args.has("adaptive")
+        && !args.has("_review-policy-pinned")
+        && seats
+            .iter()
+            .filter_map(|seat| adaptive_family(&seat.route.provider, &seat.route.model))
+            .collect::<BTreeSet<_>>()
+            .len()
+            != seats.len()
+    {
+        code = 2;
+        output.push_str(
+            "adaptive reviewers did not retain distinct model families; review incomplete\n",
+        );
+    }
     if changed {
         code = 2;
-        output.push_str("review scope changed during provider calls; gate incomplete\n");
+        output.push_str(if args.has("gate") {
+            "review scope changed during provider calls; gate incomplete\n"
+        } else {
+            "review scope changed during provider calls; review incomplete\n"
+        });
     }
-    let verify_command = if args.has("_review-verify-resolved") {
+    let verify_command = if !args.has("gate") {
+        None
+    } else if args.has("_review-verify-resolved") {
         args.has("_review-verify")
             .then(|| args.get("_review-verify").to_owned())
     } else {
@@ -1151,6 +1425,15 @@ pub(crate) fn finish(
         code = 2;
         output.push_str("open findings remain; gate incomplete\n");
     }
+    if args.has("adaptive") {
+        let blockers = blocking_findings(repo, dir, &original)?;
+        if !blockers.is_empty() {
+            if code == 0 {
+                code = 2;
+            }
+            output.push_str(&blocking_note(&blockers)?);
+        }
+    }
     if args.has("confirm") {
         output.push_str(&confirm(args, repo, dir, run, seats, &patch, context)?);
     }
@@ -1226,19 +1509,129 @@ pub(crate) fn finish(
         ("overall", V::Num(code.to_string())),
         ("seats", V::Arr(seat_rows)),
     ]);
-    storage::write(
-        repo,
-        &dir.join(format!("_verdicts-{run}.json")),
-        json(&verdicts)?,
-        false,
-        context.interrupted,
-    )?;
+    if args.has("gate") {
+        storage::write(
+            repo,
+            &dir.join(format!("_verdicts-{run}.json")),
+            json(&verdicts)?,
+            false,
+            context.interrupted,
+        )?;
+    } else {
+        output.push_str("review: advisory; no gate evidence\n");
+    }
     outcome(args, repo, run, &original, code, context)?;
     Ok((code, output.into_bytes(), Vec::new()))
 }
+
+fn blocking_findings(repo: &Path, dir: &Path, current: &V) -> Result<Vec<V>> {
+    let mut directories = BTreeSet::from([dir.to_path_buf()]);
+    for row in storage::load(repo, Path::new(".oms/artifacts/index.jsonl"))? {
+        if text(&row, "kind") != "review" || !storage::identifier(text(&row, "run")) {
+            continue;
+        }
+        let artifact = Path::new(text(&row, "artifact"));
+        storage::relative(artifact)?;
+        if let Some(parent) = artifact.parent() {
+            storage::relative(parent)?;
+            directories.insert(parent.to_path_buf());
+        }
+    }
+    let paths = current
+        .get("paths")
+        .array()
+        .iter()
+        .filter_map(V::text)
+        .collect::<BTreeSet<_>>();
+    let current_task = text(current.get("criterion_context"), "active_task_id");
+    let mut blockers = Vec::new();
+    for directory in directories {
+        for mut finding in load_findings(repo, &directory)? {
+            if !finding.get("unresolved_blocking").truth() {
+                continue;
+            }
+            let location_unknown = text(&finding, "file").is_empty() || finding.has("withheld");
+            if !location_unknown && !paths.contains(text(&finding, "file")) {
+                continue;
+            }
+            let mut related = false;
+            for run in finding
+                .get("blocking_runs")
+                .array()
+                .iter()
+                .filter_map(V::text)
+            {
+                if !storage::identifier(run) {
+                    return fail("invalid finding review run");
+                }
+                let bytes =
+                    storage::read(repo, &directory.join(format!("_scope-{run}.json")), false)?;
+                if bytes.is_empty() {
+                    return fail(
+                        "unresolved blocking finding has no review scope; review incomplete",
+                    );
+                }
+                let prior = V::parse(&bytes)?;
+                if !oms_command_plan::repository::commit(text(&prior, "base"))
+                    || !matches!(prior.get("paths"), V::Arr(_))
+                {
+                    return fail(
+                        "unresolved blocking finding has an invalid review scope; review incomplete",
+                    );
+                }
+                let prior_task = text(prior.get("criterion_context"), "active_task_id");
+                if prior.get("base") == current.get("base")
+                    && (current_task.is_empty()
+                        || prior_task.is_empty()
+                        || current_task == prior_task)
+                    && (paths.contains(text(&finding, "file"))
+                        || location_unknown
+                            && prior
+                                .get("paths")
+                                .array()
+                                .iter()
+                                .filter_map(V::text)
+                                .any(|path| paths.contains(path)))
+                {
+                    related = true;
+                    break;
+                }
+            }
+            if related {
+                finding.set("artifact_dir", directory.to_string_lossy().into_owned());
+                blockers.push(finding);
+            }
+        }
+    }
+    Ok(blockers)
+}
+
+fn blocking_note(findings: &[V]) -> Result<String> {
+    if findings.is_empty() {
+        return Ok(String::new());
+    }
+    let mut note = format!(
+        "{} unresolved blocking finding(s) for this base and file scope; review incomplete until verified or dismissed with an owner reason (fixed is not verified)\n",
+        findings.len()
+    );
+    for finding in findings.iter().take(20) {
+        note.push_str(&format!(
+            "{} {} {}:{} [{}; {}]\n",
+            text(finding, "id"),
+            text(finding, "summary"),
+            text(finding, "file"),
+            finding.get("line").py(),
+            text(finding, "status"),
+            text(finding, "artifact_dir")
+        ));
+    }
+    Ok(String::from_utf8_lossy(&safety::redact(note.as_bytes())?).into_owned())
+}
+
 fn load_findings(repo: &Path, dir: &Path) -> Result<Vec<V>> {
     let mut entries: BTreeMap<String, V> = BTreeMap::new();
     let mut sightings: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut blocking_sightings: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for name in storage::names(repo, dir, ".jsonl")?
         .into_iter()
         .filter(|s| s.starts_with("_findings-"))
@@ -1252,6 +1645,12 @@ fn load_findings(repo: &Path, dir: &Path) -> Result<Vec<V>> {
                 .entry(ident.clone())
                 .or_default()
                 .insert(text(&row, "run").into());
+            if text(&row, "severity") == "blocking" {
+                blocking_sightings
+                    .entry(ident.clone())
+                    .or_default()
+                    .insert(text(&row, "run").into());
+            }
             entries.insert(ident, row);
         }
     }
@@ -1276,6 +1675,20 @@ fn load_findings(repo: &Path, dir: &Path) -> Result<Vec<V>> {
     for (ident, entry) in &mut entries {
         let history = histories.remove(ident.as_str()).unwrap_or_default();
         let last = history.last();
+        let blocking_runs = blocking_sightings.remove(ident).unwrap_or_default();
+        let unresolved_blocking = !blocking_runs.is_empty()
+            && match last.map(|row| text(row, "state")) {
+                Some("dismissed" | "out-of-scope") => false,
+                Some("verified") => blocking_runs.iter().any(|run| {
+                    !last
+                        .unwrap()
+                        .get("runs")
+                        .array()
+                        .iter()
+                        .any(|value| value.text() == Some(run))
+                }),
+                _ => true,
+            };
         let mut status = last.map_or("open", |r| text(r, "state"));
         if ["fixed", "verified"].contains(&status)
             && sightings[ident].iter().any(|run| {
@@ -1290,6 +1703,11 @@ fn load_findings(repo: &Path, dir: &Path) -> Result<Vec<V>> {
             status = "open";
         }
         entry.set("status", status);
+        entry.set("unresolved_blocking", unresolved_blocking);
+        entry.set(
+            "blocking_runs",
+            V::Arr(blocking_runs.into_iter().map(V::from).collect()),
+        );
         entry.set(
             "runs",
             V::Arr(sightings[ident].iter().map(|s| s.as_str().into()).collect()),
@@ -1603,46 +2021,47 @@ fn risk_paths(paths: &[String], patch: &[u8]) -> Vec<String> {
     }
     selected.into_iter().collect()
 }
-fn advise(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
-    let args = Args::parse(
-        argv,
-        &["repo", "base", "red-check", "red-timeout"],
-        &["json"],
-    )?;
-    args.exact_operands(0)?;
-    let red_timeout = if args.has("red-check") && args.has("red-timeout") {
-        args.get("red-timeout")
-            .parse::<i64>()
-            .ok()
-            .and_then(|n| usize::try_from(n.max(1)).ok())
-            .ok_or_else(|| Error::new(2, "--red-timeout must be an integer"))?
-    } else {
-        300
-    };
-    if args.has("red-check") {
-        safety::parent()?;
-        args.required("red-check")?;
-    }
-    let repo = storage::repository(context, &args.path("repo", context.cwd))?;
-    let base = base(&repo, args.value("base", "HEAD"), context)?;
+fn review_depth(repo: &Path, base: &str, context: &Context<'_>) -> Result<(V, Vec<u8>)> {
     let bytes = process::git(
         context,
-        &repo,
-        &["diff", "--numstat", "--no-renames", &base, "--"],
+        repo,
+        &["diff", "--numstat", "-z", "--no-renames", base, "--"],
     )?;
     let mut paths = Vec::new();
     let mut lines = 0usize;
-    for line in String::from_utf8_lossy(&bytes).lines() {
-        let cells = line.splitn(3, '\t').collect::<Vec<_>>();
-        if cells.len() == 3 {
-            lines += cells[..2]
-                .iter()
-                .filter_map(|s| s.parse::<usize>().ok())
-                .sum::<usize>();
-            paths.push(cells[2].to_owned());
+    let mut opaque = false;
+    for entry in bytes.split(|b| *b == 0).filter(|entry| !entry.is_empty()) {
+        let cells = entry.splitn(3, |b| *b == b'\t').collect::<Vec<_>>();
+        if cells.len() != 3 {
+            return fail("invalid diff size record");
         }
+        for cell in &cells[..2] {
+            match std::str::from_utf8(cell)
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                Some(count) => lines = lines.saturating_add(count),
+                None => opaque = true,
+            }
+        }
+        opaque |= std::str::from_utf8(cells[2]).is_err();
+        paths.push(String::from_utf8_lossy(cells[2]).into_owned());
     }
     let config = providers::config(context, "review-depth.json")?;
+    for key in ["contract_paths", "risk_paths"] {
+        if config.has(key)
+            && (!matches!(config.get(key), V::Arr(_))
+                || config
+                    .get(key)
+                    .array()
+                    .iter()
+                    .any(|value| value.text().is_none_or(str::is_empty)))
+        {
+            return fail(format!(
+                "review-depth.json {key} must be an array of nonempty strings"
+            ));
+        }
+    }
     let contracts = paths
         .iter()
         .filter(|p| {
@@ -1657,17 +2076,43 @@ fn advise(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         .collect::<Vec<_>>();
     let patch = process::git(
         context,
-        &repo,
+        repo,
         &[
             "diff",
             "--no-ext-diff",
             "--no-textconv",
             "--no-renames",
-            &base,
+            base,
             "--",
         ],
     )?;
-    let risks = risk_paths(&paths, &patch);
+    opaque |= String::from_utf8_lossy(&patch).lines().any(|line| {
+        (line.starts_with("index ")
+            || line.starts_with("new file mode ")
+            || line.starts_with("deleted file mode ")
+            || line.starts_with("new mode ")
+            || line.starts_with("old mode "))
+            && line
+                .split_whitespace()
+                .last()
+                .is_some_and(|mode| ["100755", "120000", "160000"].contains(&mode))
+    });
+    let mut risks = risk_paths(&paths, &patch)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    risks.extend(
+        paths
+            .iter()
+            .filter(|path| {
+                config
+                    .get("risk_paths")
+                    .array()
+                    .iter()
+                    .filter_map(V::text)
+                    .any(|pattern| glob(pattern, path))
+            })
+            .cloned(),
+    );
     let limit = |key: &str| crate::number(config.get(key)).unwrap_or(0.0) as usize;
     let mut depth = "none";
     let mut reasons = Vec::new();
@@ -1698,24 +2143,14 @@ fn advise(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     if reasons.is_empty() {
         reasons.push("none: no risk or contract path above the size floor".into());
     }
-    let spec_stage = matches!(depth, "gate+security" | "council");
-    let red = if args.has("red-check") {
-        Some(crate::review_red::run(
-            &repo,
-            &patch,
-            args.get("red-check"),
-            &base,
-            red_timeout,
-            context,
-        )?)
-    } else {
-        None
-    };
-    let mut value = obj([
+    let value = obj([
         ("schema", 1usize.into()),
         ("advisory", true.into()),
         ("depth", depth.into()),
-        ("spec_stage", spec_stage.into()),
+        (
+            "spec_stage",
+            matches!(depth, "gate+security" | "council").into(),
+        ),
         (
             "reasons",
             V::Arr(reasons.iter().map(|s| s.as_str().into()).collect()),
@@ -1730,7 +2165,48 @@ fn advise(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
         ),
         ("lines", V::Num(lines.to_string())),
         ("files", V::Num(paths.len().to_string())),
+        ("paths", V::Arr(paths.into_iter().map(V::from).collect())),
+        ("opaque", opaque.into()),
+        ("diff_sha256", storage::hash(&patch).into()),
     ]);
+    Ok((value, patch))
+}
+
+fn advise(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
+    let args = Args::parse(
+        argv,
+        &["repo", "base", "red-check", "red-timeout"],
+        &["json"],
+    )?;
+    args.exact_operands(0)?;
+    let red_timeout = if args.has("red-check") && args.has("red-timeout") {
+        args.get("red-timeout")
+            .parse::<i64>()
+            .ok()
+            .and_then(|n| usize::try_from(n.max(1)).ok())
+            .ok_or_else(|| Error::new(2, "--red-timeout must be an integer"))?
+    } else {
+        300
+    };
+    if args.has("red-check") {
+        safety::parent()?;
+        args.required("red-check")?;
+    }
+    let repo = storage::repository(context, &args.path("repo", context.cwd))?;
+    let base = base(&repo, args.value("base", "HEAD"), context)?;
+    let (mut value, patch) = review_depth(&repo, &base, context)?;
+    let red = if args.has("red-check") {
+        Some(crate::review_red::run(
+            &repo,
+            &patch,
+            args.get("red-check"),
+            &base,
+            red_timeout,
+            context,
+        )?)
+    } else {
+        None
+    };
     let red_text = red
         .as_ref()
         .map(crate::review_red::render)
@@ -1738,6 +2214,14 @@ fn advise(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     if let Some(red) = red {
         value.set("red_check", red);
     }
+    let depth = text(&value, "depth");
+    let spec_stage = value.get("spec_stage").truth();
+    let reasons = value
+        .get("reasons")
+        .array()
+        .iter()
+        .filter_map(V::text)
+        .collect::<Vec<_>>();
     Ok(out(if args.has("json") {
         json(&value)?
     } else {
@@ -1781,7 +2265,18 @@ fn confirm(
 ) -> Result<String> {
     let target = providers::Target::parse(args.required("confirm")?)?;
     let route = providers::route(context, &target, "", "auto", "reviewer")?;
-    let family = providers::family(&route.provider, &route.model);
+    let family = if args.has("adaptive") {
+        adaptive_family(&route.provider, &route.model)
+            .ok_or_else(|| {
+                Error::new(
+                    2,
+                    "adaptive confirming reviewer has an unknown model family",
+                )
+            })?
+            .to_owned()
+    } else {
+        providers::family(&route.provider, &route.model)
+    };
     if args.has("writer") && family == providers::family(args.get("writer"), "") {
         return fail("confirming reviewer must use a different model family from the writer");
     }
@@ -1808,7 +2303,14 @@ fn confirm(
             let independent = seats
                 .iter()
                 .filter(|seat| seat.target.provider == reporter)
-                .all(|seat| providers::family(&seat.route.provider, &seat.route.model) != family);
+                .all(|seat| {
+                    if args.has("adaptive") {
+                        adaptive_family(&seat.route.provider, &seat.route.model)
+                            .is_some_and(|reported| reported != family)
+                    } else {
+                        providers::family(&seat.route.provider, &seat.route.model) != family
+                    }
+                });
             (independent && reporter != target.provider).then(|| rows[0].clone())
         })
         .collect::<Vec<_>>();
@@ -1941,6 +2443,18 @@ fn outcome(
     let mut scope = scope.clone();
     scope.set("run", run);
     scope.set("gate", args.has("gate"));
+    if args.has("adaptive") {
+        scope.set(
+            "policy",
+            obj([
+                ("name", "adaptive".into()),
+                ("depth", args.get("_review-policy-depth").into()),
+                ("writer", args.get("writer").into()),
+                ("providers", args.get("providers").into()),
+                ("pinned", args.has("_review-policy-pinned").into()),
+            ]),
+        );
+    }
     peer::index(
         repo,
         &obj([

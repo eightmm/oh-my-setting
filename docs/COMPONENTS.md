@@ -2239,6 +2239,45 @@ review and never changes a gate verdict. `--json` adds `spec_stage`, true for
 `gate+security` and `council`: run one routine-tier spec/acceptance check
 before that deep review (the text output prints a line for it).
 
+`oms peer-review --adaptive --writer PROVIDER` opts into bounded review using
+that deterministic risk assessment. An empty diff or a small ordinary
+documentation change can skip model review; other changes require at least
+one independent reviewer. Depths `gate+security` and `council` select two
+independent reviewers. No full council, debate or synthesis starts
+automatically. A skip is advisory and creates no passing gate outcome.
+Adding `--gate` keeps at least one reviewer and the mechanical verify check;
+missing required reviewers refuse before any provider call. Explicit
+`--providers` keeps its selected seats even when the automatic count differs,
+and exact model, fallback and effort pins remain in force. Adaptive seats must
+be independent of the identified writer family; an explicit conflicting seat
+is refused instead of weakening that requirement. Reviewer, fallback and confirm
+models need a recognized OpenAI, Anthropic or Google family; supported native
+aliases remain valid, but unknown family pins are refused.
+
+`--writer` identifies the native default family of Codex, Claude or Antigravity;
+adaptive mode refuses generic writer transports and cannot infer the family of
+an arbitrary model routed through a native provider. Autopilot's
+existing semantic review opts into adaptive mode for default or recognized
+same-family native worker routes, including the recorded fallback. Unknown or
+cross-family worker pins keep the existing gate path. The frozen explicit
+reviewer stays a single seat, with its model, fallback and effort unchanged;
+the existing exact retained review is replayed without another provider call.
+
+Adaptive review requires the full diff and refuses `--no-diff`, `--since-last`,
+`--no-verify`, debate/deliberation, synthesis, `--security-audit` and `--to`/`--all`
+(use `--providers`). Live runs require non-`.oms/` untracked content to be staged
+or added with intent-to-add before a review or skip. A requested
+`--confirm PROVIDER` still adds at most one read-only call for eligible blocking
+findings reported by only one seat. Its labels cannot clear a gate or change
+a finding's disposition. Adaptive gates also remain incomplete while an earlier
+same-base blocking finding in the current file/task scope is `open` or `fixed`;
+a fix claim alone is insufficient. This includes prior indexed review directories.
+Verify it with the existing receipt-backed workflow or record a reasoned owner
+`dismiss`/`out-of-scope` disposition. Advisory-only findings do not block, but a
+later advisory label cannot erase a historical blocker. Recording `verified`
+does not rewrite an earlier incomplete gate; a standalone final pass may need
+another gate. No general pass cache is added; autopilot retains its exact replay.
+
 `oms peer-review advise --red-check CMD` and `oms patch-admit --red-check CMD`
 add an opt-in, never automatic red check: do the tests the change adds fail on
 the base? CMD first runs once in a scratch worktree at the base (a base that is
