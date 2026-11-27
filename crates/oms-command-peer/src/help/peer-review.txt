@@ -18,9 +18,9 @@ Plain review persists seat answers as artifacts.
 With --gate, enforce and record the typed gate outcome.
 
 verdicts: inspect the latest review run's artifacts and print one line per
-provider — pass, fail, timed out, interrupted, or incomplete (artifact has no
-exit section, e.g. the run died mid-flight). For --debate runs each provider's
-FINAL round artifact is used. Exit 0 all pass, 1 any fail, 2
+provider — pass, fail, stalled, timed out, interrupted, or incomplete (artifact
+has no exit section, e.g. the run died mid-flight). For --debate runs each
+provider's FINAL round artifact is used. Exit 0 all pass, 1 any fail, 2
 incomplete/undeterminable; 2 takes precedence over 1 (a died provider means the
 round must be re-run before any fail is meaningful). Dry-run artifacts have no
 exit section and therefore always read as incomplete.
@@ -190,12 +190,14 @@ Options:
                        `oms artifact-index import`.
   --synthesize [P]     After provider reviews, run a synthesis pass with a
                        registered provider P. Default: claude.
-  --print-timeout DUR  Antigravity print-mode wait. Default: the review 20m wall.
+  --print-timeout DUR  Pin a fixed wall-clock timeout (also passed to agy print
+                       mode). Default: no fixed wall (20m stall, 24h cap).
   --dry-run            Write prompts as artifacts without CLI calls.
   -h, --help           Show this help.
 
 Environment:
   OH_MY_SETTING_REVIEW_DRY_RUN=1   Same as --dry-run.
-  OMS_PEER_TIMEOUT          Per-provider wall-clock timeout (default: 20m).
-  OMS_PEER_PRINT_TIMEOUT    Timeout for print mode wait (agy); tracks the
-                            verb wall default unless set.
+  OMS_PEER_TIMEOUT          Pin a fixed per-provider wall-clock timeout. Unset
+                            by default (no fixed wall; 20m stall, 24h cap).
+  OMS_PEER_STALL            Stop a streaming provider after DUR with no output
+                            on stdout/stderr (default: 20m; 0 disables stall).

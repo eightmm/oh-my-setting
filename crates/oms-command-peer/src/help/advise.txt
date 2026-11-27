@@ -41,10 +41,15 @@ Options:
   --task               Attach the active task handoff packet.
   --ml-context         Attach the compact ML context digest.
   --export-only        Write the prompt artifact without calling the CLI.
-  --print-timeout DUR  Timeout for print mode wait (agy). Default: 5m.
+  --print-timeout DUR  Pin a fixed wall-clock timeout (also passed to agy print
+                       mode). Default: no fixed wall (20m stall, 24h cap).
   --dry-run            Write prompt artifact without calling the CLI.
   -h, --help           Show help.
 
 Environment:
   OMS_ADVISOR_PROVIDER   Default advisor provider (overridden by --to).
   OMS_AGENT              Caller identity; the default advisor avoids it.
+  OMS_PEER_TIMEOUT       Pin a fixed provider wall-clock timeout. Unset by
+                         default (no fixed wall; 20m stall check, 24h cap).
+  OMS_PEER_STALL         Stop a streaming provider after DUR with no output on
+                         stdout/stderr (default: 20m; 0 disables stall check).

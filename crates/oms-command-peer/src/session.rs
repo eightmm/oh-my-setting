@@ -901,6 +901,7 @@ pub(crate) fn run(tool: &str, argv: &[OsString], context: &Context<'_>) -> Resul
                 environment,
                 remove_environment,
                 timeout: Duration::from_secs(86400),
+                stall: None,
                 max_bytes: 1024 * 1024,
                 merge: false,
                 launch_fence: Some(pending.launch_fence()),

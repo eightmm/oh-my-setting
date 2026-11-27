@@ -473,6 +473,8 @@ struct Job<'a> {
     remove_environment: Vec<OsString>,
     merged: bool,
     timeout: Duration,
+    stall: Option<Duration>,
+    stalled_out: Option<&'a mut Option<Duration>>,
     limit: usize,
     heartbeat: Option<&'a ActivityHeartbeat>,
     cancel: StopReason,
@@ -499,6 +501,8 @@ impl<'a> Job<'a> {
             remove_environment: Vec::new(),
             merged: false,
             timeout,
+            stall: None,
+            stalled_out: None,
             limit,
             heartbeat: None,
             cancel: StopReason::Cancelled,
@@ -694,6 +698,11 @@ fn supervise_flags(
             )
         })?;
     }
+    let mut stalled_out = job.stalled_out;
+    let mut stall = oms_command_peer::process::StallTracker::for_execution(
+        job.stall,
+        allow_whole_tree && !job.acknowledge_start,
+    );
     let mut channel_failed = false;
     let mut beat = Instant::now();
     let mut heartbeat_failed = false;
@@ -753,11 +762,17 @@ fn supervise_flags(
         let progress = reactor
             .poll(id, Duration::from_millis(50))
             .map_err(|e| e.to_string())?;
-        if let Progress::Pending(snapshot) = &progress
-            && let Some(tap) = job.stream
-            && !snapshot.stdout.limited
-        {
-            (tap.0)(&snapshot.stdout.bytes);
+        if let Progress::Pending(snapshot) = &progress {
+            if let Some(tap) = job.stream
+                && !snapshot.stdout.limited
+            {
+                (tap.0)(&snapshot.stdout.bytes);
+            }
+            if !cancelling && !channel_failed && stall.poll(snapshot, Instant::now()) {
+                reactor
+                    .stop(id, StopReason::Deadline)
+                    .map_err(|e| e.to_string())?;
+            }
         }
         if let Progress::Complete(mut done) = progress {
             #[cfg(target_os = "linux")]
@@ -774,6 +789,9 @@ fn supervise_flags(
                         channel_failed = true;
                     }
                 }
+            }
+            if let Some(out) = &mut stalled_out {
+                **out = stall.finish(done.stop);
             }
             return Ok((done, heartbeat_failed, channel_failed));
         }
@@ -1241,6 +1259,7 @@ fn peer_job<'a>(
         environment: std::mem::take(&mut input.environment),
         remove_environment: std::mem::take(&mut input.remove_environment),
         merged: input.merge,
+        stall: input.stall,
         heartbeat,
         physical_call: input.physical_call.take(),
         launch_fence: input.launch_fence.as_ref(),
@@ -1317,20 +1336,20 @@ impl CollabServices<'_> {
             return self.execute_peer_supervised(input, argv, interrupted);
         }
         let heartbeat = peer_activity_heartbeat(input.heartbeat.as_ref());
-        let (done, heartbeat_failed) = supervise(
-            peer_job(
-                argv,
-                &mut input,
-                heartbeat.as_ref(),
-                Some(&self.control),
-                #[cfg(target_os = "linux")]
-                observer
-                    .as_mut()
-                    .map(protected_dispatch::Observer::Provider),
-            ),
-            interrupted,
-        )
-        .map_err(|e| fail(if e == "interrupted" { 130 } else { 125 }, e))?;
+        let mut stalled = None;
+        let mut job = peer_job(
+            argv,
+            &mut input,
+            heartbeat.as_ref(),
+            Some(&self.control),
+            #[cfg(target_os = "linux")]
+            observer
+                .as_mut()
+                .map(protected_dispatch::Observer::Provider),
+        );
+        job.stalled_out = Some(&mut stalled);
+        let (done, heartbeat_failed) = supervise(job, interrupted)
+            .map_err(|e| fail(if e == "interrupted" { 130 } else { 125 }, e))?;
         #[cfg(target_os = "linux")]
         if !interrupted.load(Ordering::Acquire)
             && let Some(observer) = observer
@@ -1355,6 +1374,7 @@ impl CollabServices<'_> {
             stdout: done.stdout.bytes,
             stderr,
             complete,
+            stalled,
             cleanup_complete,
             owned_cleanup,
             elapsed: done.duration,
@@ -1446,6 +1466,7 @@ impl CollabServices<'_> {
             stdout: child.stdout,
             stderr,
             complete,
+            stalled: None,
             cleanup_complete: Some(true),
             owned_cleanup: done.owned_cleanup().cloned(),
             elapsed: child.elapsed,
@@ -4063,6 +4084,7 @@ mod tests {
             environment: Vec::new(),
             remove_environment: Vec::new(),
             timeout: Duration::from_secs(5),
+            stall: None,
             max_bytes: 1024,
             merge: false,
             launch_fence: None,
@@ -4139,6 +4161,7 @@ mod tests {
                     environment: Vec::new(),
                     remove_environment: Vec::new(),
                     timeout,
+                    stall: None,
                     max_bytes: 1024,
                     merge: false,
                     launch_fence: None,
@@ -4164,8 +4187,50 @@ mod tests {
         assert_eq!(cleanup.call().id(), "call_fixture_11");
         assert_eq!(cleanup.scope(), Scope::ProcessGroup);
         let done = invoke("sleep 30", Duration::from_millis(200)).expect("deadline");
-        assert_eq!((done.code, done.complete), (124, false));
+        assert_eq!((done.code, done.complete, done.stalled), (124, false, None));
         assert_eq!(done.cleanup_complete, Some(true));
+
+        let invoke_stall = |script: &str, timeout: Duration, stall: Duration| {
+            PeerProcessExecutor::execute(
+                &host,
+                Invocation {
+                    argv: sh(script),
+                    cwd: dir.path().to_owned(),
+                    input: None,
+                    environment: Vec::new(),
+                    remove_environment: Vec::new(),
+                    timeout,
+                    stall: Some(stall),
+                    max_bytes: 1024,
+                    merge: false,
+                    launch_fence: None,
+                    physical_call: None,
+                    heartbeat: None,
+                    stream: None,
+                },
+                &stop,
+            )
+        };
+        let active = invoke_stall(
+            "i=0; while [ \"$i\" -lt 5 ]; do sleep 0.1; printf '.'; i=$((i + 1)); done",
+            Duration::from_secs(10),
+            Duration::from_millis(300),
+        )
+        .expect("streaming child completes");
+        assert_eq!(
+            (active.code, active.complete, active.stalled),
+            (0, true, None)
+        );
+        let stalled = invoke_stall(
+            "printf 'once'; sleep 30",
+            Duration::from_secs(10),
+            Duration::from_millis(250),
+        )
+        .expect("silent child stalls");
+        assert_eq!(
+            (stalled.code, stalled.complete, stalled.stalled),
+            (124, false, Some(Duration::from_millis(250)))
+        );
         assert_eq!(
             done.owned_cleanup.as_ref().unwrap().call().id(),
             "call_fixture_8"

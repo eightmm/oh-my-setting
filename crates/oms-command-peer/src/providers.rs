@@ -240,6 +240,11 @@ pub fn discovered(provider: &str) -> bool {
 fn requires_read_isolation(provider: &str) -> bool {
     matches!(provider, "antigravity" | "aider") || builtin_binary(provider).is_none()
 }
+/// True when `transport` invokes `provider` in a streaming event output mode
+/// (`codex` `--json`, `claude` `--output-format stream-json`, `pi` `--mode json`).
+pub(crate) fn streams_output(provider: &str) -> bool {
+    matches!(provider, "codex" | "claude" | "pi")
+}
 pub(crate) fn config(context: &Context<'_>, name: &str) -> Result<V> {
     config_from(context.source, name)
 }
@@ -2273,7 +2278,7 @@ pub(crate) fn execute_env<P: crate::request_context::Input + ?Sized>(
         prompt,
         cwd,
         write,
-        timeout,
+        timeout.into(),
         account_repo,
         extra_env,
         OutputMode::Legacy,
@@ -2287,7 +2292,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
     prompt: &P,
     cwd: &Path,
     write: bool,
-    timeout: u64,
+    timeouts: crate::peer::Timeouts,
     account_repo: &Path,
     extra_env: &[(OsString, OsString)],
     output_mode: OutputMode<'_>,
@@ -2337,7 +2342,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
     {
         return fail("provider does not support read access through this transport");
     }
-    let mut transport = transport(route, prompt.bytes(), cwd, write, timeout)?;
+    let mut transport = transport(route, prompt.bytes(), cwd, write, timeouts.wall)?;
     let stream = match output_mode {
         OutputMode::Observed(_, Some(tap)) if route.provider == "claude" && !write => {
             // Partial events precede `-p`; completion still comes from `result`.
@@ -2588,13 +2593,18 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
         let started = std::time::Instant::now();
         let direct = matches!(route.provider.as_str(), "codex" | "claude" | "antigravity")
             && exec_argv == transport.argv;
+        let stall = streams_output(&route.provider)
+            .then_some(timeouts.stall)
+            .flatten()
+            .map(Duration::from_secs);
         let mut invocation = Invocation {
             argv: exec_argv,
             cwd: cwd.to_owned(),
             input: transport.input.clone(),
             environment,
             remove_environment,
-            timeout: Duration::from_secs(timeout),
+            timeout: Duration::from_secs(timeouts.wall),
+            stall,
             max_bytes: 64 * 1024 * 1024,
             merge: false,
             launch_fence: Some(pending_usage.launch_fence()),
@@ -2797,7 +2807,7 @@ pub(crate) fn execute_with_fallback_env<P: crate::request_context::Input + ?Size
     prompt: &P,
     cwd: &Path,
     write: bool,
-    timeout: u64,
+    timeouts: impl Into<crate::peer::Timeouts>,
     account_repo: &Path,
     extra_env: &[(OsString, OsString)],
     context: &Context<'_>,
@@ -2808,7 +2818,7 @@ pub(crate) fn execute_with_fallback_env<P: crate::request_context::Input + ?Size
         prompt,
         cwd,
         write,
-        timeout,
+        timeouts.into(),
         account_repo,
         extra_env,
         OutputMode::Legacy,
@@ -2823,7 +2833,7 @@ pub(crate) fn execute_with_fallback_output<P: crate::request_context::Input + ?S
     prompt: &P,
     cwd: &Path,
     write: bool,
-    timeout: u64,
+    timeouts: crate::peer::Timeouts,
     account_repo: &Path,
     extra_env: &[(OsString, OsString)],
     output_mode: OutputMode<'_>,
@@ -2840,7 +2850,7 @@ pub(crate) fn execute_with_fallback_output<P: crate::request_context::Input + ?S
         prompt,
         cwd,
         write,
-        timeout,
+        timeouts,
         account_repo,
         &extra_env,
         output_mode,
@@ -2859,7 +2869,7 @@ pub(crate) fn execute_with_fallback_output<P: crate::request_context::Input + ?S
             prompt,
             cwd,
             write,
-            timeout,
+            timeouts,
             account_repo,
             &extra_env,
             output_mode,
@@ -3005,6 +3015,7 @@ mod bridge_route_tests {
             stdout: text.as_bytes().to_vec(),
             stderr: Vec::new(),
             complete,
+            stalled: None,
             cleanup_complete: Some(true),
             owned_cleanup: None,
             elapsed: Duration::ZERO,
@@ -3158,6 +3169,7 @@ mod bridge_route_tests {
                 stdout: b"fixture answer\n".to_vec(),
                 stderr: Vec::new(),
                 complete: true,
+                stalled: None,
                 cleanup_complete: Some(true),
                 owned_cleanup: None,
                 elapsed: Duration::ZERO,
@@ -3370,6 +3382,7 @@ mod bridge_route_tests {
                                 stdout: Vec::new(),
                                 stderr: Vec::new(),
                                 complete: true,
+                                stalled: None,
                                 cleanup_complete: Some(true),
                                 owned_cleanup: None,
                                 elapsed: Duration::ZERO,
@@ -3675,6 +3688,7 @@ mod bridge_route_tests {
                         stdout: raw.as_bytes().to_vec(),
                         stderr: vec![],
                         complete,
+                        stalled: None,
                         cleanup_complete: Some(true),
                         owned_cleanup: None,
                         elapsed: Duration::ZERO,
@@ -3732,6 +3746,7 @@ mod bridge_route_tests {
                                 stdout: vec![],
                                 stderr: vec![],
                                 complete: true,
+                                stalled: None,
                                 cleanup_complete: Some(true),
                                 owned_cleanup: None,
                                 elapsed: Duration::ZERO,
@@ -3795,7 +3810,7 @@ mod bridge_route_tests {
                         code:if n == 0 {1} else if n == 2 {124} else {0},
                         stdout:format!("{{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"fixture answer\",\"usage\":{{\"input_tokens\":10,\"output_tokens\":2,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":0}},\"total_cost_usd\":0.0000{}}}\n",n+1).into_bytes(),
                         stderr:if n == 0 {b"rate limit".to_vec()} else {vec![]},
-                        complete:n != 2,cleanup_complete:Some(true),owned_cleanup:None,elapsed:Duration::ZERO,
+                        complete:n != 2,stalled:None,cleanup_complete:Some(true),owned_cleanup:None,elapsed:Duration::ZERO,
                     })
                     }
                 }

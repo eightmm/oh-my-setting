@@ -1114,6 +1114,8 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     };
     let live_context = context.with_heartbeat(Some(&heartbeat));
     let mut code = 1;
+    let mut stalled_secs: Option<u64> = None;
+    let mut timeout_secs: Option<u64> = None;
     let mut body = header.into_bytes();
     let mut captured = Vec::new();
     let mut written_patch = Vec::new();
@@ -1138,11 +1140,13 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         }
         crate::check(context.interrupted)?;
         verify_exit_code = None;
+        stalled_secs = None;
+        timeout_secs = None;
         let mut bound_verifier_failed = false;
         worktree.identity(context)?;
         if interactive && round == 0 {
             let mut turn_history = String::new();
-            let timeout = peer::timeout(args, "peer-delegate")?;
+            let timeouts = peer::timeout(args, "peer-delegate")?;
             code = 0;
             let max_turns = args
                 .get("max-turns")
@@ -1175,7 +1179,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                     &full_prompt,
                     &worktree.path,
                     !read,
-                    timeout,
+                    timeouts,
                     &repo,
                     &extra_env,
                     &live_context,
@@ -1199,6 +1203,11 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                         break;
                     }
                 };
+                if let Some(dur) = res.stalled {
+                    stalled_secs = Some(peer::rounded_secs(dur));
+                } else if !res.complete && res.code == 124 {
+                    timeout_secs = Some(timeouts.wall);
+                }
                 let turn_code = if !res.complete && res.code == 0 {
                     1
                 } else {
@@ -1209,6 +1218,20 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 body.extend_from_slice(
                     format!("\n## Turn {}\n\n{clean_str}\n", idx + 1).as_bytes(),
                 );
+                if let Some(secs) = stalled_secs {
+                    body.extend_from_slice(
+                        format!("\n## Diagnostics\n\nerror: {}\n", peer::stall_message(secs))
+                            .as_bytes(),
+                    );
+                } else if let Some(wall) = timeout_secs {
+                    body.extend_from_slice(
+                        format!(
+                            "\n## Diagnostics\n\nerror: {}\n",
+                            peer::timeout_message(wall, 0)
+                        )
+                        .as_bytes(),
+                    );
+                }
                 turn_history.push_str(&format!(
                     "\nTurn {}: {}\nReply: {}\n",
                     idx + 1,
@@ -1238,6 +1261,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 idx += 1;
             }
         } else {
+            let timeouts = peer::timeout(args, "peer-delegate")?;
             let result = plan
                 .as_ref()
                 .map_or(Ok(()), |bound| bound.check(context))
@@ -1248,7 +1272,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                         &prompt,
                         &worktree.path,
                         !read,
-                        peer::timeout(args, "peer-delegate")?,
+                        timeouts,
                         &repo,
                         &extra_env,
                         &live_context,
@@ -1266,6 +1290,11 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 }
             };
             code = result.code;
+            if let Some(dur) = result.stalled {
+                stalled_secs = Some(peer::rounded_secs(dur));
+            } else if !result.complete && result.code == 124 {
+                timeout_secs = Some(timeouts.wall);
+            }
             if !result.complete {
                 if code == 0 {
                     code = 1;
@@ -1284,6 +1313,20 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 )
                 .as_bytes(),
             );
+            if let Some(secs) = stalled_secs {
+                body.extend_from_slice(
+                    format!("\n## Diagnostics\n\nerror: {}\n", peer::stall_message(secs))
+                        .as_bytes(),
+                );
+            } else if let Some(wall) = timeout_secs {
+                body.extend_from_slice(
+                    format!(
+                        "\n## Diagnostics\n\nerror: {}\n",
+                        peer::timeout_message(wall, 0)
+                    )
+                    .as_bytes(),
+                );
+            }
         }
         worktree.identity(context)?;
         process::git(
@@ -1420,7 +1463,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     if no_change && !args.has("allow-no-change") && dispatch.panel.is_some() {
         code = 6;
     }
-    let state = if code == 0 {
+    let attempt_state = if code == 0 {
         "review"
     } else if code == 124 {
         "timed_out"
@@ -1429,17 +1472,25 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     } else {
         "failed"
     };
+    let index_state = if code == 124 && stalled_secs.is_some() {
+        "stalled"
+    } else {
+        attempt_state
+    };
     let mut refs = obj([
         ("artifact", artifact.to_string_lossy().into_owned().into()),
         ("patch", patch.to_string_lossy().into_owned().into()),
         ("verify_status", verified.into()),
         ("admit", "pending".into()),
     ]);
+    if code == 124 && stalled_secs.is_some() {
+        refs.set("termination_reason", "stalled");
+    }
     if !providers::panel_account(&route).is_empty() {
         // An overflow may have moved the run off the account bound at start.
         refs.set("panel_account", V::from(providers::panel_account(&route)));
     }
-    transition(&repo, &attempt, state, refs, context)?;
+    transition(&repo, &attempt, attempt_state, refs, context)?;
     body.extend_from_slice(format!("\n## Exit\n\n{code}\n\n- outcome: {}\n- verification: {verified}\n- admission: pending\n",if no_change{"no_change"}else if code==0{"review"}else{"failed"}).as_bytes());
     let artifact_sha256 = storage::hash(&body);
     let patch_sha256 = storage::hash(&written_patch);
@@ -1477,7 +1528,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
             "verify_exit",
             verify_exit_code.map_or(V::Null, |n| V::Num(n.to_string())),
         ),
-        ("state", state.into()),
+        ("state", index_state.into()),
         ("admit", "pending".into()),
         ("no_change", no_change.into()),
     ]);
@@ -1506,6 +1557,13 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         Ok(())
     };
     let mut note = String::new();
+    if code == 124 {
+        if let Some(secs) = stalled_secs {
+            note.push_str(&format!("error: {}\n", peer::stall_message(secs)));
+        } else if let Some(wall) = timeout_secs {
+            note.push_str(&format!("error: {}\n", peer::timeout_message(wall, 0)));
+        }
+    }
     if needs_keep {
         note.push_str(&format!("worktree retained: {}\n", worktree.path.display()));
     } else if let Err(e) = worktree.remove(context) {
@@ -1828,6 +1886,7 @@ mod tests {
                         stdout: b"Answer:\nok\nTradeoffs:\nnone\nEvidence:\nvictim.txt\nRisks:\nnone\nRecommendation:\nship\nVerification:\ntrue\n".to_vec(),
                         stderr: Vec::new(),
                         complete: true,
+                        stalled: None,
                         cleanup_complete: Some(true),
                         owned_cleanup: None,
                         elapsed: std::time::Duration::from_millis(1),

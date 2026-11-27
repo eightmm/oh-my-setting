@@ -7996,10 +7996,56 @@ fn peer_status_tasks() {
     let running = c.tool("oms_peer_result", json!({"operation":op}));
     good(&running);
     assert_eq!(payload(&running)["status"], "running");
+    assert!(payload(&running)["elapsed_seconds"].as_i64().is_some());
+    assert!(payload(&running)["quiet_seconds"].as_i64().is_some());
     assert_eq!(
         payload(&running)["cancellation"],
         json!({"requested_at":Value::Null,"state":"none"})
     );
+    // Elapsed vs quiet seconds distinguish an active streaming run from a silent one,
+    // and neither volatile counter invalidates an unchanged result cursor.
+    let ten_secs_ago = std::time::SystemTime::now() - Duration::from_secs(10);
+    std::fs::File::options()
+        .write(true)
+        .open(dir.join("prompt.txt"))
+        .unwrap()
+        .set_modified(ten_secs_ago)
+        .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(dir.join("run.log"))
+        .unwrap()
+        .set_modified(ten_secs_ago)
+        .unwrap();
+    let silent_snap = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+    assert!(
+        silent_snap["elapsed_seconds"].as_i64().unwrap() >= 9,
+        "{silent_snap}"
+    );
+    assert!(
+        silent_snap["quiet_seconds"].as_i64().unwrap() >= 9,
+        "{silent_snap}"
+    );
+    let silent_cursor = silent_snap["cursor"].as_str().unwrap().to_owned();
+    let rechecked = payload(&c.tool(
+        "oms_peer_result",
+        json!({"operation":op,"after":silent_cursor}),
+    ));
+    assert_eq!(rechecked["unchanged"], true, "{rechecked}");
+    assert!(rechecked["elapsed_seconds"].as_i64().unwrap() >= 9);
+    assert!(rechecked["quiet_seconds"].as_i64().unwrap() >= 9);
+    // New output resets quiet_seconds while elapsed_seconds keeps growing.
+    std::fs::write(dir.join("last-output"), b"").unwrap();
+    let active_snap = payload(&c.tool("oms_peer_result", json!({"operation":op})));
+    assert!(
+        active_snap["elapsed_seconds"].as_i64().unwrap() >= 9,
+        "{active_snap}"
+    );
+    assert!(
+        active_snap["quiet_seconds"].as_i64().unwrap() <= 2,
+        "{active_snap}"
+    );
+    std::fs::remove_file(dir.join("last-output")).unwrap();
     assert_eq!(
         c.call(
             "tasks/get",

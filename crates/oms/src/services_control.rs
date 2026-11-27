@@ -5557,6 +5557,7 @@ mod tests {
                         environment: vec![],
                         remove_environment: vec![],
                         timeout: Duration::from_secs(5),
+                        stall: None,
                         max_bytes: 1024,
                         merge: false,
                         physical_call: Some(tag.clone()),

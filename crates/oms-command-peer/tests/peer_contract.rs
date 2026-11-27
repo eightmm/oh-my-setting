@@ -164,9 +164,37 @@ fn provider_isolated_with_env(name: &str, layout: &str, env: &[(&str, &str)], bo
     fixture.write("bin/oms-agent-adapter-disabled", "inert\n");
     fs::create_dir(fixture.0.join("tmp")).unwrap();
     let mut paths = vec![fixture.0.join("bin")];
-    paths.extend(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    ));
+    for (idx, dir) in
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).enumerate()
+    {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut items = Vec::new();
+        let mut has_provider = false;
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if PROVIDER_BINS.contains(&name.as_ref())
+                || matches!(name.as_ref(), "phantom" | "disabled")
+                || name.starts_with("oms-agent-adapter-")
+            {
+                has_provider = true;
+            } else {
+                items.push((file_name, entry.path()));
+            }
+        }
+        if !has_provider {
+            paths.push(dir);
+        } else if !items.is_empty() {
+            let clean = fixture.0.join(format!("sys-bin-{idx}"));
+            fs::create_dir_all(&clean).unwrap();
+            for (file_name, target) in items {
+                let _ = std::os::unix::fs::symlink(target, clean.join(file_name));
+            }
+            paths.push(clean);
+        }
+    }
     let mut command = if layout == "private" {
         let mut command = Command::new("bash");
         command
@@ -320,6 +348,7 @@ impl Executor for ProviderProbe {
                 .unwrap_or_else(|| b"fixture answer\n".to_vec()),
             stderr: Vec::new(),
             complete: true,
+            stalled: None,
             cleanup_complete: Some(true),
             owned_cleanup: None,
             elapsed: Duration::ZERO,
@@ -2286,7 +2315,7 @@ exec "$real_git" "$@"
                     Ok(Completed {
                         code: if self.mode == "failure" { 7 } else if self.mode == "cancel" { 130 } else { 0 },
                         stdout: b"{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"implemented the frozen task\"}\n".to_vec(),
-                        stderr: vec![], complete: self.mode != "cancel", cleanup_complete: Some(true),
+                        stderr: vec![], complete: self.mode != "cancel", stalled: None, cleanup_complete: Some(true),
                         owned_cleanup: None, elapsed: Duration::ZERO,
                     })
                 }
@@ -3750,6 +3779,7 @@ fn review_classification_and_validation() {
                     stdout: self.answer.as_bytes().to_vec(),
                     stderr: Vec::new(),
                     complete: true,
+                    stalled: None,
                     cleanup_complete: Some(true),
                     owned_cleanup: None,
                     elapsed: Duration::ZERO,
@@ -4202,6 +4232,7 @@ fn review_classification_and_validation() {
                         stdout: Vec::new(),
                         stderr: Vec::new(),
                         complete: true,
+                        stalled: None,
                         cleanup_complete: Some(true),
                         owned_cleanup: None,
                         elapsed: Duration::ZERO,
@@ -4217,6 +4248,7 @@ fn review_classification_and_validation() {
                     stdout: self.answer.clone(),
                     stderr: Vec::new(),
                     complete: true,
+                    stalled: None,
                     cleanup_complete: Some(true),
                     owned_cleanup: None,
                     elapsed: Duration::ZERO,
@@ -4657,6 +4689,7 @@ fn review_gate_timeout_and_pinned_base() {
             AdvanceHead,
             InterruptedSeat,
             LargeDiffTimeout,
+            DefaultStall,
         }
         struct GateProbe<'a> {
             repo: &'a Repo,
@@ -4678,6 +4711,7 @@ fn review_gate_timeout_and_pinned_base() {
                         stdout: Vec::new(),
                         stderr: Vec::new(),
                         complete: true,
+                        stalled: None,
                         cleanup_complete: Some(true),
                         owned_cleanup: None,
                         elapsed: Duration::ZERO,
@@ -4692,6 +4726,7 @@ fn review_gate_timeout_and_pinned_base() {
                             stdout: b"CONFIDENCE: 0.9\nGATE: pass\n".to_vec(),
                             stderr: Vec::new(),
                             complete: true,
+                            stalled: None,
                             cleanup_complete: Some(true),
                             owned_cleanup: None,
                             elapsed: Duration::from_secs(4),
@@ -4713,6 +4748,7 @@ fn review_gate_timeout_and_pinned_base() {
                             stdout: b"CONFIDENCE: 0.9\nGATE: pass\n".to_vec(),
                             stderr: Vec::new(),
                             complete: true,
+                            stalled: None,
                             cleanup_complete: Some(true),
                             owned_cleanup: None,
                             elapsed: Duration::from_secs(2),
@@ -4723,6 +4759,7 @@ fn review_gate_timeout_and_pinned_base() {
                         stdout: Vec::new(),
                         stderr: b"warning: child caught signal\nerror: interrupted\n".to_vec(),
                         complete: false,
+                        stalled: None,
                         cleanup_complete: Some(true),
                         owned_cleanup: None,
                         elapsed: Duration::from_secs(3),
@@ -4732,6 +4769,17 @@ fn review_gate_timeout_and_pinned_base() {
                         stdout: Vec::new(),
                         stderr: b"error: interrupted\n".to_vec(),
                         complete: false,
+                        stalled: None,
+                        cleanup_complete: Some(true),
+                        owned_cleanup: None,
+                        elapsed: Duration::from_secs(1200),
+                    }),
+                    Mode::DefaultStall => Ok(Completed {
+                        code: 124,
+                        stdout: Vec::new(),
+                        stderr: b"error: interrupted\n".to_vec(),
+                        complete: false,
+                        stalled: Some(Duration::from_secs(1200)),
                         cleanup_complete: Some(true),
                         owned_cleanup: None,
                         elapsed: Duration::from_secs(1200),
@@ -4868,7 +4916,8 @@ fn review_gate_timeout_and_pinned_base() {
         assert!(cancel_err.contains("interrupted"), "{cancel_err}");
         assert!(!cancel_err.contains("timed out"), "{cancel_err}");
 
-        // 3. Large diff timeout at default 20m suggests raising OMS_PEER_TIMEOUT.
+        // 3. Default 24h cap records "timed out after 24h", default 20m stall records "stalled",
+        // and pinned --print-timeout 20m on a large diff suggests raising OMS_PEER_TIMEOUT.
         let large_body = (0..400)
             .map(|i| {
                 format!(
@@ -4896,7 +4945,70 @@ fn review_gate_timeout_and_pinned_base() {
             large_diff_bytes >= 16 * 1024,
             "large_diff_bytes={large_diff_bytes}"
         );
-        let large_timeout = run_case(Mode::LargeDiffTimeout, ".oms/review-large-timeout", &STOP);
+        let cap_timeout = run_case(Mode::LargeDiffTimeout, ".oms/review-cap-timeout", &STOP);
+        assert_eq!(cap_timeout.0, 2, "{cap_timeout:?}");
+        let cap_out = String::from_utf8_lossy(&cap_timeout.1);
+        assert!(
+            cap_out.contains("codex: timed out after 24h")
+                && cap_out.contains(&format!("elapsed 1200s, diff {large_diff_bytes} bytes")),
+            "{cap_out}"
+        );
+        assert!(!cap_out.to_lowercase().contains("interrupted"), "{cap_out}");
+
+        let default_stall = run_case(Mode::DefaultStall, ".oms/review-default-stall", &STOP);
+        assert_eq!(default_stall.0, 2, "{default_stall:?}");
+        let stall_out = String::from_utf8_lossy(&default_stall.1);
+        assert!(
+            stall_out.contains("codex: no output for 20m; the run was stopped")
+                && !stall_out.to_lowercase().contains("interrupted"),
+            "{stall_out}"
+        );
+        let stall_inspected = run(
+            &repo,
+            &repo.0,
+            "peer-review",
+            &["verdicts", ".oms/review-default-stall", "--json"],
+        );
+        assert_eq!(stall_inspected.0, 2);
+        let stall_json = V::parse(&stall_inspected.1).unwrap();
+        assert_eq!(
+            stall_json.get("seats").array()[0].get("verdict").text(),
+            Some("stalled")
+        );
+
+        let pinned_probe = GateProbe {
+            repo: &repo,
+            mode: Mode::LargeDiffTimeout,
+            base_v2: &base_v2,
+        };
+        let large_timeout = oms_command_peer::run_with_executor(
+            "peer-review",
+            &args(&[
+                "--providers",
+                "codex",
+                "--model",
+                "fixture",
+                "--print-timeout",
+                "20m",
+                "--gate",
+                "--base",
+                "refs/remotes/origin/main",
+                "--verify",
+                "true",
+                "--prompt",
+                "verify pinned base and diagnostics",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--no-graph-context",
+                "--artifact-dir",
+                ".oms/review-large-timeout",
+            ]),
+            &repo.0,
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+            &STOP,
+            &pinned_probe,
+        );
         assert_eq!(large_timeout.0, 2, "{large_timeout:?}");
         let large_out = String::from_utf8_lossy(&large_timeout.1);
         assert!(
@@ -4920,6 +5032,305 @@ fn review_gate_timeout_and_pinned_base() {
             "{head_out}"
         );
     });
+}
+
+#[test]
+fn peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap() {
+    let name = "peer_runs_keep_going_while_streaming_and_stop_on_stall_or_cap";
+
+    // 1. No OMS_PEER_TIMEOUT + OMS_PEER_STALL=1s: a streaming stub printing every 200ms
+    // runs for ~3s (3x the stall threshold) and completes cleanly; non-streaming
+    // transports (antigravity) receive stall=None and only the 24h safety cap.
+    provider_isolated_with_env(
+        name,
+        "streaming-completes",
+        &[("OMS_PEER_STALL", "1s")],
+        || {
+            use oms_command_peer::storage;
+            let repo = provider_repo();
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+
+            struct StreamingStub {
+                seen_timeout: Mutex<Vec<(String, Duration, Option<Duration>)>>,
+            }
+            impl Executor for StreamingStub {
+                fn execute(
+                    &self,
+                    mut request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    if request.argv[0] == "git" {
+                        return Native.execute(request, stop);
+                    }
+                    let prog = Path::new(&request.argv[0])
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    self.seen_timeout.lock().unwrap().push((
+                        prog.clone(),
+                        request.timeout,
+                        request.stall,
+                    ));
+                    if prog == "agy" {
+                        // End-only JSON envelope after 1.6s of silence (> 1s stall): must NOT stall.
+                        request.argv = vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        concat!(
+                            "sleep 1.6; ",
+                            "printf '%s\\n' '{\"conversation_id\":\"12345678-1234-4234-8234-123456789abc\",\"status\":\"SUCCESS\",\"response\":\"Answer:\\nagy ok\\nTradeoffs:\\nnone\\nEvidence:\\ntracked.txt\\nRisks:\\nnone\\nRecommendation:\\nkeep\\nVerification:\\ncargo test\\n\"}'"
+                        )
+                        .into(),
+                    ];
+                    } else {
+                        // 15 iterations * 0.2s = ~3.0s total (> 1s stall), streaming JSONL lines.
+                        request.argv = vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        concat!(
+                            "printf '%s\\n' '{\"type\":\"thread.started\"}' '{\"type\":\"turn.started\"}'; ",
+                            "i=0; while [ \"$i\" -lt 15 ]; do ",
+                            "sleep 0.2; ",
+                            "printf '{\"type\":\"item.started\",\"id\":\"%s\"}\\n' \"$i\"; ",
+                            "i=$((i + 1)); ",
+                            "done; ",
+                            "printf '%s\\n' ",
+                            "'{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Answer:\\nstreamed past stall window\\nTradeoffs:\\nnone\\nEvidence:\\ntracked.txt\\nRisks:\\nnone\\nRecommendation:\\nkeep\\nVerification:\\ncargo test\"}}' ",
+                            "'{\"type\":\"turn.completed\"}'"
+                        )
+                        .into(),
+                    ];
+                    }
+                    Native.execute(request, stop)
+                }
+            }
+
+            let probe = StreamingStub {
+                seen_timeout: Mutex::new(Vec::new()),
+            };
+            let started = std::time::Instant::now();
+            let out = oms_command_peer::run_with_executor(
+                "peer-ask",
+                &args(&[
+                    "--providers",
+                    "codex,antigravity",
+                    "--prompt",
+                    "verify streaming progress keeps run alive",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "--artifact-dir",
+                    ".oms/ask-streaming",
+                ]),
+                &repo.0,
+                source,
+                &STOP,
+                &probe,
+            );
+            assert_eq!(out.0, 0, "{:?}", message(&out));
+            assert!(
+                started.elapsed() >= Duration::from_millis(2800),
+                "expected ~3s streaming run, got {:?}",
+                started.elapsed()
+            );
+            let stdout = String::from_utf8_lossy(&out.1);
+            assert!(stdout.contains("streamed past stall window"), "{stdout}");
+            assert!(
+                stdout.contains("peer-ask: 2/2 target(s) answered"),
+                "{stdout}"
+            );
+
+            let recorded = probe.seen_timeout.lock().unwrap();
+            assert_eq!(recorded.len(), 2);
+            for (prog, wall, stall) in recorded.iter() {
+                assert_eq!(*wall, Duration::from_secs(86_400), "{prog}");
+                if prog == "codex" {
+                    assert_eq!(*stall, Some(Duration::from_secs(1)), "codex streams");
+                } else {
+                    assert_eq!(*stall, None, "agy writes one JSON envelope at completion");
+                }
+            }
+            let rows = storage::load(&repo.0, Path::new(".oms/artifacts/index.jsonl")).unwrap();
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().all(|r| r.get("exit").py() == "0"));
+        },
+    );
+
+    // 2. Stub that prints once then goes silent: stopped as `stalled` after OMS_PEER_STALL=1s
+    // with exit 124 and "no output for 1s; the run was stopped".
+    provider_isolated_with_env(name, "stall-stops", &[("OMS_PEER_STALL", "1s")], || {
+        use oms_command_peer::storage;
+        let repo = provider_repo();
+        let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+
+        struct PrintOnceThenSilent;
+        impl Executor for PrintOnceThenSilent {
+            fn execute(
+                &self,
+                mut request: Invocation,
+                stop: &AtomicBool,
+            ) -> oms_command_peer::Result<Completed> {
+                if request.argv[0] != "git" {
+                    request.argv = vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "trap 'printf \"error: interrupted\\n\" >&2; exit 130' TERM INT; printf '%s\\n' '{\"type\":\"thread.started\"}'; sleep 30"
+                            .into(),
+                    ];
+                }
+                Native.execute(request, stop)
+            }
+        }
+
+        let dir = ".oms/ask-stalled";
+        let out = oms_command_peer::run_with_executor(
+            "peer-ask",
+            &args(&[
+                "--providers",
+                "codex",
+                "--model",
+                "fixture",
+                "--prompt",
+                "check stall stop",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--artifact-dir",
+                dir,
+            ]),
+            &repo.0,
+            source,
+            &STOP,
+            &PrintOnceThenSilent,
+        );
+        assert_eq!(out.0, 124, "stalled peer-ask must exit 124: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.2);
+        assert!(
+            stderr.contains("no output for 1s; the run was stopped"),
+            "{stderr}"
+        );
+        let seat_name = storage::names(&repo.0, Path::new(dir), ".md")
+            .unwrap()
+            .into_iter()
+            .find(|n| n.starts_with("codex-"))
+            .expect("stalled artifact");
+        let artifact = String::from_utf8(
+            storage::read(&repo.0, &Path::new(dir).join(seat_name), false).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            artifact.contains("error: no output for 1s; the run was stopped"),
+            "{artifact}"
+        );
+        assert!(
+            !artifact.contains("timed out after"),
+            "stall must stay distinct from cap timeout: {artifact}"
+        );
+        assert!(!artifact.contains("error: interrupted"), "{artifact}");
+
+        let delegate_dir = ".oms/delegate-stalled";
+        let del = oms_command_peer::run_with_executor(
+            "peer-delegate",
+            &args(&[
+                "--to",
+                "codex",
+                "--model",
+                "fixture",
+                "--no-verify",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--artifact-dir",
+                delegate_dir,
+                "--prompt",
+                "check delegate stall",
+            ]),
+            &repo.0,
+            source,
+            &STOP,
+            &PrintOnceThenSilent,
+        );
+        assert_eq!(del.0, 124, "stalled peer-delegate must exit 124: {del:?}");
+        assert!(
+            String::from_utf8_lossy(&del.2).contains("no output for 1s; the run was stopped"),
+            "{:?}",
+            String::from_utf8_lossy(&del.2)
+        );
+
+        let rows = storage::load(&repo.0, Path::new(".oms/artifacts/index.jsonl")).unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.get("exit").py(), "124", "{row:?}");
+            assert_eq!(row.get("state").text(), Some("stalled"), "{row:?}");
+        }
+    });
+
+    // 3. OMS_PEER_STALL=0 disables stall detection; a silent stub runs until the safety cap
+    // (injected via OMS_PEER_TEST_MAX_WALL=1s) and records `timed_out` ("timed out after 1s").
+    provider_isolated_with_env(
+        name,
+        "stall-disabled-hits-cap",
+        &[("OMS_PEER_STALL", "0"), ("OMS_PEER_TEST_MAX_WALL", "1s")],
+        || {
+            use oms_command_peer::storage;
+            let repo = provider_repo();
+            let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+
+            struct SilentUntilCap;
+            impl Executor for SilentUntilCap {
+                fn execute(
+                    &self,
+                    mut request: Invocation,
+                    stop: &AtomicBool,
+                ) -> oms_command_peer::Result<Completed> {
+                    if request.argv[0] != "git" {
+                        assert_eq!(request.stall, None, "OMS_PEER_STALL=0 must disable stall");
+                        assert_eq!(request.timeout, Duration::from_secs(1));
+                        request.argv = vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()];
+                    }
+                    Native.execute(request, stop)
+                }
+            }
+
+            let dir = ".oms/ask-cap";
+            let out = oms_command_peer::run_with_executor(
+                "peer-ask",
+                &args(&[
+                    "--providers",
+                    "codex",
+                    "--model",
+                    "fixture",
+                    "--prompt",
+                    "check safety cap with stall disabled",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "--artifact-dir",
+                    dir,
+                ]),
+                &repo.0,
+                source,
+                &STOP,
+                &SilentUntilCap,
+            );
+            assert_eq!(out.0, 124, "cap stop must exit 124: {out:?}");
+            let seat_name = storage::names(&repo.0, Path::new(dir), ".md")
+                .unwrap()
+                .into_iter()
+                .find(|n| n.starts_with("codex-"))
+                .expect("cap artifact");
+            let artifact = String::from_utf8(
+                storage::read(&repo.0, &Path::new(dir).join(seat_name), false).unwrap(),
+            )
+            .unwrap();
+            assert!(artifact.contains("error: timed out after 1s"), "{artifact}");
+            assert!(!artifact.contains("no output for"), "{artifact}");
+            let rows = storage::load(&repo.0, Path::new(".oms/artifacts/index.jsonl")).unwrap();
+            assert_eq!(rows[0].get("exit").py(), "124");
+            assert_eq!(rows[0].get("state").text(), Some("timed_out"));
+        },
+    );
 }
 #[test]
 fn unavailable_services_refuse() {
@@ -8259,6 +8670,7 @@ fn session_handoff_prompt_projects_bounded_native_reads() {
                         stdout,
                         stderr: Vec::new(),
                         complete,
+                        stalled: None,
                         cleanup_complete: Some(true),
                         owned_cleanup: None,
                         elapsed: Duration::ZERO,

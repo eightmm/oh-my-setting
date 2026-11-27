@@ -33,6 +33,7 @@ pub struct Invocation {
     pub environment: Vec<(OsString, OsString)>,
     pub remove_environment: Vec<OsString>,
     pub timeout: Duration,
+    pub stall: Option<Duration>,
     pub max_bytes: usize,
     pub merge: bool,
     pub physical_call: Option<oms_supervisor::process::PhysicalCall>,
@@ -46,11 +47,111 @@ pub struct Completed {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub complete: bool,
+    pub stalled: Option<Duration>,
     /// Cleanup of the executor's supervision scope, not proof of bounded native
     /// fanout. Missing execution acknowledgement stays unknown even with an exit code.
     pub cleanup_complete: Option<bool>,
     pub owned_cleanup: Option<oms_supervisor::process::OwnedCleanup>,
     pub elapsed: Duration,
+}
+
+#[derive(Debug)]
+pub struct StallTracker {
+    limit: Option<Duration>,
+    last_bytes: u64,
+    last_activity: Instant,
+    last_touch: Option<Instant>,
+    activity_dir: Option<std::fs::File>,
+    stalled: Option<Duration>,
+}
+impl StallTracker {
+    pub fn new(limit: Option<Duration>) -> Self {
+        Self::for_execution(limit, false)
+    }
+
+    pub fn for_execution(limit: Option<Duration>, track_mcp_output: bool) -> Self {
+        let activity_dir = track_mcp_output
+            .then(|| std::env::var_os("OMS_PEER_CANCEL_DIR"))
+            .flatten()
+            .and_then(|raw| {
+                use rustix::fs::{AtFlags, FileType, Mode, OFlags, fstat, open, statat};
+                let uid = rustix::process::geteuid().as_raw();
+                let flags = OFlags::RDONLY
+                    | OFlags::DIRECTORY
+                    | OFlags::NOFOLLOW
+                    | OFlags::CLOEXEC
+                    | OFlags::NONBLOCK;
+                let dir: std::fs::File = open(Path::new(&raw), flags, Mode::empty()).ok()?.into();
+                let stat = fstat(&dir).ok()?;
+                if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
+                    || stat.st_uid != uid
+                    || stat.st_mode & 0o022 != 0
+                {
+                    return None;
+                }
+                let prompt = statat(&dir, "prompt.txt", AtFlags::SYMLINK_NOFOLLOW).ok()?;
+                (FileType::from_raw_mode(prompt.st_mode) == FileType::RegularFile
+                    && prompt.st_uid == uid)
+                    .then_some(dir)
+            });
+        Self {
+            limit: limit.filter(|d| !d.is_zero()),
+            last_bytes: 0,
+            last_activity: Instant::now(),
+            last_touch: None,
+            activity_dir,
+            stalled: None,
+        }
+    }
+
+    pub fn poll(&mut self, snapshot: &oms_supervisor::process::Snapshot, now: Instant) -> bool {
+        let total = snapshot
+            .stdout
+            .observed_bytes
+            .saturating_add(snapshot.stderr.as_ref().map_or(0, |s| s.observed_bytes));
+        if total != self.last_bytes {
+            self.last_bytes = total;
+            self.last_activity = now;
+            if let Some(dir) = &self.activity_dir
+                && self
+                    .last_touch
+                    .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_millis(100))
+            {
+                use rustix::fs::{Mode, OFlags, openat};
+                self.last_touch = Some(now);
+                if let Ok(fd) = openat(
+                    dir,
+                    "last-output",
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::TRUNC
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::from_raw_mode(0o600),
+                ) {
+                    let _ = std::io::Write::write(&mut std::fs::File::from(fd), b"\n");
+                }
+            }
+            return false;
+        }
+        if self.stalled.is_some() || snapshot.stop.is_some() {
+            return false;
+        }
+        let Some(limit) = self.limit else {
+            return false;
+        };
+        if now.saturating_duration_since(self.last_activity) >= limit {
+            self.stalled = Some(limit);
+            return true;
+        }
+        false
+    }
+
+    pub fn finish(&self, stop: Option<StopReason>) -> Option<Duration> {
+        (stop == Some(StopReason::Deadline))
+            .then_some(self.stalled)
+            .flatten()
+    }
 }
 
 /// Fixed native reads for an explicitly requested next-session prompt. These
@@ -87,6 +188,7 @@ impl HandoffProjection {
             environment: vec![("OMS_STATE_REPO".into(), state.as_os_str().to_owned())],
             remove_environment: Vec::new(),
             timeout: timeout.min(Duration::from_secs(40)),
+            stall: None,
             max_bytes: 65536,
             merge: false,
             physical_call: None,
@@ -654,6 +756,7 @@ impl Native {
             reactor.start(request)
         };
         let job = started.map_err(|e| Error::new(125, format!("process could not start: {e}")))?;
+        let mut stall = StallTracker::for_execution(input.stall, allow_whole_tree);
         let mut cancelled = false;
         loop {
             if interrupted.load(Ordering::Acquire) && !cancelled {
@@ -667,6 +770,9 @@ impl Native {
                     {
                         (tap.0)(&snapshot.stdout.bytes);
                     }
+                    if !cancelled && stall.poll(&snapshot, Instant::now()) {
+                        reactor.stop(job, StopReason::Deadline)?;
+                    }
                 }
                 Progress::Complete(result) => {
                     let code = match result.stop {
@@ -679,6 +785,7 @@ impl Native {
                         && result.output_complete()
                         && result.cleanup_complete()
                         && result.supervision_error.is_none();
+                    let stalled = stall.finish(result.stop);
                     let cleanup_complete = Some(result.cleanup_complete());
                     let owned_cleanup = result.owned_cleanup().cloned();
                     return Ok(Completed {
@@ -686,6 +793,7 @@ impl Native {
                         stdout: result.stdout.bytes,
                         stderr: result.stderr.map_or_else(Vec::new, |s| s.bytes),
                         complete,
+                        stalled,
                         cleanup_complete,
                         owned_cleanup,
                         elapsed: result.duration,
@@ -723,6 +831,7 @@ pub(crate) fn invoke_env(
             environment,
             remove_environment: Vec::new(),
             timeout: Duration::from_secs(timeout),
+            stall: None,
             max_bytes: 64 * 1024 * 1024,
             merge,
             physical_call: None,
@@ -781,6 +890,7 @@ pub(crate) fn git_input(
             ],
             remove_environment,
             timeout: Duration::from_secs(30),
+            stall: None,
             max_bytes: 64 * 1024 * 1024,
             merge: false,
             physical_call: None,
@@ -874,6 +984,7 @@ mod tests {
             environment: Vec::new(),
             remove_environment: Vec::new(),
             timeout: Duration::from_secs(1),
+            stall: None,
             max_bytes: 1024,
             merge: false,
             physical_call: None,

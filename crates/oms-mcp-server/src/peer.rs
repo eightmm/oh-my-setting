@@ -218,6 +218,47 @@ fn verify_lead_thread(
 
 pub(super) use oms_command_operations::peer_operations::{age, status, updated_stamp};
 
+fn quiet_seconds(dir: &Path, elapsed: Option<i64>) -> Option<i64> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, fstat, open, statat};
+    let uid = rustix::process::getuid().as_raw();
+    let flags =
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let dir_fd: std::fs::File = open(dir, flags, Mode::empty()).ok()?.into();
+    let dir_stat = fstat(&dir_fd).ok()?;
+    if FileType::from_raw_mode(dir_stat.st_mode) != FileType::Directory || dir_stat.st_uid != uid {
+        return None;
+    }
+    let modified_at = |name: &str, require_nonempty: bool| -> Option<SystemTime> {
+        let stat = statat(&dir_fd, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
+            || stat.st_uid != uid
+            || (require_nonempty && stat.st_size <= 0)
+        {
+            return None;
+        }
+        let secs = u64::try_from(stat.st_mtime).ok()?;
+        let nsecs = u32::try_from(stat.st_mtime_nsec)
+            .unwrap_or(0)
+            .min(999_999_999);
+        SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs, nsecs))
+    };
+    let last_output = [
+        modified_at("last-output", false),
+        modified_at("run.log", true),
+    ]
+    .into_iter()
+    .flatten()
+    .max();
+    match last_output {
+        Some(t) => Some(
+            SystemTime::now()
+                .duration_since(t)
+                .map_or(0, |d| d.as_secs() as i64),
+        ),
+        None => elapsed.map(|n| n.max(0)),
+    }
+}
+
 fn tail(dir: &Path) -> String {
     let result = (|| -> io::Result<String> {
         let root = dir
@@ -422,7 +463,9 @@ fn reference_line(
 }
 fn result_response(mut payload: Value, after: &str) -> ToolResult {
     let mut stable = payload.clone();
-    stable.as_object_mut().unwrap().remove("elapsed_seconds");
+    let stable_obj = stable.as_object_mut().unwrap();
+    stable_obj.remove("elapsed_seconds");
+    stable_obj.remove("quiet_seconds");
     let bytes = crate::value::encode(&stable, false, false, true, true);
     let bytes = bytes.as_str().ok_or(crate::ToolError::InvalidField)?;
     let cursor = format!("result:{}", storage::hash(bytes));
@@ -1125,16 +1168,23 @@ impl Server<'_> {
                 self.cancellation_view_with(&dir, &meta, state, observed, uncaptured_scan.as_ref());
             apply_cancellation(&view, state, &mut payload);
         }
-        if let Some(n) = age(&dir).filter(|_| {
-            std::fs::symlink_metadata(dir.join("prompt.txt")).is_ok_and(|m| m.file_type().is_file())
-        }) {
+        let has_prompt = std::fs::symlink_metadata(dir.join("prompt.txt"))
+            .is_ok_and(|m| m.file_type().is_file());
+        let elapsed = age(&dir).filter(|_| has_prompt);
+        if let Some(n) = elapsed {
             payload["elapsed_seconds"] = json!(n);
+        }
+        if state == "running"
+            && has_prompt
+            && let Some(q) = quiet_seconds(&dir, elapsed)
+        {
+            payload["quiet_seconds"] = json!(q);
         }
         payload["status"] = json!(state);
         if state != "done" {
             payload["log_tail"] = json!(tail(&dir));
             payload["next"] = json!(if state == "running" {
-                "Still running; this read did not cancel or restart the peer. Do authorized independent work, or reuse this operation with wait_seconds=50 (below your host timeout). Avoid status-only loops."
+                "Still running; inspect elapsed_seconds and quiet_seconds to tell active progress from silence. This read did not cancel or restart the peer. Do authorized independent work, or reuse this operation with wait_seconds=50 (below your host timeout). Avoid status-only loops."
             } else {
                 "The run's process is gone and it recorded no exit, so no answer is coming. The log tail says how far it got; start a new consultation if the question still needs one."
             });
