@@ -1987,7 +1987,11 @@ function moreFixture(state){
       pullRequests:[{number:1,title:'Pass',checks:{passed:2},url:'https://github.com/o/r/pull/1'},
         {number:2,title:'Broken',baseBranch:'dev',checks:{failed:1,passed:1,items:[{name:'lint',status:'failed'}]},url:'https://evil.example/o/r/pull/2'},
         {number:3,title:'Running',checks:{pending:1}}]}}),
-  };
+    oms_panel_work_items:()=>({schema:1,availability:'partial',items:[{id:'t1',title:'Running one',state:'running',owner:null},{id:'bad id',title:'Spaced',state:'running'},
+      {id:'t2',title:'Stuck',state:'blocked'},{id:'t3',state:'weird'},{id:'t4',state:'cancelled'},{id:'t5',title:'Old',state:'done'}]}),
+    oms_panel_tui_view:a=>({view:'results',page:a.page,status:'ready',nextPage:null,incomplete:false,rows:[
+      {taskId:'t1',implement:'passed',verify:'failed',review:'not_run',delivery:'not_run'},
+      {taskId:'zz',implement:'passed',verify:'passed',review:'not_requested',delivery:'not_run'}]})};
   const fire=async ms=>{for(const [id,j] of jobs)if(j.ms===ms){jobs.delete(id);j.fn();}for(let i=0;i<4;i++)await setImmediate();};
   return {jobs,timers,tools,fire};
 }
@@ -2015,7 +2019,7 @@ test('v35 usage strip reads once after the first screen, shows only recorded win
   assert.equal(p.get('usage-rows').textContent,'No record');assert.match(p.get('usage-strip').getAttribute('aria-label'),/No record/);
 });
 
-test('v34 More PR · CI reads on first expand, sorts PRs by failure and keeps the read across auto refresh',async()=>{
+test('v34 More sections read on first expand, sort PRs by failure and join result titles from work',async()=>{
   const state={key:'b'.repeat(64)},f=moreFixture(state),p=await panel(['one','two'],dashboard,{locale:'en',timers:f.timers,tools:f.tools,openLinks:true});
   await p.open('input',{arguments:{project:'one'}});await settle();
   await p.event('more-pr','click');await settle();
@@ -2027,11 +2031,27 @@ test('v34 More PR · CI reads on first expand, sorts PRs by failure and keeps th
   assert.equal(link(kids(list)[0]).tagName,'span');assert.equal(link(kids(list)[2]).tagName,'button');
   await p.event('more-pr','click');await p.event('more-pr','click');await settle();assert.equal(count(p,'oms_panel_git_status'),1);
   kids(kids(pr)[0])[1].dispatchEvent(new Event('click'));await settle();assert.equal(count(p,'oms_panel_git_status'),2);
-  assert.equal(p.get('more-work'),undefined);assert.equal(p.get('more-results'),undefined);
+  await p.event('more-work','click');await settle();
+  const work=p.get('more-work-body').textContent;assert.match(work,/ · partial/);assert.match(work,/1 cancelled/);
+  assert.match(work,/Active●Running oneUnassigned/);assert.match(work,/Other○t3/);assert.doesNotMatch(work,/Old/);
+  assert.match(p.get('more-work-chip').textContent,/Blocked 1/);
+  // A draft from a work row names the task only when its id is a valid task id.
+  const rowOf=title=>{const walk=e=>e.row && e.head?.textContent===title?e:(e.children?kids(e):[]).map(walk).find(Boolean);return walk(p.get('more-work-body'));};
+  for(const [title,task] of [['Spaced',null],['Running one','t1']]){
+    // A real empty element has no children; the fake DOM keeps an empty text child that would block the first open.
+    const li=rowOf(title);kids(li)[1].children=[];li.row.dispatchEvent(new Event('click'));await settle();
+    kids(kids(kids(li)[1])[1])[0].dispatchEvent(new Event('click'));await settle();
+    const text=p.get('followup-text').value;assert.match(text,new RegExp(title));
+    if(task)assert.match(text,/^Task: t1$/m);else assert.doesNotMatch(text,/^Task:|bad id/m);}
+  await p.event('more-results','click');await settle();assert.equal(count(p,'oms_panel_work_items'),1);
+  const res=p.get('more-results-body');assert.match(res.textContent,/Failed · timed out 1.*Running one.*t1/);assert.match(res.textContent,/zz/);
+  const rowButtons=res.children.filter(e=>e.className==='group').flatMap(g=>kids(g.children.at(-1)).map(li=>li.row));
+  assert.equal(rowButtons[0].getAttribute('aria-label'),'Running one: Implement passed, Verify failed, Review not run, Delivery not run');
+  assert.match(rowButtons[1].getAttribute('aria-label'),/^zz: /);
   await p.event('refresh','click');await settle();
-  assert.equal(p.get('more-pr').getAttribute('aria-expanded'),'true');assert.equal(count(p,'oms_panel_git_status'),2);assert.match(pr.textContent,/Broken/);
+  assert.equal(p.get('more-results').getAttribute('aria-expanded'),'true');assert.equal(count(p,'oms_panel_tui_view'),1);assert.match(res.textContent,/Running one/);
   await p.open('input',{arguments:{project:'two'}});await settle();
-  for(const k of ['pr']){assert.equal(p.get('more-'+k).getAttribute('aria-expanded'),'false',k);assert.equal(p.get('more-'+k+'-body').hidden,true,k);
+  for(const k of ['pr','work','results']){assert.equal(p.get('more-'+k).getAttribute('aria-expanded'),'false',k);assert.equal(p.get('more-'+k+'-body').hidden,true,k);
     assert.equal(kids(p.get('more-'+k+'-body')).length,0,k);}
 });
 
