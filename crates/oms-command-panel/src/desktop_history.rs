@@ -379,6 +379,7 @@ mod tests {
                 }
             });
             let done = AtomicBool::new(false);
+            let reader_steps = std::sync::atomic::AtomicUsize::new(0);
             let barrier = std::sync::Barrier::new(2);
             std::thread::scope(|scope| {
                 scope.spawn(|| {
@@ -396,12 +397,26 @@ mod tests {
                         )
                         .unwrap();
                         file.flush().unwrap();
+                        let tail = format!("pos-{seq}\"}}");
                         if seq == 1 {
-                            std::thread::sleep(Duration::from_millis(12));
+                            let started = std::time::Instant::now();
+                            for (idx, chunk) in tail.as_bytes().chunks(2).enumerate() {
+                                let target = Duration::from_micros(((idx + 1) * 700) as u64);
+                                while started.elapsed() < target {
+                                    std::thread::yield_now();
+                                }
+                                file.write_all(chunk).unwrap();
+                                file.flush().unwrap();
+                            }
+                            file.write_all(b"\n").unwrap();
+                        } else {
+                            file.write_all(tail.as_bytes()).unwrap();
+                            file.write_all(b"\n").unwrap();
                         }
-                        file.write_all(format!("pos-{seq}\"}}\n").as_bytes())
-                            .unwrap();
                         file.flush().unwrap();
+                        while reader_steps.load(Ordering::Acquire) < seq {
+                            std::thread::yield_now();
+                        }
                     }
                     file.write_all(
                         format!(
@@ -418,7 +433,7 @@ mod tests {
                     let stop = AtomicBool::new(false);
                     let mut prev = 1u64;
                     let mut reads = 0usize;
-                    while !done.load(Ordering::Acquire) || reads < 24 {
+                    while !done.load(Ordering::Acquire) || prev < 25 || reads < 24 {
                         let out = page(&root, &debate_report, Some("room-a"), "debate", 1, &stop)
                             .unwrap();
                         let row = &out["rows"][0];
@@ -426,6 +441,7 @@ mod tests {
                         assert!(positions >= prev, "{positions} < {prev}");
                         prev = positions;
                         reads += 1;
+                        reader_steps.fetch_add(1, Ordering::Release);
                     }
                     let final_page =
                         page(&root, &debate_report, Some("room-a"), "debate", 1, &stop).unwrap();

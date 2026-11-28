@@ -1281,6 +1281,7 @@ mod panel_room_tests {
                 interrupted: &stop,
             };
             let done = AtomicBool::new(false);
+            let reader_steps = std::sync::atomic::AtomicUsize::new(0);
             let barrier = std::sync::Barrier::new(3);
             std::thread::scope(|scope| {
                 scope.spawn(|| {
@@ -1299,12 +1300,30 @@ mod panel_room_tests {
                         )
                         .unwrap();
                         file.flush().unwrap();
+                        let tail = format!("pos-{seq}\"}}");
                         if seq == 2 {
-                            std::thread::sleep(std::time::Duration::from_millis(12));
+                            let started = std::time::Instant::now();
+                            for (idx, chunk) in tail.as_bytes().chunks(2).enumerate() {
+                                let target =
+                                    std::time::Duration::from_micros(((idx + 1) * 700) as u64);
+                                while started.elapsed() < target {
+                                    std::thread::yield_now();
+                                }
+                                file.write_all(chunk).unwrap();
+                                file.flush().unwrap();
+                            }
+                            file.write_all(b"\n").unwrap();
+                        } else {
+                            file.write_all(tail.as_bytes()).unwrap();
+                            file.write_all(b"\n").unwrap();
                         }
-                        file.write_all(format!("pos-{seq}\"}}\n").as_bytes())
-                            .unwrap();
                         file.flush().unwrap();
+                        let required_reads = (seq - 1).min(16);
+                        while reader_steps.load(std::sync::atomic::Ordering::Acquire)
+                            < required_reads
+                        {
+                            std::thread::yield_now();
+                        }
                     }
                     done.store(true, std::sync::atomic::Ordering::Release);
                 });
@@ -1330,7 +1349,10 @@ mod panel_room_tests {
                     barrier.wait();
                     let mut prev_turns = 1i128;
                     let mut reads = 0usize;
-                    while !done.load(std::sync::atomic::Ordering::Acquire) || reads < 16 {
+                    while !done.load(std::sync::atomic::Ordering::Acquire)
+                        || prev_turns < 25
+                        || reads < 16
+                    {
                         let mut snap = enrich_state();
                         projection::enrich(
                             &race_ctx,
@@ -1359,6 +1381,7 @@ mod panel_room_tests {
                             .unwrap();
                         assert!(findings.is_empty(), "{findings:?}");
                         reads += 1;
+                        reader_steps.fetch_add(1, std::sync::atomic::Ordering::Release);
                     }
                     assert_eq!(prev_turns, 25);
                 });

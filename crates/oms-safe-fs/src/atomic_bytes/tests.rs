@@ -655,6 +655,7 @@ fn atomic_read_races_detect_identity_timestamp_and_ancestry_changes() {
         max_bytes: 1024 * 1024,
     };
     let done = std::sync::atomic::AtomicBool::new(false);
+    let jsonl_reads = std::sync::atomic::AtomicUsize::new(0);
     let barrier = std::sync::Barrier::new(3);
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -672,9 +673,19 @@ fn atomic_read_races_detect_identity_timestamp_and_ancestry_changes() {
                     .unwrap();
                 file.flush().unwrap();
                 if seq == 1 {
-                    std::thread::sleep(Duration::from_millis(12));
+                    let started = std::time::Instant::now();
+                    for (idx, chunk) in b"complete\"}".chunks(2).enumerate() {
+                        let target = Duration::from_micros(((idx + 1) * 700) as u64);
+                        while started.elapsed() < target {
+                            std::thread::yield_now();
+                        }
+                        file.write_all(chunk).unwrap();
+                        file.flush().unwrap();
+                    }
+                    file.write_all(b"\n").unwrap();
+                } else {
+                    file.write_all(b"complete\"}\n").unwrap();
                 }
-                file.write_all(b"complete\"}\n").unwrap();
                 file.flush().unwrap();
                 change(
                     &writer_root,
@@ -683,6 +694,9 @@ fn atomic_read_races_detect_identity_timestamp_and_ancestry_changes() {
                     format!("race-{seq}\n").as_bytes(),
                 )
                 .unwrap();
+                while jsonl_reads.load(Ordering::Acquire) < seq {
+                    std::thread::yield_now();
+                }
             }
             done.store(true, Ordering::Release);
         });
@@ -690,7 +704,7 @@ fn atomic_read_races_detect_identity_timestamp_and_ancestry_changes() {
             barrier.wait();
             let mut prev_lines = 1usize;
             let mut reads = 0usize;
-            while !done.load(Ordering::Acquire) || reads < 32 {
+            while !done.load(Ordering::Acquire) || prev_lines < 33 || reads < 32 {
                 let (bytes, stat) = race_root
                     .read_no_follow_retrying_stat(Path::new("race.jsonl"), read_opts, true)
                     .unwrap();
@@ -703,6 +717,7 @@ fn atomic_read_races_detect_identity_timestamp_and_ancestry_changes() {
                 assert!(count >= prev_lines);
                 prev_lines = count;
                 reads += 1;
+                jsonl_reads.fetch_add(1, Ordering::Release);
             }
             assert_eq!(prev_lines, 33);
         });
@@ -718,12 +733,92 @@ fn atomic_read_races_detect_identity_timestamp_and_ancestry_changes() {
             }
         });
     });
+
+    let active_path = race_fixture.0.join("active.jsonl");
+    std::fs::write(&active_path, b"{\"seq\":0}\n").unwrap();
+    let active_ready = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&active_path)
+                .unwrap();
+            file.write_all(b"{\"seq\":1,\"body\":\"").unwrap();
+            file.flush().unwrap();
+            active_ready.wait();
+            let started = std::time::Instant::now();
+            for (idx, chunk) in b"recovered\"}".chunks(2).enumerate() {
+                let target = Duration::from_micros(((idx + 1) * 700) as u64);
+                while started.elapsed() < target {
+                    std::thread::yield_now();
+                }
+                file.write_all(chunk).unwrap();
+                file.flush().unwrap();
+            }
+            file.write_all(b"\n").unwrap();
+            file.flush().unwrap();
+        });
+        active_ready.wait();
+        let recovered = race_root
+            .read_no_follow_jsonl(Path::new("active.jsonl"), read_opts)
+            .unwrap();
+        assert_eq!(
+            recovered,
+            b"{\"seq\":0}\n{\"seq\":1,\"body\":\"recovered\"}\n"
+        );
+    });
+
+    let progressing_path = race_fixture.0.join("progressing.jsonl");
+    std::fs::write(&progressing_path, b"{\"seq\":1,\"part\":\"").unwrap();
+    let mut progressing_file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&progressing_path)
+        .unwrap();
+    let mut progressing_pauses = 0usize;
+    let (progressing, _) = race_root
+        .read_retrying_with(Path::new("progressing.jsonl"), read_opts, true, || {
+            progressing_pauses += 1;
+            match progressing_pauses {
+                1 | 3 => {}
+                2 => {
+                    progressing_file.write_all(b"a").unwrap();
+                    progressing_file.flush().unwrap();
+                }
+                4 => {
+                    progressing_file.write_all(b"b").unwrap();
+                    progressing_file.flush().unwrap();
+                }
+                5 => {
+                    progressing_file.write_all(b"\"}\n").unwrap();
+                    progressing_file.flush().unwrap();
+                }
+                other => panic!("unexpected retry pause {other}"),
+            }
+        })
+        .unwrap();
+    assert_eq!(progressing_pauses, 5);
+    assert_eq!(progressing, b"{\"seq\":1,\"part\":\"ab\"}\n");
+
     std::fs::write(race_fixture.0.join("crashed.jsonl"), b"{\"seq\":1").unwrap();
+    let mut crashed_pauses = 0usize;
+    let (crashed_hooked, _) = race_root
+        .read_retrying_with(Path::new("crashed.jsonl"), read_opts, true, || {
+            crashed_pauses += 1;
+        })
+        .unwrap();
+    assert_eq!(crashed_pauses, STABLE_TORN_ATTEMPTS - 1);
+    assert_eq!(crashed_hooked, b"{\"seq\":1");
+    let crashed_started = std::time::Instant::now();
     let crashed = race_root
         .read_no_follow_jsonl(Path::new("crashed.jsonl"), read_opts)
         .unwrap();
+    let crashed_elapsed = crashed_started.elapsed();
     assert_eq!(crashed, b"{\"seq\":1");
     assert!(unfinished_jsonl(&crashed));
+    assert!(
+        crashed_elapsed < Duration::from_millis(40),
+        "stable torn tail took {crashed_elapsed:?}"
+    );
     symlink("race.jsonl", race_fixture.0.join("symlink.jsonl")).unwrap();
     let fast = std::time::Instant::now();
     assert_eq!(
