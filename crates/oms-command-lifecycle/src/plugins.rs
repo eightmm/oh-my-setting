@@ -898,6 +898,58 @@ mod tests {
             (fs::read(&file).unwrap(), fs::read(&marker).unwrap()),
             bare_saved
         );
+        // Legacy `committed: true` journal with sibling undos in `plugins_dir` cleans up scratch.
+        converge(&full).unwrap();
+        let full_saved = (fs::read(&file).unwrap(), fs::read(&marker).unwrap());
+        let committed_undo_dir = plugins_dir.join(".oms-undo-legacy.3");
+        fs::create_dir_all(&committed_undo_dir).unwrap();
+        fs::write(committed_undo_dir.join("mcp_config.json"), &bare_saved.0).unwrap();
+        fs::write(
+            committed_undo_dir.join("plugin.json"),
+            r::bytes(&bare_plugin).unwrap(),
+        )
+        .unwrap();
+        let committed_undo_marker = plugins_dir.join(".oms-undo-legacy.4");
+        fs::write(&committed_undo_marker, &bare_saved.1).unwrap();
+        let committed_legacy_journal = json!({
+            "schema": 1,
+            "committed": true,
+            "changes": [
+                {
+                    "target": fs::canonicalize(&target).unwrap(),
+                    "staged": fs::canonicalize(plugins_dir).unwrap().join(".oms-stage-legacy.3"),
+                    "undo": fs::canonicalize(&committed_undo_dir).unwrap(),
+                    "old": old_dir_id,
+                    "new": new_dir_id,
+                    "external": false,
+                    "parent_identity": null
+                },
+                {
+                    "target": fs::canonicalize(&marker).unwrap(),
+                    "staged": fs::canonicalize(plugins_dir).unwrap().join(".oms-stage-legacy.4"),
+                    "undo": fs::canonicalize(&committed_undo_marker).unwrap(),
+                    "old": old_marker_id,
+                    "new": transaction::identity(&marker).unwrap(),
+                    "external": false,
+                    "parent_identity": null
+                }
+            ],
+            "effects": []
+        });
+        fs::write(
+            &journal_file,
+            serde_json::to_vec(&committed_legacy_journal).unwrap(),
+        )
+        .unwrap();
+        Transaction::begin(&paths).unwrap().commit().unwrap();
+        assert!(!committed_undo_dir.exists());
+        assert!(!committed_undo_marker.exists());
+        assert_no_plugin_scratch();
+        assert_eq!(
+            (fs::read(&file).unwrap(), fs::read(&marker).unwrap()),
+            full_saved
+        );
+        converge(&bare).unwrap();
         for profile in ["full", "core"] {
             converge(&options(&["--mcp-tool-profile", profile])).unwrap();
             assert_eq!(

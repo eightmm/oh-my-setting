@@ -19,6 +19,9 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     static LINK_CRASH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     static FORCE_ANCESTOR_STAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_CROSS_MOUNT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_RENAME_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_PROBE_EXDEV: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 const SKILL_FILE: &str = "SKILL.md";
 const HIDDEN_SKILL_FILE: &str = ".oms-hidden-SKILL.md";
@@ -105,15 +108,40 @@ impl Transaction {
         tx.save()?;
         Ok(tx)
     }
-    /// Allocate staging and undo storage on `parent_dev` outside provider-scanned
-    /// directories: prefer the private journal directory when on the same device,
-    /// else a mode-0700 hidden directory at the outermost user-owned ancestor on
-    /// `parent_dev`, falling back to `target.parent()` only when no owned ancestor
-    /// can host one.
-    fn work_dir_for(&self, target: &Path, parent_dev: u64) -> Result<PathBuf> {
+    /// Allocate staging and undo storage outside provider-scanned directories when a
+    /// rename between the work directory and `target.parent()` is known to succeed
+    /// without changing target permissions: prefer the private journal directory when
+    /// on the same mount, else a mode-0700 hidden directory at the outermost
+    /// user-owned ancestor on the same mount, falling back to `target.parent()`.
+    fn work_dir_for(&self, target: &Path, source: Option<&Path>) -> Result<PathBuf> {
         let parent = target
             .parent()
             .ok_or_else(|| r::Error(2, "invalid lifecycle target".into()))?;
+        let euid = rustix::process::geteuid().as_raw();
+        match fs::symlink_metadata(target) {
+            Ok(m)
+                if m.is_dir()
+                    && !m.file_type().is_symlink()
+                    && (m.uid() != euid || m.mode() & 0o200 == 0) =>
+            {
+                return Ok(parent.to_path_buf());
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        if let Some(src) = source {
+            match fs::symlink_metadata(src) {
+                Ok(m) if m.is_dir() && !m.file_type().is_symlink() && m.mode() & 0o200 == 0 => {
+                    return Ok(parent.to_path_buf());
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let parent_fd = open_dir_nofollow(parent)?;
+        let parent_dev = parent_fd.metadata()?.dev();
         #[cfg(test)]
         let force_ancestor = FORCE_ANCESTOR_STAGE.with(std::cell::Cell::get);
         #[cfg(not(test))]
@@ -121,34 +149,46 @@ impl Transaction {
         if !force_ancestor
             && !self.journal_dir.starts_with(target)
             && !target.starts_with(&self.journal_dir)
-            && fs::symlink_metadata(&self.journal_dir)?.dev() == parent_dev
         {
-            return Ok(self.journal_dir.clone());
+            let journal_fd = open_dir_nofollow(&self.journal_dir)?;
+            if can_rename_fds(&journal_fd, &parent_fd)? {
+                return Ok(self.journal_dir.clone());
+            }
         }
-        let euid = rustix::process::geteuid().as_raw();
         let mut candidates = Vec::new();
-        for ancestor in parent.ancestors() {
+        for ancestor in parent.ancestors().skip(1) {
+            if ancestor.parent().is_none() {
+                break;
+            }
             let Ok(m) = fs::symlink_metadata(ancestor) else {
                 break;
             };
             if !m.is_dir() || m.file_type().is_symlink() || m.dev() != parent_dev {
                 break;
             }
-            if m.uid() == euid && m.mode() & 0o002 == 0 {
-                candidates.push(ancestor);
-            } else {
+            if m.uid() != euid || m.mode() & 0o002 != 0 {
                 break;
             }
+            let Ok(anc_fd) = open_dir_nofollow(ancestor) else {
+                break;
+            };
+            if same_mount_fast(&anc_fd, &parent_fd)? == Some(false) {
+                break;
+            }
+            candidates.push(ancestor);
         }
         for ancestor in candidates.into_iter().rev() {
             let dir = ancestor.join(STAGING_DIR);
             if target.starts_with(&dir) || dir.starts_with(target) {
                 continue;
             }
-            if r::private_dir(&dir).is_ok()
-                && fs::symlink_metadata(&dir).is_ok_and(|m| m.dev() == parent_dev)
-            {
-                return Ok(dir);
+            if ensure_staging_dir(&dir).is_ok() {
+                if let Ok(dir_fd) = open_dir_nofollow(&dir)
+                    && can_rename_fds(&dir_fd, &parent_fd).unwrap_or(false)
+                {
+                    return Ok(dir);
+                }
+                prune_staging_dir(&dir);
             }
         }
         Ok(parent.to_path_buf())
@@ -165,7 +205,7 @@ impl Transaction {
         })
     }
     pub fn link(&mut self, target: &Path, source: &Path) -> Result<()> {
-        self.replace_mode(target, false, false, Some(source.to_owned()), |p| {
+        self.replace_mode(target, false, false, Some(source.to_owned()), None, |p| {
             symlink(source, p)?;
             Ok(false)
         })
@@ -187,7 +227,7 @@ impl Transaction {
         files: &[(&str, &[u8], u32)],
         create_only: bool,
     ) -> Result<()> {
-        self.replace_mode(target, false, create_only, None, |p| {
+        self.replace_mode(target, false, create_only, None, None, |p| {
             fs::create_dir(p)?;
             fs::set_permissions(p, fs::Permissions::from_mode(0o700))?;
             let hide = !files.iter().any(|(name, _, _)| *name == HIDDEN_SKILL_FILE);
@@ -213,7 +253,7 @@ impl Transaction {
         target: &Path,
         prepare: impl FnOnce(&Path) -> Result<bool>,
     ) -> Result<()> {
-        self.replace_mode(target, false, false, None, prepare)
+        self.replace_mode(target, false, false, None, None, prepare)
     }
     fn replace_mode(
         &mut self,
@@ -221,6 +261,7 @@ impl Transaction {
         external: bool,
         create_only: bool,
         link_source: Option<PathBuf>,
+        copy_source: Option<&Path>,
         prepare: impl FnOnce(&Path) -> Result<bool>,
     ) -> Result<()> {
         let identify = |p: &Path, allow_hidden: bool| {
@@ -234,9 +275,8 @@ impl Transaction {
         let parent = target.parent().unwrap();
         fs::create_dir_all(parent)?;
         let target = r::leaf(&target)?;
-        let parent = target.parent().unwrap();
-        let parent_dev = fs::symlink_metadata(parent)?.dev();
-        let work_dir = self.work_dir_for(&target, parent_dev)?;
+        let work_dir = self.work_dir_for(&target, copy_source)?;
+        let mut stage_guard = StageGuard(&work_dir, true);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let suffix = format!("{}.{}.{}", std::process::id(), r::now().replace(':', ""), n);
         let staged = work_dir.join(format!(".oms-stage-{suffix}"));
@@ -264,8 +304,20 @@ impl Transaction {
             fs::remove_file(&probe)?;
             (false, result?)
         } else {
-            let hidden = prepare(&staged)?;
-            (hidden, identify(&staged, hidden)?)
+            let hidden = match prepare(&staged) {
+                Ok(hidden) => hidden,
+                Err(error) => {
+                    let _ = remove(&staged);
+                    return Err(error);
+                }
+            };
+            match identify(&staged, hidden) {
+                Ok(id) => (hidden, id),
+                Err(error) => {
+                    let _ = remove(&staged);
+                    return Err(error);
+                }
+            }
         };
         let candidate = Change {
             target,
@@ -284,10 +336,10 @@ impl Transaction {
             if !deferred {
                 remove(&candidate.staged)?;
             }
-            prune_staging_dir(&work_dir);
             return Err(error);
         }
         self.journal.changes.push(candidate);
+        stage_guard.1 = false;
         self.save()?;
         let change = self.journal.changes.last().unwrap();
         if change.identity(&change.target, false)? != change.old {
@@ -305,7 +357,7 @@ impl Transaction {
             }
         }
         if change.old.is_some() && change.old_link.is_none() {
-            rename_target(&change.target, &change.undo)?;
+            fs::rename(&change.target, &change.undo)?;
             if change.hidden_old_skill {
                 hide_skill(&change.undo)?;
             }
@@ -314,7 +366,7 @@ impl Transaction {
         if change.old_link.is_some() && fs::symlink_metadata(&change.staged)?.is_dir() {
             fs::remove_file(&change.target)?;
         }
-        rename_target(&change.staged, &change.target)?;
+        fs::rename(&change.staged, &change.target)?;
         if change.hidden_new_skill {
             unhide_skill(&change.target)?;
         }
@@ -337,9 +389,8 @@ impl Transaction {
         if old.is_none() {
             return Ok(());
         }
-        let parent = target.parent().unwrap();
-        let parent_dev = fs::symlink_metadata(parent)?.dev();
-        let work_dir = self.work_dir_for(&target, parent_dev)?;
+        let work_dir = self.work_dir_for(&target, None)?;
+        let mut stage_guard = StageGuard(&work_dir, true);
         let (old_link, old_link_mode) = read_old_link(&target)?;
         let hidden_old_skill = can_hide_skill(&target)?;
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -360,11 +411,9 @@ impl Transaction {
             old_link,
             old_link_mode,
         };
-        if let Err(error) = validate_change(&candidate, &self.journal_dir) {
-            prune_staging_dir(&work_dir);
-            return Err(error);
-        }
+        validate_change(&candidate, &self.journal_dir)?;
         self.journal.changes.push(candidate);
+        stage_guard.1 = false;
         self.save()?;
         let change = self.journal.changes.last().unwrap();
         if change.identity(&change.target, false)? != change.old {
@@ -373,7 +422,7 @@ impl Transaction {
         if change.old_link.is_some() {
             fs::remove_file(&change.target)?;
         } else {
-            rename_target(&change.target, &change.undo)?;
+            fs::rename(&change.target, &change.undo)?;
         }
         if change.hidden_old_skill {
             hide_skill(&change.undo)?;
@@ -452,20 +501,22 @@ impl Transaction {
             _ => return r::fail("account settings target changed; retained"),
         };
         let target_leaf = r::leaf(target)?;
-        let lm = fs::symlink_metadata(target_leaf.parent().unwrap())?;
+        let target_parent = target_leaf.parent().unwrap();
+        let lm = fs::symlink_metadata(target_parent)?;
         if lm.dev() != m.dev() || lm.ino() != m.ino() {
             return r::fail("account settings home changed; retained");
         }
-        let work_dir = self.work_dir_for(&target_leaf, m.dev())?;
-        let work_handle = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(
-                (rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
-            )
-            .open(&work_dir)?;
-        if work_handle.metadata()?.dev() != m.dev() {
-            return r::fail("account settings staging moved across filesystems");
-        }
+        let work_dir = self.work_dir_for(&target_leaf, None)?;
+        let mut stage_guard = StageGuard(&work_dir, true);
+        let work_handle = if work_dir == target_parent {
+            directory.try_clone()?
+        } else {
+            let wh = open_dir_nofollow(&work_dir)?;
+            if !can_rename_fds(&wh, &directory)? {
+                return r::fail("account settings staging moved across filesystems");
+            }
+            wh
+        };
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let staged = work_dir.join(format!(".oms-stage-{}.{}", std::process::id(), n));
         let undo = work_dir.join(format!(".oms-undo-{}.{}", std::process::id(), n));
@@ -488,8 +539,11 @@ impl Transaction {
         )
         .map_err(|_| r::Error(2, "cannot stage bound account settings".into()))?;
         let mut output = fs::File::from(fd);
-        output.write_all(raw)?;
-        output.sync_all()?;
+        if let Err(error) = output.write_all(raw).and_then(|()| output.sync_all()) {
+            drop(output);
+            let _ = remove(&staged);
+            return Err(error.into());
+        }
         let mut hash = Sha256::new();
         hash.update(b"file\0");
         hash.update(raw);
@@ -509,10 +563,10 @@ impl Transaction {
         };
         if let Err(error) = validate_change(&candidate, &self.journal_dir) {
             remove(&candidate.staged)?;
-            prune_staging_dir(&work_dir);
             return Err(error);
         }
         self.journal.changes.push(candidate);
+        stage_guard.1 = false;
         self.save()?;
         check()?;
         if identity(target)? != old {
@@ -575,20 +629,22 @@ impl Transaction {
         };
         inspect()?;
         let target_leaf = r::leaf(target)?;
-        let lm = fs::symlink_metadata(target_leaf.parent().unwrap())?;
+        let target_parent = target_leaf.parent().unwrap();
+        let lm = fs::symlink_metadata(target_parent)?;
         if lm.dev() != m.dev() || lm.ino() != m.ino() {
             return r::fail("account home changed before removal");
         }
-        let work_dir = self.work_dir_for(&target_leaf, m.dev())?;
-        let work_handle = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(
-                (rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
-            )
-            .open(&work_dir)?;
-        if work_handle.metadata()?.dev() != m.dev() {
-            return r::fail("account link staging moved across filesystems");
-        }
+        let work_dir = self.work_dir_for(&target_leaf, None)?;
+        let mut stage_guard = StageGuard(&work_dir, true);
+        let work_handle = if work_dir == target_parent {
+            handle.try_clone()?
+        } else {
+            let wh = open_dir_nofollow(&work_dir)?;
+            if !can_rename_fds(&wh, &handle)? {
+                return r::fail("account link staging moved across filesystems");
+            }
+            wh
+        };
         let mut hash = Sha256::new();
         hash.update(b"link\0");
         hash.update(destination.as_os_str().as_bytes());
@@ -611,11 +667,9 @@ impl Transaction {
             old_link: None,
             old_link_mode: None,
         };
-        if let Err(error) = validate_change(&candidate, &self.journal_dir) {
-            prune_staging_dir(&work_dir);
-            return Err(error);
-        }
+        validate_change(&candidate, &self.journal_dir)?;
         self.journal.changes.push(candidate);
+        stage_guard.1 = false;
         self.save()?;
         inspect()?;
         rustix::fs::renameat(&handle, name, &work_handle, undo.file_name().unwrap())
@@ -642,7 +696,8 @@ impl Transaction {
         } else {
             None
         };
-        self.replace_mode(target, true, false, link_source, |p| {
+        let copy_source = link_source.is_none().then_some(source);
+        self.replace_mode(target, true, false, link_source, copy_source, |p| {
             external_copy(source, p, Some((SKILL_FILE, HIDDEN_SKILL_FILE)))
         })
     }
@@ -652,9 +707,8 @@ impl Transaction {
             let target = r::leaf(target)?;
             fs::create_dir_all(target.parent().unwrap())?;
             let target = r::leaf(&target)?;
-            let parent = target.parent().unwrap();
-            let parent_dev = fs::symlink_metadata(parent)?.dev();
-            let work_dir = self.work_dir_for(&target, parent_dev)?;
+            let work_dir = self.work_dir_for(&target, None)?;
+            let mut stage_guard = StageGuard(&work_dir, true);
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             let undo = work_dir.join(format!(".oms-undo-{}.{}", std::process::id(), n));
             let staged = work_dir.join(format!(".oms-stage-{}.{}", std::process::id(), n));
@@ -681,11 +735,9 @@ impl Transaction {
                 old_link,
                 old_link_mode,
             };
-            if let Err(error) = validate_change(&candidate, &self.journal_dir) {
-                prune_staging_dir(&work_dir);
-                return Err(error);
-            }
+            validate_change(&candidate, &self.journal_dir)?;
             self.journal.changes.push(candidate);
+            stage_guard.1 = false;
             self.save()?;
             if self.journal.changes.last().unwrap().old_link.is_some()
                 && external_identity(&target)? != old
@@ -717,6 +769,7 @@ impl Transaction {
         self.complete = true;
         cleanup(&self.journal)?;
         fs::remove_file(&self.path)?;
+        prune_journal_staging_dirs(&self.journal);
         r::sync_dir(&self.journal_dir)?;
         Ok(())
     }
@@ -743,6 +796,7 @@ impl Transaction {
             rollback(&journal, &journal_dir)?;
         }
         fs::remove_file(path)?;
+        prune_journal_staging_dirs(&journal);
         r::sync_dir(&journal_dir)?;
         Ok(())
     }
@@ -751,6 +805,147 @@ impl Drop for Transaction {
     fn drop(&mut self) {
         if !self.complete && rollback(&self.journal, &self.journal_dir).is_ok() {
             let _ = fs::remove_file(&self.path);
+            prune_journal_staging_dirs(&self.journal);
+        }
+    }
+}
+struct StageGuard<'a>(&'a Path, bool);
+impl Drop for StageGuard<'_> {
+    fn drop(&mut self) {
+        if self.1 {
+            prune_staging_dir(self.0);
+        }
+    }
+}
+fn open_dir_nofollow(path: &Path) -> Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    Ok(fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32)
+        .open(path)?)
+}
+fn ensure_staging_dir(path: &Path) -> Result<()> {
+    if !r::exists(path) {
+        fs::create_dir(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    let m = fs::symlink_metadata(path)?;
+    if !m.is_dir()
+        || m.file_type().is_symlink()
+        || m.uid() != rustix::process::geteuid().as_raw()
+        || m.mode() & 0o777 != 0o700
+    {
+        return r::fail("unsafe lifecycle staging directory");
+    }
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+fn statx_mnt_id(dir: &fs::File) -> Result<Option<u64>> {
+    use rustix::fs::{AtFlags, StatxFlags, statx};
+    use rustix::io::Errno;
+    match statx(dir, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID) {
+        Ok(st) if st.stx_mask & StatxFlags::MNT_ID.bits() != 0 && st.stx_mnt_id != 0 => {
+            Ok(Some(st.stx_mnt_id))
+        }
+        Ok(_) => Ok(None),
+        Err(Errno::NOSYS | Errno::PERM | Errno::NOTSUP | Errno::INVAL) => Ok(None),
+        Err(e) => Err(std::io::Error::from(e).into()),
+    }
+}
+fn same_mount_fast(a: &fs::File, b: &fs::File) -> Result<Option<bool>> {
+    let ma = a.metadata()?;
+    let mb = b.metadata()?;
+    if ma.dev() != mb.dev() {
+        return Ok(Some(false));
+    }
+    #[cfg(test)]
+    if FORCE_CROSS_MOUNT.with(std::cell::Cell::get) && ma.ino() != mb.ino() {
+        return Ok(Some(false));
+    }
+    #[cfg(test)]
+    if FORCE_RENAME_PROBE.with(std::cell::Cell::get) {
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match (statx_mnt_id(a)?, statx_mnt_id(b)?) {
+            (Some(ia), Some(ib)) => Ok(Some(ia == ib)),
+            _ => Ok(None),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(Some(true))
+    }
+}
+fn can_rename_fds(work_dir: &fs::File, target_parent: &fs::File) -> Result<bool> {
+    if let Some(same) = same_mount_fast(work_dir, target_parent)? {
+        return Ok(same);
+    }
+    probe_rename_fds(work_dir, target_parent)
+}
+/// Fallback when `STATX_MNT_ID` is unavailable (Linux < 5.8 or seccomp): probe
+/// bidirectional regular-file rename between the open candidate work directory and
+/// the target parent, leaving neither directories nor files behind.
+fn probe_rename_fds(work_dir: &fs::File, target_parent: &fs::File) -> Result<bool> {
+    use rustix::fs::{AtFlags, Mode, OFlags, unlinkat};
+    use rustix::io::Errno;
+    let same_inode = {
+        let mw = work_dir.metadata()?;
+        let mp = target_parent.metadata()?;
+        mw.dev() == mp.dev() && mw.ino() == mp.ino()
+    };
+    #[cfg(target_os = "macos")]
+    let raw_mode = 0o600u16;
+    #[cfg(not(target_os = "macos"))]
+    let raw_mode = 0o600u32;
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let name = format!(".oms-probe-{}.{n}", std::process::id());
+    let fd = match rustix::fs::openat(
+        work_dir,
+        &name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(raw_mode),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::ACCESS | Errno::PERM | Errno::ROFS) => return Ok(false),
+        Err(e) => return Err(std::io::Error::from(e).into()),
+    };
+    drop(fd);
+    let step = |from: &fs::File, to: &fs::File| -> std::result::Result<(), Errno> {
+        #[cfg(test)]
+        if FORCE_PROBE_EXDEV.with(std::cell::Cell::get) {
+            return Err(Errno::XDEV);
+        }
+        if same_inode {
+            rustix::fs::renameat(from, &name, to, &name)
+        } else {
+            rename_between_noreplace(from, &name, to, &name)
+        }
+    };
+    match step(work_dir, target_parent) {
+        Ok(()) => {}
+        Err(Errno::XDEV | Errno::ACCESS | Errno::PERM | Errno::ROFS) => {
+            let _ = unlinkat(work_dir, &name, AtFlags::empty());
+            return Ok(false);
+        }
+        Err(e) => {
+            let _ = unlinkat(work_dir, &name, AtFlags::empty());
+            return Err(std::io::Error::from(e).into());
+        }
+    }
+    match step(target_parent, work_dir) {
+        Ok(()) => {
+            unlinkat(work_dir, &name, AtFlags::empty()).map_err(std::io::Error::from)?;
+            Ok(true)
+        }
+        Err(Errno::XDEV | Errno::ACCESS | Errno::PERM | Errno::ROFS) => {
+            let _ = unlinkat(target_parent, &name, AtFlags::empty());
+            Ok(false)
+        }
+        Err(e) => {
+            let _ = unlinkat(target_parent, &name, AtFlags::empty());
+            Err(std::io::Error::from(e).into())
         }
     }
 }
@@ -778,6 +973,13 @@ fn prune_staging_dir(dir: &Path) {
         let _ = r::sync_dir(parent);
     }
 }
+fn prune_journal_staging_dirs(j: &Journal) {
+    for c in &j.changes {
+        if let Some(work_dir) = c.undo.parent() {
+            prune_staging_dir(work_dir);
+        }
+    }
+}
 fn valid_work_dir(
     work_dir: &Path,
     target: &Path,
@@ -790,33 +992,66 @@ fn valid_work_dir(
     if target.starts_with(work_dir) || work_dir.starts_with(target) {
         return Ok(false);
     }
+    let Some(target_mount_dir) = parent.ancestors().find(|p| r::exists(p)) else {
+        return Ok(false);
+    };
+    let target_fd = open_dir_nofollow(target_mount_dir)?;
+    let target_dev = target_fd.metadata()?.dev();
     if work_dir == journal_dir {
         r::private_dir(journal_dir)?;
-        return Ok(true);
+        let work_fd = open_dir_nofollow(journal_dir)?;
+        return can_rename_fds(&work_fd, &target_fd);
     }
     if work_dir.file_name() == Some(std::ffi::OsStr::new(STAGING_DIR))
         && let Some(base) = work_dir.parent()
+        && base.parent().is_some()
+        && base != parent
         && parent.starts_with(base)
     {
-        if r::exists(work_dir) {
-            let m = fs::symlink_metadata(work_dir)?;
-            if !m.is_dir()
-                || m.file_type().is_symlink()
-                || m.uid() != rustix::process::geteuid().as_raw()
-                || m.mode() & 0o022 != 0
-            {
-                return Ok(false);
-            }
-        }
-        let bm = match fs::symlink_metadata(base) {
-            Ok(bm) => bm,
+        let euid = rustix::process::geteuid().as_raw();
+        let m = match fs::symlink_metadata(work_dir) {
+            Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
         };
-        if !bm.is_dir() || bm.file_type().is_symlink() {
+        if !m.is_dir() || m.file_type().is_symlink() || m.uid() != euid || m.mode() & 0o777 != 0o700
+        {
             return Ok(false);
         }
-        return Ok(true);
+        let mut saw_base = false;
+        for anc in parent.ancestors().skip(1) {
+            let am = match fs::symlink_metadata(anc) {
+                Ok(am) => am,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if anc == base {
+                        return Ok(false);
+                    }
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if !am.is_dir()
+                || am.file_type().is_symlink()
+                || am.uid() != euid
+                || am.mode() & 0o002 != 0
+                || am.dev() != target_dev
+            {
+                return Ok(false);
+            }
+            let anc_fd = open_dir_nofollow(anc)?;
+            if same_mount_fast(&anc_fd, &target_fd)? == Some(false) {
+                return Ok(false);
+            }
+            if anc == base {
+                saw_base = true;
+                break;
+            }
+        }
+        if !saw_base {
+            return Ok(false);
+        }
+        let work_fd = open_dir_nofollow(work_dir)?;
+        return can_rename_fds(&work_fd, &target_fd);
     }
     Ok(false)
 }
@@ -919,9 +1154,6 @@ fn rollback(j: &Journal, journal_dir: &Path) -> Result<()> {
             if r::exists(&c.staged) {
                 return r::fail("unexpected external staging during rollback");
             }
-            if let Some(work_dir) = c.undo.parent() {
-                prune_staging_dir(work_dir);
-            }
             sync_change_dirs(c)?;
             continue;
         }
@@ -968,7 +1200,7 @@ fn rollback(j: &Journal, journal_dir: &Path) -> Result<()> {
             if c.hidden_old_skill {
                 unhide_skill(&c.undo)?;
             }
-            rename_target(&c.undo, &c.target)?;
+            fs::rename(&c.undo, &c.target)?;
         } else if c.old.is_none() {
             if current_new.is_some() && current_new != c.new {
                 return r::fail("new lifecycle target changed; recovery journal retained");
@@ -976,9 +1208,6 @@ fn rollback(j: &Journal, journal_dir: &Path) -> Result<()> {
             remove(&c.target)?;
         } else if current_old != c.old {
             return r::fail("previous lifecycle target missing; recovery journal retained");
-        }
-        if let Some(work_dir) = c.undo.parent() {
-            prune_staging_dir(work_dir);
         }
         sync_change_dirs(c)?;
     }
@@ -1000,9 +1229,6 @@ fn cleanup(j: &Journal) -> Result<()> {
         }
         if r::exists(&c.staged) {
             return r::fail("unexpected lifecycle staging content");
-        }
-        if let Some(work_dir) = c.undo.parent() {
-            prune_staging_dir(work_dir);
         }
         sync_change_dirs(c)?;
     }
@@ -1067,20 +1293,35 @@ fn can_hide_skill(dir: &Path) -> Result<bool> {
     }
     Ok(!r::exists(&dir.join(HIDDEN_SKILL_FILE)))
 }
+fn rename_between_noreplace(
+    from_dir: &fs::File,
+    from: &str,
+    to_dir: &fs::File,
+    to: &str,
+) -> std::result::Result<(), rustix::io::Errno> {
+    match rustix::fs::renameat_with(
+        from_dir,
+        from,
+        to_dir,
+        to,
+        rustix::fs::RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => Ok(()),
+        Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS | rustix::io::Errno::NOTSUP) => {
+            match rustix::fs::statat(to_dir, to, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(_) => Err(rustix::io::Errno::EXIST),
+                Err(rustix::io::Errno::NOENT) => rustix::fs::renameat(from_dir, from, to_dir, to),
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
 fn rename_entry_noreplace(dir: &fs::File, from: &str, to: &str) -> Result<()> {
-    match rustix::fs::renameat_with(dir, from, dir, to, rustix::fs::RenameFlags::NOREPLACE) {
+    match rename_between_noreplace(dir, from, dir, to) {
         Ok(()) => Ok(()),
         Err(rustix::io::Errno::EXIST) => {
             r::fail("skill visibility transition destination already exists")
-        }
-        Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS | rustix::io::Errno::NOTSUP) => {
-            match rustix::fs::statat(dir, to, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(_) => return r::fail("skill visibility transition destination already exists"),
-                Err(rustix::io::Errno::NOENT) => {}
-                Err(e) => return Err(std::io::Error::from(e).into()),
-            }
-            rustix::fs::renameat(dir, from, dir, to)
-                .map_err(|e| r::Error::from(std::io::Error::from(e)))
         }
         Err(e) => Err(std::io::Error::from(e).into()),
     }
@@ -1151,36 +1392,6 @@ fn remap_hidden_skill_entries(
     }
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(entries)
-}
-/// Cross-directory `rename(2)` updates a moved directory's `..` entry and fails
-/// with `EACCES` when owner write permission is absent; grant `0o200` on the
-/// open directory descriptor only across the rename and restore exact mode bits.
-fn rename_target(from: &Path, to: &Path) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    if from.parent() != to.parent()
-        && let Ok(m) = fs::symlink_metadata(from)
-        && m.is_dir()
-        && !m.file_type().is_symlink()
-    {
-        let orig_mode = m.mode() & 0o7777;
-        if orig_mode & 0o200 == 0 {
-            let dir_file = fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(
-                    (rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
-                )
-                .open(from)?;
-            dir_file.set_permissions(fs::Permissions::from_mode(orig_mode | 0o200))?;
-            let res = fs::rename(from, to).map_err(r::Error::from);
-            let restore = dir_file
-                .set_permissions(fs::Permissions::from_mode(orig_mode))
-                .map_err(r::Error::from);
-            res?;
-            return restore;
-        }
-    }
-    fs::rename(from, to)?;
-    Ok(())
 }
 fn make_tree_writable(path: &Path) -> Result<()> {
     let m = match fs::symlink_metadata(path) {
@@ -1616,6 +1827,130 @@ mod tests {
         );
         assert!(!target.join(HIDDEN_SKILL_FILE).exists());
         assert_eq!(identity(&target).unwrap(), old_id);
+
+        // Legacy `committed: true` journal with a sibling undo cleans up undo and keeps v2.
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.copy(&target, &source_v2).unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(identity(&target).unwrap(), new_id);
+        let legacy_committed_undo = skills.join(".oms-undo-legacy.2");
+        let legacy_committed_staged = skills.join(".oms-stage-legacy.2");
+        write_skill_dir(&legacy_committed_undo, "---\nname: oms-demo\n---\nv1\n");
+        let committed_journal = json!({
+            "schema": 1,
+            "committed": true,
+            "changes": [{
+                "target": target,
+                "staged": legacy_committed_staged,
+                "undo": legacy_committed_undo,
+                "old": old_id,
+                "new": new_id,
+                "external": false,
+                "parent_identity": null
+            }],
+            "effects": []
+        });
+        fs::write(
+            journal_dir.join("transaction.json"),
+            serde_json::to_vec(&committed_journal).unwrap(),
+        )
+        .unwrap();
+        Transaction::begin(&paths).unwrap().commit().unwrap();
+        assert!(!legacy_committed_undo.exists());
+        assert!(stage_or_undo_siblings(&skills).is_empty());
+        assert_eq!(identity(&target).unwrap(), new_id);
+
+        // Legacy `prepare_external`-style journals (unchanged rollback, mutated rollback, and
+        // committed cleanup) with sibling undo paths in `skills`.
+        let v2_ext_id = external_identity(&target).unwrap();
+        let legacy_ext_undo = skills.join(".oms-undo-ext-legacy.1");
+        let legacy_ext_staged = skills.join(".oms-stage-ext-legacy.1");
+        external_copy(&target, &legacy_ext_undo, None).unwrap();
+        let ext_unchanged = json!({
+            "schema": 1,
+            "committed": false,
+            "changes": [{
+                "target": target,
+                "staged": legacy_ext_staged,
+                "undo": legacy_ext_undo,
+                "old": v2_ext_id,
+                "new": v2_ext_id,
+                "external": true,
+                "parent_identity": null
+            }],
+            "effects": []
+        });
+        fs::write(
+            journal_dir.join("transaction.json"),
+            serde_json::to_vec(&ext_unchanged).unwrap(),
+        )
+        .unwrap();
+        Transaction::begin(&paths).unwrap().commit().unwrap();
+        assert!(!legacy_ext_undo.exists());
+        assert_eq!(external_identity(&target).unwrap(), v2_ext_id);
+
+        external_copy(&target, &legacy_ext_undo, None).unwrap();
+        fs::write(
+            target.join(SKILL_FILE),
+            b"---\nname: oms-demo\n---\next-mutated\n",
+        )
+        .unwrap();
+        let mutated_ext_id = external_identity(&target).unwrap();
+        let ext_rollback = json!({
+            "schema": 1,
+            "committed": false,
+            "changes": [{
+                "target": target,
+                "staged": legacy_ext_staged,
+                "undo": legacy_ext_undo,
+                "old": v2_ext_id,
+                "new": mutated_ext_id,
+                "external": true,
+                "parent_identity": null
+            }],
+            "effects": []
+        });
+        fs::write(
+            journal_dir.join("transaction.json"),
+            serde_json::to_vec(&ext_rollback).unwrap(),
+        )
+        .unwrap();
+        Transaction::begin(&paths).unwrap().commit().unwrap();
+        assert!(!legacy_ext_undo.exists());
+        assert_eq!(external_identity(&target).unwrap(), v2_ext_id);
+
+        external_copy(&target, &legacy_ext_undo, None).unwrap();
+        fs::write(
+            target.join(SKILL_FILE),
+            b"---\nname: oms-demo\n---\next-committed\n",
+        )
+        .unwrap();
+        let committed_ext_id = external_identity(&target).unwrap();
+        let ext_committed = json!({
+            "schema": 1,
+            "committed": true,
+            "changes": [{
+                "target": target,
+                "staged": legacy_ext_staged,
+                "undo": legacy_ext_undo,
+                "old": v2_ext_id,
+                "new": committed_ext_id,
+                "external": true,
+                "parent_identity": null
+            }],
+            "effects": []
+        });
+        fs::write(
+            journal_dir.join("transaction.json"),
+            serde_json::to_vec(&ext_committed).unwrap(),
+        )
+        .unwrap();
+        Transaction::begin(&paths).unwrap().commit().unwrap();
+        assert!(!legacy_ext_undo.exists());
+        assert!(stage_or_undo_siblings(&skills).is_empty());
+        assert_eq!(external_identity(&target).unwrap(), committed_ext_id);
     }
 
     #[test]
@@ -1884,6 +2219,11 @@ mod tests {
             let mut tx = Transaction::begin(&paths).unwrap();
             tx.publish_external(&ro_target, &source_v2).unwrap();
             let change = tx.journal.changes.last().unwrap();
+            assert_eq!(
+                change.undo.parent(),
+                Some(skills.as_path()),
+                "read-only target dir must use legacy sibling parent to avoid chmod across rename"
+            );
             assert!(!change.undo.join(SKILL_FILE).exists());
             assert!(change.undo.join(HIDDEN_SKILL_FILE).is_file());
             assert_eq!(
@@ -1906,9 +2246,30 @@ mod tests {
             let mut tx = Transaction::begin(&paths).unwrap();
             tx.publish_external(&ro_target, &source_v2).unwrap();
             let undo_path = tx.journal.changes.last().unwrap().undo.clone();
+            assert_eq!(undo_path.parent(), Some(skills.as_path()));
             tx.commit().unwrap();
             assert!(!undo_path.exists());
         }
+        // Publishing a read-only source directory onto a fresh target also uses the sibling parent.
+        let ro_source = root.0.join("ro-source");
+        write_skill_dir(&ro_source, "---\nname: oms-ro-src\n---\nsrc\n");
+        fs::set_permissions(&ro_source, fs::Permissions::from_mode(0o500)).unwrap();
+        let _ro_src_guard = RestoreWritable(ro_source.clone());
+        let ro_fresh = skills.join("oms-ro-fresh");
+        let _ro_fresh_guard = RestoreWritable(ro_fresh.clone());
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.publish_external(&ro_fresh, &ro_source).unwrap();
+            assert_eq!(
+                tx.journal.changes.last().unwrap().staged.parent(),
+                Some(skills.as_path())
+            );
+            tx.commit().unwrap();
+        }
+        assert_eq!(
+            fs::symlink_metadata(&ro_fresh).unwrap().mode() & 0o777,
+            0o500
+        );
 
         // A foreign SKILL.md present at the unhide destination is refused, not overwritten.
         let foreign_dir = skills.join("oms-foreign-unhide");
@@ -2050,5 +2411,343 @@ mod tests {
             );
             fs::remove_file(journal_dir.join("transaction.json")).unwrap();
         }
+    }
+
+    #[test]
+    fn cross_mount_and_probe_fallbacks_and_tightened_work_dir_validation() {
+        let (root, paths) = fixture("cross-mount-and-validation");
+        let skills = root.0.join("skills");
+        let target = skills.join("oms-demo");
+        let source_v2 = root.0.join("source-v2");
+        write_skill_dir(&target, "---\nname: oms-demo\n---\nv1\n");
+        write_skill_dir(&source_v2, "---\nname: oms-demo\n---\nv2\n");
+        let old_id = identity(&target).unwrap();
+        let new_id = identity(&source_v2).unwrap();
+        let journal_dir = paths.config.join("native-lifecycle");
+
+        struct ResetHooks;
+        impl Drop for ResetHooks {
+            fn drop(&mut self) {
+                FORCE_CROSS_MOUNT.with(|f| f.set(false));
+                FORCE_RENAME_PROBE.with(|f| f.set(false));
+                FORCE_PROBE_EXDEV.with(|f| f.set(false));
+            }
+        }
+        let assert_no_probes = |dir: &Path| {
+            if !dir.is_dir() {
+                return;
+            }
+            for e in fs::read_dir(dir).unwrap() {
+                let name = e.unwrap().file_name().to_string_lossy().into_owned();
+                assert!(!name.starts_with(".oms-probe-"), "leaked probe {name}");
+                assert_ne!(
+                    name,
+                    STAGING_DIR,
+                    "unexpected staging dir in {}",
+                    dir.display()
+                );
+            }
+        };
+
+        // 1. Cross-mount refusal via `FORCE_CROSS_MOUNT` (simulating separate bind mounts with equal
+        //    `st_dev`) refuses both `journal_dir` and ancestor staging, falls back to the sibling
+        //    parent, and still rolls back, recovers from crash, and commits.
+        {
+            let _reset = ResetHooks;
+            FORCE_CROSS_MOUNT.with(|f| f.set(true));
+            {
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.copy(&target, &source_v2).unwrap();
+                let change = tx.journal.changes.last().unwrap();
+                assert_eq!(change.staged.parent(), Some(skills.as_path()));
+                assert_eq!(change.undo.parent(), Some(skills.as_path()));
+                assert!(!root.0.join(STAGING_DIR).exists());
+                assert!(!skills.join(STAGING_DIR).exists());
+                assert!(siblings_with_skill_md(&skills).is_empty());
+            }
+            assert_eq!(identity(&target).unwrap(), old_id);
+            assert!(stage_or_undo_siblings(&skills).is_empty());
+
+            // Crash recovery under cross-mount sibling fallback.
+            {
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.copy(&target, &source_v2).unwrap();
+                tx.simulate_crash();
+            }
+            Transaction::begin(&paths).unwrap().commit().unwrap();
+            assert_eq!(identity(&target).unwrap(), old_id);
+            assert!(stage_or_undo_siblings(&skills).is_empty());
+
+            // Commit under cross-mount sibling fallback.
+            {
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.copy(&target, &source_v2).unwrap();
+                assert_eq!(
+                    tx.journal.changes.last().unwrap().undo.parent(),
+                    Some(skills.as_path())
+                );
+                tx.commit().unwrap();
+            }
+            assert_eq!(identity(&target).unwrap(), new_id);
+            assert!(stage_or_undo_siblings(&skills).is_empty());
+
+            // Bound account operations (`write_bound` and `remove_link_bound`) also fall back to the
+            // sibling parent and succeed on both rollback and commit.
+            let acct = root.0.join("acct");
+            fs::create_dir_all(&acct).unwrap();
+            let acct_canon = fs::canonicalize(&acct).unwrap();
+            let settings = acct_canon.join("settings.json");
+            fs::write(&settings, b"{\"a\":1}\n").unwrap();
+            let pm = fs::symlink_metadata(&acct_canon).unwrap();
+            let parent_json = json!({ "st_dev": pm.dev(), "st_ino": pm.ino() });
+            let sm = fs::symlink_metadata(&settings).unwrap();
+            let id_json = json!({ "st_dev": sm.dev(), "st_ino": sm.ino() });
+            {
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.write_bound(
+                    &settings,
+                    b"{\"a\":2}\n",
+                    0o600,
+                    &parent_json,
+                    Some(b"{\"a\":1}\n"),
+                    Some(&id_json),
+                )
+                .unwrap();
+                assert_eq!(
+                    tx.journal.changes.last().unwrap().undo.parent(),
+                    Some(acct_canon.as_path())
+                );
+            }
+            assert_eq!(fs::read(&settings).unwrap(), b"{\"a\":1}\n");
+            let sm = fs::symlink_metadata(&settings).unwrap();
+            let id_json = json!({ "st_dev": sm.dev(), "st_ino": sm.ino() });
+            {
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.write_bound(
+                    &settings,
+                    b"{\"a\":2}\n",
+                    0o600,
+                    &parent_json,
+                    Some(b"{\"a\":1}\n"),
+                    Some(&id_json),
+                )
+                .unwrap();
+                tx.commit().unwrap();
+            }
+            assert_eq!(fs::read(&settings).unwrap(), b"{\"a\":2}\n");
+
+            let link_dest = root.0.join("dest-target");
+            fs::write(&link_dest, b"x\n").unwrap();
+            let bound_link = acct_canon.join("managed-link");
+            symlink(&link_dest, &bound_link).unwrap();
+            let lm = fs::symlink_metadata(&bound_link).unwrap();
+            let link_json = json!({ "st_dev": lm.dev(), "st_ino": lm.ino() });
+            let pm = fs::symlink_metadata(&acct_canon).unwrap();
+            let parent_json = json!({ "st_dev": pm.dev(), "st_ino": pm.ino() });
+            {
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.remove_link_bound(&bound_link, &parent_json, &link_json, &link_dest)
+                    .unwrap();
+                assert_eq!(
+                    tx.journal.changes.last().unwrap().undo.parent(),
+                    Some(acct_canon.as_path())
+                );
+            }
+            assert_eq!(fs::read_link(&bound_link).unwrap(), link_dest);
+            let lm = fs::symlink_metadata(&bound_link).unwrap();
+            let link_json = json!({ "st_dev": lm.dev(), "st_ino": lm.ino() });
+            let pm = fs::symlink_metadata(&acct_canon).unwrap();
+            let parent_json = json!({ "st_dev": pm.dev(), "st_ino": pm.ino() });
+            {
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.remove_link_bound(&bound_link, &parent_json, &link_json, &link_dest)
+                    .unwrap();
+                tx.commit().unwrap();
+            }
+            assert!(!r::exists(&bound_link));
+
+            // Cross-mount `journal_dir` in a recovery journal is rejected by `valid_work_dir`.
+            let bad_cross = json!({
+                "schema": 1,
+                "committed": false,
+                "changes": [{
+                    "target": target,
+                    "staged": journal_dir.join(".oms-stage-xm.1"),
+                    "undo": journal_dir.join(".oms-undo-xm.1"),
+                    "old": new_id,
+                    "new": new_id,
+                    "external": false,
+                    "parent_identity": null
+                }],
+                "effects": []
+            });
+            fs::write(
+                journal_dir.join("transaction.json"),
+                serde_json::to_vec(&bad_cross).unwrap(),
+            )
+            .unwrap();
+            let err = Transaction::begin(&paths).err().expect("must reject");
+            assert!(
+                err.1.contains("unsafe lifecycle recovery paths"),
+                "{}",
+                err.1
+            );
+            fs::remove_file(journal_dir.join("transaction.json")).unwrap();
+        }
+
+        // 2. Cheap file-rename probe fallback (used when `STATX_MNT_ID` is absent on Linux 5.4 or
+        //    blocked by seccomp): succeeds cleanly on same mount and falls back to sibling on EXDEV
+        //    without leaving `.oms-probe-*` files or subdirectories behind.
+        {
+            let _reset = ResetHooks;
+            FORCE_RENAME_PROBE.with(|f| f.set(true));
+            {
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.copy(&target, &skills.join("oms-demo")).unwrap_or(());
+            }
+            write_skill_dir(&source_v2, "---\nname: oms-demo\n---\nv3\n");
+            let v3_id = identity(&source_v2).unwrap();
+            {
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.copy(&target, &source_v2).unwrap();
+                assert_ne!(
+                    tx.journal.changes.last().unwrap().undo.parent(),
+                    Some(skills.as_path())
+                );
+                assert_no_probes(&journal_dir);
+                assert_no_probes(&skills);
+            }
+            assert_eq!(identity(&target).unwrap(), new_id);
+
+            FORCE_PROBE_EXDEV.with(|f| f.set(true));
+            {
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.copy(&target, &source_v2).unwrap();
+                assert_eq!(
+                    tx.journal.changes.last().unwrap().undo.parent(),
+                    Some(skills.as_path())
+                );
+                assert_no_probes(&journal_dir);
+                assert_no_probes(&skills);
+                assert!(!root.0.join(STAGING_DIR).exists());
+            }
+            assert_eq!(identity(&target).unwrap(), new_id);
+            {
+                let mut tx = Transaction::begin(&paths).unwrap();
+                tx.copy(&target, &source_v2).unwrap();
+                tx.commit().unwrap();
+            }
+            assert_eq!(identity(&target).unwrap(), v3_id);
+            assert_no_probes(&journal_dir);
+            assert_no_probes(&skills);
+            assert!(stage_or_undo_siblings(&skills).is_empty());
+        }
+
+        // 3. Tightened `valid_work_dir` rejects absent staging dirs, non-0700 staging dirs,
+        //    symlinked staging dirs, `parent/.oms-lifecycle-staging`, world-writable bases, and
+        //    non-owned bases such as `/` or the system temp directory.
+        let current_id = identity(&target).unwrap();
+        let assert_rejected_work_dir = |work: &Path| {
+            let bad = json!({
+                "schema": 1,
+                "committed": false,
+                "changes": [{
+                    "target": target,
+                    "staged": work.join(".oms-stage-v.1"),
+                    "undo": work.join(".oms-undo-v.1"),
+                    "old": current_id,
+                    "new": current_id,
+                    "external": false,
+                    "parent_identity": null
+                }],
+                "effects": []
+            });
+            fs::write(
+                journal_dir.join("transaction.json"),
+                serde_json::to_vec(&bad).unwrap(),
+            )
+            .unwrap();
+            let err = Transaction::begin(&paths).err().expect("must reject");
+            assert!(
+                err.1.contains("unsafe lifecycle recovery paths"),
+                "work_dir {} should be rejected, got: {}",
+                work.display(),
+                err.1
+            );
+            fs::remove_file(journal_dir.join("transaction.json")).unwrap();
+        };
+
+        let anc_staging = root.0.join(STAGING_DIR);
+        assert!(!anc_staging.exists());
+        // Absent `.oms-lifecycle-staging` must be rejected.
+        assert_rejected_work_dir(&anc_staging);
+
+        // Mode 0755 `.oms-lifecycle-staging` must be rejected.
+        fs::create_dir(&anc_staging).unwrap();
+        fs::set_permissions(&anc_staging, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_rejected_work_dir(&anc_staging);
+        fs::remove_dir(&anc_staging).unwrap();
+
+        // Symlinked `.oms-lifecycle-staging` must be rejected.
+        let real_elsewhere = root.0.join("elsewhere");
+        fs::create_dir(&real_elsewhere).unwrap();
+        fs::set_permissions(&real_elsewhere, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&real_elsewhere, &anc_staging).unwrap();
+        assert_rejected_work_dir(&anc_staging);
+        fs::remove_file(&anc_staging).unwrap();
+
+        // `parent/.oms-lifecycle-staging` (`base == parent`) must be rejected.
+        let in_parent_staging = skills.join(STAGING_DIR);
+        fs::create_dir(&in_parent_staging).unwrap();
+        fs::set_permissions(&in_parent_staging, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_rejected_work_dir(&in_parent_staging);
+        fs::remove_dir(&in_parent_staging).unwrap();
+
+        // Non-euid / world-writable ancestors (`/` and temp_dir) must be rejected.
+        assert_rejected_work_dir(&Path::new("/").join(STAGING_DIR));
+        assert_rejected_work_dir(
+            &fs::canonicalize(std::env::temp_dir())
+                .unwrap()
+                .join(STAGING_DIR),
+        );
+
+        // World-writable euid-owned base must be rejected.
+        let ww_base = root.0.join("ww-base");
+        let ww_parent = ww_base.join("nested");
+        let ww_target = ww_parent.join("item");
+        fs::create_dir_all(&ww_parent).unwrap();
+        fs::write(&ww_target, b"ok\n").unwrap();
+        let ww_staging = ww_base.join(STAGING_DIR);
+        fs::create_dir(&ww_staging).unwrap();
+        fs::set_permissions(&ww_staging, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&ww_base, fs::Permissions::from_mode(0o777)).unwrap();
+        let ww_id = identity(&ww_target).unwrap();
+        let bad_ww = json!({
+            "schema": 1,
+            "committed": false,
+            "changes": [{
+                "target": ww_target,
+                "staged": ww_staging.join(".oms-stage-ww.1"),
+                "undo": ww_staging.join(".oms-undo-ww.1"),
+                "old": ww_id,
+                "new": ww_id,
+                "external": false,
+                "parent_identity": null
+            }],
+            "effects": []
+        });
+        fs::write(
+            journal_dir.join("transaction.json"),
+            serde_json::to_vec(&bad_ww).unwrap(),
+        )
+        .unwrap();
+        let err = Transaction::begin(&paths).err().expect("must reject");
+        fs::set_permissions(&ww_base, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            err.1.contains("unsafe lifecycle recovery paths"),
+            "{}",
+            err.1
+        );
+        fs::remove_file(journal_dir.join("transaction.json")).unwrap();
     }
 }
