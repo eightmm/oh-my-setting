@@ -13,6 +13,7 @@ pub mod crypto;
 pub mod linear;
 pub mod model;
 pub mod reply;
+pub mod routes;
 pub mod serve;
 pub mod source;
 pub mod transport;
@@ -25,7 +26,7 @@ pub use crypto::{
 pub use linear::{
     CREATED_THOUGHT_CALLER_KEY, DEFAULT_LINEAR_API_URL, ENV_ACCESS_CRED, ENV_LINEAR_API_URL,
     ENV_WEBHOOK_CRED, FIRST_THOUGHT_BODY, LINEAR_INTAKE_PATH, LinearSource,
-    REFUSED_CONTENT_ERROR_BODY, SOURCE_LINEAR, verify_linear_signature,
+    REFUSED_CONTENT_ERROR_BODY, SOURCE_LINEAR, UNROUTED_ERROR_BODY, verify_linear_signature,
 };
 pub use model::{
     DeliveryState, ROOM_TEXT_LIMIT, UNTRUSTED_HEADER, WorkRequest, WorkRequestKind,
@@ -34,6 +35,7 @@ pub use model::{
     unknown_receipt_message_id,
 };
 pub use reply::{ReplyConfig, ReplyOutcome, execute_reply};
+pub use routes::{ANY_TEAM, ENV_ROUTES_FILE, Route};
 pub use serve::{
     DEFAULT_LISTEN_ADDR, MAX_BODY_BYTES, MAX_HEADER_BYTES, PreparedServer, ServeConfig,
     ServerHandle, parse_loopback_listen,

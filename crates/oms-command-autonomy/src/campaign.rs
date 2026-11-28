@@ -625,7 +625,29 @@ fn consolidate(
     }
     Ok(())
 }
-fn evaluate(ctx: &Context<'_>, manifest: &Value, candidate: &Value, cid: &str) -> Result<Value> {
+fn current_time() -> i64 {
+    chrono::DateTime::parse_from_rfc3339(&value::now())
+        .unwrap()
+        .timestamp()
+}
+fn remaining(deadline: i64) -> Option<Duration> {
+    let seconds = deadline.saturating_sub(current_time());
+    (seconds > 0).then(|| Duration::from_secs(seconds as u64))
+}
+fn deadline_verdict() -> Value {
+    json!({"verdict": "timeout", "reason": "campaign-deadline"})
+}
+fn evaluate(
+    ctx: &Context<'_>,
+    manifest: &Value,
+    candidate: &Value,
+    cid: &str,
+    deadline: i64,
+) -> Result<Value> {
+    checkpoint(ctx.interrupted)?;
+    if remaining(deadline).is_none() {
+        return Ok(deadline_verdict());
+    }
     let kind = value::text(candidate, "format");
     if !["patch", "lean"].contains(&kind) {
         return Ok(json!({"verdict": "unverified"}));
@@ -669,6 +691,9 @@ fn evaluate(ctx: &Context<'_>, manifest: &Value, candidate: &Value, cid: &str) -
             return Ok(json!({"verdict": "error", "reason": "verifier-tamper"}));
         }
     }
+    let Some(scratch_wall) = remaining(deadline) else {
+        return Ok(deadline_verdict());
+    };
     let scratch = invoke(
         ctx,
         "scratch-worktree",
@@ -681,8 +706,11 @@ fn evaluate(ctx: &Context<'_>, manifest: &Value, candidate: &Value, cid: &str) -
             "--owner-pid".into(),
             std::process::id().to_string().into(),
         ],
-        Duration::from_secs(60),
+        Duration::from_secs(60).min(scratch_wall),
     )?;
+    if scratch.code != 0 && remaining(deadline).is_none() {
+        return Ok(deadline_verdict());
+    }
     require(
         scratch.code == 0,
         "native isolated campaign worktree service failed",
@@ -735,6 +763,9 @@ fn evaluate(ctx: &Context<'_>, manifest: &Value, candidate: &Value, cid: &str) -
                 .as_u64()
                 .unwrap(),
         );
+        let Some(verify_wall) = remaining(deadline) else {
+            return Ok(deadline_verdict());
+        };
         let command = SupervisedCommand {
             argv: vec![
                 "bash".into(),
@@ -742,13 +773,16 @@ fn evaluate(ctx: &Context<'_>, manifest: &Value, candidate: &Value, cid: &str) -
                 value::text(&manifest["verify"], "command").into(),
             ],
             cwd: scratch_path.clone(),
-            wall: Duration::from_secs(timeout),
+            wall: Duration::from_secs(timeout).min(verify_wall),
             output_limit: 8 * MAX_FILE,
             label: "campaign-verifier",
             remove_environment: vec!["OMS_PLAN_RETIRE_AUTHORITY"],
             environment: vec![],
         };
         let checked = ctx.services.supervise(&command)?;
+        if remaining(deadline).is_none() {
+            return Ok(deadline_verdict());
+        }
         let verdict = if checked.timed_out {
             "timeout"
         } else if checked.supervision_error || checked.launch_error || checked.output_limited {
@@ -763,6 +797,7 @@ fn evaluate(ctx: &Context<'_>, manifest: &Value, candidate: &Value, cid: &str) -
             json!({"verdict": verdict, "exit_code": checked.exit, "tail": String::from_utf8_lossy(tail)}),
         )
     })();
+    // Releasing scratch custody remains necessary after the work deadline.
     let removed = invoke(
         ctx,
         "scratch-worktree",
@@ -779,6 +814,9 @@ fn evaluate(ctx: &Context<'_>, manifest: &Value, candidate: &Value, cid: &str) -
         removed.is_ok_and(|out| out.code == 0),
         "candidate scratch cleanup failed; retain its ownership record for recovery",
     )?;
+    if result.is_ok() && remaining(deadline).is_none() {
+        return Ok(deadline_verdict());
+    }
     result
 }
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
@@ -838,11 +876,6 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         .map_err(|_| Error::new(2, "invalid campaign start timestamp"))?
         .timestamp();
     let deadline = start + manifest["budget"]["deadline_s"].as_i64().unwrap();
-    let current_time = || {
-        chrono::DateTime::parse_from_rfc3339(&value::now())
-            .unwrap()
-            .timestamp()
-    };
     let first_wave = initial
         .iter()
         .filter(|r| r["type"] == "wave_completed")
@@ -1004,15 +1037,23 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             }
         }
         for candidate in &made {
-            let verdict = evaluate(ctx, &manifest, candidate, cid)?;
+            if remaining(deadline).is_none() {
+                reason = "deadline";
+                break;
+            }
+            let verdict = evaluate(ctx, &manifest, candidate, cid, deadline)?;
             let mut receipt = verdict.clone();
             receipt["candidate"] = candidate["id"].clone();
             receipt["sha256"] = candidate["sha256"].clone();
             receipt["base"] = manifest["base"].clone();
             let digest = value::hash(value::canonical(&receipt)?);
             ledger.emit("candidate_verdict", json!({"id": candidate["id"], "receipt": receipt, "receipt_sha256": digest, "verdict": verdict["verdict"]}))?;
+            if verdict["reason"] == "campaign-deadline" {
+                reason = "deadline";
+                break;
+            }
             if verdict["verdict"] == "pass" {
-                let mut final_receipt = evaluate(ctx, &manifest, candidate, cid)?;
+                let mut final_receipt = evaluate(ctx, &manifest, candidate, cid, deadline)?;
                 final_receipt["candidate"] = candidate["id"].clone();
                 final_receipt["sha256"] = candidate["sha256"].clone();
                 final_receipt["base"] = manifest["base"].clone();
@@ -1030,6 +1071,10 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                     "final_verify_failed",
                     json!({"id": candidate["id"], "receipt": final_receipt}),
                 )?;
+                if final_receipt["reason"] == "campaign-deadline" {
+                    reason = "deadline";
+                    break;
+                }
             }
         }
         ledger.emit(

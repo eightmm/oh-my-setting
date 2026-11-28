@@ -3336,16 +3336,24 @@ impl CollabServices<'_> {
             for failure in list["failures"].as_array().into_iter().flatten() {
                 check()?;
                 let fingerprint = failure["fingerprint"].as_str().unwrap_or_default();
-                if failure["attention"] != "stale"
-                    || fingerprint.is_empty()
+                let stale = failure["attention"] == "stale";
+                let non_current_multi =
+                    failure["non_current_head"] == true && failure["attention"] == "actionable";
+                let legacy_read_guard = stale && failure["failure_code"] == "read_guard_changed";
+                let is_aged = failure["ts"].as_str().is_some_and(|t| aged(t, stale_days));
+                if fingerprint.is_empty()
                     || fingerprint.contains(['\n', '\r'])
-                    || !failure["ts"].as_str().is_some_and(|t| aged(t, stale_days))
+                    || !((stale && is_aged) || (non_current_multi && is_aged) || legacy_read_guard)
                 {
                     continue;
                 }
-                let how = format!(
-                    "retired by oms tick: failures on a single commit older than {stale_days}d with no recurrence on another commit"
-                );
+                let how = if legacy_read_guard {
+                    "retired by oms tick: legacy read_guard_changed failure superseded by isolated worktrees".to_owned()
+                } else {
+                    format!(
+                        "retired by oms tick: non-current historical failures older than {stale_days}d with no recurrence on current commit"
+                    )
+                };
                 if ledger(&["resolve", "--fingerprint", fingerprint, "--how", &how]).0 == 0 {
                     failures_retired += 1;
                 }
@@ -5219,6 +5227,114 @@ mod tests {
                 "{kept} should stay open"
             );
         }
+
+        // Historical non-current multi-head failures (> stale_days) and legacy
+        // read_guard_changed failures retire on tick; recent non-current multi-head
+        // and current-HEAD failures stay open.
+        let git_repo = Fixture::new();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(git_repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let git_commit = |msg: &str| {
+            std::fs::write(git_repo.path().join("f.txt"), msg).unwrap();
+            assert!(
+                std::process::Command::new("git")
+                    .args(["add", "f.txt"])
+                    .current_dir(git_repo.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(
+                std::process::Command::new("git")
+                    .args([
+                        "-c",
+                        "user.name=Fixture",
+                        "-c",
+                        "user.email=fixture@example.invalid",
+                        "commit",
+                        "-qm",
+                        msg,
+                    ])
+                    .current_dir(git_repo.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(git_repo.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        let head_a = git_commit("a");
+        let head_b = git_commit("b");
+        let head_c = git_commit("c");
+        let recent_ts = "2999-01-01T00:00:00Z";
+        let old_ts = "2020-01-01T00:00:00Z";
+        let ledger_dir = git_repo.path().join(".oms");
+        std::fs::create_dir_all(&ledger_dir).unwrap();
+        let row = |fp: &str, head: &str, ts: &str, extra: &str| {
+            format!(
+                "{{\"schema\":2,\"event\":\"fail\",\"ts\":\"{ts}\",\"agent\":\"a\",\"fingerprint\":\"{fp}\",\"kind\":\"cmd\",\"cmd\":\"cmd-{fp}\",\"exit\":1,\"state_fingerprint\":\"{head}:tree:untracked\"{extra}}}\n"
+            )
+        };
+        std::fs::write(
+            ledger_dir.join("failures.jsonl"),
+            [
+                row("aged_multi", &head_a, old_ts, ""),
+                row("aged_multi", &head_b, old_ts, ""),
+                row(
+                    "607bd5b10a60755d",
+                    &head_a,
+                    recent_ts,
+                    ",\"failure_code\":\"read_guard_changed\"",
+                ),
+                row(
+                    "607bd5b10a60755d",
+                    &head_b,
+                    recent_ts,
+                    ",\"failure_code\":\"read_guard_changed\"",
+                ),
+                row("recent_multi", &head_a, recent_ts, ""),
+                row("recent_multi", &head_b, recent_ts, ""),
+                row("curr_multi", &head_a, old_ts, ""),
+                row("curr_multi", &head_c, recent_ts, ""),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let out = host.tick_maintenance(git_repo.path(), source(), &stop);
+        assert_eq!(out.0, 0, "{}", String::from_utf8_lossy(&out.2));
+        let receipt: Value = serde_json::from_slice(&out.1).expect("json");
+        assert_eq!(receipt["failures_retired"], 2, "{receipt}");
+        let ledger_text = std::fs::read_to_string(ledger_dir.join("failures.jsonl")).unwrap();
+        let resolved_fps: std::collections::BTreeSet<String> = ledger_text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|row| {
+                row["event"] == "resolved"
+                    && row["how"]
+                        .as_str()
+                        .is_some_and(|h| h.starts_with("retired by oms tick"))
+            })
+            .filter_map(|row| row["fingerprint"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(
+            resolved_fps,
+            std::collections::BTreeSet::from([
+                "607bd5b10a60755d".to_owned(),
+                "aged_multi".to_owned(),
+            ]),
+            "{ledger_text}"
+        );
     }
 
     #[test]

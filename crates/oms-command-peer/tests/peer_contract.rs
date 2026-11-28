@@ -1620,6 +1620,138 @@ fn council_seat_publication_stops_after_thread_append_failure() {
 }
 
 #[test]
+fn review_read_worktree_mutation_fails_attempt_and_healthy_review_resolves_read_guard() {
+    provider_isolated_with_env(
+        "review_read_worktree_mutation_fails_attempt_and_healthy_review_resolves_read_guard",
+        "override",
+        &[("OMS_PANEL_DISPATCH", "1")],
+        || {
+            let repo = provider_repo();
+            repo.write(
+                ".oms/failures.jsonl",
+                "{\"schema\":2,\"event\":\"fail\",\"ts\":\"2026-11-14T18:48:53Z\",\"agent\":\"antigravity\",\"fingerprint\":\"607bd5b10a60755d\",\"kind\":\"cmd\",\"cmd\":\"peer-review read guard\",\"exit\":2,\"failure_code\":\"read_guard_changed\",\"summary\":\"read guard rejected completed antigravity\"}\n",
+            );
+            let mutating = ProviderProbe {
+                mutate: true,
+                answer: Some(
+                    b"GATE: pass\nCONFIDENCE: 0.9\nEvidence: mutated read worktree.\n".to_vec(),
+                ),
+                ..ProviderProbe::default()
+            };
+            let review_args = args(&[
+                "--providers",
+                "agy",
+                "--model",
+                "fixture",
+                "--gate",
+                "--allow-no-change",
+                "--no-verify",
+                "--prompt",
+                "Check read worktree mutation lifecycle",
+                "--no-task",
+                "--no-memory",
+                "--no-ml-context",
+                "--no-graph-context",
+            ]);
+            let failed_out = oms_command_peer::run_with_executor(
+                "peer-review",
+                &review_args,
+                &repo.0,
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                &STOP,
+                &mutating,
+            );
+            assert_ne!(failed_out.0, 0, "{}", message(&failed_out));
+            let events: Vec<V> = fs::read_to_string(repo.0.join(".oms/lifecycle/events.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| V::parse(line.as_bytes()).unwrap())
+                .collect();
+            let first_attempt = events
+                .iter()
+                .find(|ev| {
+                    ev.get("event_type").text() == Some("attempt.created")
+                        && ev.get("tool").text() == Some("peer-review")
+                })
+                .expect("first peer-review attempt")
+                .get("attempt_id")
+                .text()
+                .unwrap()
+                .to_owned();
+            let first_states: Vec<_> = events
+                .iter()
+                .filter(|ev| {
+                    ev.get("event_type").text() == Some("attempt.state_changed")
+                        && ev.get("attempt_id").text() == Some(first_attempt.as_str())
+                })
+                .map(|ev| ev.get("to_state").text().unwrap().to_owned())
+                .collect();
+            assert_eq!(first_states, ["starting", "working", "failed"]);
+            assert!(
+                !fs::read_to_string(repo.0.join(".oms/failures.jsonl"))
+                    .unwrap()
+                    .contains("\"event\":\"resolved\""),
+                "mutated read-only pass must not resolve peer-review read guard"
+            );
+
+            let healthy = ProviderProbe {
+                mutate: false,
+                answer: Some(
+                    b"GATE: pass\nCONFIDENCE: 0.9\nEvidence: read-only worktree clean.\n".to_vec(),
+                ),
+                ..ProviderProbe::default()
+            };
+            let ok_out = oms_command_peer::run_with_executor(
+                "peer-review",
+                &review_args,
+                &repo.0,
+                Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+                &STOP,
+                &healthy,
+            );
+            assert_eq!(ok_out.0, 0, "{}", message(&ok_out));
+            let events: Vec<V> = fs::read_to_string(repo.0.join(".oms/lifecycle/events.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| V::parse(line.as_bytes()).unwrap())
+                .collect();
+            let second_attempt = events
+                .iter()
+                .rfind(|ev| {
+                    ev.get("event_type").text() == Some("attempt.created")
+                        && ev.get("tool").text() == Some("peer-review")
+                })
+                .expect("second peer-review attempt")
+                .get("attempt_id")
+                .text()
+                .unwrap()
+                .to_owned();
+            assert_ne!(second_attempt, first_attempt);
+            let second_states: Vec<_> = events
+                .iter()
+                .filter(|ev| {
+                    ev.get("event_type").text() == Some("attempt.state_changed")
+                        && ev.get("attempt_id").text() == Some(second_attempt.as_str())
+                })
+                .map(|ev| ev.get("to_state").text().unwrap().to_owned())
+                .collect();
+            assert_eq!(second_states, ["starting", "working", "review", "done"]);
+            let ledger = fs::read_to_string(repo.0.join(".oms/failures.jsonl")).unwrap();
+            assert!(
+                ledger
+                    .lines()
+                    .filter_map(|line| V::parse(line.as_bytes()).ok())
+                    .any(|row| {
+                        row.get("event").text() == Some("resolved")
+                            && row.get("fingerprint").text() == Some("607bd5b10a60755d")
+                    }),
+                "healthy peer-review must resolve legacy peer-review read guard: {ledger}"
+            );
+        },
+    );
+}
+
+#[test]
 fn delegate_research_roles_expose_public_tools_without_file_write_authority() {
     assert_delegate_research_tools(
         "delegate_research_roles_expose_public_tools_without_file_write_authority",

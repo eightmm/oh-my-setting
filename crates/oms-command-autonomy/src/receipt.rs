@@ -202,7 +202,7 @@ pub fn validate(row: &Value) -> Result<()> {
             "allow_floor_change",
             "collaboration",
         ],
-        &["milestones", "issue_requirements", "council"],
+        &["milestones", "issue_requirements", "council", "max_writers"],
     )?;
     if contract.get("council").is_some() {
         require(
@@ -260,6 +260,9 @@ pub fn validate(row: &Value) -> Result<()> {
         "invalid review base/remote binding",
     )?;
     value::integer(&contract["max_cycles"], 1, 10, "max cycles")?;
+    if let Some(writers) = contract.get("max_writers") {
+        value::integer(writers, 1, 16, "max writers")?;
+    }
     value::integer(&contract["initial_tasks"], 1, 12, "initial tasks")?;
     value::integer(&contract["replan_tasks"], 1, 2, "replan tasks")?;
     for field in [
@@ -669,6 +672,9 @@ pub fn continuation_argv(row: &Value) -> Vec<String> {
     put("base", text(contract, "base"));
     put("remote", text(contract, "remote"));
     put("max-cycles", contract["max_cycles"].to_string());
+    if let Some(writers) = contract.get("max_writers") {
+        put("max-writers", writers.to_string());
+    }
     put("initial-tasks", contract["initial_tasks"].to_string());
     put("replan-tasks", contract["replan_tasks"].to_string());
     if let Some(items) = contract["milestones"].as_array() {
@@ -1238,7 +1244,7 @@ fn fresh(ctx: &Context<'_>, args: &Args) -> Result<Value> {
             "shadow"
         },
     )?;
-    let mut row = json!({"schema": 1, "kind": "autopilot-run", "stage": "proposing", "repo": ctx.repo, "spec_sha256": spec.sha256, "providers": {"planner": planner, "worker": worker, "reviewer": reviewer}, "routing": routing, "contract": {"allowed": allowed.join(","), "base": branch, "base_sha": base(ctx, remote, &branch)?, "remote": remote, "max_cycles": args.number("max-cycles", 10, 1, 10)?, "initial_tasks": args.number("initial-tasks", 6, 1, 12)?, "replan_tasks": args.number("replan-tasks", 2, 1, 2)?, "auto_repair": args.flag("auto-repair"), "retry_known": args.flag("retry-known"), "review_mode": review_mode, "draft_pr": args.flag("draft-pr"), "allow_verifier_change": args.flag("allow-verifier-change"), "allow_floor_change": args.text("allow-floor-change")?, "collaboration": args.get("collaboration", "off")?}, "proposal": {"path": "", "sha256": ""}, "branch": format!("oms/autopilot-{}", &spec.sha256[..12]), "owner_id": value::random("owner_")?, "updated": value::now()});
+    let mut row = json!({"schema": 1, "kind": "autopilot-run", "stage": "proposing", "repo": ctx.repo, "spec_sha256": spec.sha256, "providers": {"planner": planner, "worker": worker, "reviewer": reviewer}, "routing": routing, "contract": {"allowed": allowed.join(","), "base": branch, "base_sha": base(ctx, remote, &branch)?, "remote": remote, "max_cycles": args.number("max-cycles", 10, 1, 10)?, "max_writers": args.number("max-writers", 1, 1, 16)?, "initial_tasks": args.number("initial-tasks", 6, 1, 12)?, "replan_tasks": args.number("replan-tasks", 2, 1, 2)?, "auto_repair": args.flag("auto-repair"), "retry_known": args.flag("retry-known"), "review_mode": review_mode, "draft_pr": args.flag("draft-pr"), "allow_verifier_change": args.flag("allow-verifier-change"), "allow_floor_change": args.text("allow-floor-change")?, "collaboration": args.get("collaboration", "off")?}, "proposal": {"path": "", "sha256": ""}, "branch": format!("oms/autopilot-{}", &spec.sha256[..12]), "owner_id": value::random("owner_")?, "updated": value::now()});
     if row["contract"]["collaboration"] == "auto" {
         row["contract"]["council"] = value::from_plan(&council.value())?;
     }
@@ -1263,6 +1269,13 @@ fn fresh(ctx: &Context<'_>, args: &Args) -> Result<Value> {
     Ok(row)
 }
 fn options_match(args: &Args, row: &Value) -> Result<()> {
+    if args.has("max-writers") {
+        require(
+            args.number("max-writers", 1, 1, 16)?
+                == row["contract"]["max_writers"].as_u64().unwrap_or(1),
+            "frozen max-writers differs",
+        )?;
+    }
     if planning::has_council_options(args) {
         let council = planning::retained_council(&row["contract"])?;
         require(
@@ -2818,6 +2831,13 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     drive.set("run-id", &drive_run);
     drive.set("to", value::text(&row["providers"], "worker"));
     drive.set("max-cycles", row["contract"]["max_cycles"].to_string());
+    drive.set(
+        "max-writers",
+        row["contract"]["max_writers"]
+            .as_u64()
+            .unwrap_or(1)
+            .to_string(),
+    );
     drive.set("contract-id", value::text(&row, "owner_id"));
     drive.set("expected-ref", format!("refs/heads/{work_branch}"));
     for (option, field) in [
@@ -4277,6 +4297,33 @@ mod tests {
             &worker_only,
         )
         .unwrap();
+
+        let legacy = sample();
+        let mut concurrency = Args::default();
+        concurrency.set("max-writers", "1");
+        options_match(&concurrency, &legacy).unwrap();
+        concurrency.set("max-writers", "2");
+        assert!(options_match(&concurrency, &legacy).is_err());
+        assert!(
+            !continuation_argv(&legacy)
+                .iter()
+                .any(|arg| arg == "--max-writers")
+        );
+        let mut parallel = legacy.clone();
+        parallel["contract"]["max_writers"] = json!(3);
+        validate(&parallel).unwrap();
+        assert_ne!(contract_digest(&parallel), contract_digest(&legacy));
+        let argv = approved_continuation(&parallel).unwrap();
+        let raw: Vec<_> = argv[2..].iter().map(OsString::from).collect();
+        let mut selected = Args::parse("autopilot", &raw).unwrap();
+        assert_eq!(selected.text("max-writers").unwrap(), "3");
+        options_match(&selected, &parallel).unwrap();
+        selected.set("max-writers", "4");
+        assert!(options_match(&selected, &parallel).is_err());
+        for bad in [json!(0), json!(17), json!(null), json!("3")] {
+            parallel["contract"]["max_writers"] = bad;
+            assert!(validate(&parallel).is_err());
+        }
 
         for bad in [
             json!(null),

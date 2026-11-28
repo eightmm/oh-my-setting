@@ -707,7 +707,8 @@ pub(super) fn enrich(
     let thread_ttl = std::env::var("OMS_THREAD_STALE_TTL")
         .ok()
         .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(86400);
+        .filter(|n| *n >= 0)
+        .unwrap_or(259200);
     let threads_dir = ctx.repo.join(".oms/threads");
     let thread_paths = helpers::shallow_files(ctx, &threads_dir, ".jsonl", 50000)?;
     let canonical_repo = room.and_then(|_| std::fs::canonicalize(&ctx.repo).ok());

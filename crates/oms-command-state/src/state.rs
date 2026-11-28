@@ -386,7 +386,14 @@ fn collect_snapshot(
         .ok()
         .and_then(|(rows, _)| failures::stall_findings(rows).into_iter().next())
         .map(|f| f.get("count").int().unwrap_or(0));
-    let failure = failure_rows.and_then(|(rows, bad)| failures::project(&rows, bad, "", epoch()));
+    let failure = failure_rows.and_then(|(rows, bad)| {
+        let head = if rows.is_empty() {
+            String::new()
+        } else {
+            oms_command_operations::storage::git_head(&ctx.repo)
+        };
+        failures::project(&rows, bad, &head, epoch())
+    });
     let mut failure = collector(failure, ctx.repo.join(".oms/failures.jsonl").exists());
     if let Some(count) = repeat {
         failure.set("recent_repeat", object([("count", number(count))]))?;

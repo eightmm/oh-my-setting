@@ -773,8 +773,174 @@ fn reconcile(ctx: &Context<'_>, args: &Args, wall: ProviderWall) -> Result<()> {
     }
     Ok(())
 }
+pub(crate) fn spent_attempts(ctx: &Context<'_>) -> Result<u64> {
+    Ok(ctx
+        .rows(PROGRESS)?
+        .iter()
+        .filter(|row| {
+            if ctx.owner_id.is_empty() {
+                row["kind"] == "goal-cycle" && row["run_id"] == ctx.run_id
+            } else {
+                row["kind"] == "autopilot-cycle" && row["contract_id"] == ctx.owner_id
+            }
+        })
+        .count() as u64)
+}
+
+fn reserved_cycle(ctx: &Context<'_>, task: &Value) -> Result<Option<u64>> {
+    Ok(ctx
+        .rows(PROGRESS)?
+        .iter()
+        .rev()
+        .find(|row| {
+            let owner = if ctx.owner_id.is_empty() {
+                row["kind"] == "goal-cycle" && row["run_id"] == ctx.run_id
+            } else {
+                row["kind"] == "autopilot-cycle" && row["contract_id"] == ctx.owner_id
+            };
+            owner
+                && row["task_id"] == task["id"]
+                && (value::text(row, "lease_id").is_empty() || row["lease_id"] == task["lease_id"])
+        })
+        .and_then(|row| row["cycle"].as_u64()))
+}
+
+fn task_context<'a>(ctx: &Context<'a>, cycle: u64) -> Result<Context<'a>> {
+    let mut task = Context::new(
+        ctx.repo.clone(),
+        ctx.state.clone(),
+        ctx.services,
+        ctx.interrupted,
+    )?;
+    task.owner_id = ctx.owner_id.clone();
+    task.run_id = ctx.run_id.clone();
+    task.cycle = Some(cycle);
+    task.gates = ctx.gates;
+    task.peer_wall = ctx.peer_wall;
+    Ok(task)
+}
+
+fn check_frozen_task(ctx: &Context<'_>, task: &Value) -> Result<()> {
+    if !ctx.owner_id.is_empty() {
+        return Ok(());
+    }
+    // Read the Plan before the progress ledger; no Plan lock is nested under
+    // the reservation lock. Dispatch/landing still fence the exact task SHA.
+    let plan = ctx.plan_value()?;
+    let rows = ctx.rows(PROGRESS)?;
+    let bound = rows
+        .iter()
+        .find(|row| row["kind"] == "goal-contract" && row["run_id"] == ctx.run_id)
+        .ok_or_else(|| {
+            Error::new(
+                2,
+                "standalone goal reservation requires its frozen run contract",
+            )
+        })?;
+    let contract = &bound["contract"];
+    require(
+        contract["plan_id"] == plan["plan_id"]
+            && contract["work_ref"] == ctx.git(&["symbolic-ref", "--quiet", "HEAD"])?
+            && contract["accept_sha256"] == value::hash(value::text(&plan, "accept"))
+            && contract["tasks"][value::text(task, "id")]
+                == json!({"contract":adaptive::worker_contract(task)?,"resources":task["resources"]}),
+        "frozen goal run task or Plan changed before admission",
+    )
+}
+
+/// A reservation survives interruption, including a claim that never reached
+/// the provider. Serial and parallel dispatch share the original lifetime cap.
+pub(crate) fn reserve_attempt(
+    ctx: &Context<'_>,
+    task: &Value,
+    max: u64,
+    facts: &Value,
+    tranche: &Value,
+) -> Result<Option<u64>> {
+    check_frozen_task(ctx, task)?;
+    let _lock = ctx.lock(PROGRESS)?;
+    let spent = spent_attempts(ctx)?;
+    if spent >= max {
+        return Ok(None);
+    }
+    let cycle = spent + 1;
+    let mut row = json!({"schema":1,"kind":if ctx.owner_id.is_empty() {"goal-cycle"} else {"autopilot-cycle"},
+        "ts":value::now(),"contract_id":ctx.owner_id,"run_id":ctx.run_id,"cycle":cycle,
+        "task_id":task["id"],"lease_id":value::text(task,"lease_id")});
+    if !tranche.is_null() {
+        row["proposal_sha256"] = tranche["proposal_sha256"].clone();
+        row["retry_sha256"] = tranche["retry_sha256"].clone();
+    }
+    row.as_object_mut().unwrap().extend(
+        facts
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
+    ctx.append(PROGRESS, &row)?;
+    Ok(Some(cycle))
+}
+
+fn bind_run(
+    ctx: &Context<'_>,
+    args: &Args,
+    run: &str,
+    max: u64,
+    writers: u64,
+    wall: ProviderWall,
+) -> Result<()> {
+    let plan = ctx.plan_value()?;
+    let tasks = plan["tasks"]
+        .as_object()
+        .ok_or_else(|| Error::new(2, "plan tasks missing"))?;
+    let contracts = tasks
+        .iter()
+        .map(|(id, task)| {
+            Ok((
+                id.clone(),
+                json!({"contract":adaptive::worker_contract(task)?,"resources":task["resources"]}),
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let wall = match wall {
+        ProviderWall::Unpinned => json!({"mode":"unpinned"}),
+        ProviderWall::Deadline(duration) => json!({"mode":"deadline","seconds":duration.as_secs()}),
+        ProviderWall::Pinned(duration) => json!({"mode":"pinned","seconds":duration.as_secs()}),
+    };
+    let contract = json!({"plan_id":plan["plan_id"],"tasks":contracts,"accept_sha256":value::hash(value::text(&plan,"accept")),
+        "work_ref":ctx.git(&["symbolic-ref","--quiet","HEAD"])?,"max_cycles":max,"max_writers":writers,
+        "provider":ctx.services.normalize_provider(args.get("to","codex")?)?,
+        "model":args.text("model")?,"fallback_model":args.text("fallback-model")?,
+        "reasoning_effort":args.get("reasoning-effort","auto")?,"provider_wall":wall,
+        "auto_repair":args.flag("auto-repair"),"retry_known":args.flag("retry-known"),
+        "allow_verifier_change":args.flag("allow-verifier-change"),"allow_floor_change":args.text("allow-floor-change")?});
+    let _lock = ctx.lock(PROGRESS)?;
+    let rows = ctx.rows(PROGRESS)?;
+    if let Some(bound) = rows
+        .iter()
+        .find(|r| r["kind"] == "goal-contract" && r["run_id"] == run)
+    {
+        return require(
+            bound["contract"] == contract,
+            "frozen goal run differs; reconcile its work before starting another run",
+        );
+    }
+    require(
+        !rows
+            .iter()
+            .any(|r| r["kind"] == "goal-cycle" && r["run_id"] == run),
+        "legacy goal run has no frozen budget contract; reconcile it before selecting a new run id",
+    )?;
+    ctx.append(PROGRESS, &json!({"schema":1,"kind":"goal-contract","run_id":run,"contract":contract,"ts":value::now()}))
+}
+
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     if args.has("campaign") {
+        require(
+            !args.has("max-writers"),
+            "campaign concurrency is frozen in its manifest, not --max-writers",
+        )?;
         return crate::campaign::execute(ctx, args);
     }
     require(
@@ -783,6 +949,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     )?;
     ctx.parent()?;
     let max = args.number("max-cycles", 3, 1, 10)?;
+    let writers = args.number("max-writers", 1, 1, 16)?;
     let run = if args.has("run-id") {
         args.required("run-id")?.to_owned()
     } else {
@@ -801,6 +968,10 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             "contract id, stage or lifetime cycle cap differs from live receipt",
         )?;
         require(
+            row["contract"]["max_writers"].as_u64().unwrap_or(1) == writers,
+            "concurrency differs from the live frozen receipt",
+        )?;
+        require(
             args.text("expected-ref")? == format!("refs/heads/{}", value::text(&row, "branch")),
             "autopilot goal-drive requires the frozen full work ref",
         )?;
@@ -811,6 +982,11 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             || expected_ref.starts_with("refs/heads/") && !expected_ref.contains(".."),
         "expected ref must be a full work branch ref",
     )?;
+    let expected_ref = if expected_ref.is_empty() {
+        ctx.git(&["symbolic-ref", "--quiet", "HEAD"])?
+    } else {
+        expected_ref.to_owned()
+    };
     verify::model(args.text("model")?)?;
     verify::model(args.text("fallback-model")?)?;
     verify::effort(args.get("reasoning-effort", "auto")?)?;
@@ -819,7 +995,10 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         verify::reason(args.required("allow-floor-change")?)?;
     }
     let _drive_lock = ctx.lock(".oms/plan/goal-drive")?;
-    guard(ctx, expected_ref)?;
+    guard(ctx, &expected_ref)?;
+    if owner.is_empty() && !args.has("commit-task") {
+        bind_run(ctx, args, &run, max, writers, wall)?;
+    }
     if let Err(error) = reconcile(ctx, args, wall) {
         return terminal(
             ctx,
@@ -892,7 +1071,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     )?;
     let mut previous: Option<Progress> = None;
     let mut output = Output::default();
-    let mut attempts = 0;
+    let mut dispatch_failed = false;
     for cycle in 1u64.. {
         let mut cycle_context = Context::new(
             ctx.repo.clone(),
@@ -906,7 +1085,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         cycle_context.peer_wall = Some(wall);
         let ctx = &cycle_context;
         checkpoint(ctx.interrupted)?;
-        guard(ctx, expected_ref)?;
+        guard(ctx, &expected_ref)?;
         let plan = ctx.plan_value()?;
         if value::text(&plan, "accept") != accept {
             return terminal(
@@ -941,13 +1120,22 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             stdout: acceptance.stdout,
             stderr: acceptance.stderr,
         });
-        guard(ctx, expected_ref)?;
+        guard(ctx, &expected_ref)?;
         let tranche = adaptive::tranche(ctx)?;
+        let pending = plan["tasks"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|task| !["done", "cancelled"].contains(&value::text(task, "state")));
+        let has_review = plan["tasks"]
+            .as_object()
+            .unwrap()
+            .values()
+            .any(|task| task["state"] == "review");
+        if dispatch_failed && !has_review {
+            return terminal(ctx, &run, cycle, "park", "task-failed", output);
+        }
         if accept_code == 0 && tranche["pending"] != true {
-            let pending = plan["tasks"].as_object().is_some_and(|t| {
-                t.values()
-                    .any(|t| !["done", "cancelled"].contains(&value::text(t, "state")))
-            });
             let failed_before = ctx.rows(PROGRESS)?.iter().any(|r| {
                 value::text(r, "kind") == "acceptance"
                     && value::text(r, "status") == "fail"
@@ -962,8 +1150,10 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             if cycle == 1 && pending && !failed_before {
                 return terminal(ctx, &run, cycle, "park", "acceptance-vacuous", output);
             }
-            output.code = 0;
-            return terminal(ctx, &run, cycle, "done", "acceptance-pass", output);
+            if !pending {
+                output.code = 0;
+                return terminal(ctx, &run, cycle, "done", "acceptance-pass", output);
+            }
         }
         if accept_code != 3 && accept_code != 0 {
             return terminal(ctx, &run, cycle, "park", "acceptance-command-error", output);
@@ -1010,36 +1200,67 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         let mut current = current;
         current.stalled = facts["stalled_cycles"].as_u64().unwrap_or(0);
         previous = Some(current.clone());
-        let pending = plan["tasks"]
+        let mut pending = plan["tasks"]
             .as_object()
             .unwrap()
             .values()
             .filter(|t| value::text(t, "state") == "review")
             .collect::<Vec<_>>();
-        if pending.len() > 1 {
-            return terminal(ctx, &run, cycle, "park", "multiple-reviewed-tasks", output);
-        }
+        pending.sort_by_key(|task| value::text(task, "id"));
         let reference = ctx.git(&["symbolic-ref", "--quiet", "HEAD"])?;
         let id = if let Some(task) = pending.first() {
             value::text(task, "id").to_owned()
         } else {
-            let rows = ctx.rows(PROGRESS)?;
-            let spent = if owner.is_empty() {
-                attempts
-            } else {
-                rows.iter()
-                    .filter(|r| {
-                        value::text(r, "kind") == "autopilot-cycle"
-                            && value::text(r, "contract_id") == owner
-                    })
-                    .count() as u64
-            };
+            let spent = spent_attempts(ctx)?;
             if spent >= max {
                 return terminal(ctx, &run, cycle, "park", "cycles-exhausted", output);
             }
             let _ = ctx.action(&Request::new(Action::Reclaim));
+            if writers > 1 && tranche["retry_task_id"].is_null() {
+                let mut batch = Args::default();
+                batch.set("to", args.get("to", "codex")?);
+                batch.set("max-writers", writers.to_string());
+                for key in ["model", "fallback-model", "reasoning-effort"] {
+                    if args.has(key) {
+                        batch.set(key, args.values[key].clone());
+                    }
+                }
+                if args.flag("retry-known") {
+                    batch.flags.insert("retry-known".into());
+                }
+                match crate::parallel::execute_goal(ctx, &batch, max, &facts, &tranche) {
+                    Ok(out) => {
+                        dispatch_failed = out.code != 0;
+                        if dispatch_failed {
+                            adaptive::record_failure(
+                                ctx,
+                                "worker",
+                                &format!(
+                                    "{}{}",
+                                    String::from_utf8_lossy(&out.stdout),
+                                    String::from_utf8_lossy(&out.stderr)
+                                ),
+                                out.code,
+                            )?;
+                        }
+                        output.append(out);
+                        continue;
+                    }
+                    Err(error) => {
+                        output
+                            .stderr
+                            .extend_from_slice(format!("{}\n", error.message).as_bytes());
+                        let reason = if error.message.contains("no actionable task") {
+                            adaptive::selection_reason(ctx)?
+                        } else {
+                            "task-failed"
+                        };
+                        return terminal(ctx, &run, cycle, "park", reason, output);
+                    }
+                }
+            }
             let selected = if let Some(id) = tranche["retry_task_id"].as_str() {
-                let task = ctx.plan_value()?["tasks"][id].clone();
+                let task = task(ctx, id)?;
                 require(task["state"] == "ready", "retry task is no longer ready")?;
                 task
             } else {
@@ -1068,22 +1289,16 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             };
             let selected_id = value::text(&selected, "id");
             require(value::id(selected_id, 160), "next task has invalid id")?;
-            let mut reservation = json!({"schema": 1, "kind": if owner.is_empty() { "goal-cycle" } else { "autopilot-cycle" }, "ts": value::now(), "contract_id": owner, "run_id": run, "cycle": cycle, "task_id": selected_id, "lease_id": ""});
-            if !tranche.is_null() {
-                reservation["proposal_sha256"] = tranche["proposal_sha256"].clone();
-                reservation["retry_sha256"] = tranche["retry_sha256"].clone();
-            }
-            reservation
-                .as_object_mut()
-                .unwrap()
-                .extend(facts.as_object().unwrap().clone());
-            {
-                let _lock = ctx.lock(PROGRESS)?;
-                ctx.append(PROGRESS, &reservation)?;
-            }
-            attempts += 1;
+            let reserved =
+                reserve_attempt(ctx, &selected, max, &facts, &tranche)?.ok_or_else(|| {
+                    Error::new(3, "goal lifetime cycle budget exhausted before dispatch")
+                })?;
             let mut run_args = Args::default();
             run_args.set("id", selected_id);
+            run_args.set(
+                "expected-task-sha256",
+                value::text(&selected, "task_sha256"),
+            );
             run_args.set("to", args.get("to", "codex")?);
             for key in ["model", "fallback-model", "reasoning-effort"] {
                 if args.has(key) {
@@ -1105,7 +1320,8 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             if args.flag("retry-known") {
                 run_args.flags.insert("retry-known".into());
             }
-            let result = crate::runner::execute(ctx, &run_args);
+            let dispatch = task_context(ctx, reserved)?;
+            let result = crate::runner::execute(&dispatch, &run_args);
             match result {
                 Ok(out) if out.code == 0 => {
                     output.append(out);
@@ -1150,11 +1366,24 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                 .values()
                 .filter(|t| value::text(t, "state") == "review")
                 .collect::<Vec<_>>();
-            if reviews.len() != 1 {
+            let review = reviews
+                .iter()
+                .find(|task| value::text(task, "id") == selected_id);
+            if review.is_none() {
                 return terminal(ctx, &run, cycle, "park", "invalid-review-receipt", output);
             }
-            value::text(reviews[0], "id").to_owned()
+            selected_id.to_owned()
         };
+        let selected = task(ctx, &id)?;
+        if let Err(error) = check_frozen_task(ctx, &selected) {
+            output
+                .stderr
+                .extend_from_slice(format!("{}\n", error.message).as_bytes());
+            return terminal(ctx, &run, cycle, "park", "task-contract-changed", output);
+        }
+        let cycle = reserved_cycle(ctx, &selected)?.unwrap_or(cycle);
+        let landing = task_context(ctx, cycle)?;
+        let ctx = &landing;
         if ctx.git(&["rev-parse", "HEAD"])? != current.head
             || ctx.git(&["symbolic-ref", "--quiet", "HEAD"])? != reference
         {
