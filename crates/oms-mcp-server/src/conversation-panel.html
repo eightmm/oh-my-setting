@@ -2416,6 +2416,7 @@ function currentInspection(s,ticket=s?.ticket){
 const inspectedNumber=v=>typeof v==='number' && Number.isFinite(v) && v>=0?v.toLocaleString(lang==='ko'?'ko-KR':'en-US'):t('statusUnknown');
 const inspectedValue=v=>typeof v==='boolean'?choice(v?'예':'아니요',v?'Yes':'No'):typeof v==='number'?inspectedNumber(v):displayText(v,1024)||t('statusUnknown');
 const inspectedPercent=v=>typeof v==='number' && Number.isFinite(v) && v>=0 && v<=100?inspectedNumber(v)+'%':t('statusUnknown');
+const inspectedUsd=v=>typeof v==='number' && Number.isFinite(v) && v>=0?(v/1000000).toLocaleString(lang==='ko'?'ko-KR':'en-US',{maximumFractionDigits:6}):t('statusUnknown');
 function inspectedDate(v){
   try{const d=new Date(typeof v==='number'?v*1000:typeof v==='string'?v:NaN);return Number.isFinite(d.getTime())?d.toLocaleString(lang==='ko'?'ko-KR':'en-US'):t('statusUnknown');}
   catch{return t('statusUnknown');}
@@ -2425,9 +2426,10 @@ const inspectLabels={
   status:['상태','Status'],requestedModel:['요청 모델','Requested model'],requestedEffort:['요청 추론 강도','Requested effort'],
   inFlight:['실행 중','In flight'],recentAttempts:['최근 시도','Recent attempts'],probeAge:['근거 경과(초)','Evidence age (seconds)'],issue:['확인할 항목','Issue'],
   efforts:['모델별 추론 강도','Model-specific efforts'],providerEfforts:['공급자 단위 강도','Provider-wide efforts'],routable:['라우팅 후보','Routing candidate'],
-  source:['출처','Source'],probe:['캐시 상태','Cache status'],age:['캐시 경과(초)','Cache age (seconds)'],
+  source:['출처','Source'],probe:['캐시 상태','Cache status'],age:['캐시 경과(초)','Cache age (seconds)'],observedAge:['관측 경과','Observed age'],
   contextUsed:['관측된 문맥 사용률','Observed context used'],cacheReadShare:['캐시 읽기 비율','Cache read share'],calls:['보고된 호출 수','Reported calls'],
-  tokens:['보고된 토큰','Reported tokens'],cost:['보고된 비용(USD)','Reported cost (USD)'],used:['사용률','Used'],stale:['오래된 관측','Stale observation'],
+  tokens:['보고된 토큰','Reported tokens'],tokenReports:['토큰 보고 호출','Token-reported calls'],cost:['보고된 비용(USD)','Reported cost (USD)'],
+  estimatedCost:['추정 비용(USD)','Estimated cost (USD)'],left:['남은 비율','Left'],used:['사용률','Used'],stale:['오래된 관측','Stale observation'],
   resets:['초기화 시각','Resets at'],input:['입력 토큰','Input tokens'],output:['출력 토큰','Output tokens'],cacheRead:['캐시 읽기 토큰','Cache read tokens']
 };
 function inspectCard(title,fields){
@@ -2439,7 +2441,8 @@ function inspectCard(title,fields){
 }
 function inspectUsage(data){
   if(data?.scope!=='repository-recent-attempts' || !Array.isArray(data.providers) || data.providers.length>4 ||
-    !Array.isArray(data.attempts) || data.attempts.length>16)throw uiError('inspect.failed');
+    !Array.isArray(data.attempts) || data.attempts.length>16 ||
+    (data.providerTotals!=null && (!Array.isArray(data.providerTotals) || data.providerTotals.length>32)))throw uiError('inspect.failed');
   const content=el('inspect-content');let partial=Number(data.attemptsOmitted)>0 || Number(data.providerTotalsOmitted)>0;
   for(const p of data.providers){
     if(!p || !displayText(p.provider,64) || !Array.isArray(p.windows) || p.windows.length>8)throw uiError('inspect.failed');
@@ -2449,17 +2452,25 @@ function inspectUsage(data){
       [['calls',p.recent7d.calls],['input',p.recent7d.input],['output',p.recent7d.output],['cacheRead',p.recent7d.cacheRead]]));
     for(const w of p.windows){
       if(!w || !displayText(w.name,160))throw uiError('inspect.failed');
-      content.append(inspectCard(()=>providerName(p.provider)+' · '+w.name,[['used',()=>inspectedPercent(w.used)],['stale',w.stale],
-        ['source',w.source],['age',w.age_seconds],['resets',()=>inspectedDate(w.resets_at)]]));
+      content.append(inspectCard(()=>providerName(p.provider)+' · '+w.name,[['left',()=>pct(w.used)?inspectedPercent(Math.round(100-w.used)):t('statusUnknown')],
+        ['used',()=>inspectedPercent(w.used)],['stale',w.stale],['source',w.source],['observedAge',()=>ago(w.age_seconds)||t('statusUnknown')],
+        ['resets',()=>inspectedDate(w.resets_at)]]));
     }
     partial ||= Number(p.windowsOmitted)>0;
+  }
+  for(const pt of (data.providerTotals||[])){
+    if(!pt || !displayText(pt.provider,64))throw uiError('inspect.failed');
+    const fields=[['calls',pt.calls],['tokens',pt.tokens],['tokenReports',pt.tokenReports]];
+    if(pt.reportedCostMicrousd!=null)fields.push(['cost',()=>inspectedUsd(pt.reportedCostMicrousd)]);
+    if(pt.estimatedCostMicrousd!=null)fields.push(['estimatedCost',()=>inspectedUsd(pt.estimatedCostMicrousd)]);
+    content.append(inspectCard(()=>providerName(pt.provider)+' · '+choice('누적 사용량','repository totals'),fields));
   }
   for(const a of data.attempts){
     if(!a || !displayText(a.id,160))throw uiError('inspect.failed');
     content.append(inspectCard(()=>providerName(a.provider)+' · '+a.id,[['tokens',a.tokens],['source',()=>a.source==='receipt'?choice('사용량 receipt','Usage receipt'):a.source==='events'?choice('기록된 event','Recorded event'):t('statusUnknown')],
-      ['calls',a.reportedCalls],['cost',()=>typeof a.costMicrousd==='number' && Number.isFinite(a.costMicrousd) && a.costMicrousd>=0?(a.costMicrousd/1000000).toLocaleString(lang==='ko'?'ko-KR':'en-US',{maximumFractionDigits:6}):t('statusUnknown')]]));
+      ['calls',a.reportedCalls],['cost',()=>inspectedUsd(a.costMicrousd)]]));
   }
-  return {count:data.providers.length+data.attempts.length,partial};
+  return {count:data.providers.length+(data.providerTotals?.length||0)+data.attempts.length,partial};
 }
 function inspectTable(data,kind,page){
   if(data?.view!==kind || data.page!==page || !['ready','unavailable'].includes(data.status) || !Array.isArray(data.rows) ||
