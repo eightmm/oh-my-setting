@@ -7506,6 +7506,23 @@ fn project_panels_codex_lifecycle_parity() {
             "antigravity",
             "--project",
             "alpha-service",
+            "--dry-run",
+        ],
+        false,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("cannot rewrite .agents/mcp_config.json"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "antigravity",
+            "--project",
+            "alpha-service",
         ],
         false,
         &[],

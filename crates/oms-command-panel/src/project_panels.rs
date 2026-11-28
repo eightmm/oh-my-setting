@@ -4407,6 +4407,10 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                             spec.rel_path,
                         )?;
                     }
+                    // Read-only: a dry run refuses whatever the real rewrite would refuse.
+                    if matches!(app, PanelApp::Antigravity) {
+                        inspect_antigravity_config_for_uninstall(&row.path, &row)?;
+                    }
                     if let GitConfigState::Tracked =
                         inspect_git_project_config(&row.path, spec.rel_path, stop)?
                     {
