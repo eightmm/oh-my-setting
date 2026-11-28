@@ -455,10 +455,13 @@ The all-projects view (`oms_open_home` and `oms_list_projects`) reads every
 registered project in the catalog, and read tools can inspect any configured
 alias, while actions happen only in the project's own conversation. On a
 `catalog` binding, write tools (`oms_start_main`, `oms_decide_approval`,
-`oms_assign_provider`, Lead conversation controls, and reviewed issue or
-Lead-context actions) run only when the calling conversation has a matched Room
-session for the same alias it targets; otherwise OMS refuses the write and
-directs you to open the panel in that project's conversation.
+`oms_assign_provider`, Room-bound Lead conversation controls, and reviewed
+issue or Lead-context actions) run only when the calling conversation has a
+matched Room session for the same alias it targets; otherwise OMS refuses the
+write and directs you to open the panel in that project's conversation. A
+project Lead conversation without a `room` stays available there: its messages
+run as read-only `ask` consultations (they spend provider quota but change no
+files), and its settings choose only that Lead's model and effort.
 
 Keep access to that map and SSH account restricted to the intended operators.
 Refresh OMS after changing the map to see the current choices. Each call on a
