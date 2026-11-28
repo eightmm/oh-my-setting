@@ -2703,6 +2703,42 @@ impl<'a> Plan<'a> {
             row.text("old_decision_artifact")
         )))
     }
+    fn open_commit_intent(&self, id: &str, lease: &str) -> Result<bool> {
+        let mut latest = BTreeMap::new();
+        let mut anonymous = Vec::new();
+        for row in self.store.rows(".oms/plan/progress.jsonl", true)? {
+            if row.text("kind") != "commit-intent" {
+                continue;
+            }
+            let intent_id = row.text("intent_id");
+            if intent_id.is_empty() {
+                anonymous.push(row);
+            } else {
+                latest.insert(intent_id.to_owned(), row);
+            }
+        }
+        Ok(latest
+            .into_values()
+            .chain(anonymous)
+            .filter(|r| !["committed", "abandoned"].contains(&r.text("phase")))
+            .any(|r| {
+                r.text("task_id") == id
+                    && (r.text("lease_id").is_empty() || r.text("lease_id") == lease)
+            }))
+    }
+    fn running_marker_veto(markers: &[Value], id: &str, lease: &str) -> bool {
+        markers.iter().any(|m| {
+            let same_task = m.text("task_id") == id;
+            let same_lease = m.text("lease_id") == lease;
+            (m.text("task_id").is_empty()
+                && m.text("lease_id").is_empty()
+                && (!marker_typed(m) || (m.text("access") != "read" && marker_alive(m))))
+                || (same_task
+                    && m.text("lease_id").is_empty()
+                    && (!marker_typed(m) || marker_alive(m)))
+                || (same_task && same_lease && (!marker_typed(m) || marker_alive(m)))
+        })
+    }
     fn recover_owner(&self, req: &Request, s: &mut Snapshot) -> Result<Response> {
         let owner = if req.has("owner-id") {
             req.value("owner-id")?
@@ -2739,10 +2775,13 @@ impl<'a> Plan<'a> {
                 .iter()
                 .filter(|m| m.text("autopilot_owner_id") == owner)
                 .count();
+            let preserve_running = state == "running"
+                && (self.open_commit_intent(&id, lease)?
+                    || Self::running_marker_veto(&markers, &id, lease));
             if lease.is_empty()
                 || matching.iter().any(|m| !marker_typed(m) || marker_alive(m))
                 || (!matching.is_empty() && owned != matching.len())
-                || state == "running" && owned == 0
+                || preserve_running
             {
                 preserved.push(id);
                 continue;
@@ -2812,11 +2851,17 @@ impl<'a> Plan<'a> {
                 continue;
             }
             if state != "review" {
-                let veto = self.markers(s)?.iter().any(|m| {
-                    m.text("task_id") == t.text("id")
-                        && m.text("lease_id") == t.text("lease_id")
-                        && (!marker_typed(m) || marker_alive(m))
-                });
+                let markers = self.markers(s)?;
+                let veto = if state == "running" {
+                    Self::running_marker_veto(markers, t.text("id"), t.text("lease_id"))
+                        || self.open_commit_intent(t.text("id"), t.text("lease_id"))?
+                } else {
+                    markers.iter().any(|m| {
+                        m.text("task_id") == t.text("id")
+                            && m.text("lease_id") == t.text("lease_id")
+                            && (!marker_typed(m) || marker_alive(m))
+                    })
+                };
                 if veto {
                     continue;
                 }

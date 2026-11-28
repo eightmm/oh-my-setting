@@ -1,10 +1,12 @@
 //! One authorized plan task, with an exact lease and one durable landing repair.
 use crate::cli::Args;
 use crate::planning::{ProviderWall, invoke, invoke_provider, strings};
-use crate::storage::{Context, MAX_FILE, PROGRESS};
+use crate::storage::{Context, MAX_FILE, MAX_LEDGER, PROGRESS};
 use crate::{Error, Output, Result, require, value, verify};
 use oms_command_plan::{Action, Request};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
 
 const FEEDBACK_REPAIRS: &str = ".oms/feedback/repairs.jsonl";
@@ -246,6 +248,7 @@ fn repair_feedback(
     }
     let repair_task = show(ctx, id)?;
     feedback_task(&repair_task, task, "claimed", 1)?;
+    let operation = value::random("op_")?;
     let (mut out, reviewed) = match delegate(
         ctx,
         args,
@@ -255,6 +258,7 @@ fn repair_feedback(
         absolute.to_str(),
         head,
         wall,
+        &operation,
     ) {
         Ok(out) => out,
         Err(error) => {
@@ -414,6 +418,7 @@ fn delegate(
     artifact: Option<&str>,
     head: &str,
     wall: ProviderWall,
+    operation: &str,
 ) -> Result<(Output, Option<Value>)> {
     if let Some(excerpt) = context_pack(ctx, args)? {
         excerpt.check_task(
@@ -476,7 +481,7 @@ fn delegate(
             "--terminalize-resumed-repair".into(),
         ]);
     }
-    let operation = value::random("op_")?;
+    let operation = operation.to_owned();
     let mut dispatch = Value::Null;
     if !ctx.owner_id.is_empty() {
         dispatch = json!({"schema":1,"kind":"autopilot-worker-call","phase":"intent","owner_id":ctx.owner_id,"run_id":ctx.run_id,
@@ -681,7 +686,7 @@ pub(crate) fn execute_bound(
     };
     let provider = ctx.services.normalize_provider(args.required("to")?)?;
     if pinned.is_none() && !args.flag("dry-run") {
-        let _ = ctx.action(&Request::new(Action::Reclaim));
+        recover_orphaned_running_leases(ctx, false);
     }
     let base = ctx.git(&["rev-parse", "HEAD"])?;
     let mut claimed = false;
@@ -887,6 +892,7 @@ pub(crate) fn run_task(
                 None
             };
             let late_before = ctx.rows(LATE_RESULTS).map(|rows| rows.len()).unwrap_or(0);
+            let operation = value::random("op_")?;
             let (delegated, reviewed) = match delegate(
                 ctx,
                 args,
@@ -896,6 +902,7 @@ pub(crate) fn run_task(
                 review_artifact,
                 base,
                 wall,
+                &operation,
             ) {
                 Ok(pair) => pair,
                 Err(mut error) => {
@@ -913,6 +920,8 @@ pub(crate) fn run_task(
                             !error.message.contains("late result preserved"),
                         );
                         error.message = format!("{}\n{}", error.message, note.trim_end());
+                    } else if !resume && claimed {
+                        recover_running_lease(ctx, &id, &lease, None);
                     }
                     return Err(error);
                 }
@@ -939,6 +948,8 @@ pub(crate) fn run_task(
                 }
                 if resume {
                     terminalize_repair(ctx, &id, &lease)?;
+                } else if claimed {
+                    recover_running_lease(ctx, &id, &lease, Some(&operation));
                 }
                 let _ = invoke(
                     ctx,
@@ -1017,6 +1028,7 @@ pub(crate) fn run_task(
                         && repair_task["repair_count"].as_u64() == Some(1),
                     "bounded repair no longer owns its original lease",
                 )?;
+                let repair_op = value::random("op_")?;
                 let (repaired, reviewed) = delegate(
                     ctx,
                     args,
@@ -1026,6 +1038,7 @@ pub(crate) fn run_task(
                     absolute.to_str(),
                     &land_base,
                     wall,
+                    &repair_op,
                 )?;
                 let repair_code = repaired.code;
                 output.append(repaired);
@@ -1102,6 +1115,278 @@ pub(crate) fn release_unstarted(
             .with("expected-task-sha256", issued_sha),
     )
     .is_ok_and(|out| out.code == 0)
+}
+
+fn marker_valid_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+fn marker_typed(m: &Value) -> bool {
+    let schema = m.get("schema").and_then(Value::as_i64).unwrap_or(-1);
+    let pid = m.get("pid").and_then(Value::as_i64).unwrap_or(0);
+    (1..=4).contains(&schema)
+        && marker_valid_id(value::text(m, "id"))
+        && !matches!(value::text(m, "id"), "." | "..")
+        && (1..=0x7fff_ffff).contains(&pid)
+        && (schema != 4 || m.get("native_pid").is_some())
+        && m.get("native_pid")
+            .is_none_or(|v| v.as_i64().is_some_and(|n| (1..=0xffff_ffff).contains(&n)))
+        && ["task_id", "lease_id", "executor_id"].iter().all(|k| {
+            m.get(*k).is_none_or(|v| {
+                v.as_str()
+                    .is_some_and(|s| s.is_empty() || marker_valid_id(s))
+            })
+        })
+        && !matches!(value::text(m, "executor_id"), "." | "..")
+        && m.get("access")
+            .is_none_or(|v| matches!(v.as_str(), Some("read" | "write")))
+        && m.get("autopilot_owner_id").is_none_or(|v| {
+            v.as_str().is_some_and(|s| {
+                s.is_empty()
+                    || s.strip_prefix("owner_").is_some_and(|hex| {
+                        hex.len() == 32
+                            && hex
+                                .bytes()
+                                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                    })
+            })
+        })
+}
+
+fn marker_alive(m: &Value) -> bool {
+    let Some(pid) = m
+        .get("pid")
+        .and_then(Value::as_i64)
+        .and_then(|n| i32::try_from(n).ok())
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return true;
+    };
+    match rustix::process::test_kill_process(pid) {
+        Ok(()) => true,
+        Err(rustix::io::Errno::SRCH) => false,
+        Err(_) => true,
+    }
+}
+
+fn has_open_commit_intent(ctx: &Context<'_>, id: &str, lease: &str) -> Result<bool> {
+    let mut latest = BTreeMap::new();
+    let mut anonymous = Vec::new();
+    for row in ctx.rows(PROGRESS)? {
+        if value::text(&row, "kind") != "commit-intent" {
+            continue;
+        }
+        let intent_id = value::text(&row, "intent_id");
+        if intent_id.is_empty() {
+            anonymous.push(row);
+        } else {
+            latest.insert(intent_id.to_owned(), row);
+        }
+    }
+    Ok(latest
+        .into_values()
+        .chain(anonymous)
+        .filter(|r| !["committed", "abandoned"].contains(&value::text(r, "phase")))
+        .any(|r| {
+            value::text(&r, "task_id") == id
+                && (value::text(&r, "lease_id").is_empty() || value::text(&r, "lease_id") == lease)
+        }))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MarkerCustody {
+    Blocked,
+    ConfirmedDead,
+    Absent,
+}
+
+fn inspect_delegation_markers(ctx: &Context<'_>, id: &str, lease: &str) -> Result<MarkerCustody> {
+    let names = ctx.store.names(".oms/delegations", 4096, true)?;
+    let mut matched = false;
+    for name in names {
+        if !name.as_encoded_bytes().ends_with(b".json") {
+            continue;
+        }
+        let raw = ctx
+            .store
+            .read(Path::new(".oms/delegations").join(name), 64 * 1024)?;
+        let marker = value::parse(&raw)?;
+        require(marker.is_object(), "delegation marker is not an object")?;
+        let m_task = value::text(&marker, "task_id");
+        let m_lease = value::text(&marker, "lease_id");
+        let unattributed_live_or_untyped = m_task.is_empty()
+            && m_lease.is_empty()
+            && (!marker_typed(&marker)
+                || (value::text(&marker, "access") != "read" && marker_alive(&marker)));
+        let task_live_or_untyped = m_task == id
+            && (m_lease.is_empty() || m_lease == lease)
+            && (!marker_typed(&marker) || marker_alive(&marker));
+        if unattributed_live_or_untyped || task_live_or_untyped {
+            return Ok(MarkerCustody::Blocked);
+        }
+        if m_task == id && m_lease == lease {
+            matched = true;
+        }
+    }
+    Ok(if matched {
+        MarkerCustody::ConfirmedDead
+    } else {
+        MarkerCustody::Absent
+    })
+}
+
+fn operation_cleanup_complete(ctx: &Context<'_>, id: &str, op: &str) -> Result<bool> {
+    if op.is_empty() {
+        return Ok(false);
+    }
+    let intents = oms_command_telemetry::store::physical::load(&ctx.state, ctx.interrupted)
+        .map_err(|e| Error::new(2, e.to_string()))?;
+    let usage = oms_command_telemetry::store::usage::load(&ctx.state)
+        .map_err(|e| Error::new(2, e.to_string()))?;
+    let intents = intents
+        .iter()
+        .filter(|i| i.identity.operation_id == op)
+        .collect::<Vec<_>>();
+    let calls = usage
+        .calls
+        .iter()
+        .filter(|c| c.receipt.identity.operation_id == op)
+        .collect::<Vec<_>>();
+    if intents.is_empty() || intents.len() > 64 || intents.len() != calls.len() {
+        return Ok(false);
+    }
+    Ok(intents.iter().all(|intent| {
+        calls
+            .iter()
+            .find(|c| c.receipt.identity == intent.identity)
+            .is_some_and(|usage| {
+                let receipt = &usage.receipt;
+                !usage.conflict
+                    && intent.phase == oms_command_telemetry::store::physical::Phase::Ready
+                    && intent.usage_ordinal == Some(receipt.ordinal)
+                    && receipt.cleanup_complete == Some(true)
+                    && !matches!(
+                        receipt.phase,
+                        oms_command_telemetry::store::usage::Phase::Pending
+                            | oms_command_telemetry::store::usage::Phase::Partial
+                    )
+                    && receipt.identity.task_id.as_deref() == Some(id)
+            })
+    }))
+}
+
+fn delegate_failure_recorded(ctx: &Context<'_>, id: &str, lease: &str, op: &str) -> Result<bool> {
+    let raw = ctx
+        .source
+        .optional(".oms/artifacts/index.jsonl", MAX_LEDGER)?
+        .unwrap_or_default();
+    if raw.is_empty() || !raw.ends_with(b"\n") {
+        return Ok(false);
+    }
+    for line in raw.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+        let Ok(row) = value::parse(line) else {
+            return Ok(false);
+        };
+        if value::text(&row, "kind") == "delegate"
+            && value::text(&row, "task_id") == id
+            && value::text(&row["plan_binding"], "lease_id") == lease
+            && (op.is_empty() || value::text(&row, "operation_id") == op)
+            && row["exit"].as_i64().is_some_and(|exit| exit != 0)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Recover a `running` lease only when proven safe: no open `commit-intent`,
+/// no blocking live/untyped/unreadable delegation marker, and either a confirmed-dead
+/// exact marker or, for a completed invocation, confirmed supervision cleanup /
+/// recorded failed delegate receipt.
+pub(crate) fn recover_running_lease(
+    ctx: &Context<'_>,
+    id: &str,
+    lease: &str,
+    op: Option<&str>,
+) -> bool {
+    if lease.is_empty() || has_open_commit_intent(ctx, id, lease).unwrap_or(true) {
+        return false;
+    }
+    let proven_dead =
+        match inspect_delegation_markers(ctx, id, lease).unwrap_or(MarkerCustody::Blocked) {
+            MarkerCustody::Blocked => false,
+            MarkerCustody::ConfirmedDead => true,
+            MarkerCustody::Absent => op.is_some_and(|op| {
+                delegate_failure_recorded(ctx, id, lease, op).unwrap_or(false)
+                    || operation_cleanup_complete(ctx, id, op).unwrap_or(false)
+            }),
+        };
+    if !proven_dead {
+        return false;
+    }
+    ctx.action(
+        &Request::new(Action::RecoverLease)
+            .with("id", id)
+            .with("lease-id", lease)
+            .with("expected-state", "running"),
+    )
+    .is_ok_and(|out| out.code == 0)
+}
+
+/// Recover confirmed-dead/cleaned `running` leases (and optionally expired
+/// leases via `reclaim --include-running`) without touching live or unknown tasks.
+pub(crate) fn recover_orphaned_running_leases(ctx: &Context<'_>, include_expired: bool) {
+    if let Ok(plan) = ctx.plan_value()
+        && let Some(tasks) = plan["tasks"].as_object()
+    {
+        let calls = ctx.rows(PROGRESS).unwrap_or_default();
+        for (id, task) in tasks {
+            if value::text(task, "state") != "running"
+                || task["repair_count"].as_u64().unwrap_or(0) != 0
+            {
+                continue;
+            }
+            let lease = value::text(task, "lease_id");
+            if lease.is_empty() || has_open_commit_intent(ctx, id, lease).unwrap_or(true) {
+                continue;
+            }
+            let op = calls
+                .iter()
+                .rev()
+                .find(|r| {
+                    value::text(r, "kind") == "autopilot-worker-call"
+                        && value::text(r, "task_id") == id
+                        && value::text(r, "lease_id") == lease
+                })
+                .map(|r| value::text(r, "operation_id").to_owned())
+                .unwrap_or_default();
+            let proven_dead = match inspect_delegation_markers(ctx, id, lease)
+                .unwrap_or(MarkerCustody::Blocked)
+            {
+                MarkerCustody::Blocked => false,
+                MarkerCustody::ConfirmedDead => true,
+                MarkerCustody::Absent => {
+                    delegate_failure_recorded(ctx, id, lease, "").unwrap_or(false)
+                        || operation_cleanup_complete(ctx, id, &op).unwrap_or(false)
+                }
+            };
+            if proven_dead {
+                let _ = ctx.action(
+                    &Request::new(Action::RecoverLease)
+                        .with("id", id)
+                        .with("lease-id", lease)
+                        .with("expected-state", "running"),
+                );
+            }
+        }
+    }
+    let mut reclaim = Request::new(Action::Reclaim);
+    if include_expired {
+        reclaim = reclaim.flag("include-running");
+    }
+    let _ = ctx.action(&reclaim);
 }
 fn terminalize_repair(ctx: &Context<'_>, id: &str, lease: &str) -> Result<bool> {
     let current = show(ctx, id)?;

@@ -2676,6 +2676,190 @@ fn panel_acceptance_checks_canonical_claimed_and_running_expiry() {
                 .contains("lease changed")
         );
     }
+    // Open commit-intent protects an expired running task from reclaim --include-running;
+    // once committed, reclaim --include-running recovers it.
+    let a_running = active.load().unwrap().task("a").unwrap().clone();
+    assert_eq!(a_running.text("state"), "running");
+    let progress = repo.join(".oms/plan/progress.jsonl");
+    let intent = json::object([
+        ("schema", json::number(1)),
+        ("kind", json::string("commit-intent")),
+        ("intent_id", json::string("intent-a")),
+        ("phase", json::string("prepared")),
+        ("task_id", json::string("a")),
+        ("lease_id", a_running.get("lease_id").clone()),
+    ]);
+    let encode_line = |v: &json::Value| String::from_utf8(json::canonical(v).unwrap()).unwrap();
+    fs::write(&progress, format!("{}\n", encode_line(&intent))).unwrap();
+    assert!(
+        String::from_utf8(query(Action::Reclaim, &[("include-running", "1")]).stdout)
+            .unwrap()
+            .contains("reclaimed 0")
+    );
+    assert_eq!(
+        active.load().unwrap().task("a").unwrap().text("state"),
+        "running"
+    );
+    let mut committed = intent.clone();
+    committed.set("phase", json::string("committed")).unwrap();
+    fs::write(
+        &progress,
+        format!("{}\n{}\n", encode_line(&intent), encode_line(&committed)),
+    )
+    .unwrap();
+    // Empty-lease and unattributed live write markers also veto reclaim --include-running.
+    let reclaim_veto_marker = repo.join(".oms/delegations/reclaim-veto.json");
+    for marker in [
+        json::object([
+            ("schema", json::number(1)),
+            ("id", json::string("reclaim-veto")),
+            ("pid", json::number(std::process::id())),
+            ("task_id", json::string("a")),
+            ("lease_id", json::string("")),
+        ]),
+        json::object([
+            ("schema", json::number(1)),
+            ("id", json::string("reclaim-veto")),
+            ("pid", json::number(std::process::id())),
+            ("task_id", json::string("")),
+            ("lease_id", json::string("")),
+            ("access", json::string("write")),
+        ]),
+    ] {
+        fs::write(&reclaim_veto_marker, json::canonical(&marker).unwrap()).unwrap();
+        assert!(
+            String::from_utf8(query(Action::Reclaim, &[("include-running", "1")]).stdout)
+                .unwrap()
+                .contains("reclaimed 0")
+        );
+        assert_eq!(
+            active.load().unwrap().task("a").unwrap().text("state"),
+            "running"
+        );
+    }
+    fs::remove_file(&reclaim_veto_marker).unwrap();
+    assert!(
+        String::from_utf8(query(Action::Reclaim, &[("include-running", "1")]).stdout)
+            .unwrap()
+            .contains("reclaimed 1")
+    );
+    assert_eq!(
+        active.load().unwrap().task("a").unwrap().text("state"),
+        "ready"
+    );
+
+    // recover-owner recovers markerless orphan running tasks while preserving
+    // running tasks with a matching live/untyped marker or open commit-intent.
+    let owner = format!("owner_{}", "4".repeat(32));
+    for id in ["orphan", "protected", "intent_held"] {
+        assert_eq!(
+            go(
+                &repo,
+                &[
+                    "add",
+                    "--id",
+                    id,
+                    "--title",
+                    id,
+                    "--brief-file",
+                    "brief.txt"
+                ]
+            )
+            .0,
+            0
+        );
+    }
+    let mut owner_ctx = active.context.clone();
+    owner_ctx.owner_id = owner.clone();
+    let owner_plan = Plan::open(owner_ctx, &Host, &stop).unwrap();
+    for id in ["orphan", "protected", "intent_held"] {
+        owner_plan
+            .execute(
+                &Request::new(Action::Claim)
+                    .with("id", id)
+                    .with("provider", "codex"),
+            )
+            .unwrap();
+        owner_plan
+            .execute(&Request::new(Action::Start).with("id", id))
+            .unwrap();
+    }
+    let marker_file = repo.join(".oms/delegations/protected.json");
+    fs::write(
+        &marker_file,
+        json::canonical(&json::object([
+            ("schema", json::number(1)),
+            ("id", json::string("protected")),
+            ("pid", json::number(std::process::id())),
+            ("task_id", json::string("protected")),
+            ("lease_id", json::string("")),
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let held_lease = owner_plan
+        .load()
+        .unwrap()
+        .task("intent_held")
+        .unwrap()
+        .get("lease_id")
+        .clone();
+    let open_held = json::object([
+        ("schema", json::number(1)),
+        ("kind", json::string("commit-intent")),
+        ("intent_id", json::string("intent-held")),
+        ("phase", json::string("prepared")),
+        ("task_id", json::string("intent_held")),
+        ("lease_id", held_lease),
+    ]);
+    fs::write(&progress, format!("{}\n", encode_line(&open_held))).unwrap();
+    let rec = json::parse(
+        &owner_plan
+            .execute(
+                &Request::new(Action::RecoverOwner)
+                    .with("owner-id", &owner)
+                    .flag("json"),
+            )
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        rec.get("recovered"),
+        &json::Value::Array(vec![json::string("orphan")])
+    );
+    assert_eq!(
+        rec.get("preserved"),
+        &json::Value::Array(vec![json::string("protected"), json::string("intent_held")])
+    );
+    let snap = owner_plan.load().unwrap();
+    assert_eq!(snap.task("orphan").unwrap().text("state"), "ready");
+    assert_eq!(snap.task("protected").unwrap().text("state"), "running");
+    assert_eq!(snap.task("intent_held").unwrap().text("state"), "running");
+
+    fs::remove_file(&marker_file).unwrap();
+    let mut abandoned = open_held.clone();
+    abandoned.set("phase", json::string("abandoned")).unwrap();
+    fs::write(
+        &progress,
+        format!("{}\n{}\n", encode_line(&open_held), encode_line(&abandoned)),
+    )
+    .unwrap();
+    let rec2 = json::parse(
+        &owner_plan
+            .execute(
+                &Request::new(Action::RecoverOwner)
+                    .with("owner-id", &owner)
+                    .flag("json"),
+            )
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        rec2.get("recovered"),
+        &json::Value::Array(vec![json::string("protected"), json::string("intent_held")])
+    );
     assert!(!repo.join(".oms/plan/late-results.jsonl").exists());
 }
 

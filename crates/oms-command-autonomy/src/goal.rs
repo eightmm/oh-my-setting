@@ -1215,7 +1215,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             if spent >= max {
                 return terminal(ctx, &run, cycle, "park", "cycles-exhausted", output);
             }
-            let _ = ctx.action(&Request::new(Action::Reclaim));
+            crate::runner::recover_orphaned_running_leases(ctx, true);
             if writers > 1 && tranche["retry_task_id"].is_null() {
                 let mut batch = Args::default();
                 batch.set("to", args.get("to", "codex")?);

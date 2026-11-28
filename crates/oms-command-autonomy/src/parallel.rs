@@ -202,7 +202,7 @@ fn execute_with(ctx: &Context<'_>, args: &Args, goal: Option<GoalDispatch<'_>>) 
             }
             other => Error::new(2, other.to_string()),
         })?;
-    let _ = ctx.action(&Request::new(Action::Reclaim));
+    crate::runner::recover_orphaned_running_leases(ctx, true);
 
     let gates = Gates::default();
     let mut controller = Context::new(
@@ -365,11 +365,22 @@ fn execute_with(ctx: &Context<'_>, args: &Args, goal: Option<GoalDispatch<'_>>) 
                                     &flight.issued_sha,
                                 )
                             });
+                            let recovered = !released
+                                && flight.as_ref().is_some_and(|flight| {
+                                    crate::runner::recover_running_lease(
+                                        controller,
+                                        &done.id,
+                                        &flight.lease,
+                                        None,
+                                    )
+                                });
                             format!(
                                 "plan-run: parallel task={} panicked; {}\n",
                                 done.id,
                                 if released {
                                     "unstarted claim released"
+                                } else if recovered {
+                                    "dead running lease recovered"
                                 } else {
                                     "inspect the retained lease"
                                 },
