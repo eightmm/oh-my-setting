@@ -35,21 +35,55 @@ pub fn relative(path: &Path) -> Result<()> {
 pub fn root(path: &Path) -> Result<Root> {
     Root::open(path).map_err(|_| Error::new(2, "unsafe or unavailable repository"))
 }
+const READ_RACE_RETRIES: usize = 32;
+const READ_RACE_SLEEP: Duration = Duration::from_millis(3);
+
+fn unfinished_jsonl(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && !bytes.ends_with(b"\n")
+}
+
+/// Bytes plus the (device, inode) of the descriptor they were read from.
+pub(crate) type Snapshot = (Vec<u8>, Option<(u64, u64)>);
+
+#[allow(clippy::unnecessary_cast)]
+pub(crate) fn read_snapshot(
+    repo: &Path,
+    path: &Path,
+    missing: bool,
+    jsonl: bool,
+) -> Result<Snapshot> {
+    let anchor = root(repo)?;
+    let options = ByteReadOptions {
+        missing_ok: missing,
+        max_bytes: MAX_FILE,
+    };
+    for attempt in 0..=READ_RACE_RETRIES {
+        match anchor.read_no_follow_checked::<oms_safe_fs::ByteError>(path, options, |_| Ok(())) {
+            Ok((bytes, _)) if jsonl && unfinished_jsonl(&bytes) && attempt < READ_RACE_RETRIES => {
+                std::thread::sleep(READ_RACE_SLEEP);
+            }
+            Ok((bytes, stat)) => {
+                return Ok((bytes, stat.map(|s| (s.st_dev as u64, s.st_ino as u64))));
+            }
+            Err(oms_safe_fs::ByteError::Changed) if attempt < READ_RACE_RETRIES => {
+                std::thread::sleep(READ_RACE_SLEEP);
+            }
+            Err(e) => {
+                return Err(Error::new(
+                    2,
+                    format!("unsafe, changed, oversized or unavailable file: {e:?}"),
+                ));
+            }
+        }
+    }
+    unreachable!()
+}
+
 pub fn read(repo: &Path, path: &Path, missing: bool) -> Result<Vec<u8>> {
-    root(repo)?
-        .read_no_follow(
-            path,
-            ByteReadOptions {
-                missing_ok: missing,
-                max_bytes: MAX_FILE,
-            },
-        )
-        .map_err(|e| {
-            Error::new(
-                2,
-                format!("unsafe, changed, oversized or unavailable file: {e:?}"),
-            )
-        })
+    read_snapshot(repo, path, missing, false).map(|(bytes, _)| bytes)
+}
+pub(crate) fn read_jsonl(repo: &Path, path: &Path, missing: bool) -> Result<Vec<u8>> {
+    read_snapshot(repo, path, missing, true).map(|(bytes, _)| bytes)
 }
 pub fn file(path: &Path) -> Result<Vec<u8>> {
     let parent = path
@@ -62,7 +96,7 @@ pub fn file(path: &Path) -> Result<Vec<u8>> {
     read(parent, Path::new(name), false)
 }
 pub fn rows(bytes: &[u8]) -> Result<Vec<V>> {
-    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+    if unfinished_jsonl(bytes) {
         return fail("unfinished JSONL record; reconcile the writer before retrying");
     }
     bytes
@@ -83,7 +117,7 @@ pub fn rows(bytes: &[u8]) -> Result<Vec<V>> {
         .collect()
 }
 pub fn load(repo: &Path, path: &Path) -> Result<Vec<V>> {
-    rows(&read(repo, path, true)?)
+    rows(&read_jsonl(repo, path, true)?)
 }
 pub fn latest(rows: &[V]) -> Result<Vec<V>> {
     let mut positions = std::collections::HashMap::new();

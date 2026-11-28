@@ -49,7 +49,7 @@ fn current_id(repo: &Path) -> Option<String> {
 }
 fn current_snapshot(repo: &Path) -> Option<(String, Vec<u8>)> {
     let ident = current_id(repo)?;
-    let bytes = storage::read(repo, &path(&ident).ok()?, false).ok()?;
+    let bytes = storage::read_jsonl(repo, &path(&ident).ok()?, false).ok()?;
     Some((ident, bytes))
 }
 pub(crate) fn current(repo: &Path) -> Option<String> {
@@ -65,7 +65,7 @@ fn set_current(repo: &Path, ident: &str, context: &Context<'_>) -> Result<()> {
     )
 }
 fn load(repo: &Path, ident: &str) -> Result<Vec<V>> {
-    let bytes = storage::read(repo, &path(ident)?, false)?;
+    let bytes = storage::read_jsonl(repo, &path(ident)?, false)?;
     parse_log(&bytes, ident)
 }
 fn parse_log(bytes: &[u8], ident: &str) -> Result<Vec<V>> {
@@ -178,7 +178,12 @@ pub(crate) fn append(
             ));
         }
         if let Some((_, after)) = fields.iter().find(|(k, _)| *k == "after") {
-            offset(old, ident, meta, after.text().unwrap_or(""))?;
+            offset(
+                old,
+                ident,
+                (meta.dev(), meta.ino()),
+                after.text().unwrap_or(""),
+            )?;
             if rows
                 .iter()
                 .any(|row| fields.iter().all(|(key, value)| row.get(key) == value))
@@ -308,18 +313,18 @@ fn anchor(bytes: &[u8], offset: usize) -> String {
         .concat(),
     )
 }
-fn cursor(bytes: &[u8], ident: &str, meta: &std::fs::Metadata, at: usize) -> Result<String> {
+fn cursor(bytes: &[u8], ident: &str, (dev, ino): (u64, u64), at: usize) -> Result<String> {
     let value = V::Arr(vec![
         1usize.into(),
         ident.into(),
-        V::Num(meta.dev().to_string()),
-        V::Num(meta.ino().to_string()),
+        V::Num(dev.to_string()),
+        V::Num(ino.to_string()),
         V::Num(at.to_string()),
         anchor(bytes, at).into(),
     ]);
     Ok(encode(&value.json(false)?))
 }
-fn offset(bytes: &[u8], ident: &str, meta: &std::fs::Metadata, after: &str) -> Result<usize> {
+fn offset(bytes: &[u8], ident: &str, (dev, ino): (u64, u64), after: &str) -> Result<usize> {
     if after.is_empty() {
         return Ok(0);
     }
@@ -335,8 +340,8 @@ fn offset(bytes: &[u8], ident: &str, meta: &std::fs::Metadata, after: &str) -> R
     .ok_or_else(|| Error::new(2, "invalid thread cursor offset"))?;
     if fields[0] != 1usize.into()
         || fields[1].text() != Some(ident)
-        || fields[2] != V::Num(meta.dev().to_string())
-        || fields[3] != V::Num(meta.ino().to_string())
+        || fields[2] != V::Num(dev.to_string())
+        || fields[3] != V::Num(ino.to_string())
         || at > bytes.len()
         || at > 0 && bytes[at - 1] != b'\n'
         || fields[5].text() != Some(&anchor(bytes, at))
@@ -387,32 +392,13 @@ pub(crate) fn decode(raw: &str) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn snapshot(repo: &Path, ident: &str) -> Result<(Vec<u8>, std::fs::Metadata)> {
-    use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-    let label = path(ident)?;
-    storage::read(repo, &label, false)?;
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(
-            (rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::CLOEXEC)
-                .bits() as i32,
-        )
-        .open(repo.join(&label))?;
-    let meta = file.metadata()?;
-    if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_LOG as u64 {
-        return fail("unsafe or oversized thread");
-    }
-    let mut bytes = Vec::new();
-    (&mut file)
-        .take(MAX_LOG as u64 + 1)
-        .read_to_end(&mut bytes)?;
+fn snapshot(repo: &Path, ident: &str) -> Result<(Vec<u8>, (u64, u64))> {
+    let (bytes, stat) = storage::read_snapshot(repo, &path(ident)?, false, true)?;
     if bytes.len() > MAX_LOG {
         return fail("thread exceeds storage budget");
     }
-    Ok((bytes, meta))
+    let id = stat.ok_or_else(|| Error::new(2, "unsafe or oversized thread"))?;
+    Ok((bytes, id))
 }
 pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
     let args = Args::parse(
@@ -628,7 +614,7 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
             loop {
                 crate::check(context.interrupted)?;
                 let (bytes, meta) = snapshot(&repo, &ident)?;
-                let mut at = offset(&bytes, &ident, &meta, &after)?;
+                let mut at = offset(&bytes, &ident, meta, &after)?;
                 let mut selected = Vec::new();
                 let mut used = 0;
                 for line in bytes[at..].split_inclusive(|b| *b == b'\n').take(limit) {
@@ -654,7 +640,7 @@ pub(crate) fn run(argv: &[OsString], context: &Context<'_>) -> Result<Output> {
                     at += line.len();
                     used += line.len();
                 }
-                let next = cursor(&bytes, &ident, &meta, at)?;
+                let next = cursor(&bytes, &ident, meta, at)?;
                 if !selected.is_empty() || Instant::now() >= deadline {
                     return Ok(out(json(&obj([
                         ("schema", 1usize.into()),
