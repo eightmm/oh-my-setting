@@ -809,7 +809,7 @@ test('a running Claude reply streams scanned partial Markdown and a failed strea
       if(a.turnId)v.turn={turnId:a.turnId,status:state};return v;},
     oms_send_lead_message:a=>({...leadStatus(a,'ready'),turn:{turnId:a.turnId,status:state}}),
     oms_read_lead_stream:a=>{reads.push(a.cursor);if(fail)throw new Error('down');const i=a.cursor?1:0;
-      return {...leadStatus(a,'ready'),_private:{room:a.room,...leadStatus(a,'ready').leads[0],stream:{turnId:a.turnId,status:state,text:log[i]||'',tool:i?null:'Read AGENTS.md',end:null,cursor:a.cursor+10}}};}
+      return {...leadStatus(a,'ready'),_private:{room:a.room,...leadStatus(a,'ready').leads[0],stream:{turnId:a.turnId,status:state,text:a.provider==='codex'?'':log[i]||'',tool:a.provider==='codex'?'Run cargo test':i?null:'Read AGENTS.md',end:null,cursor:a.cursor+10}}};}
   }});
   p.get('leads').children[1].children[1].children.find(e=>e.type==='button').dispatchEvent(new Event('click'));await setImmediate();
   p.get('chat-text').value='Go';await p.event('chat-text','input');await p.event('chat-compose','submit');await setImmediate();
@@ -822,6 +822,14 @@ test('a running Claude reply streams scanned partial Markdown and a failed strea
   assert.ok(!p.get('chat-typing').hidden);assert.ok(!p.get('chat-compose').hidden);assert.doesNotMatch(p.get('chat-status').textContent,/mismatch|could not/i);
   fail=false;state='replied';streams()[0].fn();await setImmediate();await setImmediate();
   assert.ok(partial.hidden);assert.ok(p.get('chat-typing').hidden);assert.match(p.get('chat-messages').textContent,/Final answer/);assert.equal(streams().length,0);
+
+  // Running Codex Lead turns poll oms_read_lead_stream for tool activity lines.
+  state='running';reads=[];
+  p.get('leads').children[0].children[1].children.find(e=>e.type==='button').dispatchEvent(new Event('click'));await setImmediate();
+  p.get('chat-text').value='Check Codex';await p.event('chat-text','input');await p.event('chat-compose','submit');await setImmediate();
+  assert.deepEqual(reads,[0]);
+  assert.equal(p.get('chat-typing-text').textContent,'Codex · Run cargo test');
+  assert.ok(partial.hidden);
 });
 
 test('a verified unresolved message from another view blocks a new dispatch until its turn settles',async()=>{

@@ -2428,6 +2428,11 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                 None
             }
         }
+    } else if route.provider == "codex" {
+        match output_mode {
+            OutputMode::Observed(_, Some(tap)) if !write => Some(tap.clone()),
+            _ => None,
+        }
     } else {
         None
     };

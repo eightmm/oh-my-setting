@@ -18,7 +18,7 @@ mod lead_plan_context;
 mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
-const URI: &str = "ui://oms/conversation-panel/v40.html";
+const URI: &str = "ui://oms/conversation-panel/v41.html";
 const HOME_URI: &str = "ui://oms/home/v1.html";
 const V38: &str = "ui://oms/conversation-panel/v38.html";
 const V37: &str = "ui://oms/conversation-panel/v37.html";
