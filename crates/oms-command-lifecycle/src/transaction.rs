@@ -151,7 +151,7 @@ impl Transaction {
             && !target.starts_with(&self.journal_dir)
         {
             let journal_fd = open_dir_nofollow(&self.journal_dir)?;
-            if can_rename_fds(&journal_fd, &parent_fd)? {
+            if can_rename_fds(&journal_fd, &parent_fd).unwrap_or(false) {
                 return Ok(self.journal_dir.clone());
             }
         }
@@ -172,7 +172,7 @@ impl Transaction {
             let Ok(anc_fd) = open_dir_nofollow(ancestor) else {
                 break;
             };
-            if same_mount_fast(&anc_fd, &parent_fd)? == Some(false) {
+            if !matches!(same_mount_fast(&anc_fd, &parent_fd), Ok(Some(true) | None)) {
                 break;
             }
             candidates.push(ancestor);
@@ -900,7 +900,14 @@ fn probe_rename_fds(work_dir: &fs::File, target_parent: &fs::File) -> Result<boo
     #[cfg(not(target_os = "macos"))]
     let raw_mode = 0o600u32;
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let name = format!(".oms-probe-{}.{n}", std::process::id());
+    // A crash can strand a probe; a timestamp keeps a reused pid from colliding.
+    let name = format!(
+        ".oms-probe-{}.{}.{n}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    );
     let fd = match rustix::fs::openat(
         work_dir,
         &name,
@@ -985,6 +992,7 @@ fn valid_work_dir(
     target: &Path,
     parent: &Path,
     journal_dir: &Path,
+    entries_absent: bool,
 ) -> Result<bool> {
     if work_dir == parent {
         return Ok(true);
@@ -1009,15 +1017,6 @@ fn valid_work_dir(
         && parent.starts_with(base)
     {
         let euid = rustix::process::geteuid().as_raw();
-        let m = match fs::symlink_metadata(work_dir) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(e.into()),
-        };
-        if !m.is_dir() || m.file_type().is_symlink() || m.uid() != euid || m.mode() & 0o777 != 0o700
-        {
-            return Ok(false);
-        }
         let mut saw_base = false;
         for anc in parent.ancestors().skip(1) {
             let am = match fs::symlink_metadata(anc) {
@@ -1050,6 +1049,16 @@ fn valid_work_dir(
         if !saw_base {
             return Ok(false);
         }
+        let m = match fs::symlink_metadata(work_dir) {
+            Ok(m) => m,
+            // Another change may prune an emptied staging dir; nothing then moves through it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(entries_absent),
+            Err(e) => return Err(e.into()),
+        };
+        if !m.is_dir() || m.file_type().is_symlink() || m.uid() != euid || m.mode() & 0o777 != 0o700
+        {
+            return Ok(false);
+        }
         let work_fd = open_dir_nofollow(work_dir)?;
         return can_rename_fds(&work_fd, &target_fd);
     }
@@ -1076,7 +1085,10 @@ fn validate_change(c: &Change, journal_dir: &Path) -> Result<()> {
         .target
         .parent()
         .ok_or_else(|| r::Error(2, "invalid journal target".into()))?;
-    for anc in parent.ancestors() {
+    // Cross-directory work dirs need physical ancestors; sibling entries (the legacy
+    // layout, whose journals stored unresolved targets) keep the old rule.
+    let sibling = c.undo.parent() == Some(parent);
+    for anc in parent.ancestors().filter(|_| !sibling) {
         match fs::symlink_metadata(anc) {
             Ok(m) if !m.is_dir() || m.file_type().is_symlink() => {
                 return r::fail("unsafe lifecycle recovery paths");
@@ -1116,7 +1128,13 @@ fn validate_change(c: &Change, journal_dir: &Path) -> Result<()> {
         || c.staged == c.undo
         || c.staged == c.target
         || c.undo == c.target
-        || !valid_work_dir(work_dir, &c.target, parent, journal_dir)?
+        || !valid_work_dir(
+            work_dir,
+            &c.target,
+            parent,
+            journal_dir,
+            !r::exists(&c.staged) && !r::exists(&c.undo),
+        )?
         || !c
             .staged
             .file_name()
@@ -2679,8 +2697,31 @@ mod tests {
 
         let anc_staging = root.0.join(STAGING_DIR);
         assert!(!anc_staging.exists());
-        // Absent `.oms-lifecycle-staging` must be rejected.
-        assert_rejected_work_dir(&anc_staging);
+        // An absent `.oms-lifecycle-staging` holds nothing to move (another change may
+        // have pruned it), so recovery accepts it and leaves the target unchanged.
+        let pruned = json!({
+            "schema": 1,
+            "committed": false,
+            "changes": [{
+                "target": target,
+                "staged": anc_staging.join(".oms-stage-v.1"),
+                "undo": anc_staging.join(".oms-undo-v.1"),
+                "old": current_id,
+                "new": current_id,
+                "external": false,
+                "parent_identity": null
+            }],
+            "effects": []
+        });
+        fs::write(
+            journal_dir.join("transaction.json"),
+            serde_json::to_vec(&pruned).unwrap(),
+        )
+        .unwrap();
+        drop(Transaction::begin(&paths).unwrap());
+        assert!(!journal_dir.join("transaction.json").exists());
+        assert!(!anc_staging.exists());
+        assert_eq!(identity(&target).unwrap(), current_id);
 
         // Mode 0755 `.oms-lifecycle-staging` must be rejected.
         fs::create_dir(&anc_staging).unwrap();

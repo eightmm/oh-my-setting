@@ -762,7 +762,9 @@ mod tests {
             for entry in fs::read_dir(plugins_dir).unwrap() {
                 let name = entry.unwrap().file_name().to_string_lossy().into_owned();
                 assert!(
-                    !name.starts_with(".oms-stage-") && !name.starts_with(".oms-undo-"),
+                    !name.starts_with(".oms-stage-")
+                        && !name.starts_with(".oms-undo-")
+                        && !name.starts_with(".oms-probe-"),
                     "provider-scanned Antigravity plugins dir exposed {name}"
                 );
             }
