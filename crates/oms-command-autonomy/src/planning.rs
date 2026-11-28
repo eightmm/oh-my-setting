@@ -37,6 +37,7 @@ const PROVIDER_TOOLS: [&str; 4] = ["agent-call", "peer-ask", "peer-delegate", "p
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProviderWall {
     Unpinned,
+    Deadline(std::time::Duration),
     Pinned(std::time::Duration),
 }
 impl ProviderWall {
@@ -58,16 +59,31 @@ impl ProviderWall {
             ctx.peer_wall.map_or_else(Self::from_env, Ok)
         }
     }
+    pub fn bounded(self, remaining: std::time::Duration) -> Self {
+        let cap = remaining.clamp(std::time::Duration::from_secs(1), UNPINNED_PROVIDER_WALL);
+        match self {
+            Self::Unpinned => Self::Deadline(cap),
+            Self::Deadline(wall) => {
+                Self::Deadline(wall.min(cap).max(std::time::Duration::from_secs(1)))
+            }
+            Self::Pinned(wall) => {
+                Self::Pinned(wall.min(cap).max(std::time::Duration::from_secs(1)))
+            }
+        }
+    }
     pub fn outer(self) -> std::time::Duration {
         match self {
             Self::Unpinned => UNPINNED_PROVIDER_WALL,
+            Self::Deadline(wall) => {
+                wall.clamp(std::time::Duration::from_secs(1), UNPINNED_PROVIDER_WALL)
+            }
             Self::Pinned(wall) => wall,
         }
     }
     pub fn land(self, base: std::time::Duration) -> std::time::Duration {
         match self {
             Self::Pinned(wall) => wall.max(base),
-            Self::Unpinned => base,
+            Self::Unpinned | Self::Deadline(_) => base,
         }
     }
 }
@@ -77,16 +93,7 @@ pub(crate) fn invoke(
     args: Vec<OsString>,
     wall: std::time::Duration,
 ) -> Result<Output> {
-    invoke_configured(ctx, tool, args, wall, Vec::new())
-}
-pub(crate) fn invoke_configured(
-    ctx: &Context<'_>,
-    tool: &str,
-    args: Vec<OsString>,
-    wall: std::time::Duration,
-    environment: Vec<(OsString, OsString)>,
-) -> Result<Output> {
-    invoke_with_wall(ctx, tool, args, ProviderWall::Pinned(wall), environment)
+    invoke_with_wall(ctx, tool, args, ProviderWall::Pinned(wall), Vec::new())
 }
 pub(crate) fn invoke_provider(
     ctx: &Context<'_>,
@@ -1426,6 +1433,44 @@ mod tests {
                 .iter()
                 .any(|(k, _)| k == "OMS_PEER_TIMEOUT")
         );
+        drop(recorded);
+        for (wall, expected_wall, expected_env) in [
+            (
+                ProviderWall::Unpinned.bounded(Duration::ZERO),
+                Duration::from_secs(1),
+                None,
+            ),
+            (
+                ProviderWall::Unpinned.bounded(Duration::from_secs(1800)),
+                Duration::from_secs(1800),
+                None,
+            ),
+            (
+                ProviderWall::Unpinned.bounded(Duration::from_secs(90_000)),
+                UNPINNED_PROVIDER_WALL,
+                None,
+            ),
+            (
+                ProviderWall::Pinned(Duration::from_secs(300)).bounded(Duration::from_secs(1800)),
+                Duration::from_secs(300),
+                Some("300s"),
+            ),
+            (
+                ProviderWall::Pinned(Duration::from_secs(3600)).bounded(Duration::from_secs(1800)),
+                Duration::from_secs(1800),
+                Some("1800s"),
+            ),
+        ] {
+            invoke_provider(&ctx, "agent-call", Vec::new(), wall, Vec::new()).unwrap();
+            let call = host.0.lock().unwrap().pop().unwrap();
+            assert_eq!(call.wall, expected_wall);
+            assert_eq!(
+                call.environment
+                    .iter()
+                    .find_map(|(k, v)| (k == "OMS_PEER_TIMEOUT").then(|| v.to_str().unwrap())),
+                expected_env
+            );
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

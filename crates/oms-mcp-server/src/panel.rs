@@ -18,8 +18,9 @@ mod lead_plan_context;
 mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
-const URI: &str = "ui://oms/conversation-panel/v38.html";
+const URI: &str = "ui://oms/conversation-panel/v39.html";
 const HOME_URI: &str = "ui://oms/home/v1.html";
+const V38: &str = "ui://oms/conversation-panel/v38.html";
 const V37: &str = "ui://oms/conversation-panel/v37.html";
 const V33: &str = "ui://oms/conversation-panel/v33.html";
 const V34: &str = "ui://oms/conversation-panel/v34.html";
@@ -378,6 +379,13 @@ fn project_read(name: &str) -> bool {
     )
 }
 
+fn project_lead_tool(name: &str) -> bool {
+    matches!(
+        name,
+        LEAD_STATUS | SEND_LEAD | STOP_LEAD | READ_STREAM | SETTINGS | UPDATE_SETTINGS
+    )
+}
+
 fn panel_title_for_repo(repo: &Path) -> String {
     match repo
         .file_name()
@@ -526,14 +534,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         SEND_LEAD,
         "Send a user's explicit message to this Lead's existing OMS conversation. Repeated submissions with the same turn ID never start another call.",
         json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"},"turnId":turn_id,"text":{"type":"string","minLength":1,"maxLength":4000}}),
-        &[
-            "projectKey",
-            "room",
-            "provider",
-            "leadRequestId",
-            "turnId",
-            "text",
-        ],
+        &["projectKey", "provider", "leadRequestId", "turnId", "text"],
         true,
     );
     send["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true});
@@ -542,7 +543,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         STOP_LEAD,
         "Stop this Lead's running reply to the user's message. A finished or already stopped message is left unchanged.",
         json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"},"turnId":{"type":"string","format":"uuid"}}),
-        &["projectKey", "room", "provider", "leadRequestId", "turnId"],
+        &["projectKey", "provider", "leadRequestId", "turnId"],
         true,
     );
     stop["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false});
@@ -553,7 +554,6 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"},"turnId":{"type":"string","format":"uuid"},"cursor":{"type":"integer","minimum":0,"maximum":131072}}),
         &[
             "projectKey",
-            "room",
             "provider",
             "leadRequestId",
             "turnId",
@@ -567,7 +567,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         SETTINGS,
         "Read this Lead's saved model and effort for future messages, with host-cached or routing policy options.",
         settings_scope.clone(),
-        &["projectKey", "room", "provider", "leadRequestId"],
+        &["projectKey", "provider", "leadRequestId"],
         false,
     );
     let mut choices = settings_scope;
@@ -581,7 +581,6 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         choices,
         &[
             "projectKey",
-            "room",
             "provider",
             "leadRequestId",
             "revision",
@@ -633,9 +632,9 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         prepare,
         make(
             LEAD_STATUS,
-            "Read provider readiness in the current Main’s Room. A selected provider’s answer is visible only in the panel.",
+            "Read provider readiness in the current Main’s Room or selected project. A selected provider’s answer is visible only in the panel.",
             json!({"project":project,"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"turnId":turn_id,"before":{"type":"string","description":"An older-page cursor returned by this conversation."},"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"leadRequestId":{"type":"string","format":"uuid"},"answerPage":{"type":"string","maxLength":100,"description":"Read a completed turn's full answer. Requires exact projectKey, leadRequestId and turnId. Empty starts; otherwise use nextCursor."}}),
-            &["room"],
+            &[],
             false
         ),
         make(
@@ -766,7 +765,11 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
             all.as_array()
                 .unwrap()
                 .iter()
-                .filter(|t| t["name"].as_str().is_some_and(project_read))
+                .filter(|t| {
+                    t["name"]
+                        .as_str()
+                        .is_some_and(|n| project_read(n) || project_lead_tool(n))
+                })
                 .cloned()
                 .collect(),
         )
@@ -1640,6 +1643,7 @@ impl Server<'_> {
                             | V35
                             | V36
                             | V37
+                            | V38
                     )
                 ) =>
             {
@@ -1651,7 +1655,9 @@ impl Server<'_> {
             "resources/read" => return error(id, -32602, "unknown panel resource"),
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or("");
-                if self.config.profile == ToolProfile::McpApp && !project_read(name) {
+                if self.config.profile == ToolProfile::McpApp
+                    && !(project_read(name) || project_lead_tool(name))
+                {
                     return error(id, -32602, "unknown project read tool");
                 }
                 let allowed: &[&str] = match name {
@@ -2152,6 +2158,7 @@ impl Server<'_> {
                     "projectKeys":keys,"projectKey":key,
                     "binding": binding,
                     "readOnly": self.config.profile == ToolProfile::McpApp,
+                    "leadChat": true,
                 }));
             }
             if name == OPEN_HOME {
@@ -2219,7 +2226,10 @@ impl Server<'_> {
         {
             return Err("This desktop control requires the parent app connection.".into());
         }
-        if write {
+        if write
+            && !(matches!(name, SEND_LEAD | STOP_LEAD | UPDATE_SETTINGS)
+                && args.get("room").is_none())
+        {
             self.check_catalog_write_binding(&repo, args, meta)?;
         }
         if name == WORKER_OUTPUT {
@@ -3092,6 +3102,15 @@ impl Server<'_> {
         args: &Value,
         meta: &Value,
     ) -> PanelResult<Value> {
+        if args.get("room").is_none() {
+            if name == OPEN_LEADS {
+                return Err("Invalid Room.".into());
+            }
+            return self.project_lead_conversations(repo, name, args);
+        }
+        if self.config.profile == ToolProfile::McpApp {
+            return Err("Room-bound Lead controls are not available in this profile.".into());
+        }
         let thread = meta["threadId"]
             .as_str()
             .filter(|v| uuid(v))
@@ -3449,6 +3468,412 @@ impl Server<'_> {
             return Err("OMS could not verify the current Main in the selected Room.".into());
         }
         let mut result = json!({"room":room,"projectKey":key,"leads":rows});
+        if let Some(turn) = turn {
+            result["turn"] = turn;
+        }
+        if let Some(private) = private {
+            result["leadConversation"] = private;
+        }
+        Ok(result)
+    }
+
+    fn project_lead_request(project_key: &str, canonical: &str) -> String {
+        let digest = crate::storage::hash(
+            format!("oms-project-lead-v1/{project_key}/{canonical}").as_bytes(),
+        );
+        format!(
+            "{}-{}-8{}-a{}-{}",
+            &digest[..8],
+            &digest[8..12],
+            &digest[13..16],
+            &digest[17..20],
+            &digest[20..32]
+        )
+    }
+
+    fn expected_project_anchor(anchor_op: &str, binding: &str, canonical: &str) -> (Value, Value) {
+        let targets = json!([canonical]);
+        let context = json!({"include_memory":false,"include_task":false});
+        let meta = json!({
+            "operation": anchor_op,
+            "kind": "ask",
+            "targets": targets,
+            "thread": anchor_op,
+            "context_options": context,
+            "answer_storage": "operation",
+            "panel_assignment": binding,
+        });
+        let launch = json!({
+            "kind": "ask",
+            "targets": targets,
+            "thread": anchor_op,
+            "new_thread": false,
+            "debate_rounds": 0,
+            "context_options": context,
+            "preserve_current": true,
+        });
+        (meta, launch)
+    }
+
+    fn valid_project_lead_anchor(
+        &self,
+        repo: &Path,
+        anchor_op: &str,
+        binding: &str,
+        canonical: &str,
+    ) -> PanelResult<bool> {
+        let Ok(dir) = crate::storage::Directory::run(repo, anchor_op, true) else {
+            return Ok(false);
+        };
+        if rustix::fs::fstat(&dir.fd)
+            .ok()
+            .is_none_or(|s| s.st_mode & 0o077 != 0)
+        {
+            return Ok(false);
+        }
+        let Ok(status) = crate::storage::read_run(&dir.path, "status", 32) else {
+            return Ok(false);
+        };
+        if status != b"0\n" {
+            return Ok(false);
+        }
+        let Ok(meta_bytes) = crate::storage::read_run(&dir.path, "meta.json", 256 * 1024) else {
+            return Ok(false);
+        };
+        let Ok(launch_bytes) = crate::storage::read_run(&dir.path, "launch.json", 256 * 1024)
+        else {
+            return Ok(false);
+        };
+        if oms_context::parse_json_bounded(&meta_bytes, 256 * 1024).is_err()
+            || oms_context::parse_json_bounded(&launch_bytes, 256 * 1024).is_err()
+        {
+            return Ok(false);
+        }
+        let (Ok(meta), Ok(launch)) = (
+            crate::value::from_slice(&meta_bytes),
+            crate::value::from_slice(&launch_bytes),
+        ) else {
+            return Ok(false);
+        };
+        let (expected_meta, expected_launch) =
+            Self::expected_project_anchor(anchor_op, binding, canonical);
+        if meta != expected_meta || launch != expected_launch {
+            return Ok(false);
+        }
+        self.lead_thread_open(repo, anchor_op)
+    }
+
+    fn ensure_project_lead_anchor(
+        &self,
+        repo: &Path,
+        anchor_op: &str,
+        binding: &str,
+        canonical: &str,
+    ) -> PanelResult<()> {
+        let oms = crate::storage::Directory::open(repo, ".oms", true, true)
+            .map_err(|_| "Lead storage unavailable.")?;
+        oms.publish_new(".gitignore", b"*\n")
+            .map_err(|_| "Lead storage unavailable.")?;
+        let parent = crate::storage::Directory::open(repo, crate::RUN_ROOT, true, true)
+            .map_err(|_| "Lead storage unavailable.")?;
+        match rustix::fs::mkdirat(
+            &parent.fd,
+            anchor_op,
+            rustix::fs::Mode::from_raw_mode(0o700),
+        ) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(_) => return Err("Lead conversation directory unavailable.".into()),
+        }
+        let _ = rustix::fs::fsync(&parent.fd);
+        let dir = crate::storage::Directory::run(repo, anchor_op, true)
+            .map_err(|_| "Lead conversation directory unavailable.")?;
+        let _lock = dir.lock().map_err(
+            |_| "Another Lead message is being checked. Read the original request status.",
+        )?;
+        let (expected_meta, expected_launch) =
+            Self::expected_project_anchor(anchor_op, binding, canonical);
+        dir.publish_new("meta.json", expected_meta.to_string().as_bytes())
+            .map_err(|_| "Lead conversation metadata unavailable.")?;
+        dir.publish_new("launch.json", expected_launch.to_string().as_bytes())
+            .map_err(|_| "Lead conversation metadata unavailable.")?;
+        dir.publish_new("status", b"0\n")
+            .map_err(|_| "Lead conversation status unavailable.")?;
+        if !self.lead_thread_open(repo, anchor_op)? {
+            let path = repo.to_str().ok_or("Repository path is not UTF-8.")?;
+            let out = self.command(
+                &[
+                    "thread",
+                    "--repo",
+                    path,
+                    "--id",
+                    anchor_op,
+                    "new",
+                    "--live",
+                    "--topic",
+                    "Council",
+                    "--no-current",
+                ],
+                repo,
+                Duration::from_secs(5),
+            )?;
+            if out.code != 0 && !self.lead_thread_open(repo, anchor_op)? {
+                return Err("Lead conversation thread could not be opened.".into());
+            }
+        }
+        if !self.valid_project_lead_anchor(repo, anchor_op, binding, canonical)? {
+            return Err("The original Lead conversation could not be verified.".into());
+        }
+        Ok(())
+    }
+
+    fn project_lead_conversations(
+        &self,
+        repo: &Path,
+        name: &str,
+        args: &Value,
+    ) -> PanelResult<Value> {
+        const PROJECT_LEAD_STAMP: &str = "2026-01-01T00:00:00Z";
+        let selected = args
+            .get("provider")
+            .map(|v| {
+                v.as_str()
+                    .filter(|p| LEAD_PROVIDERS.contains(p))
+                    .ok_or("Unsupported Lead provider.")
+            })
+            .transpose()?;
+        if args.get("providers").is_some() {
+            return Err("Invalid Lead selector.".into());
+        }
+        let stream = name == READ_STREAM;
+        let full_answer = args.get("answerPage").is_some() || stream;
+        let settings = matches!(name, SETTINGS | UPDATE_SETTINGS);
+        if settings
+            && (selected.is_none()
+                || !args["projectKey"].is_string()
+                || !args["leadRequestId"].as_str().is_some_and(uuid))
+        {
+            return Err("Select the exact project and current Lead conversation.".into());
+        }
+        lead_turns::validate(name, args, selected)?;
+        let project_key = || self.project_key(repo, args);
+        let key = project_key()?;
+        if args
+            .get("projectKey")
+            .is_some_and(|v| v.as_str() != Some(key.as_str()))
+        {
+            return Err("The selected project changed. Reopen the panel for that project.".into());
+        }
+        let bound = || {
+            if project_key()? == key {
+                Ok(())
+            } else {
+                Err(BINDING.to_owned())
+            }
+        };
+        let mut rows = Vec::new();
+        let mut private = None;
+        let mut turn = None;
+        for provider in LEAD_PROVIDERS
+            .into_iter()
+            .filter(|p| selected.is_none_or(|s| s == *p))
+        {
+            bound()?;
+            let canonical = if provider == "agy" {
+                "antigravity"
+            } else {
+                provider
+            };
+            let request = Self::project_lead_request(&key, canonical);
+            if (settings || matches!(name, SEND_LEAD | STOP_LEAD) || full_answer)
+                && args["leadRequestId"] != request
+            {
+                return Err("The selected Lead changed. Reopen its conversation.".into());
+            }
+            let binding =
+                crate::storage::hash(json!(["project-lead-v1", key, request]).to_string());
+            let lead = json!({
+                "request": request,
+                "room": Value::Null,
+                "participant": format!("ask-{request}"),
+                "provider": canonical,
+                "purpose": "provider-lead",
+                "role": "worker",
+                "readOnly": true,
+                "assignedAt": PROJECT_LEAD_STAMP,
+                "status": "started",
+            });
+            let anchor_op =
+                assignment_address(&lead, &binding).ok_or("Missing Lead operation address.")?;
+            let exists = repo.join(crate::RUN_ROOT).join(&anchor_op).exists();
+            if !exists {
+                if matches!(name, SEND_LEAD | UPDATE_SETTINGS) {
+                    self.ensure_project_lead_anchor(repo, &anchor_op, &binding, canonical)?;
+                } else if settings {
+                    let mut detail =
+                        lead_turns::default_settings(self, repo, provider, &binding, &anchor_op);
+                    let mut summary = json!({
+                        "projectKey": key,
+                        "room": Value::Null,
+                        "provider": provider,
+                        "leadRequestId": request,
+                        "revision": detail["revision"],
+                    });
+                    for field in ["projectKey", "room", "provider", "leadRequestId"] {
+                        detail[field] = summary[field].clone();
+                    }
+                    summary["leadSettings"] = detail;
+                    bound()?;
+                    return Ok(summary);
+                } else if matches!(name, STOP_LEAD | READ_STREAM) || full_answer {
+                    return Err("The original Lead conversation could not be verified.".into());
+                } else {
+                    if let Some(before) = args.get("before")
+                        && before.is_string()
+                    {
+                        return Err("Invalid Lead conversation page.".into());
+                    }
+                    if let Some(id) = args["turnId"].as_str() {
+                        turn = Some(json!({"turnId": id, "status": "not_found"}));
+                    }
+                    let row = json!({
+                        "provider": provider,
+                        "requestId": request,
+                        "status": "ready",
+                        "latestTurn": Value::Null,
+                    });
+                    if selected.is_some() {
+                        private = Some(json!({
+                            "room": Value::Null,
+                            "provider": provider,
+                            "requestId": request,
+                            "status": "ready",
+                            "transcript": {"turns": [], "cursor": Value::Null, "hasMore": false},
+                        }));
+                    }
+                    rows.push(row);
+                    continue;
+                }
+            }
+            let valid = self
+                .valid_project_lead_anchor(repo, &anchor_op, &binding, canonical)
+                .unwrap_or(false);
+            if !valid {
+                if settings
+                    || matches!(name, SEND_LEAD | STOP_LEAD)
+                    || full_answer
+                    || args.get("turnId").is_some()
+                    || args.get("before").is_some()
+                {
+                    return Err("The original Lead conversation could not be verified.".into());
+                }
+                let row = json!({
+                    "provider": provider,
+                    "requestId": request,
+                    "status": "unconfirmed",
+                    "latestTurn": Value::Null,
+                });
+                if selected.is_some() {
+                    private = Some(json!({
+                        "room": Value::Null,
+                        "provider": provider,
+                        "requestId": request,
+                        "status": "unconfirmed",
+                        "transcript": Value::Null,
+                    }));
+                }
+                rows.push(row);
+                continue;
+            }
+            let mut row = json!({
+                "provider": provider,
+                "requestId": request,
+                "status": "ready",
+                "latestTurn": Value::Null,
+            });
+            let mut transcript = json!({"turns": [], "cursor": Value::Null, "hasMore": false});
+            if selected.is_some() {
+                let conversation =
+                    lead_turns::Conversation::open(repo, &anchor_op, &binding, &lead, provider)?;
+                let current = || {
+                    bound()?;
+                    if !self.valid_project_lead_anchor(repo, &anchor_op, &binding, canonical)? {
+                        return Err("The original Lead receipt changed.".into());
+                    }
+                    Ok(())
+                };
+                if settings {
+                    let mut detail =
+                        conversation.settings(self, name == UPDATE_SETTINGS, args, &current)?;
+                    let mut summary = json!({
+                        "projectKey": key,
+                        "room": Value::Null,
+                        "provider": provider,
+                        "leadRequestId": request,
+                        "revision": detail["revision"],
+                    });
+                    for field in ["projectKey", "room", "provider", "leadRequestId"] {
+                        detail[field] = summary[field].clone();
+                    }
+                    summary["leadSettings"] = detail;
+                    bound()?;
+                    return Ok(summary);
+                }
+                if stream {
+                    let stream = conversation.stream_page(self, args, current)?;
+                    private = Some(json!({
+                        "room": Value::Null,
+                        "provider": provider,
+                        "requestId": request,
+                        "status": "ready",
+                        "stream": stream,
+                    }));
+                } else if full_answer {
+                    let answer = conversation.answer_page(self, args, current)?;
+                    transcript = json!({"turns": [], "cursor": Value::Null, "hasMore": false});
+                    private = Some(json!({
+                        "room": Value::Null,
+                        "provider": provider,
+                        "requestId": request,
+                        "status": "ready",
+                        "transcript": transcript,
+                        "answer": answer,
+                    }));
+                } else {
+                    turn = conversation.exchange(self, name, args, &mut transcript, current)?;
+                }
+                match (!stream).then(|| conversation.latest(self, true, bound)) {
+                    None => {}
+                    Some(Ok(latest)) => row["latestTurn"] = latest,
+                    Some(Err(err)) => {
+                        row["latestTurn"] = Value::Null;
+                        row["turnState"] = err.marker();
+                    }
+                }
+                if private.is_none() {
+                    private = Some(json!({
+                        "room": Value::Null,
+                        "provider": provider,
+                        "requestId": request,
+                        "status": "ready",
+                        "transcript": transcript,
+                    }));
+                }
+            } else {
+                match lead_turns::Conversation::open(repo, &anchor_op, &binding, &lead, provider)
+                    .map_err(|_| lead_turns::TurnLookupError::InvalidRecord)
+                    .and_then(|conversation| conversation.latest(self, false, bound))
+                {
+                    Ok(latest) => row["latestTurn"] = latest,
+                    Err(err) => {
+                        row["latestTurn"] = Value::Null;
+                        row["turnState"] = err.marker();
+                    }
+                }
+            }
+            rows.push(row);
+        }
+        bound()?;
+        let mut result = json!({"room": Value::Null, "projectKey": key, "leads": rows});
         if let Some(turn) = turn {
             result["turn"] = turn;
         }
@@ -4050,6 +4475,7 @@ impl Server<'_> {
             "projectKey": key,
             "binding": binding,
             "readOnly": self.config.profile == ToolProfile::McpApp,
+            "leadChat": true,
         });
         if binding != "catalog" {
             return Ok(out);
