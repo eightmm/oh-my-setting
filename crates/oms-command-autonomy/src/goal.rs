@@ -762,7 +762,7 @@ fn reconcile(ctx: &Context<'_>, args: &Args, wall: ProviderWall) -> Result<()> {
                     "--plan-task".into(),
                     value::text(intent, "task_id").into(),
                 ],
-                Duration::from_secs(1800),
+                wall.land(Duration::from_secs(1800)),
             )?;
             require(
                 out.code == 0,
@@ -814,11 +814,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     verify::model(args.text("model")?)?;
     verify::model(args.text("fallback-model")?)?;
     verify::effort(args.get("reasoning-effort", "auto")?)?;
-    let wall = if args.has("provider-timeout") {
-        ProviderWall::Pinned(verify::duration(args.required("provider-timeout")?)?)
-    } else {
-        ctx.peer_wall.map_or_else(ProviderWall::from_env, Ok)?
-    };
+    let wall = ProviderWall::resolve(ctx, args)?;
     if args.has("allow-floor-change") {
         verify::reason(args.required("allow-floor-change")?)?;
     }

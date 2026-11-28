@@ -49,10 +49,25 @@ impl ProviderWall {
             }
         }
     }
+    pub fn resolve(ctx: &Context<'_>, args: &Args) -> Result<Self> {
+        if args.has("provider-timeout") {
+            Ok(Self::Pinned(verify::duration(
+                args.required("provider-timeout")?,
+            )?))
+        } else {
+            ctx.peer_wall.map_or_else(Self::from_env, Ok)
+        }
+    }
     pub fn outer(self) -> std::time::Duration {
         match self {
             Self::Unpinned => UNPINNED_PROVIDER_WALL,
             Self::Pinned(wall) => wall,
+        }
+    }
+    pub fn land(self, base: std::time::Duration) -> std::time::Duration {
+        match self {
+            Self::Pinned(wall) => wall.max(base),
+            Self::Unpinned => base,
         }
     }
 }
@@ -777,7 +792,7 @@ struct PreparedPropose {
     council: CouncilComposition,
     prompt: String,
     discovery: Option<Value>,
-    wall: std::time::Duration,
+    wall: ProviderWall,
     extra_call_args: Vec<OsString>,
     issue: Option<String>,
     issue_pin: Option<String>,
@@ -935,7 +950,7 @@ fn prepare_propose(ctx: &Context<'_>, args: &Args, retained: bool) -> Result<Pre
         ));
     }
     scan(prompt.as_bytes())?;
-    let wall = verify::duration(args.get("provider-timeout", "5m")?)?;
+    let wall = ProviderWall::resolve(ctx, args)?;
     let mut extra_call_args = Vec::new();
     for key in ["model", "fallback-model", "reasoning-effort"] {
         if args.has(key) {
@@ -1124,7 +1139,7 @@ pub(crate) fn execute_with(ctx: &Context<'_>, args: &Args, retained: bool) -> Re
                 "--deliberation".into(),
             ]);
         }
-        let council = invoke(ctx, "peer-ask", council_args, wall)?;
+        let council = invoke_provider(ctx, "peer-ask", council_args, wall, Vec::new())?;
         if council.code == 130 {
             return Err(Error::new(
                 130,
@@ -1193,7 +1208,7 @@ pub(crate) fn execute_with(ctx: &Context<'_>, args: &Args, retained: bool) -> Re
             route.effort.clone().into(),
         ]);
     }
-    let output = invoke(ctx, "agent-call", call, wall)?;
+    let output = invoke_provider(ctx, "agent-call", call, wall, Vec::new())?;
     if output.code == 130 {
         return Err(Error::new(
             130,

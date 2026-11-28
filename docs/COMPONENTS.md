@@ -1759,18 +1759,24 @@ The detailed operating contract is in the harness state-memory reference.
 
 `oms plan-from-spec` proposes tasks from an active `PROJECT.md`; it refuses a
 draft spec and does not alter the plan until the proposal is explicitly
-applied. `oms plan-run` claims and executes at most one ready task; unpinned
-provider calls omit `OMS_PEER_TIMEOUT` under a 24-hour-plus-grace outer wall so
-`peer-delegate`'s own limits govern: a 20-minute `OMS_PEER_STALL` check plus a
-24-hour cap for streaming workers and a 20-minute wall for non-streaming
-workers (`OMS_PEER_TIMEOUT` pins a fixed provider wall), while `patch-land`
-keeps its 20-minute wall. `oms
-goal-drive` repeats within a cycle cap and acceptance command using the same
-provider wall rule (`--provider-timeout` or `OMS_PEER_TIMEOUT` pins a fixed
-wall); the cap counts
-task attempts across resumes of one autopilot contract, bounds attempts rather
-than provider cost, and an exhausted contract is retired with `oms autopilot
-abandon`. It is not an unbounded autonomous loop.
+applied. Across `oms intent` (`draft`), `oms plan-from-spec` (council
+`peer-ask` and planner `agent-call`), `oms plan-run` (serial and `--parallel`),
+`oms goal-drive`, and `oms autopilot` (planner, worker, and `peer-review`),
+unpinned provider calls omit `OMS_PEER_TIMEOUT` under a 24-hour-plus-60-second
+outer wall so the peer layer's `route_timeouts_with` governs: only streaming
+providers (`providers::streams_output`: `codex`, `claude`, `pi`) get the
+20-minute `OMS_PEER_STALL` check and 24-hour cap, while non-streaming providers
+(such as `antigravity`) get a fixed default wall (15 minutes for `peer-ask`;
+20 minutes for `agent-call`, `peer-delegate`, and `peer-review`). Explicit
+`--provider-timeout`, `--ROLE-timeout`, or `OMS_PEER_TIMEOUT` pins that exact
+wall; `autopilot` freezes unpinned role timeouts as empty fields so recovery
+and re-entry stay unpinned while existing receipts with explicit timeouts keep
+their pins. `patch-land` uses a 20-minute wall (30 minutes with `--recover`),
+or the pinned provider wall when pinned longer. `oms goal-drive` repeats within
+a cycle cap and acceptance command; the cap counts task attempts across resumes
+of one autopilot contract, bounds attempts rather than provider cost, and an
+exhausted contract is retired with `oms autopilot abandon`. It is not an
+unbounded autonomous loop.
 
 A proposal task may carry `"covers": ["REQ-1"]`: the acceptance criteria its
 verify proves, by the ids the runtime projects from the spec (an explicit

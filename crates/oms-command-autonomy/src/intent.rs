@@ -1,7 +1,7 @@
 //! Reviewed, durable contract candidates. Generated text cannot confirm itself.
 use crate::cli::Args;
 use crate::contract::{self, Contract};
-use crate::planning::{artifact, invoke, scan};
+use crate::planning::{ProviderWall, artifact, invoke_provider, scan};
 use crate::storage::{Context, MAX_FILE, RECEIPT};
 use crate::{Error, Output, Result, require, value, verify};
 use oms_command_plan::services::SupervisedCommand;
@@ -534,7 +534,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         );
         scan(prompt.as_bytes())?;
         let provider = ctx.services.normalize_provider(args.get("to", "codex")?)?;
-        let wall = verify::duration(args.get("provider-timeout", "5m")?)?;
+        let wall = ProviderWall::resolve(ctx, args)?;
         let mut call = vec![
             "--repo".into(),
             ctx.repo.as_os_str().to_owned(),
@@ -556,7 +556,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                 call.push(args.text(key)?.into());
             }
         }
-        let mut response = invoke(ctx, "agent-call", call.clone(), wall)?;
+        let mut response = invoke_provider(ctx, "agent-call", call.clone(), wall, Vec::new())?;
         if response.code != 0
             && [75, 124, 137, 143].contains(&response.code)
             && args.get("fallback-to", "auto")? != "none"
@@ -574,7 +574,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
             if let Some(index) = call.iter().position(|s| s == "--to") {
                 call[index + 1] = fallback.into();
             }
-            response = invoke(ctx, "agent-call", call, wall)?;
+            response = invoke_provider(ctx, "agent-call", call, wall, Vec::new())?;
         }
         let raw = artifact(ctx, &response, MAX_FILE)?;
         let text =
