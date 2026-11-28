@@ -548,7 +548,7 @@ impl Services for FeedbackMock {
                 // goal-drive omit OMS_PEER_TIMEOUT under the cap-plus-grace outer
                 // wall so peer-delegate's own stall check and 24-hour cap decide.
                 if std::env::var_os("OMS_PEER_TIMEOUT").is_none()
-                    && self.mode != "base-drift-wall-flag"
+                    && !matches!(self.mode, "base-drift-wall-flag" | "base-drift-wall-2h")
                 {
                     assert!(
                         !call
@@ -832,11 +832,17 @@ impl Services for FeedbackMock {
                     "{:?}",
                     call.environment
                 );
-                let expected_wall = if call.args.iter().any(|arg| arg == "--recover") {
+                let base_wall = if call.args.iter().any(|arg| arg == "--recover") {
                     1800
                 } else {
                     1200
                 };
+                let expected_wall =
+                    if matches!(self.mode, "base-drift-wall-2h" | "base-drift-wall-env-2h") {
+                        7200
+                    } else {
+                        base_wall
+                    };
                 assert_eq!(call.wall, std::time::Duration::from_secs(expected_wall));
                 if self.mode.starts_with("base-drift-ff") {
                     let encoded = call
@@ -1326,6 +1332,37 @@ fn goal_drive_reclaims_expired_claim_for_open_commit_intent() {
                     ]
                 );
             }
+            "env-2h" => {
+                assert_eq!(std::env::var("OMS_PEER_TIMEOUT").as_deref(), Ok("2h"));
+                let two_hours = std::time::Duration::from_secs(7200);
+                let (mock, repo) = drive_fixture("base-drift-wall-env-2h");
+                let out = mock.run(&repo, "work", false);
+                assert_eq!(out.0, 1, "{out:?}");
+                assert_eq!(
+                    select_calls(&mock),
+                    vec![
+                        ("peer-delegate".into(), two_hours, Some("7200s".into())),
+                        ("patch-land".into(), two_hours, None),
+                    ]
+                );
+
+                let (mock, repo) = drive_fixture("base-drift-wall-env-2h");
+                let out = run_with_services(
+                    "goal-drive",
+                    &["--max-cycles".into(), "1".into()],
+                    &repo.0,
+                    &AtomicBool::new(false),
+                    &mock,
+                );
+                assert_eq!(out.0, 3, "{out:?}");
+                assert_eq!(
+                    select_calls(&mock),
+                    vec![
+                        ("peer-delegate".into(), two_hours, Some("7200s".into())),
+                        ("patch-land".into(), two_hours, None),
+                    ]
+                );
+            }
             "env-bad" => {
                 let (mock, repo) = drive_fixture("base-drift-wall-env");
                 assert_eq!(mock.run(&repo, "work", false).0, 2);
@@ -1441,7 +1478,101 @@ fn goal_drive_reclaims_expired_claim_for_open_commit_intent() {
         ]
     );
 
-    for (subcase, env_timeout) in [("env-90s", "90s"), ("env-bad", "bad")] {
+    let two_hours = std::time::Duration::from_secs(7200);
+    let (mock, repo) = drive_fixture("base-drift-wall-2h");
+    let out = run_with_services(
+        "goal-drive",
+        &[
+            "--max-cycles".into(),
+            "1".into(),
+            "--provider-timeout".into(),
+            "2h".into(),
+        ],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_eq!(out.0, 3, "{out:?}");
+    assert_eq!(
+        select_calls(&mock),
+        vec![
+            ("peer-delegate".into(), two_hours, Some("7200s".into())),
+            ("patch-land".into(), two_hours, None),
+        ]
+    );
+
+    for (mode, extra_args, expected_recover) in [
+        (
+            "recover-unpinned",
+            vec!["--commit-task", "recover-task"],
+            std::time::Duration::from_secs(1800),
+        ),
+        (
+            "base-drift-wall-2h",
+            vec!["--commit-task", "recover-task", "--provider-timeout", "2h"],
+            two_hours,
+        ),
+    ] {
+        let (mock, repo) = drive_fixture(mode);
+        mock.plan(
+            &repo.0,
+            &[
+                "add",
+                "--id",
+                "recover-task",
+                "--title",
+                "Recover landing intent",
+                "--allowed",
+                "src",
+                "--verify",
+                "true",
+            ],
+        );
+        mock.plan(
+            &repo.0,
+            &["claim", "--id", "recover-task", "--provider", "codex"],
+        );
+        let claimed = mock.plan(&repo.0, &["show", "--id", "recover-task"]);
+        mock.plan(
+            &repo.0,
+            &[
+                "start",
+                "--id",
+                "recover-task",
+                "--lease-id",
+                claimed["lease_id"].as_str().unwrap(),
+            ],
+        );
+        repo.write(
+            ".oms/plan/progress.jsonl",
+            format!(
+                "{}\n",
+                json!({
+                    "schema": 1,
+                    "kind": "commit-intent",
+                    "phase": "prepared",
+                    "worktree": repo.0,
+                    "intent_id": "intent-recover",
+                    "task_id": "recover-task",
+                    "provider": "codex",
+                    "lease_id": claimed["lease_id"],
+                })
+            ),
+        );
+        let argv = extra_args
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        let out = run_with_services("goal-drive", &argv, &repo.0, &AtomicBool::new(false), &mock);
+        assert_eq!(out.0, 3, "{mode}: {out:?}");
+        assert_eq!(
+            select_calls(&mock),
+            vec![("patch-land".into(), expected_recover, None)],
+            "{mode}"
+        );
+    }
+
+    for (subcase, env_timeout) in [("env-90s", "90s"), ("env-2h", "2h"), ("env-bad", "bad")] {
         let mut child = Command::new(std::env::current_exe().unwrap());
         for (key, _) in std::env::vars_os().filter(|(k, _)| ambient(k)) {
             child.env_remove(key);
@@ -2853,6 +2984,8 @@ struct Planner {
     repo: PathBuf,
     during_issue_read: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     answer: std::sync::Mutex<String>,
+    invocations: std::sync::Mutex<Vec<(String, std::time::Duration, Option<String>)>>,
+    fail_once: AtomicBool,
     calls: std::sync::atomic::AtomicUsize,
     issue_reads: std::sync::atomic::AtomicUsize,
     acceptance_checks: std::sync::atomic::AtomicUsize,
@@ -2931,7 +3064,31 @@ impl Services for Planner {
         call: &Invocation,
         _: &AtomicBool,
     ) -> oms_command_autonomy::Result<CommandResult> {
+        if call.tool == "fail-ledger" {
+            return Ok((0, vec![], vec![]));
+        }
+        let peer_timeout = call
+            .environment
+            .iter()
+            .find_map(|(k, v)| (k == "OMS_PEER_TIMEOUT").then(|| v.to_string_lossy().into_owned()));
+        self.invocations
+            .lock()
+            .unwrap()
+            .push((call.tool.clone(), call.wall, peer_timeout));
         let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call.tool == "peer-delegate" {
+            return Ok((1, vec![], b"fixture worker stop\n".to_vec()));
+        }
+        if call.tool == "peer-review" {
+            return Ok((1, vec![], b"fixture review stop\n".to_vec()));
+        }
+        if call.tool == "agent-call"
+            && self
+                .fail_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok((75, vec![], b"temporary capacity\n".to_vec()));
+        }
         let option = |key: &str| {
             call.args
                 .windows(2)
@@ -3051,6 +3208,8 @@ impl Repo {
             repo: self.0.clone(),
             during_issue_read: Default::default(),
             answer: std::sync::Mutex::new(answer.into()),
+            invocations: Default::default(),
+            fail_once: AtomicBool::new(false),
             calls: 0.into(),
             issue_reads: 0.into(),
             acceptance_checks: 0.into(),
@@ -3348,7 +3507,38 @@ fn autopilot_binds_retained_discussion_to_the_planning_inputs_and_frozen_model()
 
 #[test]
 fn github_issue_intake_is_stamped_only_by_the_harness() {
-    if scrubbed_child("github_issue_intake_is_stamped_only_by_the_harness") {
+    const NAME: &str = "github_issue_intake_is_stamped_only_by_the_harness";
+    const UNPINNED_WALL: std::time::Duration = std::time::Duration::from_secs(86_400 + 60);
+    let candidate_doc = "# Project\n## Status\n- State: draft\n## Project\n- Goal: adopt issue intake\n- Scope: src\n- Non-goals: none\n## Commands\n- Check: bash tests/check.sh\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh\n## Acceptance\n- Native checks pass\n";
+    if std::env::var_os("AUTONOMY_PLANNER_ENV_SUBTEST").is_some() {
+        assert_eq!(std::env::var("OMS_PEER_TIMEOUT").as_deref(), Ok("90s"));
+        let env_wall = std::time::Duration::from_secs(90);
+        let repo = Repo::github("git@github.com:fork-org/example-repo.git", Some(SPEC));
+        let planner = repo.planner(candidate_doc);
+        let (code, _, err) = intake("intent", &repo, &planner, &["draft", "--goal", "env pin"]);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(
+            *planner.invocations.lock().unwrap(),
+            vec![("agent-call".into(), env_wall, Some("90s".into()))]
+        );
+        let planner = repo.planner(ANSWER);
+        let (code, _, err) = intake(
+            "plan-from-spec",
+            &repo,
+            &planner,
+            &["--collaboration", "auto"],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(
+            *planner.invocations.lock().unwrap(),
+            vec![
+                ("peer-ask".into(), env_wall, Some("90s".into())),
+                ("agent-call".into(), env_wall, Some("90s".into())),
+            ]
+        );
+        return;
+    }
+    if scrubbed_child(NAME) {
         return;
     }
     let pending = "plan-from-spec: pending: GitHub project mode requires an issue; run: oms plan-from-spec --restamp ";
@@ -3518,6 +3708,290 @@ fn github_issue_intake_is_stamped_only_by_the_harness() {
         );
         assert_eq!(out.contains(pending), carried.is_none(), "{out}");
     }
+
+    // intent draft and plan-from-spec: unpinned forwards no OMS_PEER_TIMEOUT
+    // under the 24h+60s outer wall; explicit --provider-timeout pins exactly.
+    let fork = "git@github.com:fork-org/example-repo.git";
+    let repo = Repo::github(fork, Some(SPEC));
+    let draft_planner = repo.planner(candidate_doc);
+    draft_planner
+        .fail_once
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (code, _, err) = intake(
+        "intent",
+        &repo,
+        &draft_planner,
+        &["draft", "--goal", "unpinned draft"],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        *draft_planner.invocations.lock().unwrap(),
+        vec![
+            ("agent-call".into(), UNPINNED_WALL, None),
+            ("agent-call".into(), UNPINNED_WALL, None),
+        ]
+    );
+    draft_planner.invocations.lock().unwrap().clear();
+    let (code, _, err) = intake(
+        "intent",
+        &repo,
+        &draft_planner,
+        &[
+            "draft",
+            "--goal",
+            "pinned draft",
+            "--provider-timeout",
+            "4m",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        *draft_planner.invocations.lock().unwrap(),
+        vec![(
+            "agent-call".into(),
+            std::time::Duration::from_secs(240),
+            Some("240s".into()),
+        )]
+    );
+
+    let spec_planner = repo.planner(ANSWER);
+    let (code, _, err) = intake(
+        "plan-from-spec",
+        &repo,
+        &spec_planner,
+        &["--collaboration", "auto"],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        *spec_planner.invocations.lock().unwrap(),
+        vec![
+            ("peer-ask".into(), UNPINNED_WALL, None),
+            ("agent-call".into(), UNPINNED_WALL, None),
+        ]
+    );
+    spec_planner.invocations.lock().unwrap().clear();
+    let (code, _, err) = intake(
+        "plan-from-spec",
+        &repo,
+        &spec_planner,
+        &["--collaboration", "auto", "--provider-timeout", "7m"],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        *spec_planner.invocations.lock().unwrap(),
+        vec![
+            (
+                "peer-ask".into(),
+                std::time::Duration::from_secs(420),
+                Some("420s".into()),
+            ),
+            (
+                "agent-call".into(),
+                std::time::Duration::from_secs(420),
+                Some("420s".into()),
+            ),
+        ]
+    );
+
+    // autopilot propose/run without timeouts records unpinned routing and
+    // forwards no OMS_PEER_TIMEOUT; --worker-timeout 30m pins worker exactly;
+    // an old frozen receipt with explicit timeouts still loads and pins.
+    let repo = Repo::github(fork, Some(SPEC));
+    let auto_planner = repo.planner(ANSWER);
+    let (code, out, err) = intake(
+        "autopilot",
+        &repo,
+        &auto_planner,
+        &["propose", "--base", "main"],
+    );
+    assert_eq!(code, 4, "{err}");
+    let (prop_path, prop_sha) = printed(&out);
+    let receipt_path = repo.0.join(".oms/plan/autopilot-run.json");
+    let unpinned_receipt = json_file(&receipt_path);
+    assert_eq!(unpinned_receipt["routing"]["provider_timeout"], "");
+    for role in ["planner", "worker", "reviewer"] {
+        assert_eq!(unpinned_receipt["routing"][role]["timeout"], "", "{role}");
+    }
+    assert_eq!(
+        *auto_planner.invocations.lock().unwrap(),
+        vec![("agent-call".into(), UNPINNED_WALL, None)]
+    );
+    auto_planner.invocations.lock().unwrap().clear();
+    let (code, _, err) = intake(
+        "autopilot",
+        &repo,
+        &auto_planner,
+        &[
+            "run",
+            "--proposal",
+            &prop_path,
+            "--expected-proposal-sha256",
+            &prop_sha,
+        ],
+    );
+    assert_eq!(code, 3, "{err}");
+    assert_eq!(
+        *auto_planner.invocations.lock().unwrap(),
+        vec![("peer-delegate".into(), UNPINNED_WALL, None)]
+    );
+    assert_eq!(
+        json_file(&receipt_path)["routing"],
+        unpinned_receipt["routing"]
+    );
+
+    let repo = Repo::github(fork, Some(SPEC));
+    let pinned_worker = repo.planner(ANSWER);
+    let (code, out, err) = intake(
+        "autopilot",
+        &repo,
+        &pinned_worker,
+        &["propose", "--base", "main", "--worker-timeout", "30m"],
+    );
+    assert_eq!(code, 4, "{err}");
+    let (prop_path, prop_sha) = printed(&out);
+    let worker_receipt = json_file(repo.0.join(".oms/plan/autopilot-run.json"));
+    assert_eq!(worker_receipt["routing"]["provider_timeout"], "");
+    assert_eq!(worker_receipt["routing"]["planner"]["timeout"], "");
+    assert_eq!(worker_receipt["routing"]["worker"]["timeout"], "30m");
+    assert_eq!(worker_receipt["routing"]["reviewer"]["timeout"], "");
+    assert_eq!(
+        *pinned_worker.invocations.lock().unwrap(),
+        vec![("agent-call".into(), UNPINNED_WALL, None)]
+    );
+    pinned_worker.invocations.lock().unwrap().clear();
+    let (code, _, err) = intake(
+        "autopilot",
+        &repo,
+        &pinned_worker,
+        &[
+            "run",
+            "--proposal",
+            &prop_path,
+            "--expected-proposal-sha256",
+            &prop_sha,
+        ],
+    );
+    assert_eq!(code, 3, "{err}");
+    assert_eq!(
+        *pinned_worker.invocations.lock().unwrap(),
+        vec![(
+            "peer-delegate".into(),
+            std::time::Duration::from_secs(1800),
+            Some("1800s".into()),
+        )]
+    );
+
+    let repo = Repo::github(fork, Some(SPEC));
+    let legacy_planner = repo.planner(ANSWER);
+    let base_sha = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo.0)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let spec_sha = value::hash(SPEC);
+    let route = |timeout: &str| json!({"model": "", "fallback_model": "", "reasoning_effort": "auto", "timeout": timeout});
+    let legacy_row = json!({
+        "schema": 1,
+        "kind": "autopilot-run",
+        "stage": "proposing",
+        "repo": repo.0,
+        "spec_sha256": spec_sha,
+        "providers": {"planner": "claude", "worker": "codex", "reviewer": "claude"},
+        "routing": {
+            "provider_timeout": "5m",
+            "planner": route("15m"),
+            "worker": route("30m"),
+            "reviewer": route("20m"),
+        },
+        "contract": {
+            "allowed": "src",
+            "base": "main",
+            "base_sha": base_sha.trim(),
+            "remote": "origin",
+            "max_cycles": 4,
+            "initial_tasks": 4,
+            "replan_tasks": 1,
+            "auto_repair": false,
+            "retry_known": false,
+            "review_mode": "shadow",
+            "draft_pr": false,
+            "allow_verifier_change": false,
+            "allow_floor_change": "",
+            "collaboration": "off",
+        },
+        "proposal": {"path": "", "sha256": ""},
+        "branch": format!("oms/autopilot-{}", &spec_sha[..12]),
+        "owner_id": format!("owner_{}", "2".repeat(32)),
+        "updated": "2026-01-02T03:04:05Z",
+    });
+    let legacy_digest = receipt::contract_digest(&legacy_row);
+    repo.write(
+        ".oms/plan/autopilot-run.json",
+        value::pretty(&legacy_row).unwrap(),
+    );
+    let loaded = receipt::load_checked_receipt(&repo.0).unwrap().unwrap();
+    assert_eq!(loaded.row, legacy_row);
+    assert_eq!(receipt::contract_digest(&loaded.row), legacy_digest);
+    let (code, out, err) = intake("autopilot", &repo, &legacy_planner, &["propose"]);
+    assert_eq!(code, 4, "{err}");
+    let (prop_path, prop_sha) = printed(&out);
+    assert_eq!(
+        *legacy_planner.invocations.lock().unwrap(),
+        vec![(
+            "agent-call".into(),
+            std::time::Duration::from_secs(900),
+            Some("900s".into()),
+        )]
+    );
+    legacy_planner.invocations.lock().unwrap().clear();
+    let (code, _, err) = intake(
+        "autopilot",
+        &repo,
+        &legacy_planner,
+        &[
+            "run",
+            "--proposal",
+            &prop_path,
+            "--expected-proposal-sha256",
+            &prop_sha,
+        ],
+    );
+    assert_eq!(code, 3, "{err}");
+    assert_eq!(
+        *legacy_planner.invocations.lock().unwrap(),
+        vec![(
+            "peer-delegate".into(),
+            std::time::Duration::from_secs(1800),
+            Some("1800s".into()),
+        )]
+    );
+    assert_eq!(
+        receipt::contract_digest(&json_file(repo.0.join(".oms/plan/autopilot-run.json"))),
+        legacy_digest
+    );
+
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    for (key, _) in std::env::vars_os().filter(|(k, _)| ambient(k)) {
+        child.env_remove(key);
+    }
+    let result = child
+        .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+        .env("AUTONOMY_PLANNER_ENV_SUBTEST", "1")
+        .env("OMS_PEER_TIMEOUT", "90s")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.status.success(), "{text}");
+    assert!(text.contains("1 passed;"), "{text}");
 }
 
 #[test]

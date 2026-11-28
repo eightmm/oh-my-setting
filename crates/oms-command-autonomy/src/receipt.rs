@@ -153,7 +153,14 @@ pub fn validate(row: &Value) -> Result<()> {
         &["provider_timeout", "planner", "worker", "reviewer"],
         &[],
     )?;
-    verify::duration(value::text(&row["routing"], "provider_timeout"))?;
+    require(
+        row["routing"]["provider_timeout"].is_string(),
+        "provider timeout must be text",
+    )?;
+    let provider_timeout = value::text(&row["routing"], "provider_timeout");
+    if !provider_timeout.is_empty() {
+        verify::duration(provider_timeout)?;
+    }
     for role in ["planner", "worker", "reviewer"] {
         require(
             ["codex", "claude", "antigravity"].contains(&value::text(&row["providers"], role)),
@@ -170,7 +177,11 @@ pub fn validate(row: &Value) -> Result<()> {
             verify::model(value::text(route, field))?;
         }
         verify::effort(value::text(route, "reasoning_effort"))?;
-        verify::duration(value::text(route, "timeout"))?;
+        require(route["timeout"].is_string(), "route timeout must be text")?;
+        let timeout = value::text(route, "timeout");
+        if !timeout.is_empty() {
+            verify::duration(timeout)?;
+        }
     }
     let contract = &row["contract"];
     value::keys(
@@ -670,9 +681,13 @@ pub fn continuation_argv(row: &Value) -> Vec<String> {
                 .join(","),
         );
     }
-    put("provider-timeout", text(routing, "provider_timeout"));
+    if !value::text(routing, "provider_timeout").is_empty() {
+        put("provider-timeout", text(routing, "provider_timeout"));
+    }
     for role in ["planner", "worker", "reviewer"] {
-        put(&format!("{role}-timeout"), text(&routing[role], "timeout"));
+        if !value::text(&routing[role], "timeout").is_empty() {
+            put(&format!("{role}-timeout"), text(&routing[role], "timeout"));
+        }
     }
     for role in ["planner", "worker", "reviewer"] {
         put(
@@ -1164,10 +1179,15 @@ fn fresh(ctx: &Context<'_>, args: &Args) -> Result<Value> {
         "reviewer",
         if worker == "codex" { "claude" } else { "codex" },
     )?)?;
-    let provider_timeout = args.get("provider-timeout", "5m")?;
+    let provider_timeout = args.text("provider-timeout")?;
     let mut routing = json!({"provider_timeout": provider_timeout});
-    for (role, default) in [("planner", "15m"), ("worker", "30m"), ("reviewer", "20m")] {
-        routing[role] = json!({"model": args.text(&format!("{role}-model"))?, "fallback_model": args.text(&format!("{role}-fallback-model"))?, "reasoning_effort": args.get(&format!("{role}-reasoning-effort"), "auto")?, "timeout": args.get(&format!("{role}-timeout"), if args.has("provider-timeout") { provider_timeout } else { default })?});
+    for role in ["planner", "worker", "reviewer"] {
+        routing[role] = json!({
+            "model": args.text(&format!("{role}-model"))?,
+            "fallback_model": args.text(&format!("{role}-fallback-model"))?,
+            "reasoning_effort": args.get(&format!("{role}-reasoning-effort"), "auto")?,
+            "timeout": args.get(&format!("{role}-timeout"), provider_timeout)?,
+        });
     }
     if args.get("collaboration", "off")? == "auto" {
         for (role, provider) in [
@@ -1831,12 +1851,14 @@ fn review_once(
                 args.extend([format!("--{option}").into(), text.into()]);
             }
         }
-        invoke(
-            ctx,
-            "peer-review",
-            args,
-            verify::duration(value::text(&row["routing"]["reviewer"], "timeout"))?,
-        )?
+        let reviewer_timeout = value::text(&row["routing"]["reviewer"], "timeout");
+        let wall = if reviewer_timeout.is_empty() {
+            ctx.peer_wall
+                .map_or_else(planning::ProviderWall::from_env, Ok)?
+        } else {
+            planning::ProviderWall::Pinned(verify::duration(reviewer_timeout)?)
+        };
+        planning::invoke_provider(ctx, "peer-review", args, wall, Vec::new())?
     };
     match adaptive::review_evidence(ctx, row, &directory, output.code, command) {
         Ok(reference) => {
@@ -3185,6 +3207,7 @@ mod tests {
         coverage: std::sync::Mutex<Value>,
         external: std::sync::Mutex<Value>,
         review_calls: std::sync::Mutex<Vec<Vec<OsString>>>,
+        invocations: std::sync::Mutex<Vec<(String, Duration, Option<String>)>>,
         calls: std::sync::atomic::AtomicUsize,
         worker_return: AtomicBool,
         cleanup: AtomicBool,
@@ -3269,6 +3292,13 @@ mod tests {
                 return Ok((0, vec![], vec![]));
             }
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let peer_timeout = call.environment.iter().find_map(|(k, v)| {
+                (k == "OMS_PEER_TIMEOUT").then(|| v.to_string_lossy().into_owned())
+            });
+            self.invocations
+                .lock()
+                .unwrap()
+                .push((call.tool.clone(), call.wall, peer_timeout));
             if call.tool == "peer-review" {
                 self.review_calls.lock().unwrap().push(call.args.clone());
             }
@@ -3787,6 +3817,16 @@ mod tests {
         dir.write_receipt(&row);
         let mut raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
         assert!(review_once(&ctx, &mut row, &mut raw, command, &covers, "goal").is_err());
+        if std::env::var_os("OMS_PEER_TIMEOUT").is_none() {
+            assert_eq!(
+                *host.invocations.lock().unwrap(),
+                vec![(
+                    "peer-review".into(),
+                    Duration::from_secs(1200),
+                    Some("1200s".into()),
+                )]
+            );
+        }
         let intent = row["adaptive"]["review"].clone();
         {
             let calls = host.review_calls.lock().unwrap();
@@ -3939,6 +3979,7 @@ mod tests {
             row["routing"]["worker"]["model"] = model.into();
             row["routing"]["worker"]["fallback_model"] = fallback.into();
             row["routing"]["reviewer"]["model"] = "claude-sonnet-4-6".into();
+            row["routing"]["reviewer"]["timeout"] = "".into();
             row["stage"] = "reviewing".into();
             dir.write_receipt(&row);
             let ctx = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
@@ -3946,6 +3987,12 @@ mod tests {
             assert!(
                 review_once(&ctx, &mut row, &mut raw, "bash tests/check.sh", &[], "goal").is_err()
             );
+            if std::env::var_os("OMS_PEER_TIMEOUT").is_none() {
+                assert_eq!(
+                    *host.invocations.lock().unwrap(),
+                    vec![("peer-review".into(), planning::UNPINNED_PROVIDER_WALL, None)]
+                );
+            }
             let calls = host.review_calls.lock().unwrap();
             assert_eq!(calls.len(), 1);
             let args = &calls[0];
@@ -4109,6 +4156,71 @@ mod tests {
             continuation_argv(&row).last().map(String::as_str),
             Some("propose")
         );
+
+        let mut unpinned = sample();
+        unpinned["routing"]["provider_timeout"] = "".into();
+        for role in ["planner", "worker", "reviewer"] {
+            unpinned["routing"][role]["timeout"] = "".into();
+        }
+        validate(&unpinned).unwrap();
+        let unpinned_argv = approved_continuation(&unpinned).expect("approved unpinned run");
+        for flag in [
+            "--provider-timeout",
+            "--planner-timeout",
+            "--worker-timeout",
+            "--reviewer-timeout",
+        ] {
+            assert!(!unpinned_argv.iter().any(|arg| arg == flag), "{flag}");
+        }
+        let unpinned_raw: Vec<_> = unpinned_argv[2..].iter().map(OsString::from).collect();
+        let unpinned_args = Args::parse("autopilot", &unpinned_raw).unwrap();
+        options_match(&unpinned_args, &unpinned).unwrap();
+        assert!(!propose_args(&Args::default(), &unpinned, false).has("provider-timeout"));
+        let mismatch = Args::parse(
+            "autopilot",
+            &["run".into(), "--worker-timeout".into(), "30m".into()],
+        )
+        .unwrap();
+        assert!(options_match(&mismatch, &unpinned).is_err());
+
+        let mut worker_only = unpinned.clone();
+        worker_only["routing"]["worker"]["timeout"] = "30m".into();
+        validate(&worker_only).unwrap();
+        let worker_argv = approved_continuation(&worker_only).unwrap();
+        assert!(
+            worker_argv
+                .windows(2)
+                .any(|pair| pair == ["--worker-timeout", "30m"])
+        );
+        for flag in [
+            "--provider-timeout",
+            "--planner-timeout",
+            "--reviewer-timeout",
+        ] {
+            assert!(!worker_argv.iter().any(|arg| arg == flag), "{flag}");
+        }
+        let worker_raw: Vec<_> = worker_argv[2..].iter().map(OsString::from).collect();
+        options_match(
+            &Args::parse("autopilot", &worker_raw).unwrap(),
+            &worker_only,
+        )
+        .unwrap();
+
+        for bad in [
+            json!(null),
+            json!(15),
+            json!(true),
+            json!("0s"),
+            json!("bad"),
+            json!(" "),
+        ] {
+            let mut invalid = unpinned.clone();
+            invalid["routing"]["provider_timeout"] = bad.clone();
+            assert!(validate(&invalid).is_err(), "{bad:?}");
+            let mut invalid = unpinned.clone();
+            invalid["routing"]["worker"]["timeout"] = bad.clone();
+            assert!(validate(&invalid).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
