@@ -165,14 +165,18 @@ fn normalized(path: &Path) -> bool {
             )
         })
         && !raw.windows(3).any(|w| w == b"/./")
+        && !raw.windows(2).any(|w| w == b"//")
 }
 
-/// Root byte operations at the nearest existing ancestor of the table's directory, in its
-/// physical spelling. Every held directory from `/` down must be owned by root or you and not
-/// group/world-writable (a root-owned sticky directory such as `/tmp` may sit above it), and
-/// the remaining components are walked without following symlinks. A symlink in the
-/// configured spelling is resolved once here, so it can only lead to such a directory.
+/// Root byte operations at the nearest existing ancestor of the table's directory. Every
+/// component from `/` down is opened without following symlinks and must be a directory owned
+/// by root or you and not group/world-writable (a root-owned sticky directory such as `/tmp`
+/// may sit above it). The path is never canonicalized, so a symlink anywhere in it is refused
+/// and the normalized spelling names one physical file, which keeps the lock key unique.
 fn anchored(path: &Path) -> Result<(oms_safe_fs::Root, PathBuf), String> {
+    if !normalized(path) {
+        return Err("route table path must be a normalized absolute file path".into());
+    }
     let dir = path
         .parent()
         .ok_or_else(|| "route table path has no parent directory".to_owned())?;
@@ -186,14 +190,12 @@ fn anchored(path: &Path) -> Result<(oms_safe_fs::Root, PathBuf), String> {
         .strip_prefix(anchor)
         .map_err(|_| "route table path is not under its ancestor".to_owned())?
         .to_path_buf();
-    let physical = std::fs::canonicalize(anchor)
-        .map_err(|e| format!("route table directory unavailable: {e}"))?;
-    let root = oms_safe_fs::Root::open_private_workspace(&physical, |_| false)
+    let root = oms_safe_fs::Root::open_private_workspace(anchor, |_| false)
         .map_err(|_| UNSAFE.to_owned())?;
     Ok((root, rest))
 }
 
-const UNSAFE: &str = "route table or a directory above it is not private to you: every directory must be owned by you or root and not group/world-writable, and the table must be a single-link regular file owned by you with mode 0600";
+const UNSAFE: &str = "route table or a directory above it is not private to you: give a path without symlinks whose every directory is owned by you or root and not group/world-writable; the table must be a single-link regular file owned by you with mode 0600";
 
 fn storage(error: ByteError) -> String {
     match error {
@@ -276,6 +278,9 @@ pub fn update(
     path: &Path,
     edit: impl FnOnce(&mut Vec<Route>) -> Result<bool, String>,
 ) -> Result<bool, String> {
+    if !normalized(path) {
+        return Err("route table path must be a normalized absolute file path".into());
+    }
     let settings =
         oms_lock::Settings::from_env().map_err(|_| "invalid OMS lock environment".to_owned())?;
     let _guard = oms_lock::Lock::for_file(path, settings)
@@ -290,10 +295,15 @@ pub fn update(
     if routes.len() > MAX_ROUTES {
         return Err(format!("route table holds at most {MAX_ROUTES} routes"));
     }
+    for route in &routes {
+        route.validate()?;
+    }
     let encoded = encode(&routes);
     if encoded.len() > MAX_BYTES {
         return Err("route table would exceed 64 KiB".into());
     }
+    // Publish only what a later load accepts, including the one-route-per-team rule.
+    parse(&encoded)?;
     root.atomic_mutate(
         &rel,
         MutationOptions {
@@ -432,6 +442,13 @@ mod tests {
         assert!(add(&good, "X").is_err());
         mode(&base.join("cfg"), 0o700);
         assert_eq!(load(&good).unwrap().len(), 9);
+        let private_link = base.join("private-link");
+        symlink(base.join("cfg"), &private_link).unwrap();
+        let through = private_link.join("oh-my-setting/intake-routes.json");
+        assert_eq!(load(&through), Err(UNSAFE.into()));
+        assert!(add(&through, "X").is_err());
+        let doubled = PathBuf::from(good.to_str().unwrap().replace("/cfg/", "/cfg//"));
+        assert!(load(&doubled).is_err() && add(&doubled, "X").is_err());
         let shared = base.join("shared");
         std::fs::create_dir(&shared).unwrap();
         mode(&shared, 0o777);
@@ -441,6 +458,21 @@ mod tests {
         assert!(add(&via, "X").is_err());
         assert!(!shared.join("oh-my-setting").exists());
         symlink(base.join("nowhere"), base.join("dangling")).unwrap();
+        // Writes validate every route and the one-route-per-team rule before publishing.
+        let before = std::fs::read(&good).unwrap();
+        let bad = |edit: fn(&mut Vec<Route>)| {
+            update(&good, |routes| {
+                edit(routes);
+                Ok(true)
+            })
+        };
+        use std::os::unix::ffi::OsStrExt as _;
+        assert!(
+            bad(|r| r[0].repo = PathBuf::from(std::ffi::OsStr::from_bytes(b"/srv/\xff"))).is_err()
+        );
+        assert!(bad(|r| r.push(r[0].clone())).is_err());
+        assert!(bad(|r| r[0].team = "bad team".into()).is_err());
+        assert_eq!(std::fs::read(&good).unwrap(), before);
         assert!(load(&base.join("dangling/oh-my-setting/intake-routes.json")).is_err());
 
         std::fs::remove_dir_all(&base).unwrap();
@@ -481,7 +513,15 @@ mod tests {
             at(&[(ENV_ROUTES_FILE, "/t/r.json")]),
             Ok(PathBuf::from("/t/r.json"))
         );
-        for bad in ["r.json", "/t/", "/t/.", "/t/./r.json", "/t/../r.json"] {
+        for bad in [
+            "r.json",
+            "/t/",
+            "/t/.",
+            "/t/./r.json",
+            "/t/../r.json",
+            "//t/r.json",
+            "/t//r.json",
+        ] {
             assert!(at(&[(ENV_ROUTES_FILE, bad)]).is_err(), "{bad}");
         }
     }

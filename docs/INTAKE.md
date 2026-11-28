@@ -117,11 +117,12 @@ oms intake serve --source linear --routes --organization "$LINEAR_ORG_ID" \
   `~/.config/oh-my-setting/intake-routes.json`, or the absolute `OMS_INTAKE_ROUTES_FILE`), a
   `0600` single-link regular file owned by you. Every directory above it, from `/` down, must be
   owned by you or root and not group/world-writable (a root-owned sticky directory such as `/tmp`
-  may sit above it); reads and writes hold those directories open and never follow a symlink below
-  the physical spelling, and anything else is refused. A relative `XDG_CONFIG_HOME` is ignored, and
+  may sit above it). Reads and writes hold those directories open and never follow a symlink, so
+  the path must contain none (set `OMS_INTAKE_ROUTES_FILE` to a physical path if your config
+  directory is a symlink); anything else is refused. A relative `XDG_CONFIG_HOME` is ignored, and
   an empty or relative `HOME` is an error rather than a path under the working directory. Edits hold
   the OMS state lock for the table and publish atomically; at most 64 routes and 64 KiB, one route
-  per source and team, and `--repo` must be UTF-8. `route add` checks that the Room exists, is open
+  per source and team, and `--repo` must be UTF-8; every edit is validated before it is written. `route add` checks that the Room exists, is open
   and enrolls both participants, stores the physical `--repo` path, and replaces an existing route
   for the same team.
 - **Matching**: `TEAM` is a Linear team key (`JAE`), a team id, or `*`. Each `AgentSessionEvent`
