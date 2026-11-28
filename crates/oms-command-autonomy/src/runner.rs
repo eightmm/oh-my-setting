@@ -277,7 +277,7 @@ fn repair_feedback(
     feedback_record(ctx, &claim, "acknowledged")?;
     let land_head = current_landing_base(ctx, head, intent)?;
     let expected = review_fence(ctx, &repaired, &land_head)?;
-    let landed = land(ctx, args, &repaired, &expected)?;
+    let landed = land(ctx, args, &repaired, &expected, wall)?;
     let code = landed.code;
     out.append(landed);
     if code == 0 {
@@ -549,6 +549,7 @@ fn land(
     args: &Args,
     task: &Value,
     expected: &oms_command_plan::ReviewFence,
+    wall: ProviderWall,
 ) -> Result<Output> {
     let _landing = ctx.gates.map(crate::storage::Gates::landing);
     let id = value::text(task, "id");
@@ -573,7 +574,7 @@ fn land(
             args.required("allow-floor-change")?.into(),
         ]);
     }
-    let output = invoke(ctx, "patch-land", call, PATCH_LAND_WALL)?;
+    let output = invoke(ctx, "patch-land", call, wall.land(PATCH_LAND_WALL))?;
     if output.code == 0 {
         crate::goal::completed_landing(ctx, id, Some(expected))?;
     }
@@ -986,7 +987,7 @@ pub(crate) fn run_task(
             return Ok(output);
         }
         if let Some(expected) = expected {
-            let mut landed = land(ctx, args, &task, &expected)?;
+            let mut landed = land(ctx, args, &task, &expected, wall)?;
             if landed.code != 0
                 && args.flag("auto-repair")
                 && !resume
@@ -1038,7 +1039,7 @@ pub(crate) fn run_task(
                     )?;
                     land_base = current_landing_base(ctx, &land_base, intent)?;
                     let expected = review_fence(ctx, &task, &land_base)?;
-                    landed = land(ctx, args, &task, &expected)?;
+                    landed = land(ctx, args, &task, &expected, wall)?;
                 } else {
                     terminalize_repair(ctx, &id, &lease)?;
                     output.code = repair_code;
