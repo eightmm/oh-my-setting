@@ -18,8 +18,11 @@ mod lead_plan_context;
 mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
-const URI: &str = "ui://oms/conversation-panel/v41.html";
+const URI: &str = "ui://oms/conversation-panel/v42.html";
 const HOME_URI: &str = "ui://oms/home/v1.html";
+const V41: &str = "ui://oms/conversation-panel/v41.html";
+const V40: &str = "ui://oms/conversation-panel/v40.html";
+const V39: &str = "ui://oms/conversation-panel/v39.html";
 const V38: &str = "ui://oms/conversation-panel/v38.html";
 const V37: &str = "ui://oms/conversation-panel/v37.html";
 const V33: &str = "ui://oms/conversation-panel/v33.html";
@@ -1644,6 +1647,9 @@ impl Server<'_> {
                             | V36
                             | V37
                             | V38
+                            | V39
+                            | V40
+                            | V41
                     )
                 ) =>
             {
@@ -5387,6 +5393,11 @@ fn card_is_stale(
         ".git/index",
         ".oms/plan",
         ".oms/plan/tasks.json",
+        ".oms/lifecycle",
+        ".oms/lifecycle/events.jsonl",
+        ".oms/threads",
+        ".oms/approvals.jsonl",
+        ".oms/failures.jsonl",
     ] {
         if physical_repo
             .join(marker)
