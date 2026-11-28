@@ -843,8 +843,13 @@ mod tests {
         fs::remove_file(payload.join("foreign")).unwrap();
 
         let cached = paths.source.join("target/oms-native").join(&revision);
-        // Preparation secures these before publishing; a umask must not decide them.
-        for dir in ["", "target", "target/oms-native"] {
+        // Preparation secures the cache directories before publishing; the source root
+        // is the fixture's checkout, kept private explicitly so a umask does not decide it.
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&paths.source)
+            .unwrap();
+        for dir in ["target", "target/oms-native"] {
             secure_dir(&paths.source.join(dir)).unwrap();
         }
         let mut tx = Transaction::begin(&paths).unwrap();
@@ -854,6 +859,10 @@ mod tests {
             prepared_digest(&paths, &revision).unwrap(),
             r::hash(&imported.manifest)
         );
+        // A group-writable checkout root is refused (no group proof here).
+        fs::set_permissions(&paths.source, fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(prepared_digest(&paths, &revision).is_err());
+        fs::set_permissions(&paths.source, fs::Permissions::from_mode(0o700)).unwrap();
         write(&cached.join(BUILT[0]), b"post-prepare corruption");
         assert!(prepared_digest(&paths, &revision).is_err());
         assert!(prepared_digest(&paths, "../other").is_err());
