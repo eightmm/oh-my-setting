@@ -42,13 +42,16 @@ fn unfinished_jsonl(bytes: &[u8]) -> bool {
     !bytes.is_empty() && !bytes.ends_with(b"\n")
 }
 
+/// Bytes plus the (device, inode) of the descriptor they were read from.
+pub(crate) type Snapshot = (Vec<u8>, Option<(u64, u64)>);
+
 #[allow(clippy::unnecessary_cast)]
 pub(crate) fn read_snapshot(
     repo: &Path,
     path: &Path,
     missing: bool,
     jsonl: bool,
-) -> Result<(Vec<u8>, Option<(u64, u64)>)> {
+) -> Result<Snapshot> {
     let anchor = root(repo)?;
     let options = ByteReadOptions {
         missing_ok: missing,
