@@ -110,8 +110,12 @@ test('draws a mixed roster without throwing', () => {
   assert.doesNotThrow(() => home.show([...cards(40), { alias: 'hidden', state: 'withheld' }].map(home.norm)));
   assert.doesNotThrow(() => home.show([]));
   // Opening a row, a quiet tag and a withheld tag builds each detail, including the withheld note.
-  home.show([...cards(8), { alias: 'hidden', state: 'withheld' }].map(home.norm));
-  for (const alias of ['project-0', 'project-1', 'project-3', 'hidden', null]) assert.doesNotThrow(() => home.select(alias, true));
+  const roster = [...cards(10), { alias: 'hidden', state: 'withheld' }].map(home.norm);
+  home.show(roster);
+  const band = plain(home.groups(roster));
+  // project-1 is a need row, project-9 a quiet tag (stale, nothing to check), project-3 an unreachable tag.
+  assert.ok(band.need.some(c => c.alias === 'project-1') && band.quiet.some(c => c.alias === 'project-9') && band.gone.some(c => c.alias === 'project-3'));
+  for (const alias of ['project-1', 'project-9', 'project-3', 'hidden', null]) assert.doesNotThrow(() => home.select(alias, true));
 });
 
 test('calls only the read-only card tool and opens no network path', () => {
