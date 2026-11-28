@@ -109,6 +109,9 @@ test('labels say why a project sits in its band and hide withheld details', () =
 test('draws a mixed roster without throwing', () => {
   assert.doesNotThrow(() => home.show([...cards(40), { alias: 'hidden', state: 'withheld' }].map(home.norm)));
   assert.doesNotThrow(() => home.show([]));
+  // Opening a row, a quiet tag and a withheld tag builds each detail, including the withheld note.
+  home.show([...cards(8), { alias: 'hidden', state: 'withheld' }].map(home.norm));
+  for (const alias of ['project-0', 'project-1', 'project-3', 'hidden', null]) assert.doesNotThrow(() => home.select(alias, true));
 });
 
 test('calls only the read-only card tool and opens no network path', () => {
