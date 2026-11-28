@@ -733,9 +733,12 @@ and copy destinations.
 Older or divergent SHAs are refused; success requires exact HEAD equality.
 A sync that would move HEAD is refused as `active-job`, naming the run in
 `active_operation`, while a recorded `ssh-adapter exec --op-id` run (remote
-experiments) is still running in that checkout on the current boot: its
-runner or command process group is alive and it has no result yet. The check
-runs before and again after the remote fetch. It is best effort: exec and sync
+experiments) is still running in that checkout on the current boot. Sync
+judges op directories with exec's own reconcile helpers: a run with a result is
+finished; otherwise it is live while its runner is alive with its recorded start
+time or its command process group verifies the way reconcile verifies it, and
+for two minutes after launch before its metadata exists. The check runs before
+and again after the remote fetch. It is best effort: exec and sync
 share no lock, and plain exec without an op id or scheduler-submitted jobs
 leave no record to find.
 JSON sync results include `before_sha`, `after_sha`, `ok`, and `reason`.

@@ -2380,19 +2380,15 @@ if [ "$mode" = status ]; then finish; fi
 [ "$clean" = true ] || fail dirty
 [ "$branch" = "$wanted" ] || fail wrong-branch
 # A recorded `ssh-adapter exec --op-id` run (remote experiments) executes in this
-# checkout. Its op directory is resolved exactly as exec resolves it; it is live
-# until result.json or reaped.done exists, while its runner (same boot, same start
-# time) or command process group is alive, and during launch before meta.json.
-# Best effort: exec takes no lock shared with sync, and plain exec without an op
-# id or scheduler-submitted jobs leave no op directory.
-if [ -r /proc/sys/kernel/random/boot_id ]; then
-    boot=$(tr -d ' \t\r\n' < /proc/sys/kernel/random/boot_id | tr -cd 'A-Za-z0-9._: +=,-')
-elif command -v sysctl >/dev/null 2>&1; then
-    boot=$(sysctl -n kern.boottime 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || printf 'unknown')
-else
-    boot='unknown'
-fi
-[ -n "$boot" ] || boot='unknown'
+# checkout. Its op directory is resolved exactly as exec resolves it and judged
+# with exec's own helpers (prepended): finished once result.json or reaped.done
+# exists; otherwise live while its runner (same boot, same start time) is alive or
+# reconcile would verify its command process group, and while it is younger than
+# two minutes without meta.json (launch). Best effort: exec takes no lock shared
+# with sync, and plain exec without an op id or scheduler-submitted jobs leave no
+# op directory.
+read_host_id
+cur_pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d ' \t\r\n' || true)
 if [ -n "${OMS_REMOTE_STATE_DIR:-}" ]; then
     ops=$OMS_REMOTE_STATE_DIR
 elif [ -d "$workdir/.git" ]; then
@@ -2401,18 +2397,30 @@ else
     ops=${TMPDIR:-/tmp}/oms-remote-ops-$(id -u)/$ops_key
 fi
 op_live() {
-    if [ -f "$1/result.json" ] || [ -f "$1/reaped.done" ]; then return 1; fi
-    [ -f "$1/meta.json" ] || return 0
-    meta=$(cat -- "$1/meta.json" 2>/dev/null) || return 0
-    case "$meta" in *"\"boot_id\":\"$boot\""*) ;; *) return 1 ;; esac
-    pid=$(printf '%s' "$meta" | sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p')
-    started=$(printf '%s' "$meta" | sed -n 's/.*"lstart":"\([^"]*\)".*/\1/p')
-    if [ -n "$pid" ] && [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null; then
-        now=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-')
-        if [ -z "$started" ] || [ "$now" = "$started" ]; then return 0; fi
+    op_dir=$1
+    if [ -f "$op_dir/result.json" ] || [ -f "$op_dir/reaped.done" ]; then return 1; fi
+    if [ ! -r "$op_dir/meta.json" ]; then
+        # The runner writes meta.json right after exec creates the directory; an
+        # older directory without it is a launch that never started.
+        [ -n "$(find "$op_dir" -prune -mmin -2 2>/dev/null)" ]
+        return
     fi
-    pg=$(tr -cd '0-9' < "$1/child.pgid" 2>/dev/null) || pg=
-    [ -n "$pg" ] && [ "$pg" -gt 1 ] && kill -0 -"$pg" 2>/dev/null
+    mpid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+    m_bid=$(sed -n 's/.*"boot_id":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+    m_tag=$(sed -n 's/.*"op_tag":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+    m_ls=$(sed -n 's/.*"lstart":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+    if [ -n "$m_bid" ] && [ "$m_bid" != unknown ] && [ "$cur_bid" != unknown ] && [ "$m_bid" != "$cur_bid" ]; then
+        return 1
+    fi
+    if pid_live "$mpid"; then
+        cur_ls=$(LC_ALL=C ps -p "$mpid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
+        if [ -z "$m_ls" ] || [ -z "$cur_ls" ] || [ "$(norm "$m_ls")" = "$(norm "$cur_ls")" ]; then
+            return 0
+        fi
+    fi
+    read_cpg
+    check_orphan_cpg
+    [ "$cpg_verdict" != none ]
 }
 # A sync that leaves HEAD where it is changes no file a running job reads.
 guard_jobs() {
@@ -2420,8 +2428,10 @@ guard_jobs() {
     for op in "$ops"/*; do
         [ -d "$op" ] && [ ! -L "$op" ] || continue
         # Only names `exec --op-id` accepts are op directories.
-        case "${op##*/}" in *[!A-Za-z0-9._-]*|-*) continue ;; esac
-        if op_live "$op"; then busy_op=${op##*/}; fail active-job; fi
+        name=${op##*/}
+        case "$name" in *[!A-Za-z0-9._-]*|-*|.*|*..*) continue ;; esac
+        [ "${#name}" -le 64 ] || continue
+        if op_live "$op"; then busy_op=$name; fail active-job; fi
     done
 }
 guard_jobs
@@ -2566,7 +2576,7 @@ fn network_reason(stderr: &[u8]) -> &'static str {
     }
 }
 
-/// The remote reply as its 11 fields, or `None` unless it is exactly the
+/// The remote reply as its 12 fields, or `None` unless it is exactly the
 /// sentinel-framed, NUL-delimited, self-consistent shape the script emits:
 /// exit 0 iff no reason, known reasons only, booleans, an absolute workdir and
 /// empty-or-full object ids.
@@ -2601,6 +2611,8 @@ fn parse_remote_reply(code: i32, stdout: &str) -> Option<[&str; 12]> {
         && [head, before, after].into_iter().all(oid)
         && (reason == "active-job") == !busy_op.is_empty()
         && busy_op.len() <= 64
+        && !busy_op.starts_with(['-', '.'])
+        && !busy_op.contains("..")
         && busy_op
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')))
@@ -2828,7 +2840,9 @@ impl RuntimeServices<'_> {
                     return timed_out(&mut result);
                 }
                 let mut spec = ChildSpec::new(argv, remaining_wall, GIT_LIMIT);
-                spec.stdin = REMOTE_SCRIPT.as_bytes().to_vec();
+                spec.stdin = [oms_runtime::ssh_adapter::REMOTE_SH_HELPERS, REMOTE_SCRIPT]
+                    .concat()
+                    .into_bytes();
                 let remote = match self.child_raw(spec) {
                     Ok(out) => out,
                     Err(e) if e.starts_with(LAUNCH_FAILED) => {
@@ -6057,11 +6071,31 @@ exit 92
                 .spawn()
                 .unwrap()
         };
+        let started = std::process::Command::new("ps")
+            .args(["-p", &job.id().to_string(), "-o", "lstart="])
+            .env("LC_ALL", "C")
+            .output()
+            .unwrap()
+            .stdout;
+        let started: String = String::from_utf8(started)
+            .unwrap()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || "._: +=,-".contains(*c))
+            .collect();
+        assert!(!started.is_empty());
         let ops = work.join(".git/oms-remote-ops");
-        for (op, boot_id, finished) in [
-            ("done-op", boot.as_str(), true),
-            ("old-boot", "previous-boot", false),
-            ("live-op", boot.as_str(), false),
+        // A finished run, a run from an earlier boot, a reused group id (another
+        // start time), and a launch that never wrote meta.json are not live.
+        for (op, boot_id, group_start, finished) in [
+            ("done-op", boot.as_str(), started.as_str(), true),
+            ("old-boot", "previous-boot", started.as_str(), false),
+            (
+                "reused-pgid",
+                boot.as_str(),
+                "Mon Jan  1 00:00:00 2001",
+                false,
+            ),
+            ("live-op", boot.as_str(), started.as_str(), false),
         ] {
             let dir = ops.join(op);
             std::fs::create_dir_all(&dir).unwrap();
@@ -6071,10 +6105,17 @@ exit 92
             )
             .unwrap();
             std::fs::write(dir.join("child.pgid"), format!("{}\n", job.id())).unwrap();
+            std::fs::write(dir.join("child.lstart"), format!("{group_start}\n")).unwrap();
             if finished {
                 std::fs::write(dir.join("result.json"), "{\"exit_code\":0}\n").unwrap();
             }
         }
+        let crashed = ops.join("crashed-launch");
+        std::fs::create_dir_all(&crashed).unwrap();
+        std::fs::File::open(&crashed)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(600))
+            .unwrap();
         let sync = TargetRequest {
             sync: true,
             sha: Some(next.clone()),
