@@ -100,8 +100,9 @@ button:disabled{opacity:.55;cursor:default}
 .status[hidden]{display:none}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 @media (prefers-reduced-motion:reduce){.chev{transition:none}}
-@media (max-width:760px){
+@media (max-width:1000px){
   .row{grid-template-columns:10px minmax(0,1fr) auto;grid-template-areas:"d w a" ". y y" ". p c";row-gap:6px;column-gap:10px}
+  .row .pl{display:flex;align-items:center;gap:8px}.row .pl .track{flex:1;order:1}.row .pl b{order:2;margin:0}
   .row .dot{grid-area:d}.row .who{grid-area:w}.row .ag{grid-area:a}.row .why{grid-area:y}.row .pl{grid-area:p}.row .cr{grid-area:c;justify-content:flex-end}.row .chev{display:none}
   .det{grid-template-columns:minmax(0,1fr);padding-left:36px}
   .chips{margin-left:0}
@@ -209,7 +210,7 @@ function row(c,k){
     +`<span class="why"><span class="nx">${c.attention?`<span class="cnt">${esc(L.attn(c.attention))}</span>`:''}${esc(c.next||c.goal||L.noGoal)}</span>${c.next&&c.goal?`<span class="goal">${esc(c.goal)}</span>`:''}</span>`
     +`<span class="pl">${c.plan?`${esc(L.plan)}<b>${c.plan.done} / ${c.plan.total}</b><span class="track"><i style="width:${pct(c)}%"></i></span>`:''}</span>`
     +`<span class="cr">${c.main?mono(c.main,true):''}${crew}</span>`
-    +`<span class="ag">${esc(c.observedAt!=null?ago(c.observedAt):'')}</span>${CHEV}`;
+    +`<span class="ag"${typeof c.observedAt==='string'?` data-at="${esc(c.observedAt)}"`:''}>${esc(c.observedAt!=null?ago(c.observedAt):'')}</span>${CHEV}`;
   li.className='k-'+k;li.append(b,detail(c));return li;
 }
 function tag(c){
@@ -234,8 +235,7 @@ function detail(c){
   const li=(p,t,main)=>{const x=document.createElement('li');x.innerHTML=mono(p,main);x.append(t);ul.append(x)};
   if(c.main)li(c.main,L.main+' · '+c.main,true);
   for(const w of c.crew)li(w.provider,(w.provider||L.unknown)+(w.role?' · '+w.role:''));
-  if(!c.main&&!c.crew.length)ul.append(para(L.noCrew));
-  const right=block(L.crew,ul);if(c.total>c.crew.length)right.append(para(L.more(c.total-c.crew.length)));
+  const right=block(L.crew,c.main||c.crew.length?ul:para(L.noCrew));if(c.total>c.crew.length)right.append(para(L.more(c.total-c.crew.length)));
   d.append(left,mid,right,para(L.readOnly,'note'));return d;
 }
 function show(list){
@@ -370,7 +370,8 @@ function wire(){
   el('find').addEventListener('input',e=>{query=e.target.value.trim();render()});
   el('find').addEventListener('keydown',e=>{if(e.key!=='Enter')return;const b=el('list').querySelector('[data-alias]');if(b){e.preventDefault();select(b.dataset.alias,false);el('list').querySelector('[data-alias][aria-expanded="true"]')?.focus()}});
   document.addEventListener('visibilitychange',due);
-  setInterval(()=>{due();age()},15000);
+  // Row ages tick in place so an unchanged payload never leaves them frozen.
+  setInterval(()=>{due();age();for(const a of el('list').querySelectorAll('[data-at]'))a.textContent=ago(a.dataset.at)},15000);
 }
 setLang(navigator.language);wire();
 if(window.parent===window)status(L.openApp);else refresh();
