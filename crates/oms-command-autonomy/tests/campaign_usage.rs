@@ -49,7 +49,7 @@ impl Fixture {
         Self { repo, directory }
     }
     fn ledger<'a>(&self, stop: &'a AtomicBool) -> Ledger<'a> {
-        Ledger::open(&self.repo, &self.directory, stop).unwrap()
+        Ledger::open(&self.repo, &self.directory, None, stop).unwrap()
     }
     fn receipt(&self, operation: &str, phase: Phase, tokens: u64, cost: Cost) -> Receipt {
         let stop = AtomicBool::new(false);
@@ -475,7 +475,22 @@ impl DeadlineHost {
         }
     }
 }
+fn private_group(
+    gid: u32,
+) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+    let uid = rustix::process::getuid().as_raw();
+    Ok(oms_command_plan::services::GroupMembership {
+        gid,
+        explicit_member_uids: vec![uid],
+        primary_member_uids: vec![uid],
+    })
+}
 impl oms_command_plan::Services for DeadlineHost {
+    // The host proves the account's private group, as the oms runtime does, so
+    // scratch worktrees checked out under umask 002 are readable.
+    fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        Some(private_group)
+    }
     fn supervise(
         &self,
         command: &oms_command_plan::services::SupervisedCommand,
@@ -666,13 +681,18 @@ fn campaign_deadline_bounds_verifiers_and_keeps_cleanup_after_expiry() {
         assert!(!repo.join(&directory).join("handoff.json").exists());
         let stop = AtomicBool::new(false);
         assert!(
-            !Ledger::open(&repo, &directory, &stop)
+            !Ledger::open(&repo, &directory, None, &stop)
                 .unwrap()
                 .events()
                 .unwrap()
                 .iter()
                 .any(|row| row["type"] == "campaign_solved")
         );
+        // A checkout root cloned under umask 002 opens only through the host proof.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(Ledger::open(&repo, &directory, None, &stop).is_err());
+        Ledger::open(&repo, &directory, Some(private_group), &stop).unwrap();
         std::fs::remove_dir_all(repo).unwrap();
     }
 }
@@ -733,7 +753,7 @@ fn omitted_caps_preserve_lifetime_call_caps_and_enabled_caps_require_reservation
         json!({"per_call":{"tokens":10}}),
     ] {
         let fixture = Fixture::new(Some(bad));
-        assert!(Ledger::open(&fixture.repo, &fixture.directory, &stop).is_err());
+        assert!(Ledger::open(&fixture.repo, &fixture.directory, None, &stop).is_err());
     }
 
     let unpinned = run_campaign(3600, &[]);

@@ -265,7 +265,14 @@ pub struct Ledger<'a> {
     interrupted: &'a AtomicBool,
 }
 impl<'a> Ledger<'a> {
-    pub fn open(state: &Path, directory: &str, interrupted: &'a AtomicBool) -> Result<Self> {
+    /// `groups` is the host's group-membership proof for a state checkout whose
+    /// root is group-writable (cloned under umask 002).
+    pub fn open(
+        state: &Path,
+        directory: &str,
+        groups: Option<oms_command_plan::services::GroupResolver>,
+        interrupted: &'a AtomicBool,
+    ) -> Result<Self> {
         require(
             directory.starts_with(".oms/plan/campaigns/")
                 && directory.split('/').count() == 4
@@ -276,7 +283,7 @@ impl<'a> Ledger<'a> {
             "invalid campaign directory",
         )?;
         let result = Self {
-            store: Store::open(state)?,
+            store: Store::open(state)?.with_group_resolver(groups),
             directory: directory.into(),
             interrupted,
         };
@@ -748,7 +755,8 @@ fn evaluate(
         if applied.code != 0 {
             return Ok(json!({"verdict": "error", "reason": "patch does not apply"}));
         }
-        let store = Store::open(&scratch_path)?;
+        let store = Store::open(&scratch_path)?
+            .with_group_resolver(ctx.services.group_membership_resolver());
         pinned(
             &store,
             value::text(&manifest["problem"], "file"),
@@ -842,7 +850,12 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     let cid = value::text(&normalized, "campaign_id");
     let directory = format!(".oms/plan/campaigns/{cid}");
     if args.flag("status") {
-        let ledger = Ledger::open(&ctx.state, &directory, ctx.interrupted)?;
+        let ledger = Ledger::open(
+            &ctx.state,
+            &directory,
+            ctx.services.group_membership_resolver(),
+            ctx.interrupted,
+        )?;
         return Output::json(
             &json!({"manifest": normalized, "events": ledger.events()?, "spent": ledger.spent()?}),
         );
@@ -861,7 +874,12 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     {
         ctx.append(&events_path, &json!({"type": "campaign_started", "base": manifest["base"], "problem": manifest["problem"], "verify": manifest["verify"], "budget": manifest["budget"], "started_at": value::now(), "ts": value::now()}))?;
     }
-    let ledger = Ledger::open(&ctx.state, &directory, ctx.interrupted)?;
+    let ledger = Ledger::open(
+        &ctx.state,
+        &directory,
+        ctx.services.group_membership_resolver(),
+        ctx.interrupted,
+    )?;
     let initial = ledger.events()?;
     if initial.iter().any(|r| r["type"] == "campaign_solved") {
         return Ok(Output::text(format!("campaign {cid}: solved")));
