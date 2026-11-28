@@ -8,6 +8,7 @@ use crate::serve::{
     DEFAULT_LISTEN_ADDR, PreparedServer, ServeConfig, parse_loopback_listen, validate_route_room,
 };
 use crate::source::{Source, compiled_sources, find_source_arc};
+use crate::status::{render_status, status_report};
 use oms_command_room::Services as RoomServices;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +33,7 @@ Usage:
   oms intake reply --source SOURCE [--repo PATH] --room ROOM --participant PART --session ID \\
     --kind KIND --text-file FILE [--reply-to MSG] [--json]
   oms intake sources [--json]
+  oms intake status [--json]
 
 Subcommands:
   serve                   Bind loopback HTTP receiver at POST /intake/<source> and deliver
@@ -42,6 +44,9 @@ Subcommands:
                           sessions to an existing OMS Room (TEAM is a team key or id, or '*'
                           for the fallback route)
   sources                 List compiled source adapters, environment variables, and binding flags
+  status                  Read-only report: whether each adapter's environment variables are set
+                          (values never printed), and per route whether its Room target is
+                          usable and the last intake question delivered to it
 
 Options (serve):
   --source SOURCE         Compiled intake adapter name (see `oms intake sources`)
@@ -136,6 +141,9 @@ enum ParsedCommand {
         team: String,
     },
     RouteList {
+        json: bool,
+    },
+    Status {
         json: bool,
     },
     Reply {
@@ -259,34 +267,37 @@ fn parse(args: &[OsString], cwd: &Path) -> Result<ParsedCommand, String> {
         return Ok(ParsedCommand::Help);
     }
     let Some(first) = args.first() else {
-        return Err("missing subcommand (choose serve, reply, route, or sources)".into());
+        return Err("missing subcommand (choose serve, reply, route, sources, or status)".into());
     };
     let action = first
         .to_str()
         .ok_or_else(|| "invalid intake subcommand".to_owned())?;
-    if !matches!(action, "serve" | "reply" | "sources" | "route") {
+    if !matches!(action, "serve" | "reply" | "sources" | "status" | "route") {
         if action.starts_with('-') {
             return Err(format!(
                 "unrecognized option before subcommand: {}",
                 sanitize_option_name(first.as_bytes())
             ));
         }
-        return Err("invalid subcommand (choose serve, reply, route, or sources)".into());
+        return Err("invalid subcommand (choose serve, reply, route, sources, or status)".into());
     }
     if action == "route" {
         return parse_route(&args[1..], cwd);
     }
 
-    if action == "sources" {
+    if action == "sources" || action == "status" {
         let (values, flags) = collect_options(args, action, JSON_FLAGS)?;
         if let Some(unexpected) = values.keys().next() {
             return Err(format!(
-                "unrecognized option for sources: {}",
+                "unrecognized option for {action}: {}",
                 sanitize_option_name(unexpected.as_bytes())
             ));
         }
-        return Ok(ParsedCommand::Sources {
-            json: flags.contains("--json"),
+        let json = flags.contains("--json");
+        return Ok(if action == "status" {
+            ParsedCommand::Status { json }
+        } else {
+            ParsedCommand::Sources { json }
         });
     }
 
@@ -608,6 +619,20 @@ pub fn run_streaming_with_services(
             match routes::routes_path().and_then(|p| routes::load(&p)) {
                 Ok(list) => {
                     let _ = stdout.write_all(&render_routes(&list, json));
+                    let _ = stdout.flush();
+                    0
+                }
+                Err(msg) => {
+                    let _ = writeln!(stderr, "error: intake: {msg}");
+                    2
+                }
+            }
+        }
+        ParsedCommand::Status { json } => {
+            match routes::routes_path().and_then(|p| routes::load(&p)) {
+                Ok(list) => {
+                    let report = status_report(&list, room_services, interrupted);
+                    let _ = stdout.write_all(&render_status(&report, json));
                     let _ = stdout.flush();
                     0
                 }

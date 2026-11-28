@@ -16,6 +16,7 @@ pub mod reply;
 pub mod routes;
 pub mod serve;
 pub mod source;
+pub mod status;
 pub mod transport;
 
 pub use cli::{help_text, run_streaming_with_services};

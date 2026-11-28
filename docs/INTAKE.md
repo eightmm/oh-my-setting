@@ -142,6 +142,25 @@ oms intake serve --source linear --routes --organization "$LINEAR_ORG_ID" \
   retries. Replies need no route: `oms intake reply --repo PATH --room ROOM` already names the
   target. The single-target `--repo` form is one `*` route and behaves as before.
 
+### Status (`oms intake status`)
+
+`oms intake status [--json]` is read-only and exits `0` unless the route table cannot be read
+(`2`):
+
+- **Environment**: per compiled source, each serve and reply environment variable is `set`,
+  `missing` or `invalid` (empty, non-UTF-8, or a sensitive value with whitespace or control
+  characters; an empty endpoint override counts as `missing`, as at startup); values are never
+  printed. A side is `ready` when every required variable is `set`
+  and none is `invalid`. This is the startup credential check only: an endpoint override such as
+  `OMS_LINEAR_API_URL` is parsed when `serve` or `reply` starts, and status cannot tell whether a
+  `serve` process is running.
+- **Routes**: each route reports `ok` and `error` from the same Room checks as `route add`; an
+  unusable route is a row error, not a failure of the report.
+- **Last delivery**: the id and `ts` of the newest intake question (`<source>-created-*` or
+  `<source>-prompted-*`) the route's participant appended to its recipient in its Room, or `null`.
+  It describes the Room target, so a team route and a `*` route sharing one target report the same
+  message; refused, duplicate and unrouted sessions append nothing. Message text is never printed.
+
 ### Non-goals
 
 - No automatic worker delegation, plan mutation, or process cancellation from webhook events.
