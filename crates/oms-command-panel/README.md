@@ -320,8 +320,8 @@ alias to path:
 oms panel --register-project [PATH] [--alias NAME] [--area NAME]
 oms panel --unregister-project ALIAS
 oms panel --projects [--json]
-oms panel --install-panel claude|codex --project ALIAS [--dry-run] [--json]
-oms panel --uninstall-panel claude|codex --project ALIAS [--dry-run] [--json]
+oms panel --install-panel claude|codex|antigravity --project ALIAS [--dry-run] [--json]
+oms panel --uninstall-panel claude|codex|antigravity --project ALIAS [--dry-run] [--json]
 ```
 
 `--register-project` resolves `PATH` (defaulting to the current directory) to its
@@ -393,5 +393,21 @@ checkouts (`action: "forgotten"`), removes only an OMS block whose bytes match `
 `info/exclude` line (plus `exclude_separator_added`, or hands `created_exclude` and its
 separator flag to another Codex row in the same sidecar that still shares that exclude rule so
 the last uninstall removes it) only when OMS created them and they are now empty or unchanged,
-and drops the sidecar row, while `--unregister-project` refuses aliases that still have a
-recorded panel.
+and drops the sidecar row. `--install-panel antigravity --project ALIAS` and
+`--uninstall-panel antigravity --project ALIAS` manage
+`<checkout>/.agents/mcp_config.json` (`0600` when created, `.agents` `0700` if missing,
+preserving every other key, server, key order, and mode), defining `mcpServers.oms-panel`
+with the same launcher, `args`, and `env` as Codex, refusing invalid JSON, non-object
+`mcpServers`, symlinks, non-regular files, differing unmanaged `oms-panel` entries
+(adopting exact matches without rewriting), and Git-tracked `.agents/mcp_config.json`,
+adding `/.agents/mcp_config.json` to `<common-git-dir>/info/exclude` when untracked and
+not ignored, and recording `scope: "project"`, canonical `entry_sha256`, `created_config`,
+`created_agents_dir`, `created_exclude`, and optional `created_mcp_servers` /
+`exclude_separator_added` flags in `desktop-project-panels.json` without reading
+`~/.gemini` or emitting trust fields (interactive `agy` can ask "Trust this folder?", and
+the panel loads only in sessions where `agy` loads that workspace's `.agents`
+customizations). Installing into an existing file rewrites it as 2-space pretty JSON
+(identical reruns and exact-match adoptions leave the file untouched); when OMS created the file and nothing else remains in it, uninstall unlinks it (plus `.agents` if OMS created it and it is empty), and otherwise removes only `oms-panel` (plus `mcpServers` if
+OMS created that key and it is now empty, or preserves and reports edited entries via
+`preservedFiles`) and writes 2-space pretty JSON, keeping other keys, their order and values but not always their exact bytes (escapes and number spellings are normalized; a trailing newline is added). Unless it preserves an edited entry, uninstall also removes last-owner exclude lines or hands them to a remaining owner. `--unregister-project` refuses aliases that still
+have any recorded panel.

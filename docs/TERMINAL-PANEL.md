@@ -3504,6 +3504,55 @@ explicitly through room publishing.
 Sources: [Desktop shared configuration](https://code.claude.com/docs/en/desktop#shared-configuration),
 [native inbox and inbound controls](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
 
+### Desktop projects and per-project panels
+
+Host-side desktop project map and per-project panel commands manage
+`oh-my-setting/desktop-projects.json` (or `OMS_PANEL_PROJECTS_FILE`),
+`desktop-project-areas.json`, and `desktop-project-panels.json` (`0600` private
+sidecars; blocked inside `OMS_PANEL_REPO` sessions and delegated workers):
+
+```bash
+oms panel --register-project [PATH] [--alias NAME] [--area NAME]
+oms panel --unregister-project ALIAS
+oms panel --projects [--json]
+oms panel --install-panel claude|codex|antigravity --project ALIAS [--dry-run] [--json]
+oms panel --uninstall-panel claude|codex|antigravity --project ALIAS [--dry-run] [--json]
+```
+
+Each installed panel exposes an `oms-panel` MCP server (`~/.local/bin/oms` with
+`args = ["mcp-server"]`, `OMS_MCP_TOOL_PROFILE=chatgpt-panel`, and `OMS_PANEL_REPO`
+pinned to the physical checkout). Deleted checkouts are forgotten on uninstall
+(`action: "forgotten"`), failed writes roll back, and `--unregister-project` is
+refused while any panel remains installed for that alias:
+
+- `claude` registers a local-scope `oms-panel` MCP entry via `OMS_CLAUDE_BIN` or
+  `claude` on `PATH` (adopting an exact match and refusing unmanaged local entries).
+- `codex` creates or extends `<checkout>/.codex/config.toml` (`0600` when created,
+  preserving every other byte of an existing file) with a
+  `# BEGIN oh-my-setting codex-panel` .. `# END oh-my-setting codex-panel` block
+  including `OMS_MCP_PANEL_RESOURCE_VERSION`, adds `/.codex/config.toml` to
+  `<common-git-dir>/info/exclude` when untracked and not ignored, and checks
+  `$CODEX_HOME/config.toml` read-only (`active: true`, `codex-project-untrusted`,
+  or `codex-trust-unknown`).
+- `antigravity` creates or updates `<checkout>/.agents/mcp_config.json` (`0600` when
+  created and `.agents` `0700` if missing) with `mcpServers.oms-panel` (`command`,
+  `args`, `OMS_MCP_TOOL_PROFILE`, `OMS_PANEL_REPO`, and
+  `OMS_MCP_PANEL_RESOURCE_VERSION`), preserving every other key, server, key order,
+  and file mode. Ownership is tracked via the sidecar row (`entry_sha256`,
+  `created_config`, `created_agents_dir`, `created_exclude`, and optional
+  `created_mcp_servers` / `exclude_separator_added`). Installing into an existing
+  file rewrites `.agents/mcp_config.json` as 2-space pretty JSON (no-op reruns and
+  exact-match adoptions leave the file untouched). It refuses invalid JSON,
+  non-object `mcpServers`, symlinks, non-regular files, differing unmanaged
+  `oms-panel` entries, and Git-tracked `.agents/mcp_config.json` files, and adds
+  `/.agents/mcp_config.json` to `<common-git-dir>/info/exclude` when untracked and
+  not ignored. When OMS created the file and nothing else remains in it, uninstall unlinks it (plus `.agents` if OMS
+  created it and it is empty); otherwise uninstall
+  removes only `oms-panel` (and `mcpServers` if OMS created that key and it is now
+  empty, preserving and reporting edited entries via `preservedFiles`) and writes 2-space pretty JSON. That rewrite keeps the other keys, their order and values, but not always their exact bytes: string escapes and number spellings are normalized and a trailing newline is added. Unless it preserves an edited entry, uninstall also removes last-owner exclude lines or hands them to a remaining owner. Install does not read `~/.gemini` or report trust fields;
+  interactive `agy` can ask "Trust this folder?", and the panel loads only in
+  sessions where `agy` loads that workspace's `.agents` customizations.
+
 
 ## Additional CLIs and adapters
 
