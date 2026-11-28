@@ -158,6 +158,16 @@ pub trait Source: Send + Sync {
 
     fn parse_work_request(&self, payload: &Map<String, Value>) -> PayloadDecision;
 
+    /// Team keys or ids of a verified payload, most specific first, for route-table lookup.
+    fn routing_keys(&self, _payload: &Map<String, Value>) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Fixed reply for a request that no route accepts; nothing is written to any Room.
+    fn unrouted_ack(&self, _req: &WorkRequest) -> Option<OutboundAck> {
+        None
+    }
+
     fn first_ack(
         &self,
         req: &WorkRequest,
