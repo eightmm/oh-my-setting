@@ -6595,6 +6595,28 @@ fn land_pr_merge_preserves_head_branch_when_dependent_pr_is_open_or_unverified()
     }
 }
 
+/// Plan and task state are private; explicit modes keep them so under a
+/// group-writable umask, as the native writers do.
+fn write_state(path: &Path, body: impl AsRef<[u8]>) {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path.parent().unwrap())
+        .unwrap();
+    std::io::Write::write_all(
+        &mut fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap(),
+        body.as_ref(),
+    )
+    .unwrap();
+}
+
 #[test]
 fn github_panel_reads_one_explicit_project_board_without_guessing() {
     let iso = Isolated::new();
@@ -6623,12 +6645,10 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
     };
     let mine = "example-org/example-repo";
     let plan = r.repo.join(".oms/plan");
-    fs::create_dir_all(&plan).unwrap();
-    fs::write(
-        plan.join("tasks.json"),
+    write_state(
+        &plan.join("tasks.json"),
         r##"{"tasks":{"existing":{"issue":"#7","state":"in_progress"}}}"##,
-    )
-    .unwrap();
+    );
     let items = [
         issue(1, "OPEN", mine, "", &value("F_status", "o1", "Ready")),
         issue(1, "OPEN", mine, "", ""),
@@ -6904,7 +6924,7 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
         r#"{"tasks":{"broken":null}}"#,
         r##"{"tasks":{"duplicate":{"issue":"#20"},"duplicate":{}}}"##,
     ] {
-        fs::write(&plan_file, raw).unwrap();
+        write_state(&plan_file, raw);
         let page = query_board(&fields, &item);
         assert_eq!(
             page.get("items").array()[0].get("class").text(),
@@ -6924,12 +6944,10 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
     );
 
     let packet_dir = r.repo.join(".oms/task");
-    fs::create_dir_all(&packet_dir).unwrap();
-    fs::write(
-        packet_dir.join("current.md"),
+    write_state(
+        &packet_dir.join("current.md"),
         "# Task\n- github_issue: #19\n- github_issue: #20\n",
-    )
-    .unwrap();
+    );
     assert_advice(
         &query_board(&fields, &item).get("items").array()[0],
         "unverified",
@@ -7053,16 +7071,14 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
             r#"{{"data":{{"organization":{{"login":"example-org","projectV2":{{"id":"PVT_abc","number":3,"title":"Board","url":"{url}","closed":false,"fields":{{"pageInfo":{{"hasNextPage":false}},"nodes":[{rank_fields}]}},"items":{{"pageInfo":{{"hasNextPage":{more},"endCursor":"{cur}"}},"nodes":[{contents}]}}}}}}}}}}"#
         )
     };
-    fs::write(
+    write_state(
         &plan_file,
         r##"{"tasks":{"planned":{"issue":"#7","state":"pending"}}}"##,
-    )
-    .unwrap();
-    fs::write(
-        packet_dir.join("current.md"),
+    );
+    write_state(
+        &packet_dir.join("current.md"),
         "# Task\n- github_issue: #19\n",
-    )
-    .unwrap();
+    );
 
     let untrusted_marker = iso.home.path().join("never-run-marker");
     let c30 = issue(
@@ -7458,11 +7474,12 @@ fn github_panel_reads_one_explicit_project_board_without_guessing() {
     // A long valid task ID is emitted verbatim; a key outside Plan's grammar
     // leaves the plan unverified instead of yielding a mutated task.
     let long_id = "t".repeat(150);
-    fs::write(
+    write_state(
         &plan_file,
-        format!(r##"{{"tasks":{{"{long_id}":{{"id":"{long_id}","issue":"#7","state":"ready","depends":[],"allowed_paths":["docs/"]}}}}}}"##),
-    )
-    .unwrap();
+        format!(
+            r##"{{"tasks":{{"{long_id}":{{"id":"{long_id}","issue":"#7","state":"ready","depends":[],"allowed_paths":["docs/"]}}}}}}"##
+        ),
+    );
     let long = run_candidates();
     assert_eq!(
         long.get("github").get("candidates").get("items").array()[0]

@@ -4,6 +4,7 @@ use oms_command_autonomy::{
     CommandResult, Invocation, Services, contract, owns, planning, receipt, run_with_services,
     selectors, value,
 };
+use oms_command_plan::storage::Store;
 use serde_json::json;
 use std::ffi::OsString;
 use std::fs;
@@ -94,7 +95,7 @@ impl Repo {
     }
     fn select(&self, args: &str) -> oms_command_autonomy::Result<()> {
         selectors::validate(
-            &self.0,
+            &Store::open(&self.0).unwrap(),
             &format!("bash tests/operator-tools-smoke.sh {args}"),
         )
     }
@@ -340,6 +341,9 @@ fn plan_run_refuses_missing_brief_before_provider() {
     assert_eq!(FeedbackMock::count(&mock.sends), 0);
 }
 impl oms_command_plan::Services for FeedbackMock {
+    fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        Some(private_group)
+    }
     fn supervise(
         &self,
         _: &oms_command_plan::services::SupervisedCommand,
@@ -2319,14 +2323,30 @@ fn selectors_refuse_unsafe_or_non_utf8_shell_case_files() {
 }
 
 #[test]
+fn selectors_read_group_writable_suites_through_the_callers_proof() {
+    // Ubuntu's default umask leaves suites group-writable; the caller's
+    // account proof, not a proof-less store, decides whether they are trusted.
+    let repo = Repo::new();
+    repo.write("tests/check.sh", "true\n");
+    for (path, mode) in [("tests", 0o775), ("tests/check.sh", 0o664)] {
+        fs::set_permissions(repo.0.join(path), fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let command = "bash tests/check.sh";
+    let store = Store::open(&repo.0).unwrap();
+    assert!(selectors::validate(&store, command).is_err());
+    selectors::validate(&store.with_group_resolver(Some(private_group)), command).unwrap();
+}
+
+#[test]
 fn continuation_selectors_bind_exact_reviewed_bytes() {
     let repo = Repo::new();
     repo.write("tests/run-smoke-shard.sh", "");
     repo.write("tests/scripts-smoke.sh", "test_old() {\n}\n");
     let patch = b"diff --git a/tests/scripts-smoke.sh b/tests/scripts-smoke.sh\n+++ b/tests/scripts-smoke.sh\n@@ -0,0 +1,2 @@\n+test_new() {\n+}\n";
     let command = "bash tests/run-smoke-shard.sh --only test_new";
-    assert!(selectors::validate(&repo.0, command).is_err());
-    selectors::validate_with_continuation(&repo.0, command, Some((patch, &value::hash(patch))))
+    let store = Store::open(&repo.0).unwrap();
+    assert!(selectors::validate(&store, command).is_err());
+    selectors::validate_with_continuation(&store, command, Some((patch, &value::hash(patch))))
         .unwrap();
     for digest in [
         String::new(),
@@ -2335,8 +2355,7 @@ fn continuation_selectors_bind_exact_reviewed_bytes() {
         "a".repeat(63),
     ] {
         assert!(
-            selectors::validate_with_continuation(&repo.0, command, Some((patch, &digest)))
-                .is_err()
+            selectors::validate_with_continuation(&store, command, Some((patch, &digest))).is_err()
         );
     }
 }
@@ -3249,19 +3268,21 @@ struct Planner {
     issue_reads: std::sync::atomic::AtomicUsize,
     acceptance_checks: std::sync::atomic::AtomicUsize,
 }
+/// Treats every gid as the caller's private group, as a host account proof would
+/// for a default user, so group-writable Git metadata under umask 0002 is trusted.
+fn private_group(
+    gid: u32,
+) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+    let uid = rustix::process::getuid().as_raw();
+    Ok(oms_command_plan::services::GroupMembership {
+        gid,
+        explicit_member_uids: vec![uid],
+        primary_member_uids: vec![uid],
+    })
+}
 impl oms_command_plan::Services for Planner {
     fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
-        fn resolve(
-            gid: u32,
-        ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
-            let uid = rustix::process::getuid().as_raw();
-            Ok(oms_command_plan::services::GroupMembership {
-                gid,
-                explicit_member_uids: vec![uid],
-                primary_member_uids: vec![uid],
-            })
-        }
-        Some(resolve)
+        Some(private_group)
     }
     fn supervise(
         &self,

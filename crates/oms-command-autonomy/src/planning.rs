@@ -448,7 +448,7 @@ pub(crate) fn validate(
             .is_empty(),
             "floor_incompatible_verifier: task reads content it may modify",
         )?;
-        crate::selectors::validate(&ctx.repo, value::text(task, "verify"))?;
+        crate::selectors::validate(&ctx.source, value::text(task, "verify"))?;
         if !replay
             && let Some(path) = verify::missing_base(
                 &ctx.repo,

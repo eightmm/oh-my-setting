@@ -78,6 +78,12 @@ pub trait HostServices: Send + Sync {
     fn check_python_syntax(&self, _path: &Path, _source: &[u8]) -> Option<bool> {
         None
     }
+
+    /// Plan store services carrying the host's group-ownership proofs; the default fails
+    /// closed on group-writable plan state, as `oms state` does without them.
+    fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+        &oms_command_plan::UnavailableServices
+    }
 }
 
 /// Fail-closed default host adapter when no packaged host supplies `HostServices`.

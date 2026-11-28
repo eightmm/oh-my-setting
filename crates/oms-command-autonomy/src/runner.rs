@@ -811,7 +811,7 @@ pub(crate) fn run_task(
         )?;
         let allowed = strings(&task["allowed_paths"])?;
         let verify = value::text(&task, "verify").to_owned();
-        crate::selectors::validate(&ctx.repo, &verify)?;
+        crate::selectors::validate(&ctx.source, &verify)?;
         require(
             !allowed.is_empty() && !verify.trim().is_empty(),
             "task must declare non-empty allowed_paths and a mechanical verify command",

@@ -1071,6 +1071,15 @@ fn format_actionable(ids: &[&str]) -> String {
     }
 }
 
+/// Plan status through the hook host's plan services, so resume reads the same
+/// group-writable plan state `oms state` accepts with the host's proofs.
+struct PlanHost<'a>(&'a (dyn oms_command_plan::Services + Sync));
+impl oms_command_state::HostServices for PlanHost<'_> {
+    fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+        self.0
+    }
+}
+
 pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
     if !on("OMS_RESUME_HOOK") {
         return empty();
@@ -1087,8 +1096,11 @@ pub(crate) fn resume(v: &Value, ctx: &Context<'_>) -> Output {
         let plan_goal = text(&plan, "goal").trim();
         if !plan_goal.is_empty() {
             let accept = flat(text(&plan, "accept"));
-            if let Ok(plan_state) = oms_command_state::plan_status(&repo, ctx.interrupted)
-                && plan_state.object().is_ok()
+            if let Ok(plan_state) = oms_command_state::plan_status_with_host(
+                &repo,
+                ctx.interrupted,
+                &PlanHost(ctx.host.plan_services()),
+            ) && plan_state.object().is_ok()
             {
                 current_plan_goal = oms_contract_markdown::bounded_line(plan_goal, 1000);
                 plan_unfinished = matches!(
@@ -1641,6 +1653,32 @@ mod tests {
         }
     }
 
+    /// Host group proof for a group that holds only the current user.
+    struct PrivateGroup;
+    fn private_group(
+        gid: u32,
+    ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+        let uid = rustix::process::getuid().as_raw();
+        Ok(oms_command_plan::services::GroupMembership {
+            gid,
+            explicit_member_uids: vec![uid],
+            primary_member_uids: vec![uid],
+        })
+    }
+    impl oms_command_plan::Services for PrivateGroup {
+        fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+            Some(private_group)
+        }
+        fn group_membership_before(
+            &self,
+            gid: u32,
+            _deadline: std::time::Instant,
+            _interrupted: &AtomicBool,
+        ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+            private_group(gid)
+        }
+    }
+
     #[derive(Default)]
     struct MockHost {
         detached: Mutex<Vec<(String, Vec<String>)>>,
@@ -1674,6 +1712,10 @@ mod tests {
                 .lock()
                 .expect("lock")
                 .push((cmd.to_owned(), exit, summary.to_owned()));
+        }
+
+        fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+            &PrivateGroup
         }
     }
 
@@ -2425,6 +2467,13 @@ mod tests {
             "# Project\n\n- State: draft\n\n## Goal\n\nDraft contract blocking work\n",
         )
         .expect("write draft PROJECT.md");
+        // Group-writable on purpose, whatever the umask: resume must read it through
+        // the host's group proof, as `oms state` does.
+        fs::set_permissions(
+            repo.join("PROJECT.md"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o664),
+        )
+        .expect("chmod draft PROJECT.md");
         write_plan_doc(
             &repo,
             "Contract-blocked plan goal",
@@ -2435,12 +2484,13 @@ mod tests {
                 "spec_sha256": "a".repeat(64),
             })),
         );
-        let state_out = oms_command_state::run_with_source(
+        let state_out = oms_command_state::run_with_host(
             "state",
             &["--repo".into(), repo.as_os_str().into(), "--json".into()],
             &repo,
-            &repo,
             &cancel,
+            &mut oms_command_runs::NoServices,
+            &PlanHost(&PrivateGroup),
         );
         assert_eq!(state_out.0, 0);
         let state_doc = document(&state_out.1).expect("state json");
@@ -2467,6 +2517,18 @@ mod tests {
         assert!(
             !blocked_out.contains("actionable:"),
             "resume must show 0 actionable when PROJECT.md contract blocks work:\n{blocked_out}"
+        );
+        // Without the host's group proof the group-writable contract stays unread.
+        let proofless = Context {
+            host: &crate::NoHostServices,
+            ..ctx
+        };
+        let (code, stdout, _) = resume(&json!({"cwd": repo}), &proofless);
+        assert_eq!(code, 0);
+        let proofless_out = String::from_utf8(stdout).expect("utf8");
+        assert!(
+            !proofless_out.contains("contract: blocked (project-draft)"),
+            "{proofless_out}"
         );
 
         // When the plan engine itself fails on a malformed plan, keep `[status unavailable]`

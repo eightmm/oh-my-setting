@@ -773,8 +773,9 @@ the thread and attach fresh repository context only when requested.
 
 ### Prompt and debate budgets
 
-Blocking review gates default to 192 KiB; set `OMS_PROMPT_DIFF_BYTES` to raise the
-complete-diff budget, increasing prompt usage and provider cost.
+Blocking review gates default to a 192 KiB complete-diff budget and other reviews to
+a 64 KiB excerpt; `OMS_PROMPT_DIFF_BYTES` overrides both, and raising it increases
+prompt usage and provider cost.
 
 Debate rounds after the initial independent answers share a 64 KiB prompt budget across
 all seats (`OMS_DEBATE_ROUND_BYTES`). Each fresh call receives section-balanced excerpts
