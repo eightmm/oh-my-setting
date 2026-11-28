@@ -151,3 +151,92 @@ test('shows stale on need rows with branch, broadens search safely without leaki
   home.setLang('en', true);
   home.setLang('ko', true);
 });
+
+test('renders provider-matched WebP character portraits with band moods and keeps pi/unknown monogram fallbacks', () => {
+  // Mood mapping from triage bands.
+  assert.equal(home.moodOf(home.norm({ alias: 'n', state: 'fresh', attention: 1 })), 'worry');
+  assert.equal(home.moodOf(home.norm({ alias: 'b', state: 'fresh', active: 1 })), 'busy');
+  assert.equal(home.moodOf(home.norm({ alias: 'c', state: 'fresh' })), 'idle');
+  assert.equal(home.moodOf(home.norm({ alias: 'q', state: 'stale' })), 'sleep');
+  assert.equal(home.moodOf(home.norm({ alias: 'g', state: 'missing' })), 'idle');
+
+  // Saved 4-mood ART WebP map covers codex, claude, antigravity x idle, busy, worry, sleep.
+  for (const prov of ['codex', 'claude', 'antigravity']) {
+    const uris = new Set();
+    for (const mood of ['idle', 'busy', 'worry', 'sleep']) {
+      const markup = home.avatar(prov, mood, true, 'lg');
+      assert.match(markup, new RegExp(`class="mn lg p-${prov} main"`));
+      assert.match(markup, /<img src="data:image\/webp;base64,/);
+      uris.add(home.ART[prov][mood]);
+    }
+    assert.equal(uris.size, 4, `${prov} must have 4 distinct mood WebP sprites`);
+  }
+
+  // agy normalizes to antigravity; pi and unknown fall back to Pi and ? monograms.
+  const agyMarkup = home.avatar('agy', 'sleep', false, 'sm');
+  assert.match(agyMarkup, /class="mn sm p-antigravity"/);
+  assert.match(agyMarkup, /<img src="data:image\/webp;base64,/);
+  assert.equal(home.avatar('pi', 'busy', true, 'lg'), '<span class="mn lg p-pi main" aria-hidden="true">Pi</span>');
+  assert.equal(home.avatar('grok', 'idle', false), '<span class="mn p-none" aria-hidden="true">?</span>');
+  assert.equal(home.avatar(null, 'idle', false), '<span class="mn p-none" aria-hidden="true">?</span>');
+
+  // Verify real DOM output of row, detail, and tag via a minimal DOM capture.
+  const nodes = [];
+  function makeNode(tag) {
+    const node = {
+      tagName: tag, className: '', id: '', hidden: false, style: {}, dataset: {},
+      attributes: new Map(), children: [], _html: '', _text: '',
+      classList: { add(c) { node.className = [node.className, c].filter(Boolean).join(' '); } },
+      setAttribute(k, v) { node.attributes.set(k, String(v)); },
+      getAttribute(k) { return node.attributes.get(k) ?? null; },
+      append(...kids) { node.children.push(...kids); },
+      set innerHTML(v) { node._html = String(v); },
+      get innerHTML() { return node._html; },
+      set textContent(v) { node._text = String(v); },
+      get textContent() { return node._text; },
+    };
+    nodes.push(node);
+    return node;
+  }
+  const ctx = {
+    document: Object.assign(inert(), { createElement: makeNode }),
+    navigator: { language: 'en-US' }, console, performance,
+    setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0,
+    requestAnimationFrame: () => 0, cancelAnimationFrame() {}, addEventListener() {},
+    matchMedia: () => ({ matches: true }),
+  };
+  ctx.window = ctx; ctx.parent = ctx;
+  createContext(ctx);
+  runInContext(script, ctx);
+  const domHome = ctx.OMSHome;
+
+  const needCard = domHome.norm({
+    alias: 'pay', state: 'fresh', attention: 2, main: 'agy',
+    crew: [{ provider: 'claude', role: 'reviewer' }, { provider: 'pi', role: 'builder' }, { provider: 'unknown-x' }],
+    crewTotal: 3,
+  });
+  const li = domHome.row(needCard, 'need');
+  const rowHtml = li.children[0].innerHTML;
+  assert.match(rowHtml, /class="mn lg p-antigravity main"[^>]*><img src="data:image\/webp;base64,/);
+  assert.match(rowHtml, /class="mn p-claude"[^>]*><img src="data:image\/webp;base64,/);
+  assert.match(rowHtml, /class="mn p-pi"[^>]*>Pi<\/span>/);
+  assert.match(rowHtml, /class="mn p-none"[^>]*>\?<\/span>/);
+  assert.ok(rowHtml.includes(domHome.ART.antigravity.worry));
+
+  domHome.select('pay', false);
+  const det = domHome.detail(needCard);
+  assert.match(det.className, /\bhas-pt\b/);
+  const pt = det.children[0];
+  assert.equal(pt.className, 'pt p-antigravity');
+  assert.ok(pt.innerHTML.includes(domHome.ART.antigravity.worry));
+
+  const quietTag = domHome.tag(domHome.norm({ alias: 'dormant', state: 'stale', main: 'codex' }));
+  assert.match(quietTag.innerHTML, /class="mn sm p-codex"[^>]*><img src="data:image\/webp;base64,/);
+  assert.ok(quietTag.innerHTML.includes(domHome.ART.codex.sleep));
+
+  // Verify CSS layout rules for portrait card, Main accent ring, and head framing.
+  assert.match(html, /\.mn\.lg\{width:32px;height:32px/);
+  assert.match(html, /\.mn img\{[^}]*object-fit:cover;object-position:50% 15%/);
+  assert.match(html, /\.pt\{width:56px;height:76px/);
+  assert.match(html, /\.pt img\{[^}]*object-fit:contain/);
+});

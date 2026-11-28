@@ -2748,3 +2748,94 @@ test('Lead presence shows working on reserved/running turns, focuses composer on
   turnStatus='replied';await p.event('lead-refresh','click');
   assert.equal(avatar.getAttribute('data-presence'),'live');
 });
+
+test('provider avatars use cropped WebP portraits without -webkit-mask or overflow:hidden clipping, and keep pi/unknown fallbacks',async()=>{
+  assert.ok(Buffer.byteLength(html)<256*1024,'conversation-panel.html must stay strictly under 256 KiB');
+  const style=html.match(/<style>([\s\S]+?)<\/style>/)[1];
+  assert.doesNotMatch(style,/-webkit-mask|--blossom/);
+  const avatarRule=style.match(/\.avatar\{([^}]+)\}/)?.[1]||'';
+  assert.doesNotMatch(avatarRule,/overflow\s*:\s*hidden/,'avatar must not clip ::after presence dots');
+  assert.match(style,/\.avatar:is\(\[data-provider=codex\],\[data-provider=claude\],\[data-provider=agy\]\)::before\{[^}]*border-radius:inherit;background:var\(--mark\) center \/ cover no-repeat/);
+  for(const prov of ['codex','claude','agy']){
+    assert.match(style,new RegExp(`\\.avatar\\[data-provider=${prov}\\]\\{--mark:url\\("data:image\\/webp;base64,[^"]+"\\)\\}`));
+  }
+
+  // Exercise Main, Leads, Chat, Usage Strip, Inspect, and HP-04 Portfolio avatar badges.
+  const pfCards=[
+    {alias:'one',state:'fresh',active:1,main:'codex',crew:[{provider:'claude'},{provider:'agy'},{provider:'pi'},{provider:'other'}],crewTotal:4,observedAt:'2026-11-28T11:00:00Z'},
+    {alias:'two',state:'stale',main:'pi',observedAt:'2026-11-28T10:00:00Z'},
+  ];
+  const jobs=new Map();
+  const timers={Date:class extends Date{static now(){return 0;}},setTimeout(fn,ms){const k=Symbol();jobs.set(k,{fn,ms});return k;},clearTimeout:k=>jobs.delete(k)};
+  const p=await panel(['one','two'],dashboard,{locale:'en',timers,tools:{
+    oms_list_projects:a=>({projects:['one','two'],projectKeys:{one:'b'.repeat(64),two:'c'.repeat(64)},binding:'catalog',readOnly:false,leadChat:true,...(a?.cards?{cards:pfCards}:{})}),
+    oms_panel_snapshot:a=>({dashboard:{...dashboard,project:a.project}}),
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[]}};
+      return v;
+    },
+    oms_panel_usage:()=>({scope:'repository-recent-attempts',providers:[
+      {provider:'codex',windows:[{name:'5h',used:20}]},
+      {provider:'claude',windows:[{name:'5h',used:30}]},
+      {provider:'antigravity',windows:[{name:'5h',used:40}]},
+      {provider:'pi',windows:[{name:'5h',used:50}]}
+    ],attempts:[],providerTotals:[]}),
+    oms_panel_chat:a=>({...a,source:'room',messages:[]}),
+  }});
+
+  // HP-04 #portfolio Main, crew, and quiet tag badges.
+  const pfBtns=sec=>sec.children.find(e=>e?.tagName==='ul').children.filter(e=>e?.tagName==='li').map(li=>li.children.find(e=>e?.tagName==='button'));
+  const pfRow=pfBtns(p.get('pf-list').children[0])[0];
+  const pfCrew=pfRow.children.find(e=>e?.className==='pf-cr');
+  const pfAvatars=pfCrew.children.filter(e=>e?.className?.includes('avatar'));
+  assert.deepEqual(pfAvatars.map(a=>[a.getAttribute('data-provider'),a.textContent,a.className]),[
+    ['codex','','avatar main'],
+    ['claude','','avatar'],
+    ['agy','','avatar'],
+    ['pi','Pi','avatar'],
+  ]);
+  const pfTag=pfBtns(p.get('pf-list').children[1])[0];
+  const tagAvatar=pfTag.children.find(e=>e?.className?.includes('avatar'));
+  assert.equal(tagAvatar.getAttribute('data-provider'),'pi');
+  assert.equal(tagAvatar.textContent,'Pi');
+
+  // Switch into project 'one' to exercise #main-card, #leads, #chat-avatar, .use .avatar, .inspect-card .avatar.
+  pfRow.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('avatar').getAttribute('data-provider'),'codex');
+  assert.equal(p.get('avatar').textContent,'');
+  const leadAvatar=slot=>slot.children.find(e=>e?.className==='slot-heading').children.find(e=>e?.className==='avatar');
+  assert.deepEqual(p.get('leads').children.map(s=>leadAvatar(s).getAttribute('data-provider')),['codex','claude','agy']);
+  assert.ok(p.get('leads').children.every(s=>leadAvatar(s).textContent===''));
+
+  // Open managed Lead chat and verify #chat-avatar.
+  const askClaude=p.get('leads').children[1].children[1].children.find(e=>e?.type==='button');
+  askClaude.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('chat-avatar').hidden,false);
+  assert.equal(p.get('chat-avatar').getAttribute('data-provider'),'claude');
+  assert.equal(p.get('chat-avatar').textContent,'');
+  await p.event('chat-back','click');
+
+  // Usage strip and Inspect usage cards render codex/claude/agy portraits and Pi fallback.
+  for(const [k,j] of [...jobs])if(j.ms===1500){jobs.delete(k);j.fn();await setImmediate();}
+  const stripAvatars=p.get('usage-rows').children.filter(u=>u?.className==='use').map(u=>u.children.find(e=>e?.className==='avatar'));
+  assert.deepEqual(stripAvatars.map(a=>[a.getAttribute('data-provider'),a.textContent]),[
+    ['codex',''],['claude',''],['agy',''],['pi','Pi']
+  ]);
+  await p.event('inspect-open','click');
+  const inspectAvatars=p.get('inspect-content').children.filter(c=>c?.tagName==='section').map(s=>s.children.find(e=>e?.tagName==='h3').children.find(e=>e?.className==='avatar'));
+  assert.deepEqual(inspectAvatars.map(a=>[a.getAttribute('data-provider'),a.textContent]),[
+    ['codex',''],['claude',''],['agy',''],['pi','Pi']
+  ]);
+  await p.event('inspect-close','click');
+
+  // Pi Main keeps 'Pi' monogram, unknown Main keeps '–'.
+  p.host.tools.oms_panel_snapshot=()=>({dashboard:{...dashboard,project:'one',conversationMain:{...main,harness:'pi'}}});
+  await p.event('refresh','click');
+  assert.equal(p.get('avatar').getAttribute('data-provider'),'pi');
+  assert.equal(p.get('avatar').textContent,'Pi');
+  p.host.tools.oms_panel_snapshot=()=>({dashboard:{...dashboard,project:'one',conversationMain:{...main,harness:'unknown-prov'}}});
+  await p.event('refresh','click');
+  assert.equal(p.get('avatar').getAttribute('data-provider'),'unknown-prov');
+  assert.equal(p.get('avatar').textContent,'–');
+});
