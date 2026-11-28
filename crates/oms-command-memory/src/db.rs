@@ -108,7 +108,8 @@ pub(crate) fn snapshot(path: &Path) -> Result<Snapshot> {
     }
     err("memory source kept changing while it was being indexed")
 }
-pub(crate) fn snapshots(s: &Store) -> Result<Vec<(&'static str, Snapshot, Vec<Entry>)>> {
+pub(crate) type SourceSnapshots = Vec<(&'static str, Snapshot, Vec<Entry>)>;
+pub(crate) fn snapshots(s: &Store) -> Result<SourceSnapshots> {
     let mut out = Vec::new();
     for (source, path) in [
         ("shared", &s.shared),
@@ -125,12 +126,15 @@ pub(crate) fn snapshots(s: &Store) -> Result<Vec<(&'static str, Snapshot, Vec<En
     }
     Ok(out)
 }
-fn sync_db(db: &mut Connection, s: &Store, flag: &AtomicBool) -> Result<()> {
-    schema(db)?;
-    let sources = snapshots(s)?;
+fn sync_snapshots(
+    db: &mut Connection,
+    s: &Store,
+    sources: &[(&'static str, Snapshot, Vec<Entry>)],
+    flag: &AtomicBool,
+) -> Result<()> {
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     for (source, image, entries) in sources {
-        if source == "failures" && s.failures.as_os_str().is_empty() {
+        if *source == "failures" && s.failures.as_os_str().is_empty() {
             continue;
         }
         check(flag)?;
@@ -171,12 +175,18 @@ fn sync_db(db: &mut Connection, s: &Store, flag: &AtomicBool) -> Result<()> {
         }
         tx.execute("delete from memory_entries where source=?", [source])?;
         for e in entries {
-            insert_entry(&tx, &e)?;
+            insert_entry(&tx, e)?;
         }
         tx.execute("insert into memory_sources(source,path,size,mtime_ns,digest) values (?,cast(? as text),?,?,?) on conflict(source) do update set path=excluded.path,size=excluded.size,mtime_ns=excluded.mtime_ns,digest=excluded.digest",params![source,image.path.as_os_str().as_encoded_bytes(),image.size,image.mtime,image.digest])?;
     }
     tx.commit()?;
     Ok(())
+}
+fn sync_db(db: &mut Connection, s: &Store, flag: &AtomicBool) -> Result<SourceSnapshots> {
+    schema(db)?;
+    let sources = snapshots(s)?;
+    sync_snapshots(db, s, &sources, flag)?;
+    Ok(sources)
 }
 fn insert_entry(db: &Connection, e: &Entry) -> Result<()> {
     db.execute("insert into memory_entries (event_id,source,ordinal,occurred_at,agent,kind,task_id,session_hash,git_sha,git_dirty,git_state,body,rendered) values (?,?,?,?,?,?,?,?,?,?,?,?,?)",params![e.event_id,e.source,e.ordinal as i64,e.occurred_at,e.agent,e.kind,e.task_id,e.session_hash,e.git_sha,e.git_dirty,e.git_state,e.body,e.rendered])?;
@@ -206,11 +216,27 @@ fn initialize(s: &Store, flag: &AtomicBool) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) fn sync(s: &Store, flag: &AtomicBool) -> Result<()> {
-    let _g = store::lock(&s.database, flag)?;
+pub(crate) fn sync_for_health(
+    s: &Store,
+    flag: &AtomicBool,
+) -> Result<(oms_lock::Guard, SourceSnapshots)> {
+    let g = store::lock(&s.database, flag)?;
     initialize(s, flag)?;
     let mut db = connect(&s.database, false)?;
-    sync_db(&mut db, s, flag)
+    let sources = sync_db(&mut db, s, flag)?;
+    Ok((g, sources))
+}
+pub(crate) fn sync(s: &Store, flag: &AtomicBool) -> Result<()> {
+    sync_for_health(s, flag).map(|_| ())
+}
+pub(crate) fn dry_run_sync(
+    s: &Store,
+    sources: &[(&'static str, Snapshot, Vec<Entry>)],
+    flag: &AtomicBool,
+) -> Result<()> {
+    let mut db = Connection::open_in_memory()?;
+    schema(&db)?;
+    sync_snapshots(&mut db, s, sources, flag)
 }
 pub(crate) fn rebuild(s: &Store, flag: &AtomicBool) -> Result<()> {
     let _g = store::lock(&s.database, flag)?;

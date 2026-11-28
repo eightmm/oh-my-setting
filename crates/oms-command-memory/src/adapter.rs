@@ -68,6 +68,7 @@ fn database(args: &[OsString], cwd: &Path, flag: &AtomicBool) -> Result<Output> 
         let word = args[at].to_string_lossy();
         if [
             "--json",
+            "--sync",
             "--include-stale",
             "--include-superseded",
             "--apply",
@@ -148,6 +149,9 @@ fn database(args: &[OsString], cwd: &Path, flag: &AtomicBool) -> Result<Output> 
     if command == "recall" && limit == 0 {
         return err("recall --limit must be positive");
     }
+    if flags.contains("--sync") && command != "health" {
+        return err("--sync applies only to health");
+    }
     let scoped = value("--scoped");
     if !scoped.is_empty() && !["keep", "drop"].contains(&scoped.as_str()) {
         return err("--scoped takes keep or drop");
@@ -215,7 +219,9 @@ fn database(args: &[OsString], cwd: &Path, flag: &AtomicBool) -> Result<Output> 
                 flag,
             )
         }
-        "health" => crate::diagnostics::health(&s, flags.contains("--json")),
+        "health" => {
+            crate::diagnostics::health(&s, flags.contains("--sync"), flags.contains("--json"), flag)
+        }
         "rebuild" => {
             db::rebuild(&s, flag)?;
             Ok((0, Vec::new(), Vec::new()))

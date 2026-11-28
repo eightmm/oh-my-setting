@@ -15,24 +15,48 @@ use std::{
 fn finding(section: &str, level: &str, message: impl Into<String>) -> Value {
     json!({"section":section,"level":level,"message":message.into()})
 }
-/// An index that only trails its sources is refreshed by the next memory read, so it
-/// is reported, not failed; any other unhealthy state stays an error.
+/// Doctor stays strictly read-only, so it relies on health's dry-run syncability
+/// check (writability, duplicate IDs, and in-memory sync simulation) rather than
+/// mutating the index; any defect or unverified report remains an error.
 fn memory_health_finding(out: &(i32, Vec<u8>, Vec<u8>)) -> Value {
-    if out.0 != 0
-        && let Ok(report) = serde_json::from_slice::<Value>(&out.1)
-        && report["status"] == "stale"
-        && report["problems"].as_array().is_some_and(Vec::is_empty)
-        && report["index"]["problems"] == json!(["source-index-mismatch"])
-    {
-        return finding(
-            "memory",
-            "info",
-            "native memory index trails its sources; the next memory read refreshes it",
-        );
+    if let Ok(report) = serde_json::from_slice::<Value>(&out.1) {
+        if out.0 == 0 && matches!(report["status"].as_str(), Some("healthy" | "empty")) {
+            return finding("memory", "ok", "native memory health exit 0");
+        }
+        if report["status"] == "stale"
+            && report["index"]["syncable"] == true
+            && report["problems"].as_array().is_some_and(Vec::is_empty)
+            && report["index"]["problems"] == json!(["source-index-mismatch"])
+        {
+            return finding(
+                "memory",
+                "ok",
+                "native memory index trails its sources; dry-run sync check passed",
+            );
+        }
+        let problems: Vec<&str> = report["problems"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(report["index"]["problems"].as_array().into_iter().flatten())
+            .filter_map(Value::as_str)
+            .collect();
+        if !problems.is_empty() {
+            return finding(
+                "memory",
+                "error",
+                format!(
+                    "native memory health {} ({}; exit {})",
+                    clean(report["status"].as_str().unwrap_or("failed")),
+                    clean(&problems.join(", ")),
+                    out.0
+                ),
+            );
+        }
     }
     finding(
         "memory",
-        if out.0 == 0 { "ok" } else { "error" },
+        "error",
         format!("native memory health exit {}", out.0),
     )
 }
@@ -2451,26 +2475,178 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_index_trailing_sources_is_info_and_other_failures_stay_errors() {
-        let health = |v: Value| (1, serde_json::to_vec(&v).unwrap(), Vec::new());
-        let trailing =
-            json!({"status":"stale","problems":[],"index":{"problems":["source-index-mismatch"]}});
-        assert_eq!(memory_health_finding(&health(trailing))["level"], "info");
-        for bad in [
-            json!({"status":"degraded","problems":[],"index":{"problems":["integrity-check-failed"]}}),
-            json!({"status":"stale","problems":["invalid-ledger-rows"],"index":{"problems":["source-index-mismatch"]}}),
-            json!({"status":"stale","problems":[],"index":{"problems":["source-index-mismatch","fts-entry-mismatch"]}}),
-        ] {
-            assert_eq!(memory_health_finding(&health(bad))["level"], "error");
+    fn memory_health_finding_uses_real_health_output_for_syncable_lag_and_defects() {
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        if std::env::var_os("OMS_DOCTOR_MEMORY_HEALTH_TEST").is_none() {
+            let isolated = r::Scratch::new().unwrap();
+            let mut cmd = Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "--exact",
+                "memory_health_finding_uses_real_health_output_for_syncable_lag_and_defects",
+                "--nocapture",
+            ]);
+            for (key, _) in std::env::vars_os() {
+                if key.to_str().is_some_and(|k| k.starts_with("OMS_")) {
+                    cmd.env_remove(key);
+                }
+            }
+            let out = cmd
+                .env("OMS_DOCTOR_MEMORY_HEALTH_TEST", "1")
+                .env("HOME", &isolated.0)
+                .env("OH_MY_SETTING_GLOBAL_MEMORY", isolated.0.join("global.md"))
+                .env("OMS_LOCK_DIR", isolated.0.join("locks"))
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return;
         }
-        assert_eq!(
-            memory_health_finding(&(1, b"not json".to_vec(), Vec::new()))["level"],
-            "error"
+
+        let scratch = r::Scratch::new().unwrap();
+        let repo = scratch.0.join("repo");
+        fs::create_dir_all(repo.join(".oms")).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .arg(&repo)
+                .output()
+                .unwrap()
+                .status
+                .success()
         );
+        let paths = Paths {
+            home: scratch.0.join("home"),
+            source: repo.clone(),
+            receipt: scratch.0.join("config/install.json"),
+            config: scratch.0.join("config"),
+            state: scratch.0.join("state"),
+            data: scratch.0.join("data"),
+            cwd: repo.clone(),
+        };
+        let flag = AtomicBool::new(false);
+        let mem = |args: &[&str]| {
+            let argv: Vec<_> = args.iter().map(OsString::from).collect();
+            oms_command_memory::run_with_source(&argv, &repo, &repo, &flag)
+        };
+        let check_doctor = || {
+            let out = mem(&["--repo", repo.to_str().unwrap(), "health", "--json"]);
+            let row = memory_health_finding(&out);
+            let full = report(&paths, vec![row.clone()]);
+            (row, full)
+        };
+
+        assert_eq!(mem(&["init"]).0, 0);
         assert_eq!(
-            memory_health_finding(&(0, Vec::new(), Vec::new()))["level"],
-            "ok"
+            mem(&["append", "--agent", "codex", "--text", "seeded note"]).0,
+            0
         );
+        let (row, full) = check_doctor();
+        assert_eq!(row["level"], "ok", "{row}");
+        assert_eq!(full["status"], "ok", "{full}");
+        assert_eq!(full["exit"], 0);
+
+        // Post-sync failures.jsonl append: doctor stays read-only and reports ok.
+        let ledger = repo.join(".oms/failures.jsonl");
+        let valid_failure = "{\"ts\":\"2026-11-28T00:00:00Z\",\"event\":\"fail\",\"fingerprint\":\"fp-doc\",\"cmd\":\"cargo test\",\"exit\":1,\"summary\":\"failed\"}\n";
+        fs::write(&ledger, valid_failure).unwrap();
+        let db_path = repo.join(".oms/memory/memory.sqlite3");
+        let db_before = fs::read(&db_path).unwrap();
+        let (row, full) = check_doctor();
+        assert_eq!(row["level"], "ok", "{row}");
+        assert!(
+            row["message"]
+                .as_str()
+                .unwrap()
+                .contains("dry-run sync check passed"),
+            "{row}"
+        );
+        assert!(
+            !row["message"]
+                .as_str()
+                .unwrap()
+                .contains("next memory read"),
+            "{row}"
+        );
+        assert_eq!(full["status"], "ok", "{full}");
+        assert_eq!(full["exit"], 0);
+        assert_eq!(fs::read(&db_path).unwrap(), db_before);
+
+        // Invalid failure ledger row (real problem name: failure-ledger-invalid) is an error.
+        fs::write(&ledger, format!("{valid_failure}corrupt-jsonl\n")).unwrap();
+        let (row, full) = check_doctor();
+        assert_eq!(row["level"], "error", "{row}");
+        assert!(
+            row["message"]
+                .as_str()
+                .unwrap()
+                .contains("failure-ledger-invalid"),
+            "{row}"
+        );
+        assert_eq!(full["status"], "failed");
+        assert_eq!(full["exit"], 1);
+        fs::write(&ledger, valid_failure).unwrap();
+
+        // Duplicate event_id in shared.md is an error.
+        let shared = repo.join(".oms/memory/shared.md");
+        let clean_shared = fs::read(&shared).unwrap();
+        let mut dup_shared = clean_shared.clone();
+        dup_shared.extend_from_slice(
+            concat!(
+                "<!-- oms-memory\nevent_id: mem-dup-doc\nkind: note\nschema: 1\n-->\n",
+                "## 2026-11-28T00:01:00Z codex\n\na\n\n",
+                "<!-- oms-memory\nevent_id: mem-dup-doc\nkind: note\nschema: 1\n-->\n",
+                "## 2026-11-28T00:02:00Z codex\n\nb\n\n",
+            )
+            .as_bytes(),
+        );
+        fs::write(&shared, &dup_shared).unwrap();
+        let (row, full) = check_doctor();
+        assert_eq!(row["level"], "error", "{row}");
+        assert!(
+            row["message"]
+                .as_str()
+                .unwrap()
+                .contains("duplicate-event-id"),
+            "{row}"
+        );
+        assert_eq!(full["status"], "failed");
+        fs::write(&shared, &clean_shared).unwrap();
+
+        // Read-only index file is an error.
+        fs::set_permissions(&db_path, fs::Permissions::from_mode(0o444)).unwrap();
+        let (ro_idx_row, ro_idx_full) = check_doctor();
+        fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(ro_idx_row["level"], "error", "{ro_idx_row}");
+        assert!(
+            ro_idx_row["message"]
+                .as_str()
+                .unwrap()
+                .contains("index-unwritable"),
+            "{ro_idx_row}"
+        );
+        assert_eq!(ro_idx_full["status"], "failed");
+
+        // Read-only memory directory is an error.
+        let mem_dir = repo.join(".oms/memory");
+        fs::set_permissions(&mem_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let (ro_dir_row, ro_dir_full) = check_doctor();
+        fs::set_permissions(&mem_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(ro_dir_row["level"], "error", "{ro_dir_row}");
+        assert!(
+            ro_dir_row["message"]
+                .as_str()
+                .unwrap()
+                .contains("memory-dir-unwritable"),
+            "{ro_dir_row}"
+        );
+        assert_eq!(ro_dir_full["status"], "failed");
     }
 
     #[test]

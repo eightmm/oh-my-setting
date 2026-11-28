@@ -2967,6 +2967,105 @@ fn doctor_configuration_diagnostics(source: &Path, root: &Path, host: &NativeSer
         fs::remove_file(file).unwrap();
     }
     fs::remove_dir(source.join("rules")).unwrap();
+
+    // Real memory health diagnostics through full doctor: trailing failures.jsonl stays
+    // read-only and ok, while duplicate event_ids and unwritable index/dir fail.
+    let stop = AtomicBool::new(false);
+    let mem = |args: &[&str]| {
+        let argv: Vec<_> = args.iter().map(OsString::from).collect();
+        oms_command_memory::run_with_source(&argv, source, source, &stop)
+    };
+    assert_eq!(mem(&["init"]).0, 0);
+    assert_eq!(
+        mem(&["append", "--agent", "codex", "--text", "doctor memory note"]).0,
+        0
+    );
+    let inspect_memory = || -> Value {
+        let before = snapshot(root);
+        let out = call("doctor", &["--json", "--no-model-doctor"], source, host);
+        let report: Value = serde_json::from_slice(&out.1).unwrap();
+        assert_eq!(snapshot(root), before, "doctor is read-only");
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["section"] == "memory")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(inspect_memory()["level"], "ok");
+
+    let ledger = source.join(".oms/failures.jsonl");
+    let failure_row = "{\"ts\":\"2026-11-28T00:00:00Z\",\"event\":\"fail\",\"fingerprint\":\"fp-doc-e2e\",\"cmd\":\"cargo test\",\"exit\":1,\"summary\":\"failed\"}\n";
+    fs::write(&ledger, failure_row).unwrap();
+    let trailing_memory = inspect_memory();
+    assert_eq!(trailing_memory["level"], "ok", "{trailing_memory}");
+    assert!(
+        trailing_memory["message"]
+            .as_str()
+            .unwrap()
+            .contains("dry-run sync check passed"),
+        "{trailing_memory}"
+    );
+
+    let shared = source.join(".oms/memory/shared.md");
+    let clean_shared = fs::read(&shared).unwrap();
+    let mut dup_shared = clean_shared.clone();
+    dup_shared.extend_from_slice(
+        concat!(
+            "<!-- oms-memory\nevent_id: mem-dup-e2e\nkind: note\nschema: 1\n-->\n",
+            "## 2026-11-28T00:01:00Z codex\n\nfirst\n\n",
+            "<!-- oms-memory\nevent_id: mem-dup-e2e\nkind: note\nschema: 1\n-->\n",
+            "## 2026-11-28T00:02:00Z codex\n\nsecond\n\n",
+        )
+        .as_bytes(),
+    );
+    fs::write(&shared, &dup_shared).unwrap();
+    let dup_finding = inspect_memory();
+    assert_eq!(dup_finding["level"], "error", "{dup_finding}");
+    assert!(
+        dup_finding["message"]
+            .as_str()
+            .unwrap()
+            .contains("duplicate-event-id"),
+        "{dup_finding}"
+    );
+    fs::write(&shared, &clean_shared).unwrap();
+
+    let db_path = source.join(".oms/memory/memory.sqlite3");
+    fs::set_permissions(&db_path, fs::Permissions::from_mode(0o444)).unwrap();
+    let ro_index = inspect_memory();
+    fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(ro_index["level"], "error", "{ro_index}");
+    assert!(
+        ro_index["message"]
+            .as_str()
+            .unwrap()
+            .contains("index-unwritable"),
+        "{ro_index}"
+    );
+
+    let mem_dir = source.join(".oms/memory");
+    fs::set_permissions(&mem_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let ro_dir_out = call("doctor", &["--json", "--no-model-doctor"], source, host);
+    fs::set_permissions(&mem_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let ro_dir_report: Value = serde_json::from_slice(&ro_dir_out.1).unwrap();
+    let ro_dir = ro_dir_report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["section"] == "memory")
+        .unwrap();
+    assert_eq!(ro_dir["level"], "error", "{ro_dir}");
+    assert!(
+        ro_dir["message"]
+            .as_str()
+            .unwrap()
+            .contains("memory-dir-unwritable"),
+        "{ro_dir}"
+    );
+
+    fs::remove_dir_all(source.join(".oms")).unwrap();
 }
 
 fn doctor_integration_diagnostics(source: &Path, root: &Path, host: &NativeServices, cache: &Path) {
@@ -4697,6 +4796,160 @@ esac
         .0,
         0
     );
+    // Tick syncs a trailing failures.jsonl (including rows appended during tick_maintenance)
+    // and leaves the memory index current, while duplicate IDs and unwritable stores fail.
+    {
+        let stop = AtomicBool::new(false);
+        let mem = |args: &[&str]| {
+            let argv: Vec<_> = args.iter().map(OsString::from).collect();
+            oms_command_memory::run_with_source(&argv, &source, &source, &stop)
+        };
+        assert_eq!(mem(&["init"]).0, 0);
+        assert_eq!(
+            mem(&["append", "--agent", "codex", "--text", "tick memory note"]).0,
+            0
+        );
+        let ledger = source.join(".oms/failures.jsonl");
+        let open_failure = "{\"ts\":\"2026-11-28T00:00:00Z\",\"event\":\"fail\",\"fingerprint\":\"fp-tick\",\"cmd\":\"cargo test\",\"exit\":1,\"summary\":\"failed\"}\n";
+        fs::write(&ledger, open_failure).unwrap();
+        let before_tick: Value = serde_json::from_slice(&mem(&["health", "--json"]).1).unwrap();
+        assert_eq!(before_tick["status"], "stale", "{before_tick}");
+        assert_eq!(before_tick["index"]["current"], false);
+
+        let sweep = call(
+            "tick",
+            &["run", "--repo", source.to_str().unwrap()],
+            &source,
+            &host,
+        );
+        assert_eq!(sweep.0, 0, "{}", String::from_utf8_lossy(&sweep.2));
+        let sweep_body: Value = serde_json::from_slice(&sweep.1).unwrap();
+        assert_eq!(sweep_body["sweeps"][0]["status"], "ok", "{sweep_body}");
+        assert_eq!(sweep_body["sweeps"][0]["memory_rc"], 0, "{sweep_body}");
+        let after_tick = mem(&["health", "--json"]);
+        assert_eq!(after_tick.0, 0);
+        let after_tick_json: Value = serde_json::from_slice(&after_tick.1).unwrap();
+        assert_eq!(after_tick_json["status"], "healthy", "{after_tick_json}");
+        assert_eq!(after_tick_json["index"]["current"], true);
+
+        struct RetiringFailureHost<'a>(&'a NativeServices);
+        impl Services for RetiringFailureHost<'_> {
+            fn tick_maintenance(&self, repo: &Path, _: &Path, _: &AtomicBool) -> Output {
+                let ledger = repo.join(".oms/failures.jsonl");
+                let mut existing = fs::read_to_string(&ledger).unwrap_or_default();
+                existing.push_str("{\"ts\":\"2026-11-28T00:05:00Z\",\"event\":\"resolved\",\"fingerprint\":\"fp-tick\",\"how\":\"retired by oms tick\"}\n");
+                fs::write(&ledger, existing).unwrap();
+                (
+                    0,
+                    serde_json::to_vec(&json!({
+                        "journal_rc":0,"ci_rc":0,"plugin_rc":0,"plan_retire_rc":0,
+                        "artifact_resolve_rc":0,"artifact_supersede_rc":0,"threads_closed":[],
+                        "tasks_closed":0,"plans_retired":0,"artifacts_resolved":0,
+                        "artifacts_superseded":0,"failures_retired":1
+                    }))
+                    .unwrap(),
+                    Vec::new(),
+                )
+            }
+            fn refresh_catalogs(&self, preview: bool, source: &Path, stop: &AtomicBool) -> Output {
+                self.0.refresh_catalogs(preview, source, stop)
+            }
+            fn garbage_collect(&self, repo: &Path, stop: &AtomicBool) -> Output {
+                self.0.garbage_collect(repo, stop)
+            }
+            fn wake_idle_main(&self, scheduled: bool, repo: &Path, stop: &AtomicBool) -> Output {
+                self.0.wake_idle_main(scheduled, repo, stop)
+            }
+        }
+        let retired_sweep = call(
+            "tick",
+            &["run", "--repo", source.to_str().unwrap()],
+            &source,
+            &RetiringFailureHost(&host),
+        );
+        assert_eq!(
+            retired_sweep.0,
+            0,
+            "{}",
+            String::from_utf8_lossy(&retired_sweep.2)
+        );
+        let retired_body: Value = serde_json::from_slice(&retired_sweep.1).unwrap();
+        assert_eq!(retired_body["sweeps"][0]["status"], "ok", "{retired_body}");
+        assert_eq!(retired_body["sweeps"][0]["memory_rc"], 0, "{retired_body}");
+        assert_eq!(retired_body["sweeps"][0]["failures_retired"], 1);
+        let after_retire = mem(&["health", "--json"]);
+        assert_eq!(after_retire.0, 0);
+        let after_retire_json: Value = serde_json::from_slice(&after_retire.1).unwrap();
+        assert_eq!(after_retire_json["status"], "healthy");
+        assert_eq!(after_retire_json["index"]["current"], true);
+        assert_eq!(after_retire_json["failures"]["resolved_fingerprints"], 1);
+
+        // Duplicate event_id in shared.md fails the sweep.
+        let shared = source.join(".oms/memory/shared.md");
+        let clean_shared = fs::read(&shared).unwrap();
+        let mut dup_shared = clean_shared.clone();
+        dup_shared.extend_from_slice(
+            concat!(
+                "<!-- oms-memory\nevent_id: mem-dup-tick\nkind: note\nschema: 1\n-->\n",
+                "## 2026-11-28T00:06:00Z codex\n\none\n\n",
+                "<!-- oms-memory\nevent_id: mem-dup-tick\nkind: note\nschema: 1\n-->\n",
+                "## 2026-11-28T00:07:00Z codex\n\ntwo\n\n",
+            )
+            .as_bytes(),
+        );
+        fs::write(&shared, &dup_shared).unwrap();
+        let dup_sweep = call(
+            "tick",
+            &["run", "--repo", source.to_str().unwrap()],
+            &source,
+            &host,
+        );
+        assert_ne!(dup_sweep.0, 0);
+        let dup_body: Value = serde_json::from_slice(&dup_sweep.1).unwrap();
+        assert_eq!(dup_body["sweeps"][0]["status"], "failed", "{dup_body}");
+        assert_eq!(dup_body["sweeps"][0]["memory_rc"], 1, "{dup_body}");
+        fs::write(&shared, &clean_shared).unwrap();
+
+        // Read-only index file fails the sweep.
+        let db_path = source.join(".oms/memory/memory.sqlite3");
+        fs::set_permissions(&db_path, fs::Permissions::from_mode(0o444)).unwrap();
+        let ro_idx_sweep = call(
+            "tick",
+            &["run", "--repo", source.to_str().unwrap()],
+            &source,
+            &host,
+        );
+        fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_ne!(ro_idx_sweep.0, 0);
+        let ro_idx_body: Value = serde_json::from_slice(&ro_idx_sweep.1).unwrap();
+        assert_eq!(
+            ro_idx_body["sweeps"][0]["status"], "failed",
+            "{ro_idx_body}"
+        );
+        assert_eq!(ro_idx_body["sweeps"][0]["memory_rc"], 1);
+
+        // Read-only memory directory fails the sweep.
+        let mem_dir = source.join(".oms/memory");
+        fs::set_permissions(&mem_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let ro_dir_sweep = call(
+            "tick",
+            &["run", "--repo", source.to_str().unwrap()],
+            &source,
+            &host,
+        );
+        fs::set_permissions(&mem_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_ne!(ro_dir_sweep.0, 0);
+        let ro_dir_body: Value = serde_json::from_slice(&ro_dir_sweep.1).unwrap();
+        assert_eq!(
+            ro_dir_body["sweeps"][0]["status"], "failed",
+            "{ro_dir_body}"
+        );
+        assert_eq!(ro_dir_body["sweeps"][0]["memory_rc"], 1);
+
+        fs::remove_dir_all(&mem_dir).unwrap();
+        fs::remove_file(&ledger).unwrap();
+        let _ = fs::remove_file(source.join(".oms/.gitignore"));
+    }
     // An invalid previous-day wake row refuses the sweep and keeps .oms/tick/last.json unchanged.
     fs::create_dir_all(source.join(".oms/tick")).unwrap();
     let bad_prev = "{\"wakes\":[{\"day\":\"2026-11-09\",\"main\":\"m\"}]}";

@@ -835,3 +835,242 @@ fn journal_batches_reconcile_keys_refuse_collisions_and_repair_derived_outputs()
     assert_eq!(std::fs::read(&shared).unwrap(), redacted);
     assert!(run(&["search", "stable second record"]).contains("stable second record"));
 }
+
+#[test]
+fn health_distinguishes_syncable_lag_from_duplicate_ids_and_unwritable_store() {
+    use serde_json::{Value, json};
+    use std::os::unix::fs::PermissionsExt;
+
+    if std::env::var_os("OMS_MEMORY_HEALTH_TEST").is_none() {
+        let isolated = TempDir::new("oms-memory-health-env");
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "health_distinguishes_syncable_lag_from_duplicate_ids_and_unwritable_store",
+            "--nocapture",
+        ]);
+        for (key, _) in std::env::vars_os() {
+            if key.to_str().is_some_and(|k| k.starts_with("OMS_")) {
+                command.env_remove(key);
+            }
+        }
+        let result = command
+            .env("OMS_MEMORY_HEALTH_TEST", "1")
+            .env("HOME", &isolated.0)
+            .env("OH_MY_SETTING_GLOBAL_MEMORY", isolated.0.join("global.md"))
+            .env("OMS_LOCK_DIR", isolated.0.join("locks"))
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+
+    let dir = TempDir::new("oms-memory-health-repo");
+    let repo = &dir.0;
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .arg(repo)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    std::fs::create_dir_all(repo.join(".oms")).unwrap();
+
+    let flag = AtomicBool::new(false);
+    let call = |args: &[&str]| {
+        let argv: Vec<_> = args.iter().map(OsString::from).collect();
+        oms_command_memory::run_with_source(&argv, repo, repo, &flag)
+    };
+    let health = |sync: bool| -> (i32, Value) {
+        let out = if sync {
+            call(&["health", "--sync", "--json"])
+        } else {
+            call(&["health", "--json"])
+        };
+        let parsed: Value = serde_json::from_slice(&out.1).unwrap_or_else(|e| {
+            panic!(
+                "invalid health json ({e}): stdout={} stderr={}",
+                String::from_utf8_lossy(&out.1),
+                String::from_utf8_lossy(&out.2)
+            )
+        });
+        (out.0, parsed)
+    };
+
+    assert_eq!(call(&["init"]).0, 0);
+    assert_eq!(
+        call(&["append", "--agent", "codex", "--text", "baseline note"]).0,
+        0
+    );
+    let (code, ok) = health(false);
+    assert_eq!(code, 0, "{ok}");
+    assert_eq!(ok["status"], "healthy");
+    assert_eq!(ok["index"]["current"], true);
+    assert_eq!(ok["index"]["writable"], true);
+    assert_eq!(ok["index"]["syncable"], true);
+    assert_eq!(ok["index"]["sync"], "not-run");
+
+    // 1. A failures.jsonl append after the last sync is stale-but-syncable without
+    // mutating the index on read-only health, and becomes healthy/current on --sync.
+    let ledger = repo.join(".oms/failures.jsonl");
+    let failure_one = "{\"ts\":\"2026-11-28T00:00:00Z\",\"event\":\"fail\",\"fingerprint\":\"fp-1\",\"cmd\":\"cargo test\",\"exit\":1,\"summary\":\"unit test failed\"}\n";
+    std::fs::write(&ledger, failure_one).unwrap();
+    let db_path = repo.join(".oms/memory/memory.sqlite3");
+    let db_before = std::fs::read(&db_path).unwrap();
+    let (code, trailing) = health(false);
+    assert_eq!(code, 1, "{trailing}");
+    assert_eq!(trailing["status"], "stale");
+    assert_eq!(trailing["problems"], json!([]));
+    assert_eq!(
+        trailing["index"]["problems"],
+        json!(["source-index-mismatch"])
+    );
+    assert_eq!(trailing["index"]["current"], false);
+    assert_eq!(trailing["index"]["writable"], true);
+    assert_eq!(trailing["index"]["syncable"], true);
+    assert_eq!(trailing["index"]["sync"], "not-run");
+    assert_eq!(
+        std::fs::read(&db_path).unwrap(),
+        db_before,
+        "plain health must remain strictly read-only"
+    );
+
+    let (code, synced) = health(true);
+    assert_eq!(code, 0, "{synced}");
+    assert_eq!(synced["status"], "healthy");
+    assert_eq!(synced["index"]["current"], true);
+    assert_eq!(synced["index"]["syncable"], true);
+    assert_eq!(synced["index"]["sync"], "synced");
+    assert_eq!(synced["index"]["by_source"]["failures"], 1);
+    let (code, after_sync) = health(false);
+    assert_eq!(code, 0, "{after_sync}");
+    assert_eq!(after_sync["status"], "healthy");
+    assert_eq!(after_sync["index"]["current"], true);
+
+    // Malformed failure rows surface as failure-ledger-invalid / degraded, never stale.
+    std::fs::write(&ledger, format!("{failure_one}not-json\n")).unwrap();
+    for sync_flag in [false, true] {
+        let (code, bad_ledger) = health(sync_flag);
+        assert_eq!(code, 1, "{bad_ledger}");
+        assert_eq!(bad_ledger["status"], "degraded");
+        assert_eq!(bad_ledger["index"]["syncable"], false);
+        assert_eq!(bad_ledger["problems"], json!(["failure-ledger-invalid"]));
+    }
+    std::fs::write(&ledger, failure_one).unwrap();
+    assert_eq!(health(true).0, 0);
+
+    // 2. Duplicate event_id in shared.md surfaces as degraded (duplicate-event-id), never stale.
+    let shared_path = repo.join(".oms/memory/shared.md");
+    let clean_shared = std::fs::read(&shared_path).unwrap();
+    let dup_record = concat!(
+        "<!-- oms-memory\nevent_id: mem-dup-1\nkind: note\nschema: 1\n-->\n",
+        "## 2026-11-28T00:01:00Z codex\n\nfirst duplicate entry\n\n",
+        "<!-- oms-memory\nevent_id: mem-dup-1\nkind: note\nschema: 1\n-->\n",
+        "## 2026-11-28T00:02:00Z codex\n\nsecond duplicate entry\n\n",
+    );
+    let mut with_dup = clean_shared.clone();
+    with_dup.extend_from_slice(dup_record.as_bytes());
+    std::fs::write(&shared_path, &with_dup).unwrap();
+
+    let (code, dup_readonly) = health(false);
+    assert_eq!(code, 1, "{dup_readonly}");
+    assert_eq!(dup_readonly["status"], "degraded");
+    assert_eq!(dup_readonly["index"]["syncable"], false);
+    assert_eq!(dup_readonly["problems"], json!(["duplicate-event-id"]));
+
+    let (code, dup_sync) = health(true);
+    assert_eq!(code, 1, "{dup_sync}");
+    assert_eq!(dup_sync["status"], "degraded");
+    assert_eq!(dup_sync["index"]["sync"], "failed");
+    assert_eq!(dup_sync["index"]["syncable"], false);
+    assert_eq!(dup_sync["problems"], json!(["duplicate-event-id"]));
+    assert!(
+        dup_sync["index"]["problems"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("sync-failed")),
+        "{dup_sync}"
+    );
+    std::fs::write(&shared_path, &clean_shared).unwrap();
+    assert_eq!(health(true).0, 0);
+
+    // 3a. Read-only index file surfaces as degraded (index-unwritable), both current and trailing.
+    let failure_two = format!(
+        "{failure_one}{{\"ts\":\"2026-11-28T00:03:00Z\",\"event\":\"fail\",\"fingerprint\":\"fp-2\",\"cmd\":\"cargo check\",\"exit\":1,\"summary\":\"check failed\"}}\n"
+    );
+    std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let (code, ro_current) = health(false);
+    assert_eq!(code, 1, "{ro_current}");
+    assert_eq!(ro_current["status"], "degraded");
+    assert_eq!(ro_current["index"]["writable"], false);
+    assert_eq!(ro_current["index"]["syncable"], false);
+    assert_eq!(ro_current["index"]["problems"], json!(["index-unwritable"]));
+
+    std::fs::write(&ledger, &failure_two).unwrap();
+    let (code, ro_trailing) = health(false);
+    assert_eq!(code, 1, "{ro_trailing}");
+    assert_eq!(ro_trailing["status"], "degraded");
+    assert_eq!(ro_trailing["index"]["syncable"], false);
+    assert!(
+        ro_trailing["index"]["problems"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("index-unwritable")),
+        "{ro_trailing}"
+    );
+    let (code, ro_sync) = health(true);
+    assert_eq!(code, 1, "{ro_sync}");
+    assert_eq!(ro_sync["status"], "degraded");
+    assert_eq!(ro_sync["index"]["sync"], "failed");
+    assert!(
+        ro_sync["index"]["problems"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("index-unwritable")),
+        "{ro_sync}"
+    );
+    std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(health(true).0, 0);
+
+    // 3b. Read-only memory directory surfaces as degraded (memory-dir-unwritable).
+    let mem_dir = repo.join(".oms/memory");
+    let failure_three = format!(
+        "{failure_two}{{\"ts\":\"2026-11-28T00:04:00Z\",\"event\":\"fail\",\"fingerprint\":\"fp-3\",\"cmd\":\"cargo clippy\",\"exit\":1,\"summary\":\"lint failed\"}}\n"
+    );
+    std::fs::write(&ledger, &failure_three).unwrap();
+    std::fs::set_permissions(&mem_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let (code, ro_dir) = health(false);
+    let (sync_code, ro_dir_sync) = health(true);
+    std::fs::set_permissions(&mem_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(code, 1, "{ro_dir}");
+    assert_eq!(ro_dir["status"], "degraded");
+    assert_eq!(ro_dir["index"]["writable"], false);
+    assert_eq!(ro_dir["index"]["syncable"], false);
+    assert!(
+        ro_dir["index"]["problems"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("memory-dir-unwritable")),
+        "{ro_dir}"
+    );
+    assert_eq!(sync_code, 1, "{ro_dir_sync}");
+    assert_eq!(ro_dir_sync["status"], "degraded");
+    assert_eq!(ro_dir_sync["index"]["sync"], "failed");
+    assert!(
+        ro_dir_sync["index"]["problems"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("memory-dir-unwritable")),
+        "{ro_dir_sync}"
+    );
+
+    assert_eq!(call(&["init", "--sync"]).0, 2);
+}

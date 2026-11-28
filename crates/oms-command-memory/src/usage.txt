@@ -33,6 +33,8 @@ Options:
   --json            search/recall: emit JSONL with provenance metadata;
                     health: emit one schema-1 diagnostic object;
                     sources: emit one schema-1 inventory object.
+  --sync            health: synchronize the derived index under the store lock
+                    before diagnosing it.
   --source-file PATH
                     append: cite a tracked file from the current project HEAD.
                     Cited notes stay out of compact provider context and are
@@ -104,8 +106,8 @@ Commands:
                     tracked-only declaration; a PROJECT.md declaration that
                     origin does not name, or any declaration error, turns the
                     mode off with one warning.
-  health            Diagnose source/index consistency without creating,
-                    synchronizing, repairing, or otherwise changing either.
+  health [--sync]   Diagnose source/index consistency (read-only unless --sync
+                    synchronizes the derived index first).
   rebuild           Recreate the derived database from the Markdown sources.
   import --from serena|PATH [--apply --select N,N|--all] [--json]
                     List candidate lines from Markdown memory written elsewhere
