@@ -1460,10 +1460,14 @@ fn serve_cli_subhelper() {
 
 #[test]
 fn routed_serve_delivers_by_team_and_answers_unrouted_sessions() {
+    let sig_val = runtime_sig_val();
     isolated_with(
         "routed_serve_delivers_by_team_and_answers_unrouted_sessions",
         true,
-        &[],
+        &[
+            (ENV_WEBHOOK_CRED, &sig_val),
+            (ENV_ACCESS_CRED, "not one value"),
+        ],
         routed_serve_inner,
     );
 }
@@ -1661,6 +1665,104 @@ fn routed_serve_inner(ws: &TempWorkspace) {
     let logs = String::from_utf8(server.shutdown()).unwrap();
     assert!(logs.contains("session=s-ops route=3ab2f60d-ops"), "{logs}");
     assert!(logs.contains("session=s-zzz route=unrouted"), "{logs}");
+
+    // Status names the newest intake question per Room target, never a manual question, and
+    // reports an unusable route as a row error instead of failing the whole report.
+    let stop_send = AtomicBool::new(false);
+    Room::open(
+        &ws.repo,
+        Session::default(),
+        &LocalServices,
+        &stop_send,
+        false,
+        false,
+    )
+    .unwrap()
+    .send(
+        "r-jae",
+        RoomSend {
+            sender: "linear",
+            recipient: "main",
+            text: "manual question",
+            kind: "question",
+            reply_to: None,
+            message_id: Some("manual-question-1"),
+            linked: false,
+            quiet: false,
+        },
+    )
+    .unwrap();
+    oms_command_intake::routes::update(&table, |list| {
+        let mut gone = list[0].clone();
+        gone.team = "GONE".into();
+        gone.room = "r-gone".into();
+        list.push(gone);
+        Ok(true)
+    })
+    .unwrap();
+    let (code, out, _) = run("status --json", &[]);
+    assert_eq!(code, 0);
+    let status: Value = serde_json::from_slice(&out).unwrap();
+    let linear = &status["sources"][0];
+    assert_eq!(linear["source"], SOURCE_LINEAR);
+    let states = |side: &str| -> Vec<(String, String)> {
+        linear[side]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["name"].as_str().unwrap().into(),
+                    e["state"].as_str().unwrap().into(),
+                )
+            })
+            .collect()
+    };
+    let named = |n: &str, st: &str| (n.to_owned(), st.to_owned());
+    assert_eq!(
+        states("serve"),
+        [
+            named(ENV_WEBHOOK_CRED, "set"),
+            named(ENV_ACCESS_CRED, "invalid"),
+            named(ENV_LINEAR_API_URL, "missing")
+        ]
+    );
+    assert_eq!(linear["serve"]["ready"], false);
+    assert!(!String::from_utf8_lossy(&out).contains(&sig_val));
+    let row = |team: &str| {
+        status["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["team"] == team)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        row("JAE")["last_delivery"]["id"].as_str(),
+        Some(prompted_message_id(SOURCE_LINEAR, "act-1").as_str())
+    );
+    assert!(
+        !row("JAE")["last_delivery"]["ts"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        row(ops_id)["last_delivery"]["id"].as_str(),
+        Some(created_message_id(SOURCE_LINEAR, "s-ops").as_str())
+    );
+    assert_eq!(row("GONE")["ok"], false);
+    assert!(row("GONE")["error"].as_str().unwrap().contains("r-gone"));
+    let (code, out, _) = run("status", &[]);
+    assert_eq!(code, 0);
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.contains(&format!("{ENV_ACCESS_CRED}=invalid")),
+        "{text}"
+    );
+    assert!(text.contains("room=r-gone: error: "), "{text}");
+    assert_eq!(run("route remove --source linear --team GONE", &[]).0, 0);
 
     assert_eq!(run("route remove --source linear --team JAE", &[]).0, 0);
     assert_eq!(run("route remove --source linear --team JAE", &[]).0, 1);
