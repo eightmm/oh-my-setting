@@ -722,7 +722,7 @@ test('Lead settings show only private provider evidence for the observed request
   await p.event('settings-toggle','click');assert.ok(!details.hidden);assert.equal(details.textContent,'실제 사용 모델 미확인');
   await p.event('chat-back','click');evidence=observed;await open(2);
   assert.equal(details.textContent,'실제 사용 모델 미확인\n다음 메시지는 이 AGY 세션에서 이어짐');assert.ok(!details.hidden);
-  await p.event('chat-back','click');await open(0);assert.ok(!details.hidden);assert.equal(details.textContent,'실제 사용 모델 미확인');
+  await p.event('chat-back','click');await open(0);assert.ok(!details.hidden);assert.equal(details.textContent,'실제 사용 모델 미확인\n다음 메시지는 이 Codex 세션에서 이어짐');
   assert.equal(p.host.messages.length,0);assert.equal(p.host.contexts.length,0);
 });
 
@@ -2451,4 +2451,111 @@ test('initial open renders _meta.dashboard without a second snapshot read until 
     assert.equal(omitted.get('goal').textContent,'Fetched after '+reason);
     assert.equal([...omittedJobs.values()].filter(j=>j.ms===20000).length,1);
   }
+});
+
+test('mcp-app hosts open direct Lead chat without a Room or kickoff round and keep chat open across refresh',async()=>{
+  const key='b'.repeat(64);
+  let model=null,effort=null,revision='1'.repeat(64),snapCount=0;
+  const turns=[];
+  const leadRow=provider=>({provider,status:'ready',requestId:'12345678-1234-8234-8234-123456789ab'+['codex','claude','agy'].indexOf(provider)});
+  const leadResp=a=>{
+    const all=['codex','claude','agy'].map(leadRow);
+    const leads=a.provider?all.filter(r=>r.provider===a.provider):all;
+    const out={projectKey:key,room:null,leads};
+    if(a.provider)out._private={room:null,provider:a.provider,requestId:leads[0].requestId,status:'ready',transcript:{turns,cursor:null,hasMore:false}};
+    return out;
+  };
+  const p=await panel(['one'],{project:'one',goal:'Direct lead chat'},{
+    host:'Antigravity',
+    locale:'en',
+    readOnly:true,
+    tools:{
+      oms_list_projects:()=>({projects:['one'],projectKeys:{one:key},binding:'catalog',readOnly:true,leadChat:true}),
+      oms_panel_snapshot:()=>{snapCount++;return {dashboard:{project:'one',goal:'Direct lead chat #' + snapCount}};},
+      [managedRead]:a=>{assert.equal(Object.hasOwn(a,'room'),false);return leadResp(a);},
+      oms_send_lead_message:a=>{
+        assert.equal(Object.hasOwn(a,'room'),false);
+        assert.equal(a.project,'one');assert.equal(a.projectKey,key);assert.equal(a.provider,'codex');
+        turns.push({role:'user',text:a.text,turnId:a.turnId,status:'replied'},{role:'codex',text:'Codex direct reply',turnId:a.turnId});
+        return {...leadResp(a),turn:{turnId:a.turnId,status:'replied'}};
+      },
+      oms_lead_settings:a=>{
+        assert.equal(Object.hasOwn(a,'room'),false);
+        const s={projectKey:key,provider:a.provider,leadRequestId:a.leadRequestId,revision,
+          selection:{model,effort},options:[{model:'gpt-5.4',source:'catalog',efforts:['low','high'],fixed:false,requiresEffort:false}],
+          catalogAgeSeconds:5,scope:{target:'lead-conversation',appliesTo:'next-message',inheritsToWorkers:false,mode:'read-only-consultation',continuity:'oms-thread'}};
+        return {structuredContent:s,_meta:{leadSettings:s}};
+      },
+      oms_update_lead_settings:a=>{
+        assert.equal(Object.hasOwn(a,'room'),false);
+        model=a.model;effort=a.effort;revision='2'.repeat(64);
+        const s={projectKey:key,provider:a.provider,leadRequestId:a.leadRequestId,revision,
+          selection:{model,effort},options:[{model:'gpt-5.4',source:'catalog',efforts:['low','high'],fixed:false,requiresEffort:false}],
+          catalogAgeSeconds:5};
+        return {structuredContent:s,_meta:{leadSettings:s}};
+      }
+    }
+  });
+  assert.equal(p.get('new-goal').hidden,true);
+  assert.equal(p.get('approval-card').hidden,true);
+  assert.equal(p.get('lead-settings').hidden,true);
+  assert.equal(p.get('open-leads').hidden,true);
+  const codexSlot=p.get('leads').children[0];
+  const opener=codexSlot.children[1].children.find(e=>e.type==='button' && e.textContent==='Ask Codex');
+  assert.ok(opener && !opener.hidden);
+  opener.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('conversation').open,true);
+  assert.equal(p.get('chat-title').textContent,'OMS Lead · Codex');
+  p.get('chat-text').value='Hello Codex directly';await p.event('chat-text','input');
+  await p.event('chat-compose','submit');await setImmediate();
+  assert.match(p.get('chat-messages').textContent,/Codex direct reply/);
+
+  // Settings work without room in project-scoped mode.
+  await p.event('settings-toggle','click');await setImmediate();
+  p.get('settings-model').value='gpt-5.4';await p.event('settings-model','change');
+  p.get('settings-effort').value='high';await p.event('settings-effort','change');
+  await p.event('settings-save','click');await setImmediate();
+  assert.match(p.get('settings-saved').textContent,/gpt-5\.4 · high/);
+
+  // Refresh keeps the open Lead chat alive.
+  await p.event('refresh','click');await setImmediate();
+  assert.equal(p.get('conversation').open,true);
+  assert.match(p.get('chat-messages').textContent,/Codex direct reply/);
+});
+
+test('chatgpt-panel enables project-scoped Lead chat without a Codex Room and fences on stale snapshot',async()=>{
+  const key='b'.repeat(64);
+  let failSnap=false;
+  const leadRow=provider=>({provider,status:'ready',requestId:'12345678-1234-8234-8234-123456789ab'+['codex','claude','agy'].indexOf(provider)});
+  const leadResp=a=>{
+    const all=['codex','claude','agy'].map(leadRow);
+    const leads=a.provider?all.filter(r=>r.provider===a.provider):all;
+    const out={projectKey:key,room:null,leads};
+    if(a.provider)out._private={room:null,provider:a.provider,requestId:leads[0].requestId,status:'ready',transcript:{turns:[],cursor:null,hasMore:false}};
+    return out;
+  };
+  const claudeMain={...dashboard,conversationBinding:'matched',conversationMain:{source:'room-session',state:'joined',provider:'claude',harness:'claude',room:'claude-room',participant:'claude-main',incomplete:false,participants:[]}};
+  const p=await panel(['one'],claudeMain,{
+    host:'Codex',
+    locale:'en',
+    tools:{
+      oms_list_projects:()=>({projects:['one'],projectKeys:{one:key},binding:'catalog',readOnly:false,leadChat:true}),
+      oms_panel_snapshot:()=>{if(failSnap)throw Error('offline');return {dashboard:{project:'one',...claudeMain}};},
+      [managedRead]:a=>{assert.equal(Object.hasOwn(a,'room'),false);return leadResp(a);},
+      oms_send_lead_message:a=>{
+        assert.equal(Object.hasOwn(a,'room'),false);
+        return {...leadResp(a),turn:{turnId:a.turnId,status:'replied'}};
+      }
+    }
+  });
+  assert.equal(p.get('lead-settings').hidden,true);
+  const agySlot=p.get('leads').children[2];
+  const opener=agySlot.children[1].children.find(e=>e.type==='button' && e.textContent==='Ask AGY');
+  assert.ok(opener && !opener.hidden);
+  opener.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('conversation').open,true);
+  failSnap=true;await p.event('refresh','click');await setImmediate();
+  assert.equal(p.get('conversation').open,false);
+  assert.ok(opener.hidden);
+  await assert.rejects(p.run("tool('oms_send_lead_message',{})"));
 });

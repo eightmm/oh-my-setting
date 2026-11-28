@@ -8,6 +8,7 @@ use rustix::fs::{AtFlags, FileType, statat};
 impl Conversation<'_> {
     pub(super) fn native_invocation(&self, server: &Server<'_>) -> Option<(Value, Value)> {
         let provider = match self.provider {
+            "codex" => "codex",
             "claude" => "claude",
             "agy" => "antigravity",
             _ => return None,
