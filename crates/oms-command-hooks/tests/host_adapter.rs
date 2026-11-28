@@ -906,13 +906,7 @@ fn codex_precompact_rejects_explicit_unsafe_hints_without_fallback() {
     codex_handoff_rollout(&hardlink_source, &repo, sid);
     fs::hard_link(&hardlink_source, &hardlink).unwrap();
     let oversized = sessions.join("oversized.jsonl");
-    codex_handoff_rollout(&oversized, &repo, sid);
-    fs::OpenOptions::new()
-        .write(true)
-        .open(&oversized)
-        .unwrap()
-        .set_len(32 * 1024 * 1024 + 1)
-        .unwrap();
+    fs::write(&oversized, "x".repeat(65537)).unwrap();
     let conflicting_header = sessions.join("conflicting-header.jsonl");
     fs::write(
         &conflicting_header,
@@ -1001,6 +995,88 @@ fn codex_precompact_rejects_explicit_unsafe_hints_without_fallback() {
     invoke(&base.to_string());
     assert!(host.failures.lock().unwrap().is_empty());
     assert_eq!(fs::read_dir(repo.join(".oms/handoffs")).unwrap().count(), 1);
+}
+
+#[test]
+fn codex_precompact_captures_large_rollout_beyond_32mib_via_tail() {
+    use serde_json::json;
+    use std::io::Write;
+
+    let tmp = TempDir::new("precompact-large");
+    let home = tmp.path().join("home");
+    let active = home.join("active-codex");
+    if !clean_env_child(
+        "codex_precompact_captures_large_rollout_beyond_32mib_via_tail",
+        &[
+            ("HOME", home.to_str().unwrap()),
+            ("XDG_CONFIG_HOME", ""),
+            ("CODEX_HOME", active.to_str().unwrap()),
+            ("OMS_WORK_JOURNAL", "0"),
+        ],
+    ) {
+        return;
+    }
+    let repo = git_repo(&tmp);
+    fs::create_dir(repo.join(".oms")).unwrap();
+    let active = PathBuf::from(std::env::var_os("CODEX_HOME").unwrap());
+    let sessions = active.join("sessions");
+    let sid = "01a21dae-15a8-7a33-ae27-14df2f3e5de7";
+    let transcript = sessions.join("2026/11/28/rollout-large.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    {
+        let mut f = fs::File::create(&transcript).unwrap();
+        writeln!(
+            f,
+            "{}",
+            json!({"type":"session_meta","payload":{"id":sid,"cwd":repo}})
+        )
+        .unwrap();
+        let pad = json!({
+            "type": "event_msg",
+            "payload": { "type": "token_count", "pad": "x".repeat(4000) }
+        })
+        .to_string();
+        let count = (32 * 1024 * 1024 + 65536) / (pad.len() + 1);
+        for _ in 0..count {
+            writeln!(f, "{pad}").unwrap();
+        }
+        for msg in ["large first turn", "large second turn"] {
+            writeln!(
+                f,
+                "{}",
+                json!({"type":"event_msg","payload":{"type":"user_message","message":msg}})
+            )
+            .unwrap();
+        }
+        writeln!(
+            f,
+            "{}",
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"large assistant answer"}]}})
+        )
+        .unwrap();
+    }
+
+    let input = json!({
+        "hook_event_name": "PreCompact", "cwd": repo, "session_id": sid,
+        "transcript_path": transcript
+    });
+    let (code, stdout, stderr) = hook(
+        &tmp,
+        "harness-hook",
+        &["precompact-handoff", "codex"],
+        input.to_string().as_bytes(),
+    );
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "", ""));
+    let captures: Vec<_> = fs::read_dir(repo.join(".oms/handoffs"))
+        .into_iter()
+        .flatten()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(captures.len(), 1);
+    let capture = fs::read_to_string(&captures[0]).unwrap();
+    assert!(capture.contains(&format!("- session: {sid}")));
+    assert!(capture.contains("large second turn"));
+    assert!(capture.contains("large assistant answer"));
 }
 
 const CODEX_TRACE: &str = ".oms/hooks/codex-trace.jsonl";
