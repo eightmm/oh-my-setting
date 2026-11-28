@@ -16,9 +16,13 @@ use std::{
 };
 static NEXT: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
-thread_local! { static LINK_CRASH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) }; }
+thread_local! {
+    static LINK_CRASH: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static FORCE_ANCESTOR_STAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 const SKILL_FILE: &str = "SKILL.md";
 const HIDDEN_SKILL_FILE: &str = ".oms-hidden-SKILL.md";
+const STAGING_DIR: &str = ".oms-lifecycle-staging";
 
 #[derive(Serialize, Deserialize)]
 struct Change {
@@ -61,6 +65,7 @@ struct Journal {
 /// Refusals retain the journal and undo names when recovery cannot prove identity.
 pub(crate) struct Transaction {
     path: PathBuf,
+    journal_dir: PathBuf,
     journal: Journal,
     complete: bool,
     notices: Vec<String>,
@@ -75,15 +80,18 @@ impl Transaction {
     }
     fn begin_named(paths: &Paths, name: &str) -> Result<Self> {
         let dir = paths.config.join(name);
-        let path = dir.join("transaction.json");
+        let raw_path = dir.join("transaction.json");
         // Receipt overrides may differ while sharing this recovery journal.
-        let journal_lock = r::lock(&path, &paths.cwd)?;
+        let journal_lock = r::lock(&raw_path, &paths.cwd)?;
         r::private_dir(&dir)?;
+        let journal_dir = r::physical(&dir)?;
+        let path = journal_dir.join("transaction.json");
         if r::exists(&path) {
             Self::recover(&path)?;
         }
         let tx = Self {
             path,
+            journal_dir,
             journal: Journal {
                 schema: 1,
                 committed: false,
@@ -96,6 +104,54 @@ impl Transaction {
         };
         tx.save()?;
         Ok(tx)
+    }
+    /// Allocate staging and undo storage on `parent_dev` outside provider-scanned
+    /// directories: prefer the private journal directory when on the same device,
+    /// else a mode-0700 hidden directory at the outermost user-owned ancestor on
+    /// `parent_dev`, falling back to `target.parent()` only when no owned ancestor
+    /// can host one.
+    fn work_dir_for(&self, target: &Path, parent_dev: u64) -> Result<PathBuf> {
+        let parent = target
+            .parent()
+            .ok_or_else(|| r::Error(2, "invalid lifecycle target".into()))?;
+        #[cfg(test)]
+        let force_ancestor = FORCE_ANCESTOR_STAGE.with(std::cell::Cell::get);
+        #[cfg(not(test))]
+        let force_ancestor = false;
+        if !force_ancestor
+            && !self.journal_dir.starts_with(target)
+            && !target.starts_with(&self.journal_dir)
+            && fs::symlink_metadata(&self.journal_dir)?.dev() == parent_dev
+        {
+            return Ok(self.journal_dir.clone());
+        }
+        let euid = rustix::process::geteuid().as_raw();
+        let mut candidates = Vec::new();
+        for ancestor in parent.ancestors() {
+            let Ok(m) = fs::symlink_metadata(ancestor) else {
+                break;
+            };
+            if !m.is_dir() || m.file_type().is_symlink() || m.dev() != parent_dev {
+                break;
+            }
+            if m.uid() == euid && m.mode() & 0o002 == 0 {
+                candidates.push(ancestor);
+            } else {
+                break;
+            }
+        }
+        for ancestor in candidates.into_iter().rev() {
+            let dir = ancestor.join(STAGING_DIR);
+            if target.starts_with(&dir) || dir.starts_with(target) {
+                continue;
+            }
+            if r::private_dir(&dir).is_ok()
+                && fs::symlink_metadata(&dir).is_ok_and(|m| m.dev() == parent_dev)
+            {
+                return Ok(dir);
+            }
+        }
+        Ok(parent.to_path_buf())
     }
     fn save(&self) -> Result<()> {
         let value = serde_json::to_value(&self.journal)
@@ -178,10 +234,13 @@ impl Transaction {
         let parent = target.parent().unwrap();
         fs::create_dir_all(parent)?;
         let target = r::leaf(&target)?;
+        let parent = target.parent().unwrap();
+        let parent_dev = fs::symlink_metadata(parent)?.dev();
+        let work_dir = self.work_dir_for(&target, parent_dev)?;
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let suffix = format!("{}.{}.{}", std::process::id(), r::now().replace(':', ""), n);
-        let staged = target.with_file_name(format!(".oms-stage-{suffix}"));
-        let undo = target.with_file_name(format!(".oms-undo-{suffix}"));
+        let staged = work_dir.join(format!(".oms-stage-{suffix}"));
+        let undo = work_dir.join(format!(".oms-undo-{suffix}"));
         if r::exists(&staged) || r::exists(&undo) {
             return r::fail("transaction staging name already exists");
         }
@@ -221,10 +280,11 @@ impl Transaction {
             old_link,
             old_link_mode,
         };
-        if let Err(error) = validate_change(&candidate) {
+        if let Err(error) = validate_change(&candidate, &self.journal_dir) {
             if !deferred {
                 remove(&candidate.staged)?;
             }
+            prune_staging_dir(&work_dir);
             return Err(error);
         }
         self.journal.changes.push(candidate);
@@ -245,20 +305,20 @@ impl Transaction {
             }
         }
         if change.old.is_some() && change.old_link.is_none() {
-            fs::rename(&change.target, &change.undo)?;
+            rename_target(&change.target, &change.undo)?;
             if change.hidden_old_skill {
                 hide_skill(&change.undo)?;
             }
-            r::sync_dir(change.target.parent().unwrap())?;
+            sync_change_dirs(change)?;
         }
         if change.old_link.is_some() && fs::symlink_metadata(&change.staged)?.is_dir() {
             fs::remove_file(&change.target)?;
         }
-        fs::rename(&change.staged, &change.target)?;
+        rename_target(&change.staged, &change.target)?;
         if change.hidden_new_skill {
             unhide_skill(&change.target)?;
         }
-        r::sync_dir(change.target.parent().unwrap())?;
+        sync_change_dirs(change)?;
         Ok(())
     }
     pub fn remove(&mut self, target: &Path) -> Result<()> {
@@ -277,10 +337,13 @@ impl Transaction {
         if old.is_none() {
             return Ok(());
         }
+        let parent = target.parent().unwrap();
+        let parent_dev = fs::symlink_metadata(parent)?.dev();
+        let work_dir = self.work_dir_for(&target, parent_dev)?;
         let (old_link, old_link_mode) = read_old_link(&target)?;
         let hidden_old_skill = can_hide_skill(&target)?;
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let undo = target.with_file_name(format!(".oms-undo-{}.{}", std::process::id(), n));
+        let undo = work_dir.join(format!(".oms-undo-{}.{}", std::process::id(), n));
         if r::exists(&undo) {
             return r::fail("transaction undo name already exists");
         }
@@ -297,7 +360,10 @@ impl Transaction {
             old_link,
             old_link_mode,
         };
-        validate_change(&candidate)?;
+        if let Err(error) = validate_change(&candidate, &self.journal_dir) {
+            prune_staging_dir(&work_dir);
+            return Err(error);
+        }
         self.journal.changes.push(candidate);
         self.save()?;
         let change = self.journal.changes.last().unwrap();
@@ -307,12 +373,12 @@ impl Transaction {
         if change.old_link.is_some() {
             fs::remove_file(&change.target)?;
         } else {
-            fs::rename(&change.target, &change.undo)?;
+            rename_target(&change.target, &change.undo)?;
         }
         if change.hidden_old_skill {
             hide_skill(&change.undo)?;
         }
-        r::sync_dir(change.target.parent().unwrap())?;
+        sync_change_dirs(change)?;
         Ok(())
     }
     pub fn write_bound(
@@ -385,9 +451,24 @@ impl Transaction {
             Err(rustix::io::Errno::NOENT) if expected.is_none() => None,
             _ => return r::fail("account settings target changed; retained"),
         };
+        let target_leaf = r::leaf(target)?;
+        let lm = fs::symlink_metadata(target_leaf.parent().unwrap())?;
+        if lm.dev() != m.dev() || lm.ino() != m.ino() {
+            return r::fail("account settings home changed; retained");
+        }
+        let work_dir = self.work_dir_for(&target_leaf, m.dev())?;
+        let work_handle = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
+            )
+            .open(&work_dir)?;
+        if work_handle.metadata()?.dev() != m.dev() {
+            return r::fail("account settings staging moved across filesystems");
+        }
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let staged = target.with_file_name(format!(".oms-stage-{}.{}", std::process::id(), n));
-        let undo = target.with_file_name(format!(".oms-undo-{}.{}", std::process::id(), n));
+        let staged = work_dir.join(format!(".oms-stage-{}.{}", std::process::id(), n));
+        let undo = work_dir.join(format!(".oms-undo-{}.{}", std::process::id(), n));
         if r::exists(&undo) {
             return r::fail("account settings undo name exists");
         }
@@ -396,7 +477,7 @@ impl Transaction {
         #[cfg(not(target_os = "macos"))]
         let raw_mode = mode;
         let fd = rustix::fs::openat(
-            &directory,
+            &work_handle,
             staged.file_name().unwrap(),
             rustix::fs::OFlags::WRONLY
                 | rustix::fs::OFlags::CREATE
@@ -413,8 +494,8 @@ impl Transaction {
         hash.update(b"file\0");
         hash.update(raw);
         let new = Some(format!("{:x}", hash.finalize()));
-        self.journal.changes.push(Change {
-            target: target.to_owned(),
+        let candidate = Change {
+            target: target_leaf,
             staged: staged.clone(),
             undo: undo.clone(),
             old: old.clone(),
@@ -425,19 +506,27 @@ impl Transaction {
             hidden_new_skill: false,
             old_link: None,
             old_link_mode: None,
-        });
+        };
+        if let Err(error) = validate_change(&candidate, &self.journal_dir) {
+            remove(&candidate.staged)?;
+            prune_staging_dir(&work_dir);
+            return Err(error);
+        }
+        self.journal.changes.push(candidate);
         self.save()?;
         check()?;
         if identity(target)? != old {
             return r::fail("account settings changed before publication");
         }
         if old.is_some() {
-            rustix::fs::renameat(&directory, name, &directory, undo.file_name().unwrap())
+            rustix::fs::renameat(&directory, name, &work_handle, undo.file_name().unwrap())
                 .map_err(|_| r::Error(2, "account settings backup failed".into()))?;
+            work_handle.sync_all()?;
         }
-        rustix::fs::renameat(&directory, staged.file_name().unwrap(), &directory, name)
+        rustix::fs::renameat(&work_handle, staged.file_name().unwrap(), &directory, name)
             .map_err(|_| r::Error(2, "account settings publication failed".into()))?;
         directory.sync_all()?;
+        work_handle.sync_all()?;
         check()
     }
     pub fn remove_link_bound(
@@ -485,17 +574,32 @@ impl Transaction {
             Ok(())
         };
         inspect()?;
+        let target_leaf = r::leaf(target)?;
+        let lm = fs::symlink_metadata(target_leaf.parent().unwrap())?;
+        if lm.dev() != m.dev() || lm.ino() != m.ino() {
+            return r::fail("account home changed before removal");
+        }
+        let work_dir = self.work_dir_for(&target_leaf, m.dev())?;
+        let work_handle = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
+            )
+            .open(&work_dir)?;
+        if work_handle.metadata()?.dev() != m.dev() {
+            return r::fail("account link staging moved across filesystems");
+        }
         let mut hash = Sha256::new();
         hash.update(b"link\0");
         hash.update(destination.as_os_str().as_bytes());
         let old = Some(format!("{:x}", hash.finalize()));
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let undo = target.with_file_name(format!(".oms-undo-{}.{}", std::process::id(), n));
+        let undo = work_dir.join(format!(".oms-undo-{}.{}", std::process::id(), n));
         if r::exists(&undo) {
             return r::fail("account undo destination exists");
         }
-        self.journal.changes.push(Change {
-            target: target.to_owned(),
+        let candidate = Change {
+            target: target_leaf,
             staged: undo.with_extension("stage"),
             undo: undo.clone(),
             old,
@@ -506,11 +610,17 @@ impl Transaction {
             hidden_new_skill: false,
             old_link: None,
             old_link_mode: None,
-        });
+        };
+        if let Err(error) = validate_change(&candidate, &self.journal_dir) {
+            prune_staging_dir(&work_dir);
+            return Err(error);
+        }
+        self.journal.changes.push(candidate);
         self.save()?;
         inspect()?;
-        rustix::fs::renameat(&handle, name, &handle, undo.file_name().unwrap())
+        rustix::fs::renameat(&handle, name, &work_handle, undo.file_name().unwrap())
             .map_err(|_| r::Error(2, "account unlink transaction failed".into()))?;
+        work_handle.sync_all()?;
         handle.sync_all()?;
         Ok(())
     }
@@ -541,9 +651,13 @@ impl Transaction {
         for target in targets {
             let target = r::leaf(target)?;
             fs::create_dir_all(target.parent().unwrap())?;
+            let target = r::leaf(&target)?;
+            let parent = target.parent().unwrap();
+            let parent_dev = fs::symlink_metadata(parent)?.dev();
+            let work_dir = self.work_dir_for(&target, parent_dev)?;
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let undo = target.with_file_name(format!(".oms-undo-{}.{}", std::process::id(), n));
-            let staged = target.with_file_name(format!(".oms-stage-{}.{}", std::process::id(), n));
+            let undo = work_dir.join(format!(".oms-undo-{}.{}", std::process::id(), n));
+            let staged = work_dir.join(format!(".oms-stage-{}.{}", std::process::id(), n));
             if r::exists(&undo) || r::exists(&staged) {
                 return r::fail("external snapshot name already exists");
             }
@@ -567,7 +681,10 @@ impl Transaction {
                 old_link,
                 old_link_mode,
             };
-            validate_change(&candidate)?;
+            if let Err(error) = validate_change(&candidate, &self.journal_dir) {
+                prune_staging_dir(&work_dir);
+                return Err(error);
+            }
             self.journal.changes.push(candidate);
             self.save()?;
             if self.journal.changes.last().unwrap().old_link.is_some()
@@ -583,7 +700,7 @@ impl Transaction {
                 {
                     return r::fail("provider state changed during snapshot");
                 }
-                r::sync_dir(target.parent().unwrap())?;
+                r::sync_dir(&work_dir)?;
             }
         }
         Ok(start)
@@ -600,41 +717,116 @@ impl Transaction {
         self.complete = true;
         cleanup(&self.journal)?;
         fs::remove_file(&self.path)?;
-        r::sync_dir(self.path.parent().unwrap())?;
+        r::sync_dir(&self.journal_dir)?;
         Ok(())
     }
+    #[cfg(test)]
+    pub(crate) fn simulate_crash(mut self) {
+        self.complete = true;
+    }
     fn recover(path: &Path) -> Result<()> {
+        let raw_dir = path
+            .parent()
+            .ok_or_else(|| r::Error(2, "invalid lifecycle recovery journal".into()))?;
+        r::private_dir(raw_dir)?;
+        let journal_dir = r::physical(raw_dir)?;
         let v = r::value(path)?;
         let journal: Journal = serde_json::from_value(v)
             .map_err(|_| r::Error(2, "invalid lifecycle recovery journal".into()))?;
         if journal.schema != 1 {
             return r::fail("unknown lifecycle recovery schema");
         }
-        validate(&journal)?;
+        validate(&journal, &journal_dir)?;
         if journal.committed {
             cleanup(&journal)?;
         } else {
-            rollback(&journal)?;
+            rollback(&journal, &journal_dir)?;
         }
         fs::remove_file(path)?;
-        r::sync_dir(path.parent().unwrap())?;
+        r::sync_dir(&journal_dir)?;
         Ok(())
     }
 }
 impl Drop for Transaction {
     fn drop(&mut self) {
-        if !self.complete && rollback(&self.journal).is_ok() {
+        if !self.complete && rollback(&self.journal, &self.journal_dir).is_ok() {
             let _ = fs::remove_file(&self.path);
         }
     }
 }
-fn validate(j: &Journal) -> Result<()> {
-    for c in &j.changes {
-        validate_change(c)?;
+fn sync_existing_dir(dir: &Path) -> Result<()> {
+    if r::exists(dir) {
+        r::sync_dir(dir)?;
+    } else if let Some(anc) = dir.ancestors().skip(1).find(|p| r::exists(p)) {
+        r::sync_dir(anc)?;
     }
     Ok(())
 }
-fn validate_change(c: &Change) -> Result<()> {
+fn sync_change_dirs(c: &Change) -> Result<()> {
+    let parent = c.target.parent().unwrap();
+    sync_existing_dir(parent)?;
+    if let Some(work_dir) = c.undo.parent().filter(|p| *p != parent) {
+        sync_existing_dir(work_dir)?;
+    }
+    Ok(())
+}
+fn prune_staging_dir(dir: &Path) {
+    if dir.file_name() == Some(std::ffi::OsStr::new(STAGING_DIR))
+        && fs::remove_dir(dir).is_ok()
+        && let Some(parent) = dir.parent()
+    {
+        let _ = r::sync_dir(parent);
+    }
+}
+fn valid_work_dir(
+    work_dir: &Path,
+    target: &Path,
+    parent: &Path,
+    journal_dir: &Path,
+) -> Result<bool> {
+    if work_dir == parent {
+        return Ok(true);
+    }
+    if target.starts_with(work_dir) || work_dir.starts_with(target) {
+        return Ok(false);
+    }
+    if work_dir == journal_dir {
+        r::private_dir(journal_dir)?;
+        return Ok(true);
+    }
+    if work_dir.file_name() == Some(std::ffi::OsStr::new(STAGING_DIR))
+        && let Some(base) = work_dir.parent()
+        && parent.starts_with(base)
+    {
+        if r::exists(work_dir) {
+            let m = fs::symlink_metadata(work_dir)?;
+            if !m.is_dir()
+                || m.file_type().is_symlink()
+                || m.uid() != rustix::process::geteuid().as_raw()
+                || m.mode() & 0o022 != 0
+            {
+                return Ok(false);
+            }
+        }
+        let bm = match fs::symlink_metadata(base) {
+            Ok(bm) => bm,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        if !bm.is_dir() || bm.file_type().is_symlink() {
+            return Ok(false);
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+fn validate(j: &Journal, journal_dir: &Path) -> Result<()> {
+    for c in &j.changes {
+        validate_change(c, journal_dir)?;
+    }
+    Ok(())
+}
+fn validate_change(c: &Change, journal_dir: &Path) -> Result<()> {
     if let Some((dev, ino)) = c.parent_identity {
         let m = fs::symlink_metadata(
             c.target
@@ -649,6 +841,16 @@ fn validate_change(c: &Change) -> Result<()> {
         .target
         .parent()
         .ok_or_else(|| r::Error(2, "invalid journal target".into()))?;
+    for anc in parent.ancestors() {
+        match fs::symlink_metadata(anc) {
+            Ok(m) if !m.is_dir() || m.file_type().is_symlink() => {
+                return r::fail("unsafe lifecycle recovery paths");
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
     if let Some(link) = &c.old_link {
         let mut hash = Sha256::new();
         if c.external {
@@ -671,10 +873,15 @@ fn validate_change(c: &Change) -> Result<()> {
     } else if c.old_link_mode.is_some() {
         return r::fail("invalid lifecycle journal link mode");
     }
+    let Some(work_dir) = c.staged.parent().filter(|p| Some(*p) == c.undo.parent()) else {
+        return r::fail("unsafe lifecycle recovery paths");
+    };
     if !c.target.is_absolute()
         || c.target.file_name().is_none()
-        || c.staged.parent() != Some(parent)
-        || c.undo.parent() != Some(parent)
+        || c.staged == c.undo
+        || c.staged == c.target
+        || c.undo == c.target
+        || !valid_work_dir(work_dir, &c.target, parent, journal_dir)?
         || !c
             .staged
             .file_name()
@@ -692,8 +899,8 @@ fn validate_change(c: &Change) -> Result<()> {
     }
     Ok(())
 }
-fn rollback(j: &Journal) -> Result<()> {
-    validate(j)?;
+fn rollback(j: &Journal, journal_dir: &Path) -> Result<()> {
+    validate(j, journal_dir)?;
     for c in j.changes.iter().rev() {
         let current_old = c.identity(&c.target, false)?;
         let current_new = if c.hidden_new_skill {
@@ -712,7 +919,10 @@ fn rollback(j: &Journal) -> Result<()> {
             if r::exists(&c.staged) {
                 return r::fail("unexpected external staging during rollback");
             }
-            r::sync_dir(c.target.parent().unwrap())?;
+            if let Some(work_dir) = c.undo.parent() {
+                prune_staging_dir(work_dir);
+            }
+            sync_change_dirs(c)?;
             continue;
         }
         if r::exists(&c.staged) {
@@ -734,6 +944,9 @@ fn rollback(j: &Journal) -> Result<()> {
                     return r::fail("rollback conflict; lifecycle recovery journal retained");
                 }
                 remove(&c.target)?;
+                if c.parent_identity.is_none() {
+                    fs::create_dir_all(c.target.parent().unwrap())?;
+                }
                 symlink(OsString::from_vec(link.clone()), &c.target)?;
             }
             // Mode is restored on every pass so a resumed recovery finishes it, and is
@@ -749,10 +962,13 @@ fn rollback(j: &Journal) -> Result<()> {
                 return r::fail("rollback conflict; lifecycle recovery journal retained");
             }
             remove(&c.target)?;
+            if c.parent_identity.is_none() {
+                fs::create_dir_all(c.target.parent().unwrap())?;
+            }
             if c.hidden_old_skill {
                 unhide_skill(&c.undo)?;
             }
-            fs::rename(&c.undo, &c.target)?;
+            rename_target(&c.undo, &c.target)?;
         } else if c.old.is_none() {
             if current_new.is_some() && current_new != c.new {
                 return r::fail("new lifecycle target changed; recovery journal retained");
@@ -761,7 +977,10 @@ fn rollback(j: &Journal) -> Result<()> {
         } else if current_old != c.old {
             return r::fail("previous lifecycle target missing; recovery journal retained");
         }
-        r::sync_dir(c.target.parent().unwrap())?;
+        if let Some(work_dir) = c.undo.parent() {
+            prune_staging_dir(work_dir);
+        }
+        sync_change_dirs(c)?;
     }
     for effect in j.effects.iter().rev() {
         effect.restore()?;
@@ -782,7 +1001,10 @@ fn cleanup(j: &Journal) -> Result<()> {
         if r::exists(&c.staged) {
             return r::fail("unexpected lifecycle staging content");
         }
-        r::sync_dir(c.target.parent().unwrap())?;
+        if let Some(work_dir) = c.undo.parent() {
+            prune_staging_dir(work_dir);
+        }
+        sync_change_dirs(c)?;
     }
     Ok(())
 }
@@ -930,9 +1152,59 @@ fn remap_hidden_skill_entries(
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(entries)
 }
+/// Cross-directory `rename(2)` updates a moved directory's `..` entry and fails
+/// with `EACCES` when owner write permission is absent; grant `0o200` on the
+/// open directory descriptor only across the rename and restore exact mode bits.
+fn rename_target(from: &Path, to: &Path) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if from.parent() != to.parent()
+        && let Ok(m) = fs::symlink_metadata(from)
+        && m.is_dir()
+        && !m.file_type().is_symlink()
+    {
+        let orig_mode = m.mode() & 0o7777;
+        if orig_mode & 0o200 == 0 {
+            let dir_file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(
+                    (rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
+                )
+                .open(from)?;
+            dir_file.set_permissions(fs::Permissions::from_mode(orig_mode | 0o200))?;
+            let res = fs::rename(from, to).map_err(r::Error::from);
+            let restore = dir_file
+                .set_permissions(fs::Permissions::from_mode(orig_mode))
+                .map_err(r::Error::from);
+            res?;
+            return restore;
+        }
+    }
+    fs::rename(from, to)?;
+    Ok(())
+}
+fn make_tree_writable(path: &Path) -> Result<()> {
+    let m = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if m.is_dir() && !m.file_type().is_symlink() {
+        let mode = m.mode() & 0o7777;
+        if mode & 0o200 == 0 {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200))?;
+        }
+        for entry in fs::read_dir(path)? {
+            make_tree_writable(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
 pub(crate) fn remove(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
-        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => fs::remove_dir_all(path)?,
+        Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {
+            make_tree_writable(path)?;
+            fs::remove_dir_all(path)?;
+        }
         Ok(_) => fs::remove_file(path)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
         Err(e) => return Err(e.into()),
@@ -1186,6 +1458,21 @@ mod tests {
         fs::write(dir.join("references/note.md"), b"note\n").unwrap();
     }
 
+    fn stage_or_undo_siblings(parent: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        if !parent.is_dir() {
+            return found;
+        }
+        for entry in fs::read_dir(parent).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".oms-stage-") || name.starts_with(".oms-undo-") {
+                found.push(name);
+            }
+        }
+        found
+    }
+
     fn siblings_with_skill_md(parent: &Path) -> Vec<String> {
         let mut found = Vec::new();
         for entry in fs::read_dir(parent).unwrap() {
@@ -1213,6 +1500,8 @@ mod tests {
         {
             let mut tx = Transaction::begin(&paths).unwrap();
             tx.replace(&target, |staged| {
+                assert_ne!(staged.parent(), Some(skills.as_path()));
+                assert!(stage_or_undo_siblings(&skills).is_empty());
                 let hid = copy(&source_v2, staged, Some((SKILL_FILE, HIDDEN_SKILL_FILE)))?;
                 assert!(hid);
                 assert!(
@@ -1225,12 +1514,14 @@ mod tests {
             })
             .unwrap();
             let change = tx.journal.changes.last().unwrap();
+            assert_ne!(change.undo.parent(), Some(skills.as_path()));
             assert!(change.undo.is_dir());
             assert!(
                 !change.undo.join(SKILL_FILE).exists(),
                 "undo directory must not expose top-level SKILL.md"
             );
             assert!(change.undo.join(HIDDEN_SKILL_FILE).is_file());
+            assert!(stage_or_undo_siblings(&skills).is_empty());
             assert!(siblings_with_skill_md(&skills).is_empty());
             assert_eq!(
                 fs::read_to_string(target.join(SKILL_FILE)).unwrap(),
@@ -1245,17 +1536,21 @@ mod tests {
         );
         assert!(!target.join(HIDDEN_SKILL_FILE).exists());
         assert_eq!(identity(&target).unwrap(), old_id);
+        assert!(stage_or_undo_siblings(&skills).is_empty());
         assert!(siblings_with_skill_md(&skills).is_empty());
 
         // Replace and commit: target has v2 SKILL.md and undo is cleaned up.
         let mut tx = Transaction::begin(&paths).unwrap();
         tx.copy(&target, &source_v2).unwrap();
         let undo_path = tx.journal.changes.last().unwrap().undo.clone();
+        assert_ne!(undo_path.parent(), Some(skills.as_path()));
+        assert!(stage_or_undo_siblings(&skills).is_empty());
         assert!(undo_path.is_dir());
         assert!(!undo_path.join(SKILL_FILE).exists());
         assert!(undo_path.join(HIDDEN_SKILL_FILE).is_file());
         tx.commit().unwrap();
         assert!(!undo_path.exists());
+        assert!(stage_or_undo_siblings(&skills).is_empty());
         assert_eq!(
             fs::read_to_string(target.join(SKILL_FILE)).unwrap(),
             "---\nname: oms-demo\n---\nv2\n"
@@ -1275,6 +1570,8 @@ mod tests {
             )
             .unwrap();
             let change = tx.journal.changes.last().unwrap();
+            assert_ne!(change.undo.parent(), Some(skills.as_path()));
+            assert!(stage_or_undo_siblings(&skills).is_empty());
             assert!(!change.undo.join(SKILL_FILE).exists());
             assert!(change.undo.join(HIDDEN_SKILL_FILE).is_file());
             assert_eq!(
@@ -1339,14 +1636,14 @@ mod tests {
             LINK_CRASH.with(|hook| hook.set(point));
             assert!(tx.link(&target, &new).is_err());
             LINK_CRASH.with(|hook| hook.set(0));
-            if point == 1 {
-                assert!(siblings_with_skill_md(&skills).is_empty());
-            } else {
-                assert_eq!(siblings_with_skill_md(&skills).len(), 1);
-            }
+            let staged_path = tx.journal.changes[0].staged.clone();
+            assert_eq!(r::exists(&staged_path), point == 2);
+            assert!(stage_or_undo_siblings(&skills).is_empty());
+            assert!(siblings_with_skill_md(&skills).is_empty());
             tx.complete = true;
             drop(tx);
             Transaction::begin(&paths).unwrap().commit().unwrap();
+            assert!(!r::exists(&staged_path));
             assert_eq!(fs::read_link(&target).unwrap(), old_text);
             assert!(siblings_with_skill_md(&skills).is_empty());
         }
@@ -1356,13 +1653,14 @@ mod tests {
             LINK_CRASH.with(|hook| hook.set(point));
             assert!(tx.link(&fresh, &new).is_err());
             LINK_CRASH.with(|hook| hook.set(0));
-            assert_eq!(
-                siblings_with_skill_md(&skills).len(),
-                usize::from(point == 2)
-            );
+            let staged_path = tx.journal.changes[0].staged.clone();
+            assert_eq!(r::exists(&staged_path), point == 2);
+            assert!(stage_or_undo_siblings(&skills).is_empty());
+            assert!(siblings_with_skill_md(&skills).is_empty());
             tx.complete = true;
             drop(tx);
             Transaction::begin(&paths).unwrap().commit().unwrap();
+            assert!(!r::exists(&staged_path));
             assert!(!r::exists(&fresh));
             assert!(siblings_with_skill_md(&skills).is_empty());
         }
@@ -1604,6 +1902,13 @@ mod tests {
             "---\nname: oms-ro\n---\nv1\n"
         );
         assert!(!ro_target.join(HIDDEN_SKILL_FILE).exists());
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.publish_external(&ro_target, &source_v2).unwrap();
+            let undo_path = tx.journal.changes.last().unwrap().undo.clone();
+            tx.commit().unwrap();
+            assert!(!undo_path.exists());
+        }
 
         // A foreign SKILL.md present at the unhide destination is refused, not overwritten.
         let foreign_dir = skills.join("oms-foreign-unhide");
@@ -1634,5 +1939,116 @@ mod tests {
             fs::symlink_metadata(&foreign_dir).unwrap().mode() & 0o7777,
             0o1500
         );
+
+        // Ancestor `.oms-lifecycle-staging` fallback (used when the journal directory sits on a
+        // separate filesystem) keeps stage/undo out of scanned parents, recovers after crash, and
+        // prunes the staging directory when empty.
+        let anc_staging = root.0.join(STAGING_DIR);
+        FORCE_ANCESTOR_STAGE.with(|f| f.set(true));
+        struct ResetForce;
+        impl Drop for ResetForce {
+            fn drop(&mut self) {
+                FORCE_ANCESTOR_STAGE.with(|f| f.set(false));
+            }
+        }
+        let _reset_force = ResetForce;
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.copy(&target, &source_v2).unwrap();
+            let change = tx.journal.changes.last().unwrap();
+            assert_eq!(change.undo.parent(), Some(anc_staging.as_path()));
+            assert!(stage_or_undo_siblings(&skills).is_empty());
+            tx.complete = true;
+        }
+        assert!(anc_staging.is_dir());
+        Transaction::begin(&paths).unwrap().commit().unwrap();
+        assert!(!anc_staging.exists());
+        assert_eq!(identity(&target).unwrap(), old_id);
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            tx.copy(&target, &source_v2).unwrap();
+            assert!(anc_staging.is_dir());
+            assert!(stage_or_undo_siblings(&skills).is_empty());
+            tx.commit().unwrap();
+        }
+        assert!(!anc_staging.exists());
+        assert_eq!(identity(&target).unwrap(), new_id);
+        drop(_reset_force);
+
+        // External CLI removal of both target and its empty parent still commits and rolls back.
+        let ext_parent = root.0.join("ext-cache/nested");
+        let ext_target = ext_parent.join("plugin");
+        fs::create_dir_all(&ext_target).unwrap();
+        fs::write(ext_target.join("hooks.json"), b"{}\n").unwrap();
+        let ext_id = external_identity(&ext_target).unwrap();
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            let start = tx
+                .prepare_external(std::slice::from_ref(&ext_target))
+                .unwrap();
+            assert!(stage_or_undo_siblings(&ext_parent).is_empty());
+            fs::remove_dir_all(&ext_parent).unwrap();
+            tx.finish_external(start).unwrap();
+        }
+        assert_eq!(external_identity(&ext_target).unwrap(), ext_id);
+        {
+            let mut tx = Transaction::begin(&paths).unwrap();
+            let start = tx
+                .prepare_external(std::slice::from_ref(&ext_target))
+                .unwrap();
+            fs::remove_dir_all(&ext_parent).unwrap();
+            tx.finish_external(start).unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(!ext_parent.exists());
+
+        // validate_change rejects non-.oms names and unrelated recovery directories.
+        let unrelated = root.0.join("unrelated");
+        fs::create_dir_all(&unrelated).unwrap();
+        for (bad_staged, bad_undo) in [
+            (
+                journal_dir.join("not-oms-stage"),
+                journal_dir.join(".oms-undo-bad.1"),
+            ),
+            (
+                journal_dir.join(".oms-stage-bad.1"),
+                journal_dir.join(".oms-not-undo.1"),
+            ),
+            (
+                unrelated.join(".oms-stage-bad.1"),
+                unrelated.join(".oms-undo-bad.1"),
+            ),
+            (
+                journal_dir.join(".oms-stage-bad.1"),
+                skills.join(".oms-undo-bad.1"),
+            ),
+        ] {
+            let bad = json!({
+                "schema": 1,
+                "committed": false,
+                "changes": [{
+                    "target": target,
+                    "staged": bad_staged,
+                    "undo": bad_undo,
+                    "old": new_id,
+                    "new": new_id,
+                    "external": false,
+                    "parent_identity": null
+                }],
+                "effects": []
+            });
+            fs::write(
+                journal_dir.join("transaction.json"),
+                serde_json::to_vec(&bad).unwrap(),
+            )
+            .unwrap();
+            let err = Transaction::begin(&paths).err().expect("must reject");
+            assert!(
+                err.1.contains("unsafe lifecycle recovery paths"),
+                "{}",
+                err.1
+            );
+            fs::remove_file(journal_dir.join("transaction.json")).unwrap();
+        }
     }
 }
