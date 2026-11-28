@@ -1759,10 +1759,14 @@ The detailed operating contract is in the harness state-memory reference.
 
 `oms plan-from-spec` proposes tasks from an active `PROJECT.md`; it refuses a
 draft spec and does not alter the plan until the proposal is explicitly
-applied. `oms plan-run` claims and executes at most one ready task; each
-provider and landing call is bounded by `OMS_PEER_TIMEOUT` (default 20 minutes,
-the same as `peer-delegate`). `oms
-goal-drive` repeats within a cycle cap and acceptance command; the cap counts
+applied. `oms plan-run` claims and executes at most one ready task; unpinned
+provider calls omit `OMS_PEER_TIMEOUT` under a 24-hour-plus-grace outer wall so
+`peer-delegate`'s own stall check (`OMS_PEER_STALL`, default 20 minutes) and
+24-hour cap govern (`OMS_PEER_TIMEOUT` pins a fixed provider wall), while
+`patch-land` keeps its 20-minute wall. `oms
+goal-drive` repeats within a cycle cap and acceptance command using the same
+provider wall rule (`--provider-timeout` or `OMS_PEER_TIMEOUT` pins a fixed
+wall); the cap counts
 task attempts across resumes of one autopilot contract, bounds attempts rather
 than provider cost, and an exhausted contract is retired with `oms autopilot
 abandon`. It is not an unbounded autonomous loop.

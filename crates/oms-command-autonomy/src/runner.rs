@@ -1,6 +1,6 @@
 //! One authorized plan task, with an exact lease and one durable landing repair.
 use crate::cli::Args;
-use crate::planning::{invoke, strings};
+use crate::planning::{ProviderWall, invoke, invoke_provider, strings};
 use crate::storage::{Context, MAX_FILE, PROGRESS};
 use crate::{Error, Output, Result, require, value, verify};
 use oms_command_plan::{Action, Request};
@@ -9,6 +9,7 @@ use std::time::Duration;
 
 const FEEDBACK_REPAIRS: &str = ".oms/feedback/repairs.jsonl";
 const LATE_RESULTS: &str = ".oms/plan/late-results.jsonl";
+const PATCH_LAND_WALL: Duration = Duration::from_secs(20 * 60);
 
 fn feedback_reference(task: &Value) -> Result<Option<String>> {
     // The title is part of the existing reviewed task/proposal and rendered
@@ -165,7 +166,7 @@ fn repair_feedback(
     task: &Value,
     expected: &oms_command_plan::ReviewFence,
     route: &Value,
-    wall: Duration,
+    wall: ProviderWall,
     intent: Option<&Value>,
 ) -> Result<Option<Output>> {
     if !args.flag("land") || !args.flag("auto-repair") {
@@ -276,7 +277,7 @@ fn repair_feedback(
     feedback_record(ctx, &claim, "acknowledged")?;
     let land_head = current_landing_base(ctx, head, intent)?;
     let expected = review_fence(ctx, &repaired, &land_head)?;
-    let landed = land(ctx, args, &repaired, &expected, wall)?;
+    let landed = land(ctx, args, &repaired, &expected)?;
     let code = landed.code;
     out.append(landed);
     if code == 0 {
@@ -412,7 +413,7 @@ fn delegate(
     repair: u64,
     artifact: Option<&str>,
     head: &str,
-    wall: Duration,
+    wall: ProviderWall,
 ) -> Result<(Output, Option<Value>)> {
     if let Some(excerpt) = context_pack(ctx, args)? {
         excerpt.check_task(
@@ -507,7 +508,7 @@ fn delegate(
         ),
     ];
     environment.push(("OMS_OPERATION_ID".into(), operation.clone().into()));
-    let output = crate::planning::invoke_configured(ctx, "peer-delegate", call, wall, environment)?;
+    let output = invoke_provider(ctx, "peer-delegate", call, wall, environment)?;
     if !dispatch.is_null() {
         dispatch["phase"] = "returned".into();
         dispatch["exit"] = output.code.into();
@@ -548,7 +549,6 @@ fn land(
     args: &Args,
     task: &Value,
     expected: &oms_command_plan::ReviewFence,
-    wall: Duration,
 ) -> Result<Output> {
     let _landing = ctx.gates.map(crate::storage::Gates::landing);
     let id = value::text(task, "id");
@@ -573,7 +573,7 @@ fn land(
             args.required("allow-floor-change")?.into(),
         ]);
     }
-    let output = invoke(ctx, "patch-land", call, wall)?;
+    let output = invoke(ctx, "patch-land", call, PATCH_LAND_WALL)?;
     if output.code == 0 {
         crate::goal::completed_landing(ctx, id, Some(expected))?;
     }
@@ -625,8 +625,8 @@ fn context_pack(
     Ok(Some(excerpt))
 }
 /// Validation shared by the serial and parallel entry points; returns the
-/// provider wall bound.
-pub(crate) fn preflight(ctx: &Context<'_>, args: &Args) -> Result<Duration> {
+/// provider wall policy.
+pub(crate) fn preflight(ctx: &Context<'_>, args: &Args) -> Result<ProviderWall> {
     args.number("repair", if args.flag("auto-repair") { 1 } else { 0 }, 0, 3)?;
     require(
         !args.flag("auto-repair") || args.flag("land"),
@@ -646,12 +646,9 @@ pub(crate) fn preflight(ctx: &Context<'_>, args: &Args) -> Result<Duration> {
     }
     context_pack(ctx, args)?;
     ctx.git(&["rev-parse", "--git-dir"])?;
-    // The wall is forwarded to peer-delegate as OMS_PEER_TIMEOUT, so a shorter
-    // default here would cut peer-delegate's own 20-minute write default.
-    ctx.peer_wall.map_or_else(
-        || verify::duration(&std::env::var("OMS_PEER_TIMEOUT").unwrap_or_else(|_| "20m".into())),
-        Ok,
-    )
+    // Leave unpinned runs without OMS_PEER_TIMEOUT under the cap-plus-grace
+    // outer wall so peer-delegate's own stall check and 24-hour cap decide.
+    ctx.peer_wall.map_or_else(ProviderWall::from_env, Ok)
 }
 pub(crate) fn execute_bound(
     ctx: &Context<'_>,
@@ -721,7 +718,7 @@ pub(crate) fn run_task(
     mut task: Value,
     mut claimed: bool,
     base: &str,
-    wall: Duration,
+    wall: ProviderWall,
 ) -> Result<Output> {
     let repair = args.number("repair", if args.flag("auto-repair") { 1 } else { 0 }, 0, 3)?;
     let id = value::text(&task, "id").to_owned();
@@ -989,7 +986,7 @@ pub(crate) fn run_task(
             return Ok(output);
         }
         if let Some(expected) = expected {
-            let mut landed = land(ctx, args, &task, &expected, wall)?;
+            let mut landed = land(ctx, args, &task, &expected)?;
             if landed.code != 0
                 && args.flag("auto-repair")
                 && !resume
@@ -1041,7 +1038,7 @@ pub(crate) fn run_task(
                     )?;
                     land_base = current_landing_base(ctx, &land_base, intent)?;
                     let expected = review_fence(ctx, &task, &land_base)?;
-                    landed = land(ctx, args, &task, &expected, wall)?;
+                    landed = land(ctx, args, &task, &expected)?;
                 } else {
                     terminalize_repair(ctx, &id, &lease)?;
                     output.code = repair_code;

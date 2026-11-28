@@ -186,7 +186,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     controller.owner_id = ctx.owner_id.clone();
     controller.run_id = ctx.run_id.clone();
     controller.cycle = ctx.cycle;
-    controller.peer_wall = ctx.peer_wall;
+    controller.peer_wall = Some(wall);
     let controller = &controller;
 
     let mut worker_args = args.clone();
