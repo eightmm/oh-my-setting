@@ -832,9 +832,101 @@ fn should_attach_task_packet(args: &Args, read: bool, packet: &[u8]) -> bool {
     active_task_id(packet).is_some_and(|active| active == bound.as_bytes())
 }
 
+fn valid_worktree_prefix_start(bytes: &[u8], at: usize) -> bool {
+    if at == 0 || bytes[..at].ends_with(b"://") {
+        return true;
+    }
+    let prev = bytes[at - 1];
+    prev.is_ascii_whitespace() || b"\"'`([{<=:,;".contains(&prev)
+}
+
+fn valid_worktree_prefix_end(bytes: &[u8], end: usize) -> bool {
+    if end == bytes.len() {
+        return true;
+    }
+    let next = bytes[end];
+    next == b'/' || next.is_ascii_whitespace() || b"\"'`)]}>:;,?#".contains(&next)
+}
+
+fn worktree_rewrite_roots(worktree: &Path, requested_repo: &Path, repo: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![worktree.to_path_buf()];
+    if let Ok(physical) = worktree.canonicalize() {
+        roots.push(physical);
+    }
+    if let Ok(rel) = worktree.strip_prefix(repo) {
+        let cleaned_requested: PathBuf = requested_repo
+            .components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir))
+            .collect();
+        for ancestor in cleaned_requested.ancestors() {
+            if ancestor.as_os_str().is_empty() {
+                break;
+            }
+            if ancestor.canonicalize().ok().as_deref() == Some(repo) {
+                roots.push(ancestor.join(rel));
+                break;
+            }
+        }
+    }
+    roots
+}
+
+fn rewrite_worktree_paths(bytes: &[u8], roots: &[PathBuf]) -> Vec<u8> {
+    let mut prefixes: Vec<Vec<u8>> = Vec::new();
+    let mut push_path = |path: &Path| {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return;
+        }
+        let cleaned: PathBuf = path
+            .components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir))
+            .collect();
+        let mut raw = cleaned.as_os_str().as_bytes();
+        while raw.len() > 1 && raw.ends_with(b"/") {
+            raw = &raw[..raw.len() - 1];
+        }
+        if raw.len() > 1 && raw.starts_with(b"/") {
+            prefixes.push(raw.to_vec());
+        }
+    };
+    for root in roots {
+        push_path(root);
+        if let Ok(physical) = root.canonicalize() {
+            push_path(&physical);
+        }
+    }
+    prefixes.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    prefixes.dedup();
+    if prefixes.is_empty() {
+        return bytes.to_vec();
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'/'
+            && valid_worktree_prefix_start(bytes, i)
+            && let Some(prefix) = prefixes.iter().find(|p| {
+                bytes[i..].starts_with(p) && valid_worktree_prefix_end(bytes, i + p.len())
+            })
+        {
+            out.push(b'.');
+            i += prefix.len();
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
 pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     safety::parent()?;
-    let repo = storage::repository(context, &args.path("repo", context.cwd))?;
+    let requested_repo = args.path("repo", context.cwd);
+    let repo = storage::repository(context, &requested_repo)?;
     let mut resolved = args.clone();
     let mut plan = crate::plan_delegate::BoundDelegate::prepare(&mut resolved, &repo, context)?;
     let args = &resolved;
@@ -1067,6 +1159,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         return fail("--interactive requires NDJSON turn input on stdin; no worktree created");
     }
     let worktree = Worktree::create(&repo, &base, context)?;
+    let worktree_roots = worktree_rewrite_roots(&worktree.path, &requested_repo, &repo);
     if let Some(bound) = &mut plan {
         let generation = worktree.bound_start_generation()?;
         if let Err(error) = bound.start(&worktree, generation, context) {
@@ -1174,6 +1267,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
     let mut verified = "not_run";
     let mut verify_exit_code: Option<i32> = None;
     let mut needs_keep = args.has("keep-worktree");
+    let mut repair_skipped = false;
     let mut interactive_stdout = String::new();
     let mut extra_env = Vec::new();
     let cargo_guard = worktree.cargo_env(&target.provider, &mut extra_env);
@@ -1195,6 +1289,7 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         stalled_secs = None;
         timeout_secs = None;
         let mut bound_verifier_failed = false;
+        let mut repair_prompt = None;
         worktree.identity(context)?;
         if interactive && round == 0 {
             let mut turn_history = String::new();
@@ -1484,15 +1579,44 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
                 )
                 .as_bytes(),
             );
-            if code != 0 {
-                prompt.push_str(&safety::untrusted(
+            let will_repair = round < repair
+                && code != 0
+                && !matches!(code, 3 | 126 | 127 | 130)
+                && !needs_keep
+                && (plan.is_none() || bound_verifier_failed);
+            if will_repair {
+                let rewritten = rewrite_worktree_paths(&checked.stdout, &worktree_roots);
+                let prepared = safety::untrusted_outbound(
                     "verifier",
                     "verification output",
-                    &clean,
-                )?);
-            }
-            if code != 0 && round < repair {
-                transition(&repo, &attempt, "working", obj([]), context)?;
+                    &rewritten,
+                )
+                .and_then(|untrusted| {
+                    let mut next = prompt.clone();
+                    if !next.ends_with('\n') {
+                        next.push('\n');
+                    }
+                    next.push_str(&untrusted);
+                    next.push_str(
+                        "\nRepair the rejected changes and verification failure within the original scope.\n",
+                    );
+                    safety::outbound_prompt(next.as_bytes())?;
+                    Ok(next)
+                });
+                match prepared {
+                    Ok(next) => {
+                        transition(&repo, &attempt, "working", obj([]), context)?;
+                        repair_prompt = Some(next);
+                    }
+                    Err(_) => {
+                        code = 3;
+                        needs_keep |= plan.is_some();
+                        repair_skipped = true;
+                        body.extend_from_slice(
+                            b"\nRepair round skipped because the verification output could not be made safe.\n",
+                        );
+                    }
+                }
             }
         }
         storage::write(&repo, &artifact, body.clone(), true, context.interrupted)?;
@@ -1506,9 +1630,13 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         if plan.is_some() && round < repair {
             worktree.prepare_bound_repair(&captured, context)?;
         }
-        prompt.push_str(
-            "\nRepair the rejected changes and verification failure within the original scope.\n",
-        );
+        if let Some(next) = repair_prompt {
+            prompt = next;
+        } else if round < repair {
+            prompt.push_str(
+                "\nRepair the rejected changes and verification failure within the original scope.\n",
+            );
+        }
     }
     drop(cargo_guard);
     let no_change = !read && captured.is_empty();
@@ -1609,6 +1737,11 @@ pub(crate) fn run(args: &Args, context: &Context<'_>) -> Result<Output> {
         Ok(())
     };
     let mut note = String::new();
+    if repair_skipped {
+        note.push_str(
+            "error: repair round skipped because the verification output could not be made safe\n",
+        );
+    }
     if code == 124 {
         if let Some(secs) = stalled_secs {
             note.push_str(&format!("error: {}\n", peer::stall_message(secs)));
@@ -2481,5 +2614,54 @@ mod tests {
                 "help mentions unknown option --{name}"
             );
         }
+    }
+
+    #[test]
+    fn rewrite_worktree_paths_preserves_home_worktree_diffs_and_boundaries() {
+        let dir = std::env::temp_dir().join(format!("oms-wt-rewrite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let physical = dir.join("real/tree");
+        std::fs::create_dir_all(&physical).unwrap();
+        let physical = physical.canonicalize().unwrap();
+        let logical_parent = dir.join("linked");
+        std::os::unix::fs::symlink(dir.join("real"), &logical_parent).unwrap();
+        let logical = logical_parent.join("tree");
+
+        let home_wt = PathBuf::from(["/", "ho", "me/person/.cache/wt/tree"].concat());
+        let home_other = ["/", "ho", "me/person/.cargo/bin/rustfmt"].concat();
+        let raw = format!(
+            "Diff in {}/src/lib.rs at line 4:\nDiff in {}/src/main.rs at line 8:\nDiff in {}/src/mod.rs at line 2:\nfile://{}/src/url.rs:1\nin {}\nsibling {}-other/keep.rs\ntool {home_other}\n",
+            home_wt.display(),
+            logical.display(),
+            physical.display(),
+            home_wt.display(),
+            home_wt.display(),
+            home_wt.display(),
+        );
+        let rewritten = rewrite_worktree_paths(raw.as_bytes(), &[home_wt, logical]);
+        let untrusted =
+            safety::untrusted_outbound("verifier", "verification output", &rewritten).unwrap();
+        safety::outbound_prompt(untrusted.as_bytes()).unwrap();
+        assert!(
+            untrusted.contains("Diff in ./src/lib.rs at line 4:\n"),
+            "{untrusted}"
+        );
+        assert!(
+            untrusted.contains("Diff in ./src/main.rs at line 8:\n"),
+            "{untrusted}"
+        );
+        assert!(
+            untrusted.contains("Diff in ./src/mod.rs at line 2:\n"),
+            "{untrusted}"
+        );
+        assert!(untrusted.contains("file://./src/url.rs:1\n"), "{untrusted}");
+        assert!(untrusted.contains("\nin .\n"), "{untrusted}");
+        assert!(!untrusted.contains(".-other"), "{untrusted}");
+        assert_eq!(
+            untrusted.matches("[oms-redacted:home-path]").count(),
+            2,
+            "{untrusted}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

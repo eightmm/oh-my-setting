@@ -7056,9 +7056,11 @@ fn delegate_interactive_ndjson_runs_multiple_turns_in_one_worktree() {
 
 #[test]
 fn delegate_context_manifest_binds_snapshot_bundle_across_repair() {
-    provider_isolated(
+    let env_name = ["FIXTURE_REPAIR_TO", "KEN"].concat();
+    provider_isolated_with_env(
         "delegate_context_manifest_binds_snapshot_bundle_across_repair",
         "private",
+        &[(&env_name, "[oms-redacted:sbatch-partition]")],
         || {
             struct Repair(ProviderProbe);
             impl Executor for Repair {
@@ -7122,9 +7124,24 @@ fn delegate_context_manifest_binds_snapshot_bundle_across_repair() {
                 "parent task must not enter snapshot bundle\n",
             );
             repo.write("pack.json", format!("{{\"pack_digest\":\"{}\",\"files\":[\"src/main.rs\",\"stale.rs\",\"alias.rs\",\"linked/main.rs\"]}}", "a".repeat(64)));
+            let repo_link = source.0.join("repo-link");
+            std::os::unix::fs::symlink(&repo.0, &repo_link).unwrap();
+            let home_fixture = ["/", "ho", "me/person/cache/fmt.rs"].concat();
+            let verifier_script = source.0.join("verify-once.sh");
+            fs::write(
+                &verifier_script,
+                format!(
+                    "#!/bin/sh\nif grep -q 'round 2' tracked.txt; then\n  exit 0\nfi\nphys=\"$(pwd -P)\"\nrel=\"${{phys#{}/}}\"\nprintf 'Diff in %s/tracked.txt at line 1:\\n' \"$phys\"\nprintf 'Diff in %s/%s/tracked.txt at line 1:\\n' '{}' \"$rel\"\nprintf 'note: helper at %s and %s/check.tmp\\n' '{}' \"${{TMPDIR:-/tmp}}\"\nexit 1\n",
+                    repo.0.display(),
+                    repo_link.display(),
+                    home_fixture,
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&verifier_script, fs::Permissions::from_mode(0o755)).unwrap();
             let values = args(&[
                 "--repo",
-                repo.0.to_str().unwrap(),
+                repo_link.to_str().unwrap(),
                 "--to",
                 "codex",
                 "--model",
@@ -7140,7 +7157,7 @@ fn delegate_context_manifest_binds_snapshot_bundle_across_repair() {
                 "--repair",
                 "1",
                 "--verify",
-                "grep -q 'round 2' tracked.txt",
+                verifier_script.to_str().unwrap(),
                 "Change tracked.txt",
             ]);
             let probe = Repair(ProviderProbe::default());
@@ -7186,6 +7203,28 @@ fn delegate_context_manifest_binds_snapshot_bundle_across_repair() {
             );
             let calls = probe.0.calls.lock().unwrap();
             assert_eq!(calls.len(), 2);
+            let phys_wt = &calls[0].request.cwd;
+            let rel_wt = phys_wt.strip_prefix(&repo.0).unwrap();
+            let logical_wt = repo_link.join(rel_wt);
+            let repair_prompt = std::str::from_utf8(&calls[1].prompt).unwrap();
+            assert!(
+                repair_prompt
+                    .contains("Diff in ./tracked.txt at line 1:\nDiff in ./tracked.txt at line 1:"),
+                "{repair_prompt}"
+            );
+            assert!(
+                !repair_prompt.contains(phys_wt.to_str().unwrap()),
+                "{repair_prompt}"
+            );
+            assert!(
+                !repair_prompt.contains(logical_wt.to_str().unwrap()),
+                "{repair_prompt}"
+            );
+            assert!(!repair_prompt.contains(&home_fixture), "{repair_prompt}");
+            assert!(
+                repair_prompt.contains("[oms-redacted:home-path]"),
+                "{repair_prompt}"
+            );
             for call in calls.iter() {
                 assert!(call.prompt.windows(bundle.len()).any(|w| w == bundle));
                 assert!(
@@ -7252,6 +7291,65 @@ fn delegate_context_manifest_binds_snapshot_bundle_across_repair() {
             );
             assert_eq!(row.get("context_debt"), manifest.get("context_debt"));
             assert!(calls.iter().all(|call| !call.request.cwd.exists()));
+            drop(calls);
+
+            let unredactable_repo = provider_repo();
+            let unredactable_line = ["sbat", "ch --partition gpu"].concat();
+            let unredactable_verifier = source.0.join("verify-unredactable.sh");
+            fs::write(
+                &unredactable_verifier,
+                format!("#!/bin/sh\nprintf '%s\\n' '{unredactable_line}'\nexit 1\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&unredactable_verifier, fs::Permissions::from_mode(0o755)).unwrap();
+            let blocked_probe = Repair(ProviderProbe::default());
+            let blocked_out = oms_command_peer::run_with_executor(
+                "peer-delegate",
+                &args(&[
+                    "--repo",
+                    unredactable_repo.0.to_str().unwrap(),
+                    "--to",
+                    "codex",
+                    "--model",
+                    "fixture",
+                    "--no-task",
+                    "--no-memory",
+                    "--no-ml-context",
+                    "--scope",
+                    "tracked.txt",
+                    "--repair",
+                    "1",
+                    "--verify",
+                    unredactable_verifier.to_str().unwrap(),
+                    "Change tracked.txt",
+                ]),
+                &unredactable_repo.0,
+                &source.0,
+                &STOP,
+                &blocked_probe,
+            );
+            assert_eq!(blocked_out.0, 3, "{}", message(&blocked_out));
+            assert_eq!(blocked_probe.0.calls.lock().unwrap().len(), 1);
+            let blocked_stdout = String::from_utf8_lossy(&blocked_out.1);
+            let blocked_stderr = String::from_utf8_lossy(&blocked_out.2);
+            let blocked_artifact_path = blocked_stdout.lines().next().unwrap();
+            let blocked_artifact = fs::read_to_string(blocked_artifact_path).unwrap();
+            assert!(
+                blocked_stderr.contains("repair round")
+                    && blocked_stderr.contains("verification output could not be made safe"),
+                "{blocked_stderr}"
+            );
+            assert!(
+                blocked_artifact.contains("Repair round")
+                    && blocked_artifact.contains("verification output could not be made safe"),
+                "{blocked_artifact}"
+            );
+            assert!(
+                !blocked_stdout.contains("rephrase private content")
+                    && !blocked_stderr.contains("rephrase private content")
+                    && !blocked_artifact.contains("rephrase private content"),
+                "{blocked_stderr}\n{blocked_artifact}"
+            );
             let prepare = |case: &Repo, extra: &[&str]| {
                 let probe = ProviderProbe::default();
                 let mut values = args(&[
