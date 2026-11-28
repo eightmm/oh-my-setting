@@ -2749,16 +2749,18 @@ test('Lead presence shows working on reserved/running turns, focuses composer on
   assert.equal(avatar.getAttribute('data-presence'),'live');
 });
 
-test('provider avatars use cropped WebP portraits without -webkit-mask or overflow:hidden clipping, and keep pi/unknown fallbacks',async()=>{
+test('provider avatars use crisp brand SVG icons without overflow:hidden clipping, and keep pi/unknown fallbacks',async()=>{
   assert.ok(Buffer.byteLength(html)<256*1024,'conversation-panel.html must stay strictly under 256 KiB');
   const style=html.match(/<style>([\s\S]+?)<\/style>/)[1];
-  assert.doesNotMatch(style,/-webkit-mask|--blossom/);
   const avatarRule=style.match(/\.avatar\{([^}]+)\}/)?.[1]||'';
   assert.doesNotMatch(avatarRule,/overflow\s*:\s*hidden/,'avatar must not clip ::after presence dots');
-  assert.match(style,/\.avatar:is\(\[data-provider=codex\],\[data-provider=claude\],\[data-provider=agy\]\)::before\{[^}]*border-radius:inherit;background:var\(--mark\) center \/ cover no-repeat/);
-  for(const prov of ['codex','claude','agy']){
-    assert.match(style,new RegExp(`\\.avatar\\[data-provider=${prov}\\]\\{--mark:url\\("data:image\\/webp;base64,[^"]+"\\)\\}`));
+  assert.match(style,/\.avatar:is\(\[data-provider=codex\],\[data-provider=claude\],\[data-provider=agy\]\)::before\{[^}]*background:var\(--mark\) center \/ var\(--mark-size,100%\) no-repeat/);
+  assert.match(style,/--blossom:url\("data:image\/svg\+xml;base64,[^"]+"\)/);
+  assert.match(style,/\.avatar\[data-provider=codex\]::before\{[^}]*-webkit-mask:var\(--blossom\)/);
+  for(const prov of ['claude','agy']){
+    assert.match(style,new RegExp(`\\.avatar\\[data-provider=${prov}\\]\\{[^}]*--mark:url\\("data:image\\/svg\\+xml;base64,[^"]+"\\)`));
   }
+  assert.doesNotMatch(style,/data:image\/webp;base64/);
 
   // Exercise Main, Leads, Chat, Usage Strip, Inspect, and HP-04 Portfolio avatar badges.
   const pfCards=[
