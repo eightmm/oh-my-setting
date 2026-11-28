@@ -78,6 +78,7 @@ button:disabled{opacity:.55;cursor:default}
 .p-codex{--mb:light-dark(#edeff2,#30353d);--mf:light-dark(#2b3138,#dfe3e8)}
 .p-claude{--mb:light-dark(#f5ebe4,#3b2d25);--mf:light-dark(#87431f,#f2c3a6)}
 .p-antigravity{--mb:light-dark(#e6eefb,#22304a);--mf:light-dark(#1e4bb8,#a9c4ff)}
+.p-pi{--mb:light-dark(#e8f3ec,#21352a);--mf:light-dark(#1f6b3f,#9fdcb5)}
 .p-none{--mb:light-dark(#efefec,#2e3238);--mf:light-dark(#59636e,#aeb4bd)}
 .ag{font-size:12px;color:var(--soft);font-variant-numeric:tabular-nums;white-space:nowrap;text-align:right}
 .chev{color:var(--soft);transition:transform .15s}
@@ -130,7 +131,7 @@ button:disabled{opacity:.55;cursor:default}
 <script>
 'use strict';
 // Read-only overview: this page calls only oms_list_projects and renders no action control.
-const PROVS=['codex','claude','antigravity'],ABBR={codex:'Cx',claude:'Cl',antigravity:'Ag'};
+const PROVS=['codex','claude','antigravity','pi'],ABBR={codex:'Cx',claude:'Cl',antigravity:'Ag',pi:'Pi'};
 const STATES=['fresh','stale','missing','unavailable','withheld'];
 const T={
 ko:{title:'OMS 홈',sub:n=>`프로젝트 ${n}개 · 읽기 전용`,mains:n=>` · Main 있음 ${n}`,refresh:'새로고침',refreshing:'갱신 중…',expand:'크게 보기',find:'프로젝트 찾기',all:'전체',summary:'상태 요약',
