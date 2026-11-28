@@ -6379,9 +6379,18 @@ fn thread_readers_survive_concurrent_appends_and_fail_fast_on_non_races() {
                     .unwrap();
                     file.flush().unwrap();
                     ready.wait();
-                    std::thread::sleep(Duration::from_millis(15));
-                    file.write_all(br#","agent":"peer","text":"completed"}"#)
-                        .unwrap();
+                    let started = std::time::Instant::now();
+                    for (idx, chunk) in br#","agent":"peer","text":"completed"}"#
+                        .chunks(5)
+                        .enumerate()
+                    {
+                        let target = Duration::from_micros(((idx + 1) * 700) as u64);
+                        while started.elapsed() < target {
+                            std::thread::yield_now();
+                        }
+                        file.write_all(chunk).unwrap();
+                        file.flush().unwrap();
+                    }
                     file.write_all(b"\n").unwrap();
                     file.flush().unwrap();
                 });
