@@ -14,16 +14,20 @@ use std::fmt::Write as _;
 use std::sync::atomic::AtomicBool;
 
 fn env_state(spec: &EnvVarSpec) -> &'static str {
-    match std::env::var_os(spec.name).map(|v| v.into_string()) {
+    match std::env::var_os(spec.name) {
         None => "missing",
-        Some(Ok(text))
-            if !text.is_empty()
-                && !(spec.sensitive
-                    && text.chars().any(|c| c.is_whitespace() || c.is_control())) =>
-        {
-            "set"
-        }
-        Some(_) => "invalid",
+        // Endpoint overrides treat an empty value as unset (`EndpointUrl::from_env`).
+        Some(raw) if raw.is_empty() && !spec.sensitive => "missing",
+        Some(raw) => match raw.into_string() {
+            Ok(text)
+                if !text.is_empty()
+                    && !(spec.sensitive
+                        && text.chars().any(|c| c.is_whitespace() || c.is_control())) =>
+            {
+                "set"
+            }
+            _ => "invalid",
+        },
     }
 }
 
@@ -132,10 +136,11 @@ pub fn render_status(report: &Value, json_mode: bool) -> Vec<u8> {
                     let optional = if e["required"] == true {
                         ""
                     } else {
-                        " (optional)"
+                        ", optional"
                     };
+                    // Not NAME=state: the outbound scrubber reads that as a credential assignment.
                     format!(
-                        "{}={}{optional}",
+                        "{} ({}{optional})",
                         e["name"].as_str().unwrap_or(""),
                         e["state"].as_str().unwrap_or("")
                     )

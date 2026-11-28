@@ -1467,6 +1467,7 @@ fn routed_serve_delivers_by_team_and_answers_unrouted_sessions() {
         &[
             (ENV_WEBHOOK_CRED, &sig_val),
             (ENV_ACCESS_CRED, "not one value"),
+            (ENV_LINEAR_API_URL, ""),
         ],
         routed_serve_inner,
     );
@@ -1758,7 +1759,8 @@ fn routed_serve_inner(ws: &TempWorkspace) {
     assert_eq!(code, 0);
     let text = String::from_utf8_lossy(&out);
     assert!(
-        text.contains(&format!("{ENV_ACCESS_CRED}=invalid")),
+        text.contains(&format!("{ENV_ACCESS_CRED} (invalid)"))
+            && text.contains(&format!("{ENV_LINEAR_API_URL} (missing, optional)")),
         "{text}"
     );
     assert!(text.contains("room=r-gone: error: "), "{text}");

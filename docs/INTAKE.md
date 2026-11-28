@@ -149,7 +149,8 @@ oms intake serve --source linear --routes --organization "$LINEAR_ORG_ID" \
 
 - **Environment**: per compiled source, each serve and reply environment variable is `set`,
   `missing` or `invalid` (empty, non-UTF-8, or a sensitive value with whitespace or control
-  characters); values are never printed. A side is `ready` when every required variable is `set`
+  characters; an empty endpoint override counts as `missing`, as at startup); values are never
+  printed. A side is `ready` when every required variable is `set`
   and none is `invalid`. This is the startup credential check only: an endpoint override such as
   `OMS_LINEAR_API_URL` is parsed when `serve` or `reply` starts, and status cannot tell whether a
   `serve` process is running.
