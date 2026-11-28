@@ -80,21 +80,22 @@ test('normalizes the card contract, including trimmed and withheld cards', () =>
   assert.equal(plain(home.norm({ alias: 'd', state: 'bogus' })).state, 'missing');
 });
 
-test('the same set of projects draws the same map in any order', () => {
+test('groups projects by triage in any input order', () => {
   const list = cards(32).map(home.norm);
-  const spots = world => [...world.homes].map(([alias, h]) => `${alias}@${h.i},${h.j}`).sort();
-  assert.deepEqual(spots(home.layout(list)), spots(home.layout([...list].reverse())));
-  const world = home.layout(list);
-  assert.deepEqual(plain(world.islands.map(s => s.name)), ['chem-ml', 'vision', 'web', '']);
-  for (const [, h] of world.homes) assert.equal(h.island.name, h.c.area || '');
-});
-
-test('adding a project keeps every other island laid out the same', () => {
-  const list = cards(32).map(home.norm);
-  const added = [...list, home.norm({ ...cards(1, 99)[0], area: 'web' })];
-  const local = world => new Map([...world.homes].map(([alias, h]) => [alias, `${h.island.name}:${h.i - h.island.I},${h.j - h.island.J}`]));
-  const before = local(home.layout(list)), after = local(home.layout(added));
-  for (const [alias, spot] of before) if (!spot.startsWith('web:')) assert.equal(after.get(alias), spot, alias);
+  const keys = g => Object.fromEntries(Object.entries(g).map(([k, v]) => [k, v.map(c => c.alias)]));
+  const grouped = keys(home.groups(list));
+  assert.deepEqual(grouped, keys(home.groups([...list].reverse())));
+  assert.deepEqual(Object.keys(grouped), ['need', 'busy', 'calm', 'quiet', 'gone']);
+  const by = new Map(list.map(c => [c.alias, c]));
+  // Anything that needs you leads, most items first; unreachable projects never hide an attention count.
+  const need = grouped.need.map(a => by.get(a));
+  assert.ok(need.length > 0 && need.every(c => c.attention > 0));
+  for (let i = 1; i < need.length; i++) assert.ok(need[i - 1].attention >= need[i].attention);
+  assert.ok(grouped.gone.map(a => by.get(a)).every(c => ['missing', 'unavailable'].includes(c.state) && !c.attention));
+  assert.ok(grouped.quiet.map(a => by.get(a)).every(c => c.state === 'stale'));
+  assert.ok(grouped.busy.map(a => by.get(a)).every(c => c.active && c.state === 'fresh'));
+  assert.equal(Object.values(grouped).flat().length, list.length);
+  assert.deepEqual(plain(home.groups([home.norm({ alias: 'h', state: 'withheld' })]).gone.map(c => c.alias)), ['h']);
 });
 
 test('worker names are stable per worker id and distinct within a project', () => {
@@ -106,7 +107,7 @@ test('worker names are stable per worker id and distinct within a project', () =
   assert.equal(home.crewOf(renamed)[0].name, names[0]);
 });
 
-test('draws a mixed world without throwing', () => {
+test('draws a mixed roster without throwing', () => {
   assert.doesNotThrow(() => home.show([...cards(40), { alias: 'hidden', state: 'withheld' }].map(home.norm)));
   assert.doesNotThrow(() => home.show([]));
 });

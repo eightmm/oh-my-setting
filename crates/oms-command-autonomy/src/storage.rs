@@ -190,7 +190,7 @@ pub(crate) struct Context<'a> {
     pub owner_id: String,
     pub run_id: String,
     pub cycle: Option<u64>,
-    pub peer_wall: Option<std::time::Duration>,
+    pub peer_wall: Option<crate::planning::ProviderWall>,
     pub gates: Option<&'a Gates>,
 }
 impl<'a> Context<'a> {

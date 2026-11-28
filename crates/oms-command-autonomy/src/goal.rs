@@ -1,6 +1,6 @@
 //! Bounded goal driving and restartable exact-tree commit publication.
 use crate::cli::Args;
-use crate::planning::invoke;
+use crate::planning::{ProviderWall, invoke};
 use crate::storage::{Context, MAX_FILE, PROGRESS};
 use crate::{Error, Output, Result, adaptive, checkpoint, require, value, verify};
 use oms_command_plan::{Action, Request};
@@ -688,7 +688,7 @@ fn refreshed_intent(ctx: &Context<'_>, intent: &Value) -> Result<Value> {
     append_intent(ctx, &updated, "prepared")?;
     Ok(updated)
 }
-fn reconcile(ctx: &Context<'_>, args: &Args) -> Result<()> {
+fn reconcile(ctx: &Context<'_>, args: &Args, wall: ProviderWall) -> Result<()> {
     let mut latest = BTreeMap::new();
     for row in ctx.rows(PROGRESS)? {
         if value::text(&row, "kind") == "commit-intent"
@@ -735,7 +735,18 @@ fn reconcile(ctx: &Context<'_>, args: &Args) -> Result<()> {
                     run_args.flags.insert(key.into());
                 }
             }
-            let result = crate::runner::execute_bound(ctx, &run_args, Some(intent))?;
+            let mut reconcile_ctx = Context::new(
+                ctx.repo.clone(),
+                ctx.state.clone(),
+                ctx.services,
+                ctx.interrupted,
+            )?;
+            reconcile_ctx.owner_id = ctx.owner_id.clone();
+            reconcile_ctx.run_id = ctx.run_id.clone();
+            reconcile_ctx.cycle = ctx.cycle;
+            reconcile_ctx.gates = ctx.gates;
+            reconcile_ctx.peer_wall = Some(wall);
+            let result = crate::runner::execute_bound(&reconcile_ctx, &run_args, Some(intent))?;
             require(
                 result.code == 0,
                 "open commit intent could not complete its exact reviewed landing",
@@ -803,13 +814,17 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
     verify::model(args.text("model")?)?;
     verify::model(args.text("fallback-model")?)?;
     verify::effort(args.get("reasoning-effort", "auto")?)?;
-    let wall = verify::duration(args.get("provider-timeout", "5m")?)?;
+    let wall = if args.has("provider-timeout") {
+        ProviderWall::Pinned(verify::duration(args.required("provider-timeout")?)?)
+    } else {
+        ctx.peer_wall.map_or_else(ProviderWall::from_env, Ok)?
+    };
     if args.has("allow-floor-change") {
         verify::reason(args.required("allow-floor-change")?)?;
     }
     let _drive_lock = ctx.lock(".oms/plan/goal-drive")?;
     guard(ctx, expected_ref)?;
-    if let Err(error) = reconcile(ctx, args) {
+    if let Err(error) = reconcile(ctx, args, wall) {
         return terminal(
             ctx,
             &run,

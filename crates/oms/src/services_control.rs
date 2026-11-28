@@ -125,6 +125,10 @@ impl<'a> Spawn<'a> {
         self.terminate_grace = grace;
         self
     }
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn requests_stall(&self) -> bool {
+        self.stall.is_some_and(|d| !d.is_zero())
+    }
 }
 
 fn run_child(spawn: Spawn<'_>, interrupted: &AtomicBool) -> Result<Child, String> {
@@ -3695,7 +3699,7 @@ pub(crate) fn run_via_supervise_worker(
             dropped: 0,
         });
     }
-    supervise_worker_result(&done.stdout).map_err(|error| {
+    supervise_worker_result(&done.stdout, spawn.requests_stall()).map_err(|error| {
         let detail = String::from_utf8_lossy(&done.stderr);
         let detail = detail.trim();
         if detail.is_empty() {
@@ -3707,7 +3711,7 @@ pub(crate) fn run_via_supervise_worker(
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn supervise_worker_result(raw: &[u8]) -> Result<Child, String> {
+pub(crate) fn supervise_worker_result(raw: &[u8], require_stall: bool) -> Result<Child, String> {
     let result: Value = serde_json::from_slice(raw)
         .map_err(|_| "native supervise worker returned invalid completion".to_owned())?;
     if result["ok"] != true {
@@ -3734,6 +3738,9 @@ pub(crate) fn supervise_worker_result(raw: &[u8]) -> Result<Child, String> {
         .as_u64()
         .ok_or("native supervise worker returned invalid elapsed time")?;
     let stalled = match result.get("stalled_ms") {
+        None if require_stall => {
+            return Err("supervise worker does not support the stall check".into());
+        }
         None | Some(Value::Null) => None,
         Some(v) => Some(Duration::from_millis(
             v.as_u64()
