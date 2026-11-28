@@ -752,8 +752,23 @@ mod tests {
         let (_dir, paths, _) = fixture("mcp-profiles");
         let source = paths.source.join("plugins/antigravity");
         let target = paths.home.join(".gemini/config/plugins/oh-my-setting");
+        let plugins_dir = target.parent().unwrap();
         let file = target.join("mcp_config.json");
         let marker = crate::install::marker(&target);
+        let assert_no_plugin_scratch = || {
+            if !plugins_dir.is_dir() {
+                return;
+            }
+            for entry in fs::read_dir(plugins_dir).unwrap() {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                assert!(
+                    !name.starts_with(".oms-stage-")
+                        && !name.starts_with(".oms-undo-")
+                        && !name.starts_with(".oms-probe-"),
+                    "provider-scanned Antigravity plugins dir exposed {name}"
+                );
+            }
+        };
         fs::create_dir_all(&source).unwrap();
         fs::write(
             source.join("plugin.json"),
@@ -778,7 +793,10 @@ mod tests {
             let mut tx = Transaction::begin(&paths)?;
             // Production writer after its independent payload validation gate.
             write_agy_plugin(&paths, &mut tx, &source, &target, &mcp)?;
-            tx.commit()
+            assert_no_plugin_scratch();
+            let res = tx.commit();
+            assert_no_plugin_scratch();
+            res
         };
         converge(&bare).unwrap();
         assert!(
@@ -786,6 +804,154 @@ mod tests {
                 .get("env")
                 .is_none()
         );
+        // Uncommitted replace and update-snapshot rollback never expose stage/undo in plugins_dir.
+        let bare_saved = (fs::read(&file).unwrap(), fs::read(&marker).unwrap());
+        {
+            let mcp = agy_mcp(&paths, &full, &source, &target).unwrap();
+            let mut tx = Transaction::begin(&paths).unwrap();
+            write_agy_plugin(&paths, &mut tx, &source, &target, &mcp).unwrap();
+            assert_no_plugin_scratch();
+            assert_eq!(
+                read(&file)["mcpServers"]["oh-my-setting"]["env"]["OMS_MCP_TOOL_PROFILE"],
+                "full"
+            );
+        }
+        assert_no_plugin_scratch();
+        assert_eq!(
+            (fs::read(&file).unwrap(), fs::read(&marker).unwrap()),
+            bare_saved
+        );
+        {
+            let mut tx = Transaction::begin_update(&paths).unwrap();
+            let targets = [target.clone(), marker.clone()];
+            let start = tx.prepare_external(&targets).unwrap();
+            assert_no_plugin_scratch();
+            tx.finish_external(start).unwrap();
+        }
+        assert_no_plugin_scratch();
+
+        // Crash recovery from new out-of-dir undo and from a legacy sibling undo in plugins_dir.
+        let old_dir_id = transaction::identity(&target).unwrap();
+        let old_marker_id = transaction::identity(&marker).unwrap();
+        let journal_file = paths.config.join("native-lifecycle/transaction.json");
+        {
+            let mcp = agy_mcp(&paths, &full, &source, &target).unwrap();
+            let mut tx = Transaction::begin(&paths).unwrap();
+            write_agy_plugin(&paths, &mut tx, &source, &target, &mcp).unwrap();
+            assert_no_plugin_scratch();
+            let crash_journal = fs::read(&journal_file).unwrap();
+            tx.simulate_crash();
+            assert!(journal_file.is_file());
+            assert_eq!(fs::read(&journal_file).unwrap(), crash_journal);
+        }
+        Transaction::begin(&paths).unwrap().commit().unwrap();
+        assert_no_plugin_scratch();
+        assert_eq!(
+            (fs::read(&file).unwrap(), fs::read(&marker).unwrap()),
+            bare_saved
+        );
+        converge(&full).unwrap();
+        let new_dir_id = transaction::identity(&target).unwrap();
+        let legacy_undo = plugins_dir.join(".oms-undo-legacy.1");
+        let legacy_staged = plugins_dir.join(".oms-stage-legacy.1");
+        fs::create_dir_all(&legacy_undo).unwrap();
+        fs::write(legacy_undo.join("mcp_config.json"), &bare_saved.0).unwrap();
+        // Match the bare plugin.json version ("1.0.0") so legacy undo matches old_dir_id.
+        let mut bare_plugin = read(&source.join("plugin.json"));
+        bare_plugin["version"] = json!("1.0.0");
+        fs::write(
+            legacy_undo.join("plugin.json"),
+            r::bytes(&bare_plugin).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(transaction::identity(&legacy_undo).unwrap(), old_dir_id);
+        let legacy_journal = json!({
+            "schema": 1,
+            "committed": false,
+            "changes": [
+                {
+                    "target": fs::canonicalize(&target).unwrap(),
+                    "staged": fs::canonicalize(plugins_dir).unwrap().join(".oms-stage-legacy.1"),
+                    "undo": fs::canonicalize(&legacy_undo).unwrap(),
+                    "old": old_dir_id,
+                    "new": new_dir_id,
+                    "external": false,
+                    "parent_identity": null
+                },
+                {
+                    "target": fs::canonicalize(&marker).unwrap(),
+                    "staged": fs::canonicalize(plugins_dir).unwrap().join(".oms-stage-legacy.2"),
+                    "undo": fs::canonicalize(plugins_dir).unwrap().join(".oms-undo-legacy.2"),
+                    "old": old_marker_id,
+                    "new": transaction::identity(&marker).unwrap(),
+                    "external": false,
+                    "parent_identity": null
+                }
+            ],
+            "effects": []
+        });
+        fs::write(plugins_dir.join(".oms-undo-legacy.2"), &bare_saved.1).unwrap();
+        fs::write(&journal_file, serde_json::to_vec(&legacy_journal).unwrap()).unwrap();
+        Transaction::begin(&paths).unwrap().commit().unwrap();
+        assert!(!legacy_undo.exists());
+        assert!(!legacy_staged.exists());
+        assert_no_plugin_scratch();
+        assert_eq!(
+            (fs::read(&file).unwrap(), fs::read(&marker).unwrap()),
+            bare_saved
+        );
+        // Legacy `committed: true` journal with sibling undos in `plugins_dir` cleans up scratch.
+        converge(&full).unwrap();
+        let full_saved = (fs::read(&file).unwrap(), fs::read(&marker).unwrap());
+        let committed_undo_dir = plugins_dir.join(".oms-undo-legacy.3");
+        fs::create_dir_all(&committed_undo_dir).unwrap();
+        fs::write(committed_undo_dir.join("mcp_config.json"), &bare_saved.0).unwrap();
+        fs::write(
+            committed_undo_dir.join("plugin.json"),
+            r::bytes(&bare_plugin).unwrap(),
+        )
+        .unwrap();
+        let committed_undo_marker = plugins_dir.join(".oms-undo-legacy.4");
+        fs::write(&committed_undo_marker, &bare_saved.1).unwrap();
+        let committed_legacy_journal = json!({
+            "schema": 1,
+            "committed": true,
+            "changes": [
+                {
+                    "target": fs::canonicalize(&target).unwrap(),
+                    "staged": fs::canonicalize(plugins_dir).unwrap().join(".oms-stage-legacy.3"),
+                    "undo": fs::canonicalize(&committed_undo_dir).unwrap(),
+                    "old": old_dir_id,
+                    "new": new_dir_id,
+                    "external": false,
+                    "parent_identity": null
+                },
+                {
+                    "target": fs::canonicalize(&marker).unwrap(),
+                    "staged": fs::canonicalize(plugins_dir).unwrap().join(".oms-stage-legacy.4"),
+                    "undo": fs::canonicalize(&committed_undo_marker).unwrap(),
+                    "old": old_marker_id,
+                    "new": transaction::identity(&marker).unwrap(),
+                    "external": false,
+                    "parent_identity": null
+                }
+            ],
+            "effects": []
+        });
+        fs::write(
+            &journal_file,
+            serde_json::to_vec(&committed_legacy_journal).unwrap(),
+        )
+        .unwrap();
+        Transaction::begin(&paths).unwrap().commit().unwrap();
+        assert!(!committed_undo_dir.exists());
+        assert!(!committed_undo_marker.exists());
+        assert_no_plugin_scratch();
+        assert_eq!(
+            (fs::read(&file).unwrap(), fs::read(&marker).unwrap()),
+            full_saved
+        );
+        converge(&bare).unwrap();
         for profile in ["full", "core"] {
             converge(&options(&["--mcp-tool-profile", profile])).unwrap();
             assert_eq!(
@@ -845,7 +1011,9 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
+        assert_no_plugin_scratch();
         tx.commit().unwrap();
+        assert_no_plugin_scratch();
         assert!(!target.exists());
         assert!(!marker.exists());
 
