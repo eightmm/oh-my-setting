@@ -206,10 +206,9 @@ fn discover(repo: &Path, args: &Args, context: &Context<'_>) -> Result<(Vec<Sour
                         continue;
                     }
                     let meta = entry.metadata()?;
-                    if meta.len() > SESSION_BYTES as u64 {
+                    let Some(bytes) = read_header(&path) else {
                         continue;
-                    }
-                    let bytes = storage::file(&path)?;
+                    };
                     if let Some((ident, owner)) =
                         metadata(&bytes[..bytes.len().min(SESSION_HEADER_BYTES)], &provider)
                         && owner == repo
@@ -240,22 +239,56 @@ fn discover(repo: &Path, args: &Args, context: &Context<'_>) -> Result<(Vec<Sour
     });
     Ok((found, false, entries))
 }
+fn trim_leading_partial_line(bytes: Vec<u8>) -> Vec<u8> {
+    match bytes.iter().position(|&b| b == b'\n') {
+        Some(pos) => bytes[pos + 1..].to_vec(),
+        None => Vec::new(),
+    }
+}
+
+fn read_header(path: &Path) -> Option<Vec<u8>> {
+    let label = absolute_label(path)?;
+    let (bytes, _) = oms_safe_fs::Root::open("/")
+        .ok()?
+        .read_head_os(
+            label,
+            SESSION_HEADER_BYTES + 1,
+            oms_safe_fs::Policy::manifest(),
+        )
+        .ok()?;
+    Some(bytes)
+}
+
 fn read(source: &Source) -> Result<Vec<u8>> {
     plain(&source.path, false)?;
     plain(&source.root, true)?;
     if !source.path.starts_with(&source.root) {
         return fail("transcript escaped its recorded root");
     }
-    let bytes = storage::file(&source.path)?;
-    if bytes.len() > SESSION_BYTES
-        || metadata(
-            &bytes[..bytes.len().min(SESSION_HEADER_BYTES)],
-            &source.provider,
-        ) != Some((source.ident.clone(), source.repo.clone()))
+    let label = absolute_label(&source.path)
+        .ok_or_else(|| Error::new(2, "unsafe or unavailable local session path"))?;
+    let ht = oms_safe_fs::Root::open("/")
+        .and_then(|root| {
+            root.read_head_and_tail_os(
+                label,
+                SESSION_HEADER_BYTES + 1,
+                SESSION_BYTES,
+                oms_safe_fs::Policy::manifest(),
+            )
+        })
+        .map_err(|_| Error::new(2, "unsafe or unavailable local session path"))?;
+    if metadata(
+        &ht.head[..ht.head.len().min(SESSION_HEADER_BYTES)],
+        &source.provider,
+    ) != Some((source.ident.clone(), source.repo.clone()))
     {
         return fail("transcript identity or repository binding changed");
     }
-    Ok(bytes)
+    Ok(if ht.truncated {
+        trim_leading_partial_line(ht.tail)
+    } else {
+        ht.tail
+    })
 }
 
 fn absolute_label(path: &Path) -> Option<&OsStr> {
@@ -289,16 +322,28 @@ fn read_hook_transcript(hint: CodexHookTranscript<'_>, repo: &Path) -> Option<Ve
     }
     // The filesystem root keeps every component of the account path in the
     // descriptor-relative no-follow chain, including the sessions directory.
-    let bytes = oms_safe_fs::Root::open("/")
+    let ht = oms_safe_fs::Root::open("/")
         .ok()?
-        .read_os(label, SESSION_BYTES, oms_safe_fs::Policy::manifest())
+        .read_head_and_tail_os(
+            label,
+            SESSION_HEADER_BYTES + 1,
+            SESSION_BYTES,
+            oms_safe_fs::Policy::manifest(),
+        )
         .ok()?;
-    let header = &bytes[..bytes.len().min(SESSION_HEADER_BYTES + 1)];
+    let header = &ht.head[..ht.head.len().min(SESSION_HEADER_BYTES + 1)];
     let end = header.iter().position(|&byte| byte == b'\n')?;
     let header = &header[..end];
     oms_json::parse_strict(header).ok()?;
     let (id, cwd) = metadata(header, "codex")?;
-    (id == hint.session && cwd == repo).then_some(bytes)
+    if id != hint.session || cwd != repo {
+        return None;
+    }
+    Some(if ht.truncated {
+        trim_leading_partial_line(ht.tail)
+    } else {
+        ht.tail
+    })
 }
 
 fn messages(source: &Source, raw: &[u8]) -> Vec<Message> {
@@ -1335,4 +1380,128 @@ fn antigravity_handoff(repo: &Path, args: &Args, context: &Context<'_>) -> Resul
     Ok(out(
         format!("{}\n", repo.join(output).display()).into_bytes()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::atomic::AtomicBool;
+
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn large_codex_rollout_uses_bounded_head_and_tail_and_enforces_header_identity() {
+        let base = std::env::temp_dir().join(format!("oms-large-rollout-{}", std::process::id()));
+        let _cleanup = Cleanup(base.clone());
+        std::fs::create_dir_all(&base).unwrap();
+        let repo = base.join("repo");
+        let sessions = base.join("codex-home/sessions/2026/11/28");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&sessions).unwrap();
+        let repo = repo.canonicalize().unwrap();
+        let sid = "01a21dae-15a8-7a33-ae27-14df2f3e5de7";
+        let path = sessions.join("rollout-large.jsonl");
+
+        {
+            let mut file = std::fs::File::create(&path).unwrap();
+            let header = serde_json::json!({
+                "type": "session_meta",
+                "payload": { "id": sid, "cwd": repo }
+            });
+            writeln!(file, "{header}").unwrap();
+            let pad_line = serde_json::json!({
+                "type": "event_msg",
+                "payload": { "type": "token_count", "pad": "a".repeat(4000) }
+            })
+            .to_string();
+            let line_bytes = pad_line.len() + 1;
+            let count = (SESSION_BYTES + 128 * 1024) / line_bytes;
+            for _ in 0..count {
+                writeln!(file, "{pad_line}").unwrap();
+            }
+            for text in ["first large-tail question", "second large-tail question"] {
+                let ev = serde_json::json!({
+                    "type": "event_msg",
+                    "payload": { "type": "user_message", "message": text }
+                });
+                writeln!(file, "{ev}").unwrap();
+            }
+            let reply = serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "large rollout summary" }]
+                }
+            });
+            writeln!(file, "{reply}").unwrap();
+        }
+        assert!(std::fs::metadata(&path).unwrap().len() > SESSION_BYTES as u64);
+
+        let args = Args::parse(
+            &[
+                OsString::from("--provider"),
+                OsString::from("codex"),
+                OsString::from("--root"),
+                sessions
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .as_os_str()
+                    .to_os_string(),
+            ],
+            &["provider", "root"],
+            &[],
+        )
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let ctx = Context {
+            cwd: &repo,
+            interrupted: &cancel,
+            source: &base,
+            executor: &crate::process::Native,
+            heartbeat: None,
+        };
+        let (found, truncated, _) = discover(&repo, &args, &ctx).unwrap();
+        assert!(!truncated);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].ident, sid);
+
+        let raw = read(&found[0]).unwrap();
+        assert!(raw.len() <= SESSION_BYTES);
+        assert!(raw.starts_with(b"{"));
+        let parsed = messages(&found[0], &raw);
+        let users: Vec<_> = parsed
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(
+            users,
+            vec!["first large-tail question", "second large-tail question"]
+        );
+
+        let bad_sid = Source {
+            ident: "wrong-session-id".into(),
+            ..found[0].clone()
+        };
+        assert!(read(&bad_sid).is_err());
+
+        let other_repo = base.join("other-repo");
+        std::fs::create_dir_all(&other_repo).unwrap();
+        let bad_repo = Source {
+            repo: other_repo.canonicalize().unwrap(),
+            ..found[0].clone()
+        };
+        assert!(read(&bad_repo).is_err());
+    }
 }
