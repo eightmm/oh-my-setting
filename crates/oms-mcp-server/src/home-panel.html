@@ -20,7 +20,7 @@
   --r:var(--border-radius-lg,14px);--r-sm:var(--border-radius-md,8px);
   --mono:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace);
   /* Band colors stay the page's own so the triage reads the same in every host; they differ in lightness, not hue alone. */
-  --need:light-dark(#b8400c,#ffa66e);--busy:light-dark(#2459d6,#94b6ff);--calm:var(--ok);--idle:light-dark(#8a919a,#7f868f);
+  --need:light-dark(#b8400c,#ffa66e);--busy:light-dark(#2459d6,#94b6ff);--calm:var(--ok);--idle:light-dark(#646b74,#8d949d);
 }
 :root[data-theme="light"]{color-scheme:light}
 :root[data-theme="dark"]{color-scheme:dark}
@@ -92,7 +92,7 @@ button:disabled{opacity:.55;cursor:default}
 .rest h2{margin:0;font-size:13.5px}
 .rest h2 .n{color:var(--soft);font-weight:600;margin-left:4px}
 .rest ul{display:flex;flex-wrap:wrap;gap:6px;list-style:none;margin:0 0 0 auto;padding:0}
-.tag{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 11px;font-size:12.5px;font-weight:500;background:var(--surface)}
+.tag{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 11px;font-size:12.5px;font-weight:500;background:var(--surface)}
 .tag[aria-expanded="true"]{border-color:var(--focus);box-shadow:0 0 0 1px var(--focus)}
 .tag .meta{font-family:inherit}
 .rest .det{flex-basis:100%;padding:10px 4px 4px;background:transparent}
@@ -102,7 +102,7 @@ button:disabled{opacity:.55;cursor:default}
 @media (prefers-reduced-motion:reduce){.chev{transition:none}}
 @media (max-width:1000px){
   .row{grid-template-columns:10px minmax(0,1fr) auto;grid-template-areas:"d w a" ". y y" ". p c";row-gap:6px;column-gap:10px}
-  .row .pl{display:flex;align-items:center;gap:8px}.row .pl .track{flex:1;order:1}.row .pl b{order:2;margin:0}
+  .row .pl{display:flex;align-items:center;gap:8px}.row .pl .track{flex:1;order:1}.row .pl b{order:2;margin:0;white-space:nowrap}.row .pl .track{min-width:48px}
   .row .dot{grid-area:d}.row .who{grid-area:w}.row .ag{grid-area:a}.row .why{grid-area:y}.row .pl{grid-area:p}.row .cr{grid-area:c;justify-content:flex-end}.row .chev{display:none}
   .det{grid-template-columns:minmax(0,1fr);padding-left:36px}
   .chips{margin-left:0}
@@ -131,7 +131,7 @@ button:disabled{opacity:.55;cursor:default}
 const PROVS=['codex','claude','antigravity'],ABBR={codex:'Cx',claude:'Cl',antigravity:'Ag'};
 const STATES=['fresh','stale','missing','unavailable','withheld'];
 const T={
-ko:{title:'OMS 홈',sub:n=>`프로젝트 ${n}개 · 읽기 전용`,mains:n=>` · Main 실행 ${n}`,refresh:'새로고침',refreshing:'갱신 중…',expand:'크게 보기',find:'프로젝트 찾기',all:'전체',summary:'상태 요약',
+ko:{title:'OMS 홈',sub:n=>`프로젝트 ${n}개 · 읽기 전용`,mains:n=>` · Main 있음 ${n}`,refresh:'새로고침',refreshing:'갱신 중…',expand:'크게 보기',find:'프로젝트 찾기',all:'전체',summary:'상태 요약',
  sect:{need:'확인 필요',busy:'일하는 중',calm:'평온',quiet:'조용함',gone:'연결 안 됨'},
  hint:{need:'확인할 것이 많은 순',busy:'worker가 움직이는 프로젝트',calm:'최신이고 할 일 없음'},noMatch:'맞는 프로젝트가 없습니다.',
  st:{fresh:'최신',stale:'오래됨',missing:'기록 없음',unavailable:'폴더 없음',withheld:'비공개'},degraded:'일부만',
@@ -139,7 +139,7 @@ ko:{title:'OMS 홈',sub:n=>`프로젝트 ${n}개 · 읽기 전용`,mains:n=>` ·
  main:'Main',area:'동네',goal:'목표',branch:'브랜치',dirty:'변경 있음',clean:'깨끗함',plan:'계획',next:'다음 할 일',seen:'갱신',crew:'일하는 worker',noCrew:'지금 일하는 worker는 없습니다.',
  attn:n=>`확인 ${n}`,more:n=>`외 ${n}명`,other:'기타',unknown:'모름',noGoal:'목표 없음',
  now:'방금',m:'분 전',h:'시간 전',d:'일 전',loading:'불러오는 중…',bound:'이 연결은 프로젝트 하나에 묶여 있어 전체 목록을 볼 수 없습니다. 전체 프로젝트 연결에서 여세요.',fail:'불러오지 못했습니다. 잠시 뒤 다시 시도합니다.',failShort:'갱신 실패',openApp:'OMS 앱 안에서 열면 프로젝트가 보입니다.',empty:'등록된 프로젝트가 없습니다.',updated:'갱신'},
-en:{title:'OMS Home',sub:n=>`${n} project${n===1?'':'s'} · read only`,mains:n=>` · ${n} Main${n===1?'':'s'} running`,refresh:'Refresh',refreshing:'Refreshing…',expand:'Expand',find:'Find a project',all:'All',summary:'Status summary',
+en:{title:'OMS Home',sub:n=>`${n} project${n===1?'':'s'} · read only`,mains:n=>` · ${n} with a Main`,refresh:'Refresh',refreshing:'Refreshing…',expand:'Expand',find:'Find a project',all:'All',summary:'Status summary',
  sect:{need:'Needs you',busy:'Working',calm:'Calm',quiet:'Quiet',gone:'Out of reach'},
  hint:{need:'most items first',busy:'workers are moving',calm:'fresh, nothing waiting'},noMatch:'No project matches.',
  st:{fresh:'fresh',stale:'stale',missing:'no record',unavailable:'folder missing',withheld:'withheld'},degraded:'partial',
@@ -156,7 +156,7 @@ function norm(c){
   if(!c||typeof c!=='object')return null;
   const alias=str(c.alias,80);if(!alias)return null;
   const state=STATES.includes(c.state)?c.state:'missing',area=str(c.area,24);
-  if(state==='withheld')return{alias,state,area,crew:[],total:0,attention:0};
+  if(state==='withheld')return{alias,state,area:null,crew:[],total:0,attention:0};
   const plan=c.plan&&typeof c.plan==='object'?{done:num(c.plan.done),total:num(c.plan.total)}:null;
   const crew=(Array.isArray(c.crew)?c.crew:[]).slice(0,3).filter(w=>w&&typeof w==='object').map((w,i)=>({provider:prov(w.provider),role:str(w.role,24),id:str(w.id,24)||String(i)}));
   const total=Math.max(crew.length,Math.min(num(c.crewTotal)||0,999));
@@ -199,7 +199,8 @@ let cards=null,shown=[],picked=null,zone=null,query='',lastLoad=0,lastTry=0,load
 const el=id=>document.getElementById(id);
 const media=q=>globalThis.matchMedia?matchMedia(q):{matches:true};
 const reduce=media('(prefers-reduced-motion: reduce)');
-const did=c=>'d-'+encodeURIComponent(c.alias).replace(/[^A-Za-z0-9_-]/g,'_');
+// Every character outside [A-Za-z0-9-] is spelled as _hex_, so distinct aliases never share an id.
+const did=c=>'d-'+[...c.alias].map(ch=>/[A-Za-z0-9-]/.test(ch)?ch:'_'+ch.codePointAt(0).toString(16)+'_').join('');
 // One row per project: why it needs you first, then goal, plan, who is on it and how fresh it is.
 function row(c,k){
   const li=document.createElement('li'),b=document.createElement('button');
@@ -214,7 +215,7 @@ function row(c,k){
   li.className='k-'+k;li.append(b,detail(c));return li;
 }
 function tag(c){
-  const b=document.createElement('button');b.className='tag';b.type='button';b.dataset.alias=c.alias;b.setAttribute('aria-expanded',String(c.alias===picked));b.setAttribute('aria-controls',did(c));b.setAttribute('aria-label',label(c));
+  const b=document.createElement('button');b.className='tag';b.type='button';b.dataset.alias=c.alias;b.setAttribute('aria-expanded',String(c.alias===picked));if(c.alias===picked)b.setAttribute('aria-controls',did(c));b.setAttribute('aria-label',label(c));
   b.innerHTML=`${c.main?mono(c.main):''}${esc(c.alias)}<span class="meta">${esc(c.state==='withheld'?L.st.withheld:stateWord(c)+(c.dirty?' · '+L.dirty:''))}</span>`;
   return b;
 }
@@ -286,7 +287,9 @@ function hud(){
   const vis=cards||[],g=groups(shown),mains=vis.filter(c=>c.main).length;
   el('sub').textContent=L.sub(vis.length)+(mains?L.mains(mains):'');
   el('sum').setAttribute('aria-label',L.summary);
+  const jump=document.activeElement?.closest?.('#sum [data-jump]')?.dataset?.jump;
   el('sum').innerHTML=SECT.filter(k=>g[k].length).map(k=>`<li><button type="button" class="pill k-${k}" data-jump="${k}">${esc(L.sect[k])} <b>${g[k].length}</b></button></li>`).join('');
+  if(jump)el('sum').querySelector(`[data-jump="${jump}"]`)?.focus({preventScroll:true});
   age();
 }
 function age(){const a=el('age');a.textContent=failed?L.failShort+(lastLoad?' · '+L.updated+' '+ago(new Date(lastLoad).toISOString()):''):lastLoad?L.updated+' '+ago(new Date(lastLoad).toISOString()):'';a.style.color=failed?'var(--warn)':''}

@@ -76,6 +76,7 @@ test('normalizes the card contract, including trimmed and withheld cards', () =>
   assert.equal(full.degraded, true);
   assert.deepEqual([trimmed.active, trimmed.total, trimmed.crew.length, trimmed.main], [false, 0, 0, null]);
   assert.deepEqual([withheld.state, withheld.total, withheld.crew.length], ['withheld', 0, 0]);
+  assert.equal(plain(home.norm({ alias: 'e', state: 'withheld', area: 'lab' })).area, null);
   assert.equal(home.norm({ state: 'fresh' }), null);
   assert.equal(plain(home.norm({ alias: 'd', state: 'bogus' })).state, 'missing');
 });
