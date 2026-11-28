@@ -76,6 +76,7 @@ test('normalizes the card contract, including trimmed and withheld cards', () =>
   assert.equal(full.degraded, true);
   assert.deepEqual([trimmed.active, trimmed.total, trimmed.crew.length, trimmed.main], [false, 0, 0, null]);
   assert.deepEqual([withheld.state, withheld.total, withheld.crew.length], ['withheld', 0, 0]);
+  assert.equal(plain(home.norm({ alias: 'e', state: 'withheld', area: 'lab' })).area, null);
   assert.equal(home.norm({ state: 'fresh' }), null);
   assert.equal(plain(home.norm({ alias: 'd', state: 'bogus' })).state, 'missing');
 });
@@ -98,18 +99,23 @@ test('groups projects by triage in any input order', () => {
   assert.deepEqual(plain(home.groups([home.norm({ alias: 'h', state: 'withheld' })]).gone.map(c => c.alias)), ['h']);
 });
 
-test('worker names are stable per worker id and distinct within a project', () => {
-  const card = home.norm({ alias: 'x', state: 'fresh', crew: ['a', 'b', 'c'].map(n => ({ provider: 'codex', id: n.repeat(12) })), crewTotal: 3 });
-  const names = home.crewOf(card).map(w => w.name);
-  assert.equal(new Set(names).size, 3);
-  assert.deepEqual(home.crewOf(card).map(w => w.name), names);
-  const renamed = home.norm({ alias: 'x', state: 'fresh', crew: [{ provider: 'codex', id: 'aaaaaaaaaaaa' }], crewTotal: 1 });
-  assert.equal(home.crewOf(renamed)[0].name, names[0]);
+test('labels say why a project sits in its band and hide withheld details', () => {
+  home.setLang('en');
+  const need = home.norm({ alias: 'n', state: 'fresh', attention: 3, main: 'claude', crewTotal: 2, crew: [{ provider: 'codex' }] });
+  assert.match(home.label(need), /^n, Needs you, fresh, 3 to check, Main claude, Workers 2/);
+  assert.equal(home.label(home.norm({ alias: 'w', state: 'withheld', goal: 'secret' })), 'w, Out of reach, withheld');
 });
 
 test('draws a mixed roster without throwing', () => {
   assert.doesNotThrow(() => home.show([...cards(40), { alias: 'hidden', state: 'withheld' }].map(home.norm)));
   assert.doesNotThrow(() => home.show([]));
+  // Opening a row, a quiet tag and a withheld tag builds each detail, including the withheld note.
+  const roster = [...cards(10), { alias: 'hidden', state: 'withheld' }].map(home.norm);
+  home.show(roster);
+  const band = plain(home.groups(roster));
+  // project-1 is a need row, project-9 a quiet tag (stale, nothing to check), project-3 an unreachable tag.
+  assert.ok(band.need.some(c => c.alias === 'project-1') && band.quiet.some(c => c.alias === 'project-9') && band.gone.some(c => c.alias === 'project-3'));
+  for (const alias of ['project-1', 'project-9', 'project-3', 'hidden', null]) assert.doesNotThrow(() => home.select(alias, true));
 });
 
 test('calls only the read-only card tool and opens no network path', () => {
