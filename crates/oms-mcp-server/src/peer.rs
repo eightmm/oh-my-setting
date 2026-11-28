@@ -683,8 +683,8 @@ impl Server<'_> {
         if settings.is_some_and(|(model, effort)| !valid_lead_route(target, model, effort)) {
             return Err("error: invalid Lead route".into());
         }
-        // Only claude and agy publish a verified native session for a Lead.
-        if resume.is_some_and(|id| target == "codex" || !lead_session(id)) {
+        // Codex, Claude and AGY all publish verified native sessions for Lead resume.
+        if resume.is_some_and(|id| !lead_session(id)) {
             return Err("error: invalid Lead session".into());
         }
         self.start_routed_peer(&args, Some((operation, binding)), true, settings, resume)
@@ -1884,7 +1884,10 @@ fn owner_run(
     // result observation. Other consultations can have the same provider.
     let observe_lead = protected
         && launch["preserve_current"] == true
-        && matches!(selected.as_slice(), [p] if matches!(p.as_str(), "claude" | "antigravity"))
+        && matches!(
+            selected.as_slice(),
+            [p] if matches!(p.as_str(), "codex" | "claude" | "antigravity")
+        )
         && (followup.is_some()
             || (prompt == crate::panel::LEAD_PROMPT
                 && thread == op
@@ -2301,10 +2304,47 @@ echo "$$" > "$2/.oms/artifacts/mcp/$3/pid"
                 Some(id),
             )
         };
-        assert!(resume("codex", session).is_err());
+        assert!(resume("unknown", session).is_err());
         assert!(resume("agy", "12345678-1234-4234-8234-123456789ABC").is_err());
         assert!(resume("agy", "not-a-session").is_err());
         assert!(!path.join(RUN_ROOT).join(&next_op).exists());
+        let mut codex_meta = meta.clone();
+        codex_meta["targets"] = json!(["codex"]);
+        let mut codex_launch = start.clone();
+        codex_launch["targets"] = json!(["codex"]);
+        root.atomic("meta.json", codex_meta.to_string().as_bytes())
+            .unwrap();
+        root.atomic("launch.json", codex_launch.to_string().as_bytes())
+            .unwrap();
+        let codex_binding = storage::hash("codex resumed turn");
+        let codex_op = op(&codex_binding);
+        legacy["binding"] = json!(codex_binding);
+        root.atomic(&note_name, legacy.to_string().as_bytes())
+            .unwrap();
+        server
+            .start_lead_followup(
+                path,
+                "codex",
+                prompt,
+                &codex_op,
+                &thread,
+                &codex_binding,
+                None,
+                Some(session),
+            )
+            .unwrap();
+        let codex_dir = Directory::run(path, &codex_op, true).unwrap();
+        assert_eq!(
+            private_json(&codex_dir, "launch.json").unwrap()["lead_resume"],
+            session
+        );
+        root.atomic("meta.json", meta.to_string().as_bytes())
+            .unwrap();
+        root.atomic("launch.json", start.to_string().as_bytes())
+            .unwrap();
+        legacy["binding"] = json!(next_binding);
+        root.atomic(&note_name, legacy.to_string().as_bytes())
+            .unwrap();
         resume("agy", session).unwrap();
         let next_dir = Directory::run(path, &next_op, true).unwrap();
         let next_launch = private_json(&next_dir, "launch.json").unwrap();
