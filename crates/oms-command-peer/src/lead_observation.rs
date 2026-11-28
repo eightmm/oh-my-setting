@@ -326,6 +326,7 @@ pub(crate) const STREAM_LOG: &str = "lead-stream.jsonl";
 const STREAM_MAX: usize = 128 * 1024;
 
 struct Tail {
+    provider: String,
     run: Root,
     cwd: PathBuf,
     seen: usize,
@@ -347,11 +348,12 @@ impl Stream {
         cwd: &Path,
         context: &Context<'_>,
     ) -> Option<Self> {
-        if provider != "claude" {
+        if !matches!(provider, "claude" | "codex") {
             return None;
         }
         let scope = Scope::from_owner(repo, answers, thread, provider, context)?;
         Some(Self(std::sync::Mutex::new(Tail {
+            provider: provider.to_owned(),
             run: scope.run,
             cwd: cwd.to_owned(),
             seen: 0,
@@ -414,6 +416,10 @@ impl Tail {
     }
 
     fn event(&mut self, row: &Value) {
+        if self.provider == "codex" {
+            self.codex_event(row);
+            return;
+        }
         // Subagent output belongs to a tool call, not this reply.
         if !matches!(row.get("parent_tool_use_id"), Some(Value::Null)) {
             return;
@@ -481,6 +487,48 @@ impl Tail {
         }
     }
 
+    fn codex_event(&mut self, row: &Value) {
+        let kind = string(row, "type");
+        let Some(kind) = kind.as_deref() else {
+            return;
+        };
+        if !matches!(kind, "item.started" | "item.completed") {
+            return;
+        }
+        let Some(item) = row.get("item") else {
+            return;
+        };
+        let Some(item_type) = string(item, "type") else {
+            return;
+        };
+        let line = match (kind, item_type.as_str()) {
+            ("item.started", "command_execution") => {
+                self.format_activity("Run", string(item, "command").as_deref())
+            }
+            ("item.started" | "item.completed", "file_change") => {
+                let path = item
+                    .get("changes")
+                    .and_then(Value::as_array)
+                    .and_then(|arr| arr.first())
+                    .and_then(|c| string(c, "path"));
+                self.format_activity("Edit", path.as_deref())
+            }
+            ("item.started", "mcp_tool_call") => {
+                let tool = string(item, "tool")
+                    .or_else(|| string(item, "name"))
+                    .filter(|n| cached_regex!(r"\A[A-Za-z][A-Za-z0-9_.:-]{0,63}\z").is_match(n));
+                self.format_activity("MCP", tool.as_deref())
+            }
+            ("item.started", "web_search") => {
+                self.format_activity("Search", string(item, "query").as_deref())
+            }
+            _ => None,
+        };
+        if let Some(line) = line {
+            self.append("tool", &line);
+        }
+    }
+
     /// One short "Tool detail" line; the detail is dropped when it is not
     /// publishable, and a repository path is shown relative to the checkout.
     fn activity(&self, part: &Value) -> Option<String> {
@@ -489,7 +537,12 @@ impl Tail {
         let input = part.get("input");
         let detail = ["file_path", "path", "pattern", "command", "query", "url"]
             .into_iter()
-            .find_map(|key| input.and_then(|i| string(i, key)))
+            .find_map(|key| input.and_then(|i| string(i, key)));
+        self.format_activity(&name, detail.as_deref())
+    }
+
+    fn format_activity(&self, label: &str, detail: Option<&str>) -> Option<String> {
+        let detail = detail
             .map(|d| {
                 let d = d.lines().next().unwrap_or_default();
                 let d = Path::new(d)
@@ -501,15 +554,15 @@ impl Tail {
             })
             .filter(|d| !d.trim().is_empty());
         let line = match detail {
-            Some(d) => format!("{name} {d}"),
-            None => name.clone(),
+            Some(d) => format!("{label} {d}"),
+            None => label.to_owned(),
         };
         if crate::safety::outbound(line.as_bytes()).is_ok() {
             Some(line)
         } else {
-            crate::safety::outbound(name.as_bytes())
+            crate::safety::outbound(label.as_bytes())
                 .is_ok()
-                .then_some(name)
+                .then(|| label.to_owned())
         }
     }
 
@@ -568,6 +621,7 @@ mod tests {
         let cwd = Path::new("/work/tree");
         let tail = |rows: &[serde_json::Value]| {
             let mut tail = Tail {
+                provider: "claude".into(),
                 run: Root::open(&dir).unwrap(),
                 cwd: cwd.into(),
                 seen: 0,
@@ -761,5 +815,66 @@ mod tests {
         assert!(run(&[&start, &msg, &failed]).is_none());
         let bad_id = json!({"type":"thread.started","thread_id":"not-a-uuid"});
         assert!(run(&[&bad_id, &msg, &done]).is_none());
+    }
+
+    #[test]
+    fn codex_stream_publishes_scanned_activity_lines_only() {
+        use std::os::unix::fs::DirBuilderExt;
+        let dir = std::env::temp_dir().join(format!("oms-codex-stream-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let cwd = Path::new("/work/tree");
+        let mut tail = Tail {
+            provider: "codex".into(),
+            run: Root::open(&dir).unwrap(),
+            cwd: cwd.into(),
+            seen: 0,
+            pending: String::new(),
+            text: String::new(),
+            log: Vec::new(),
+            written: 0,
+            blocks: Default::default(),
+            closed: false,
+            flushed: None,
+        };
+        let planted = ["gh", "p_0123456789abcdef0123456789abcdef0123"].concat();
+        let rows = vec![
+            json!({"type":"thread.started","thread_id":"12345678-1234-7234-8234-123456789abc"}),
+            json!({"type":"item.started","item":{"type":"command_execution","command":"cargo test"}}),
+            json!({"type":"item.completed","item":{"type":"file_change","changes":[{"path":"/work/tree/src/lib.rs","kind":"update","diff":"secret-diff"}]}}),
+            json!({"type":"item.started","item":{"type":"mcp_tool_call","tool":"oms_repo_state"}}),
+            json!({"type":"item.started","item":{"type":"web_search","query":"rust rustix fstat"}}),
+            json!({"type":"item.started","item":{"type":"command_execution","command":format!("echo {planted}")}}),
+            json!({"type":"item.completed","item":{"type":"reasoning","text":"private chain"}}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":"final reply text"}}),
+            json!({"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}),
+        ];
+        let raw: String = rows.iter().map(|r| format!("{r}\n")).collect();
+        for end in (1..raw.len()).step_by(29).chain([raw.len()]) {
+            tail.feed(&raw.as_bytes()[..end]);
+        }
+        tail.flush();
+        let published: Vec<_> = std::fs::read_to_string(dir.join(STREAM_LOG))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .map(|v| {
+                (
+                    v["kind"].as_str().unwrap().to_owned(),
+                    v["text"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            published,
+            vec![
+                ("tool".into(), "Run cargo test".into()),
+                ("tool".into(), "Edit src/lib.rs".into()),
+                ("tool".into(), "MCP oms_repo_state".into()),
+                ("tool".into(), "Search rust rustix fstat".into()),
+                ("tool".into(), "Run".into()),
+            ]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
