@@ -6269,6 +6269,185 @@ fn thread_hot_paths_read_each_log_once_and_keep_stale_contracts() {
 }
 
 #[test]
+fn thread_readers_survive_concurrent_appends_and_fail_fast_on_non_races() {
+    isolated(
+        "thread_readers_survive_concurrent_appends_and_fail_fast_on_non_races",
+        || {
+            use oms_command_peer::storage;
+            use std::io::Write;
+            use std::sync::{
+                Barrier,
+                atomic::{AtomicBool, Ordering},
+            };
+
+            let repo = Repo::new();
+            let source = Repo::new();
+            success(run(
+                &repo,
+                &source.0,
+                "thread",
+                &["new", "--id", "race", "--topic", "concurrent"],
+            ));
+
+            let done = AtomicBool::new(false);
+            let start = Barrier::new(4);
+            std::thread::scope(|scope| {
+                for seat in ["alpha", "beta"] {
+                    let repo = &repo;
+                    let source = &source;
+                    let done = &done;
+                    let start = &start;
+                    scope.spawn(move || {
+                        start.wait();
+                        let deadline = std::time::Instant::now() + Duration::from_millis(350);
+                        for i in 0..40 {
+                            if i >= 8 && std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            let body = format!("{seat}-{i}-{}", "payload".repeat(32));
+                            let out = run(
+                                repo,
+                                &source.0,
+                                "thread",
+                                &["append", "--id", "race", "--role", "note", "--text", &body],
+                            );
+                            assert_eq!(out.0, 0, "writer {seat} #{i}: {}", message(&out));
+                        }
+                        done.store(true, Ordering::Release);
+                    });
+                }
+                scope.spawn(|| {
+                    start.wait();
+                    let mut prev = 1usize;
+                    let mut reads = 0usize;
+                    while !done.load(Ordering::Acquire) || reads < 64 {
+                        let rows =
+                            storage::load(&repo.0, Path::new(".oms/threads/race.jsonl")).unwrap();
+                        assert!(rows.len() >= prev, "{} < {prev}", rows.len());
+                        prev = rows.len();
+                        reads += 1;
+                    }
+                });
+                scope.spawn(|| {
+                    start.wait();
+                    let mut cursor = String::new();
+                    let mut reads = 0usize;
+                    while !done.load(Ordering::Acquire) || reads < 32 {
+                        let shown = V::parse(&success(run(
+                            &repo,
+                            &source.0,
+                            "thread",
+                            &["show", "--json"],
+                        )))
+                        .unwrap();
+                        assert!(!shown.array().is_empty());
+                        let cur = success(run(&repo, &source.0, "thread", &["current"]));
+                        assert_eq!(cur, b"race\n");
+                        let mut argv = vec!["updates", "--id", "race", "--turns", "200"];
+                        if !cursor.is_empty() {
+                            argv.extend(["--after", cursor.as_str()]);
+                        }
+                        let updates =
+                            V::parse(&success(run(&repo, &source.0, "thread", &argv))).unwrap();
+                        cursor = updates.get("cursor").text().unwrap().to_owned();
+                        reads += 1;
+                    }
+                });
+            });
+
+            // A short in-place append exposing an unfinished trailing line without a
+            // stat change during individual reads recovers once the writer finishes.
+            success(run(
+                &repo,
+                &source.0,
+                "thread",
+                &["new", "--id", "torn", "--topic", "initial"],
+            ));
+            let torn_path = repo.0.join(".oms/threads/torn.jsonl");
+            let ready = Barrier::new(2);
+            std::thread::scope(|scope| {
+                let torn_path = &torn_path;
+                let ready = &ready;
+                scope.spawn(move || {
+                    let mut file = fs::OpenOptions::new()
+                        .append(true)
+                        .open(torn_path)
+                        .unwrap();
+                    file.write_all(
+                        br#"{"schema":1,"thread":"torn","seq":2,"ts":"2026-01-01T00:00:00Z","role":"note""#,
+                    )
+                    .unwrap();
+                    file.flush().unwrap();
+                    ready.wait();
+                    std::thread::sleep(Duration::from_millis(15));
+                    file.write_all(br#","agent":"peer","text":"completed"}"#)
+                        .unwrap();
+                    file.write_all(b"\n").unwrap();
+                    file.flush().unwrap();
+                });
+                ready.wait();
+                let shown = V::parse(&success(run(
+                    &repo,
+                    &source.0,
+                    "thread",
+                    &["show", "--id", "torn", "--json"],
+                )))
+                .unwrap();
+                assert_eq!(shown.array().len(), 2);
+                let loaded = storage::load(&repo.0, Path::new(".oms/threads/torn.jsonl")).unwrap();
+                assert_eq!(loaded.len(), 2);
+            });
+
+            // A writer that crashed mid-record still fails with the existing error
+            // well under a second.
+            repo.write(
+                ".oms/threads/crashed.jsonl",
+                br#"{"schema":1,"thread":"crashed""#,
+            );
+            let t0 = std::time::Instant::now();
+            let err = storage::load(&repo.0, Path::new(".oms/threads/crashed.jsonl")).unwrap_err();
+            assert!(
+                err.message.contains("unfinished JSONL record"),
+                "{}",
+                err.message
+            );
+            let show_err = run(&repo, &source.0, "thread", &["show", "--id", "crashed"]);
+            assert_eq!(show_err.0, 2);
+            assert!(
+                message(&show_err).contains("unfinished JSONL record"),
+                "{}",
+                message(&show_err)
+            );
+            assert!(
+                t0.elapsed() < Duration::from_secs(1),
+                "bounded retry took {:?}",
+                t0.elapsed()
+            );
+
+            // Non-race safe-fs failures (missing, symlink, invalid path) fail immediately.
+            std::os::unix::fs::symlink(
+                repo.0.join(".oms/threads/race.jsonl"),
+                repo.0.join(".oms/threads/symlink.jsonl"),
+            )
+            .unwrap();
+            let fast = std::time::Instant::now();
+            for bad in [
+                Path::new(".oms/threads/absent.jsonl"),
+                Path::new(".oms/threads/symlink.jsonl"),
+                Path::new("../escape.jsonl"),
+            ] {
+                assert!(storage::read(&repo.0, bad, false).is_err(), "{bad:?}");
+            }
+            assert!(
+                fast.elapsed() < Duration::from_millis(50),
+                "non-race errors must not sleep through retry budget: {:?}",
+                fast.elapsed()
+            );
+        },
+    );
+}
+
+#[test]
 fn delegate_warm_cargo_slot_cache_and_opt_out() {
     isolated("delegate_warm_cargo_slot_cache_and_opt_out", || {
         use oms_command_peer::process::{Completed, Executor, Invocation};
