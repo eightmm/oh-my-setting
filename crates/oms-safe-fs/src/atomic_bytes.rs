@@ -11,6 +11,11 @@ use std::time::Duration;
 
 const READ_RACE_RETRIES: usize = 32;
 const READ_RACE_SLEEP: Duration = Duration::from_millis(3);
+// Ten consecutive identical snapshots (nine 3 ms sleeps, about 27 ms) outlast
+// a writer paused inside one multi-page append yet cut a crashed writer's
+// torn tail from the full 32 x 3 ms bound, which still applies while the file
+// keeps changing.
+const STABLE_TORN_ATTEMPTS: usize = 10;
 
 /// True when non-empty JSONL bytes lack a terminating newline.
 pub fn unfinished_jsonl(bytes: &[u8]) -> bool {
@@ -550,9 +555,10 @@ impl Root {
     }
 
     /// Like [`Self::read_no_follow_retrying`], also retrying within the same
-    /// bound when [`unfinished_jsonl`] reports an active append without its
-    /// trailing newline. After the bound, a stable unfinished tail is returned
-    /// as `Ok(bytes)` so callers keep their existing framing or bad-row handling.
+    /// bound while [`unfinished_jsonl`] reports an active append without its
+    /// trailing newline. Once a torn tail stays unchanged across a few
+    /// consecutive attempts (or reaches the bound), it is returned as
+    /// `Ok(bytes)` so callers keep their existing framing or bad-row handling.
     pub fn read_no_follow_jsonl(
         &self,
         path: &Path,
@@ -571,16 +577,40 @@ impl Root {
         options: ByteReadOptions,
         jsonl: bool,
     ) -> Result<(Vec<u8>, Option<Stat>), ByteError> {
+        self.read_retrying_with(path, options, jsonl, || {
+            std::thread::sleep(READ_RACE_SLEEP);
+        })
+    }
+
+    fn read_retrying_with(
+        &self,
+        path: &Path,
+        options: ByteReadOptions,
+        jsonl: bool,
+        mut pause: impl FnMut(),
+    ) -> Result<(Vec<u8>, Option<Stat>), ByteError> {
+        let mut last_torn: Option<(Stat, Vec<u8>)> = None;
+        let mut stable_torn = 0usize;
         for attempt in 0..=READ_RACE_RETRIES {
             match self.read_snapshot_retrying(path, options) {
-                Ok((bytes, _))
-                    if jsonl && unfinished_jsonl(&bytes) && attempt < READ_RACE_RETRIES =>
-                {
-                    std::thread::sleep(READ_RACE_SLEEP);
+                Ok((bytes, Some(stat))) if jsonl && unfinished_jsonl(&bytes) => {
+                    let same_tail = last_torn.as_ref().is_some_and(|(prev_stat, prev_bytes)| {
+                        unchanged(prev_stat, &stat) && *prev_bytes == bytes
+                    });
+                    stable_torn = if same_tail { stable_torn + 1 } else { 1 };
+                    if stable_torn >= STABLE_TORN_ATTEMPTS || attempt == READ_RACE_RETRIES {
+                        return Ok((bytes, Some(stat)));
+                    }
+                    if !same_tail {
+                        last_torn = Some((stat, bytes));
+                    }
+                    pause();
                 }
                 Ok(snapshot) => return Ok(snapshot),
                 Err(ByteError::Changed) if attempt < READ_RACE_RETRIES => {
-                    std::thread::sleep(READ_RACE_SLEEP);
+                    last_torn = None;
+                    stable_torn = 0;
+                    pause();
                 }
                 Err(error) => return Err(error),
             }

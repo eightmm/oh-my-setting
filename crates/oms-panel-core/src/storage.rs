@@ -421,6 +421,7 @@ mod tests {
         std::fs::create_dir_all(thread_abs.parent().unwrap()).unwrap();
         std::fs::write(&thread_abs, b"{\"seq\":0}\n").unwrap();
         let done = AtomicBool::new(false);
+        let reader_steps = std::sync::atomic::AtomicUsize::new(0);
         let barrier = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
             scope.spawn(|| {
@@ -435,10 +436,23 @@ mod tests {
                         .unwrap();
                     file.flush().unwrap();
                     if seq == 1 {
-                        std::thread::sleep(Duration::from_millis(12));
+                        let started = Instant::now();
+                        for (idx, chunk) in b"ok\"}".chunks(1).enumerate() {
+                            let target = Duration::from_micros(((idx + 1) * 700) as u64);
+                            while started.elapsed() < target {
+                                std::thread::yield_now();
+                            }
+                            file.write_all(chunk).unwrap();
+                            file.flush().unwrap();
+                        }
+                        file.write_all(b"\n").unwrap();
+                    } else {
+                        file.write_all(b"ok\"}\n").unwrap();
                     }
-                    file.write_all(b"ok\"}\n").unwrap();
                     file.flush().unwrap();
+                    while reader_steps.load(Ordering::Acquire) < seq {
+                        std::thread::yield_now();
+                    }
                 }
                 done.store(true, Ordering::Release);
             });
@@ -446,13 +460,14 @@ mod tests {
                 barrier.wait();
                 let mut prev = 1usize;
                 let mut reads = 0usize;
-                while !done.load(Ordering::Acquire) || reads < 24 {
+                while !done.load(Ordering::Acquire) || prev < 25 || reads < 24 {
                     let raw = store.read_jsonl(thread_rel, MAX_STATE, true).unwrap();
                     assert!(raw.ends_with(b"\n"));
                     let lines = raw.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count();
                     assert!(lines >= prev);
                     prev = lines;
                     reads += 1;
+                    reader_steps.fetch_add(1, Ordering::Release);
                 }
                 assert_eq!(prev, 25);
             });
