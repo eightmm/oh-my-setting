@@ -15,6 +15,27 @@ use std::{
 fn finding(section: &str, level: &str, message: impl Into<String>) -> Value {
     json!({"section":section,"level":level,"message":message.into()})
 }
+/// An index that only trails its sources is refreshed by the next memory read, so it
+/// is reported, not failed; any other unhealthy state stays an error.
+fn memory_health_finding(out: &(i32, Vec<u8>, Vec<u8>)) -> Value {
+    if out.0 != 0
+        && let Ok(report) = serde_json::from_slice::<Value>(&out.1)
+        && report["status"] == "stale"
+        && report["problems"].as_array().is_some_and(Vec::is_empty)
+        && report["index"]["problems"] == json!(["source-index-mismatch"])
+    {
+        return finding(
+            "memory",
+            "info",
+            "native memory index trails its sources; the next memory read refreshes it",
+        );
+    }
+    finding(
+        "memory",
+        if out.0 == 0 { "ok" } else { "error" },
+        format!("native memory health exit {}", out.0),
+    )
+}
 fn clean(s: &str) -> String {
     s.chars()
         .take(160)
@@ -1740,11 +1761,7 @@ fn health(paths: &Paths, flag: &AtomicBool, services: &dyn crate::Services) -> R
                 &paths.source,
                 flag,
             );
-            rows.push(finding(
-                "memory",
-                if out.0 == 0 { "ok" } else { "error" },
-                format!("native memory health exit {}", out.0),
-            ));
+            rows.push(memory_health_finding(&out));
         }
         let store = oms_command_plan::storage::Store::open(&paths.cwd)
             .map_err(|e| r::Error(e.code, e.message))?
@@ -2432,6 +2449,29 @@ fn policy_baselines(paths: &Paths) -> Result<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_index_trailing_sources_is_info_and_other_failures_stay_errors() {
+        let health = |v: Value| (1, serde_json::to_vec(&v).unwrap(), Vec::new());
+        let trailing =
+            json!({"status":"stale","problems":[],"index":{"problems":["source-index-mismatch"]}});
+        assert_eq!(memory_health_finding(&health(trailing))["level"], "info");
+        for bad in [
+            json!({"status":"degraded","problems":[],"index":{"problems":["integrity-check-failed"]}}),
+            json!({"status":"stale","problems":["invalid-ledger-rows"],"index":{"problems":["source-index-mismatch"]}}),
+            json!({"status":"stale","problems":[],"index":{"problems":["source-index-mismatch","fts-entry-mismatch"]}}),
+        ] {
+            assert_eq!(memory_health_finding(&health(bad))["level"], "error");
+        }
+        assert_eq!(
+            memory_health_finding(&(1, b"not json".to_vec(), Vec::new()))["level"],
+            "error"
+        );
+        assert_eq!(
+            memory_health_finding(&(0, Vec::new(), Vec::new()))["level"],
+            "ok"
+        );
+    }
 
     #[test]
     fn integrations_accept_owned_generated_agy_payload_and_detect_drift() {
