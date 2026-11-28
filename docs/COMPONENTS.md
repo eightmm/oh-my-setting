@@ -69,7 +69,7 @@ explains overlapping entrypoints.
 | `autopilot` | Drive bounded coding under plan and landing contracts. | `oms autopilot` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
 | `goal-drive` | Drive an existing approved plan to its acceptance command. | `oms goal-drive` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
 | `plan-from-spec` | Propose plan tasks from `PROJECT.md` or discovered work evidence. | `oms plan-from-spec` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
-| `plan-run` | Execute one pre-authorized plan task. | `oms plan-run` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
+| `plan-run` | Execute pre-authorized tasks, with optional bounded concurrency. | `oms plan-run` | [Plans and bounded autonomy](#plans-and-bounded-autonomy) |
 | `recipe` | Run typed reusable recipes and workspace actions; import versioned local packs, link worksets and create due/event requests. | `oms recipe` | [Recipes and workspaces](RECIPES.md) |
 | `patch-admit` | Check delegated patch scope and evidence. | `oms patch-admit` | [Delegating writes](#delegating-writes) |
 | `patch-land` | Apply an admitted delegated patch. | `oms patch-land` | [Delegating writes](#delegating-writes) |
@@ -1777,10 +1777,22 @@ bounded by the remaining campaign deadline (never beyond a pinned wall or the
 existing receipts with explicit timeouts keep their pins. `patch-land` uses a
 20-minute wall (30 minutes with `--recover`), or the pinned provider wall when
 pinned longer. `oms goal-drive` repeats within
-a cycle cap and acceptance command; the cap counts task attempts across resumes
-of one autopilot contract, bounds attempts rather than provider cost, and an
-exhausted contract is retired with `oms autopilot abandon`. It is not an
-unbounded autonomous loop.
+a cycle cap and acceptance command. Every new task attempt reserves one cycle
+before worker dispatch, including parallel work; reservations survive interruption.
+The cap remains cumulative across one autopilot owner, or the same standalone
+`--run-id`. Standalone runs also freeze the Plan/task contracts, acceptance,
+branch, route and limits. The cap bounds attempts rather than provider cost;
+an exhausted autopilot contract is retired with `oms autopilot abandon`.
+
+`goal-drive` and `autopilot` accept `--max-writers 1..16` with default 1.
+The autopilot receipt freezes this choice; legacy receipts without it stay serial.
+Parallel goal windows reserve disjoint scopes/resources through review, then
+admit and commit results serially against the current HEAD before starting the
+next window. Failed workers stop new claims without discarding healthy results.
+Existing reviews can drain without new worker reservations. A passing acceptance
+command cannot finish while canonical tasks remain outside `done`/`cancelled`.
+The [autonomous project engine](AUTONOMOUS-PROJECT-ENGINE.md) maps these boundaries
+to tests and distinguishes foreground Main supervision from a resident daemon.
 
 A proposal task may carry `"covers": ["REQ-1"]`: the acceptance criteria its
 verify proves, by the ids the runtime projects from the spec (an explicit
@@ -1798,8 +1810,9 @@ wave, and `oms agent-plan status --json` carries `waves` (`count`, and `tasks`
 mapping each open task to its wave). A task's wave is one past the latest wave
 it depends on, moved later until no task already in that wave may write the
 same `allowed` paths. It shows how much of a plan is sequential before it is
-approved; neither the proposal nor the plan stores it, and `plan-run` still
-claims one ready task at a time.
+approved; neither the proposal nor the plan stores it. Serial `plan-run` claims
+one ready task; opt-in parallel execution independently rechecks current readiness
+and scope/resource conflicts when each slot is filled.
 
 Under each proposed task the listing prints one `size:` line: the tracked files
 its `allowed` paths cover (`git ls-files`), the directories they sit in and how
@@ -2494,11 +2507,13 @@ campaign (`outbound_refused`, exit 2) instead of failing the route.
 The evaluator runs locally and spends no provider budget: each patch or lean candidate
 is applied in a scratch checkout of the base, refused with `verifier-tamper` if it
 touches the problem file or a verifier input, re-checked against every pinned digest,
-then verified with the manifest command under the smaller of the two timeouts (process
-group killed on timeout). Verdicts are `pass`, `fail`, `timeout`, `error` or
+then verified with the manifest command under the smaller configured timeout and
+remaining campaign lifetime (process group killed on timeout). Scratch creation
+also uses the remaining deadline. Verdicts are `pass`, `fail`, `timeout`, `error` or
 `unverified` (text and counterexample, never promoted). On a pass the controller applies
 the exact bytes to a fresh base checkout, checks the pinned digests again and reruns the
-verifier.
+verifier within the remaining lifetime. Expiry before or during either evaluation
+cannot produce a solved handoff. Bounded scratch cleanup still runs after expiry.
 
 A failed final check records `final_verify_failed` and exploration continues. A second
 pass records `campaign_solved` with both receipts, writes `handoff.json` next to the

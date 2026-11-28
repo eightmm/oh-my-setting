@@ -3208,8 +3208,14 @@ fn native_autopilot_advances_a_verified_milestone_before_global_acceptance() {
     f.provider_config();
     std::fs::create_dir(f.repo.join("tests")).unwrap();
     std::fs::write(f.repo.join("b.txt"), "b\n").unwrap();
+    std::fs::write(f.repo.join("c.txt"), "c\n").unwrap();
     for (name, body) in [
-        ("first.sh", "test \"$(cat a.txt)\" = good\n"),
+        ("first-a.sh", "test \"$(cat a.txt)\" = good\n"),
+        ("first-c.sh", "test \"$(cat c.txt)\" = good\n"),
+        (
+            "first.sh",
+            "set -eu\nbash tests/first-a.sh\nbash tests/first-c.sh\n",
+        ),
         ("second.sh", "test \"$(cat b.txt)\" = good\n"),
         (
             "check.sh",
@@ -3218,8 +3224,8 @@ fn native_autopilot_advances_a_verified_milestone_before_global_acceptance() {
     ] {
         std::fs::write(f.repo.join("tests").join(name), body).unwrap();
     }
-    std::fs::write(f.repo.join("PROJECT.md"),"# Project\n## Status\n- State: confirmed\n## Project\n- Goal: complete two independently verified milestones\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh, tests/first.sh, tests/second.sh\n## Scope\n- Scope defaults: a.txt, b.txt\n## Acceptance\n- [id:C1] The first output is good\n- [id:C2] The second output is good\n## Roadmap\n- [ ] first: first output (C1)\n- [ ] second: second output (C2)\n").unwrap();
-    f.git(&["add", "PROJECT.md", "tests", "b.txt"]);
+    std::fs::write(f.repo.join("PROJECT.md"),"# Project\n## Status\n- State: confirmed\n## Project\n- Goal: complete two independently verified milestones\n## Verification\n- Required checks: `bash tests/check.sh`\n- Required check files: tests/check.sh, tests/first.sh, tests/first-a.sh, tests/first-c.sh, tests/second.sh\n## Scope\n- Scope defaults: a.txt, b.txt, c.txt\n## Acceptance\n- [id:C1] Both first milestone outputs are good\n- [id:C2] The second output is good\n## Roadmap\n- [ ] first: first outputs (C1)\n- [ ] second: second output (C2)\n").unwrap();
+    f.git(&["add", "PROJECT.md", "tests", "b.txt", "c.txt"]);
     f.git(&["commit", "-qm", "two milestone contract"]);
     let python = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|p| p.join("python3"))
@@ -3228,7 +3234,7 @@ fn native_autopilot_advances_a_verified_milestone_before_global_acceptance() {
     let script = format!(
         "#!{}\n{}",
         python.display(),
-        r#"import json, os, pathlib, re, sys
+        r#"import json, os, pathlib, re, sys, time
 prompt=sys.stdin.read()
 if pathlib.Path(sys.argv[0]).name=='codex':
     role='review'
@@ -3239,11 +3245,20 @@ elif 'Decompose remaining work into at most' in prompt:
     prefix=json.loads(re.search(r'Ids start with ("[^"]*")\.',prompt).group(1))
     first=prefix=='m1-'
     assert first or prefix=='m2-', prefix
-    answer=json.dumps({'tasks':[{'id':prefix+'t1','title':'implement the frozen milestone','brief':'Implement the frozen milestone file.','allowed':['a.txt' if first else 'b.txt'],'verify':'bash tests/'+('first.sh' if first else 'second.sh'),'depends':[],'covers':['C1' if first else 'C2']}]})
+    targets=[('a.txt','first-a.sh'),('c.txt','first-c.sh')] if first else [('b.txt','second.sh')]
+    answer=json.dumps({'tasks':[{'id':prefix+'t'+str(index+1),'title':'implement the frozen milestone','brief':'Implement frozen target '+target+'.','allowed':[target],'verify':'bash tests/'+check,'depends':[],'covers':['C1' if first else 'C2']} for index,(target,check) in enumerate(targets)]})
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':answer}))
 else:
     role='worker'
-    path=pathlib.Path('a.txt' if pathlib.Path('a.txt').read_text().strip()!='good' else 'b.txt')
+    target=re.search(r'Implement frozen target ([a-z]+\.txt)\.',prompt).group(1)
+    if target in ('a.txt','c.txt'):
+        marker=pathlib.Path(os.environ['ADAPTIVE_LOG']+'.'+target+'.started')
+        marker.write_text('started\n')
+        peer=pathlib.Path(os.environ['ADAPTIVE_LOG']+'.'+('c.txt' if target=='a.txt' else 'a.txt')+'.started')
+        deadline=time.monotonic()+10
+        while not peer.exists() and time.monotonic()<deadline: time.sleep(.02)
+        assert peer.exists(), 'both native workers must start before either can finish'
+    path=pathlib.Path(target)
     path.write_text('good\n')
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':'implemented the assigned milestone'}))
 with pathlib.Path(os.environ['ADAPTIVE_LOG']).open('a') as out: out.write(json.dumps({'role':role,'prompt':prompt})+'\n')
@@ -3297,13 +3312,15 @@ with pathlib.Path(os.environ['ADAPTIVE_LOG']).open('a') as out: out.write(json.d
         "--review-mode",
         "gate",
         "--allowed",
-        "a.txt,b.txt",
+        "a.txt,b.txt,c.txt",
         "--base",
         "main",
         "--max-cycles",
         "4",
+        "--max-writers",
+        "2",
         "--initial-tasks",
-        "1",
+        "2",
         "--replan-tasks",
         "1",
         "--provider-timeout",
@@ -3313,12 +3330,25 @@ with pathlib.Path(os.environ['ADAPTIVE_LOG']).open('a') as out: out.write(json.d
     ]);
     assert_eq!(code, 4, "{out}{err}");
     let first = receipt();
+    assert_eq!(first["contract"]["max_writers"], 2);
     let (code, out, err) = run(&first);
     assert_eq!(
         code, 4,
         "the verified first milestone should produce the next reviewed proposal: {out}{err}"
     );
-    assert_eq!(calls("worker"), 1);
+    assert_eq!(calls("worker"), 2);
+    assert!(
+        out.contains("parallel started=2 failed=0 writers=2"),
+        "{out}{err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("a.txt")).unwrap(),
+        "good\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.repo.join("c.txt")).unwrap(),
+        "good\n"
+    );
     assert_eq!(
         calls("review"),
         1,
@@ -3348,10 +3378,10 @@ with pathlib.Path(os.environ['ADAPTIVE_LOG']).open('a') as out: out.write(json.d
         code, 2,
         "the previous Parent approval cannot approve the next proposal"
     );
-    assert_eq!(calls("worker"), 1);
+    assert_eq!(calls("worker"), 2);
     let (code, out, err) = run(&second);
     assert_eq!(code, 0, "{out}{err}");
-    assert_eq!(calls("worker"), 2);
+    assert_eq!(calls("worker"), 3);
     assert_eq!(
         calls("review"),
         2,
@@ -3370,7 +3400,7 @@ with pathlib.Path(os.environ['ADAPTIVE_LOG']).open('a') as out: out.write(json.d
     assert_eq!(code, 0);
     assert_eq!(
         calls("worker"),
-        2,
+        3,
         "replay cannot dispatch a completed milestone"
     );
 }

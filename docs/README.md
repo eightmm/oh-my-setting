@@ -17,6 +17,7 @@ Choose an OMS guide by task. Follow the linked sections for detailed contracts a
 | Your task | Guide | Start with |
 |---|---|---|
 | Run and coordinate agents | [Terminal panel](TERMINAL-PANEL.md) | [Quick start](TERMINAL-PANEL.md#quick-start) · [Keys](TERMINAL-PANEL.md#keys) |
+| Complete one project autonomously | [Autonomous project engine](AUTONOMOUS-PROJECT-ENGINE.md) | Goal-to-result flow, bounded parallel execution, recovery and acceptance evidence |
 | Review or accept work | [Panel results](TERMINAL-PANEL.md#discussion-and-results) | [Finalize](TERMINAL-PANEL.md#finalize-an-outcome) · [Accept a patch](TERMINAL-PANEL.md#accept-and-publish-a-patch) |
 | Recover interrupted work | [Panel recovery](TERMINAL-PANEL.md#salvaging-a-stopped-worker) | [Settle workers](TERMINAL-PANEL.md#settle-stopped-workers) · [Cleanup](COMPONENTS.md#cleanup) |
 | Inspect recorded progress | [Dashboard](DASHBOARD.md) | Read-only snapshot and JSON schema |

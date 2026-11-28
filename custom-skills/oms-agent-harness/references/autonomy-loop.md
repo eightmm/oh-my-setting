@@ -281,7 +281,12 @@ For a manual plan, `agent-plan add --assignment '{"provider":"claude"}'`
 stores the same contract. Contract-bound plans still require reviewed proposals.
 Unpinned catalog selection and bounded recovery follow model-routing.md; the
 stored request is not proof that every call serves an identical model.
-`plan-run` is one-shot and serial in goal-drive. Standalone interactive sessions
+`plan-run` is one-shot by default. Goal-drive stays serial unless the reviewed
+run selects `--max-writers 2..16`; autopilot freezes this cap and legacy receipts
+without it remain serial. Parallel goal windows hold scope/resource occupancy
+through review, then admit and commit results serially before the next window.
+Each new worker task reserves one original lifetime cycle before dispatch;
+interrupted reservations are not refunded. Standalone interactive sessions
 are for parent-driven clarification, not a way around plan leases or admission.
 Scope, dependencies, regression ownership and parent review remain unchanged;
 model allocation does not grant workers delegation, installation or publication
@@ -347,7 +352,9 @@ For longer work, the parent pins route and wall clock in the reviewed envelope,
 for example `--worker-model MODEL --worker-reasoning-effort high
 --worker-timeout 20m --retry-known`. After interruption, the parent runs
 `status`, validates the durable outer receipt, and executes its exact safe
-continuation internally.
+continuation internally. `--retry-known` still requires the original exact
+task/lease/head and cleanup evidence; integrating a healthy parallel sibling
+can leave another task's old retry proof on an inspection hold.
 
 The first command exits with a proposal for the parent to review and prints
 the proposal's sha256 plus a shell-safe continuation containing every effective
@@ -375,9 +382,13 @@ branch found from the base must be resumed explicitly rather than forked.
 
 For a custom/composed acceptance command, `PROJECT.md` must also name every
 repo-relative verifier file under `Required check files`; those bytes are bound
-to the proposal and protected during admission. Each cycle checks acceptance
-and required tranche completion, then runs one `plan-run --next --land` and a
-commit of exactly the admitted patch's paths, task title as subject. It
+to the proposal and protected during admission. The driver checks acceptance
+and canonical task closure, then dispatches one ready task by default or a
+bounded parallel window. It drains reviewed outputs through serial admission
+and commits exactly each admitted patch's paths, task title as subject. A
+passing acceptance cannot skip pending tasks. Standalone resume keeps the same
+`--run-id`, whose Plan/task contracts, acceptance, work ref, route and limits
+are frozen; the same id never resets the task-attempt count. It
 refuses a dirty tree, parks on task exhaustion, an acceptance command edited
 mid-run or tracked changes beyond the admitted patch. Standalone goal-drive
 retains its local tree/failure stall rule; an owned autopilot uses persisted
