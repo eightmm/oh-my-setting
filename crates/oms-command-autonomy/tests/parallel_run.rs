@@ -204,6 +204,7 @@ struct Mock {
     peak: AtomicUsize,
     live: AtomicUsize,
     plan: Mutex<()>,
+    invocations: Mutex<Vec<(String, Duration, Option<String>)>>,
     review_race: Option<Arc<ReviewRace>>,
     selection_race: Option<Arc<SelectionRace>>,
 }
@@ -427,8 +428,25 @@ impl Services for Mock {
         command: &Invocation,
         _: &AtomicBool,
     ) -> oms_command_autonomy::Result<CommandResult> {
+        let peer_timeout = command
+            .environment
+            .iter()
+            .find_map(|(k, v)| (k == "OMS_PEER_TIMEOUT").then(|| v.to_string_lossy().into_owned()));
+        self.invocations.lock().unwrap().push((
+            command.tool.clone(),
+            command.wall,
+            peer_timeout.clone(),
+        ));
         if command.tool == "peer-delegate" {
+            if std::env::var_os("OMS_PEER_TIMEOUT").is_none() {
+                assert!(peer_timeout.is_none(), "{:?}", command.environment);
+                assert_eq!(command.wall, Duration::from_secs(86_400 + 60));
+            }
             self.delegate(command);
+        } else if command.tool == "patch-land" {
+            assert!(peer_timeout.is_none(), "{:?}", command.environment);
+            assert_eq!(command.wall, Duration::from_secs(1200));
+            return Ok((1, Vec::new(), b"fixture admission hold".to_vec()));
         }
         Ok((0, Vec::new(), Vec::new()))
     }
@@ -678,7 +696,51 @@ fn review_backlog_stops_claims_drains_in_flight_and_exits_three() {
 
 #[test]
 fn one_controller_per_state_repository_and_flag_validation() {
-    if scrubbed_child("one_controller_per_state_repository_and_flag_validation") {
+    const NAME: &str = "one_controller_per_state_repository_and_flag_validation";
+    if std::env::var("PARALLEL_PINNED_TIMEOUT_SUBTEST").as_deref() == Ok("75s") {
+        assert_eq!(std::env::var("OMS_PEER_TIMEOUT").as_deref(), Ok("75s"));
+        let repo = fixture(&[("p1", "a/"), ("p2", "b/")]);
+        let mock = Mock::default();
+        let (code, out, err) = run(
+            &repo,
+            &mock,
+            &["--parallel", "--land", "--max-writers", "2"],
+        );
+        assert_eq!(code, 1, "{out}{err}");
+        let recorded = mock.invocations.lock().unwrap().clone();
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|(tool, _, _)| tool == "peer-delegate")
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "peer-delegate".into(),
+                    Duration::from_secs(75),
+                    Some("75s".into())
+                ),
+                (
+                    "peer-delegate".into(),
+                    Duration::from_secs(75),
+                    Some("75s".into())
+                ),
+            ]
+        );
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|(tool, _, _)| tool == "patch-land")
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                ("patch-land".into(), Duration::from_secs(1200), None),
+                ("patch-land".into(), Duration::from_secs(1200), None),
+            ]
+        );
+        return;
+    }
+    if scrubbed_child(NAME) {
         return;
     }
     let repo = fixture(&[("s1", "a/")]);
@@ -712,9 +774,44 @@ fn one_controller_per_state_repository_and_flag_validation() {
     let (code, out, err) = run(&repo, &mock, &["--parallel"]);
     assert_eq!(code, 0, "{out}{err}");
     assert_eq!(state(&repo, "s1")["state"], "review");
+    assert_eq!(
+        mock.invocations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(tool, _, _)| tool == "peer-delegate")
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![(
+            "peer-delegate".into(),
+            Duration::from_secs(86_400 + 60),
+            None
+        )]
+    );
     // Nothing left to claim is a refusal, not a silent success.
     let (code, _, err) = run(&repo, &mock, &["--parallel"]);
     assert_eq!(code, 2, "{err}");
+
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    if let Some(timeout) = std::env::var_os("OMS_TEST_CALL_TIMEOUT") {
+        child.env("PARALLEL_TEST_CALL_TIMEOUT", timeout);
+    }
+    for (key, _) in std::env::vars_os().filter(|(k, _)| ambient(k)) {
+        child.env_remove(key);
+    }
+    let result = child
+        .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+        .env("PARALLEL_PINNED_TIMEOUT_SUBTEST", "75s")
+        .env("OMS_PEER_TIMEOUT", "75s")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.status.success(), "{text}");
+    assert!(text.contains("1 passed;"), "{text}");
 }
 
 #[test]

@@ -189,6 +189,7 @@ struct FeedbackMock {
     rechecks: std::sync::atomic::AtomicUsize,
     sends: std::sync::atomic::AtomicUsize,
     lands: std::sync::atomic::AtomicUsize,
+    invocations: std::sync::Mutex<Vec<(String, std::time::Duration, Option<String>)>>,
 }
 impl FeedbackMock {
     fn new(mode: &'static str) -> Self {
@@ -199,6 +200,7 @@ impl FeedbackMock {
             rechecks: 0.into(),
             sends: 0.into(),
             lands: 0.into(),
+            invocations: std::sync::Mutex::new(Vec::new()),
         }
     }
     fn count(counter: &std::sync::atomic::AtomicUsize) -> usize {
@@ -337,7 +339,29 @@ fn plan_run_refuses_missing_brief_before_provider() {
     );
     assert_eq!(FeedbackMock::count(&mock.sends), 0);
 }
-impl oms_command_plan::Services for FeedbackMock {}
+impl oms_command_plan::Services for FeedbackMock {
+    fn supervise(
+        &self,
+        _: &oms_command_plan::services::SupervisedCommand,
+    ) -> oms_command_plan::Result<oms_command_plan::services::Execution> {
+        if self.mode.starts_with("base-drift-wall") {
+            return Ok(oms_command_plan::services::Execution {
+                exit: 1,
+                runner_exit: 1,
+                timed_out: false,
+                output_limited: false,
+                launch_error: false,
+                supervision_error: false,
+                output: vec![],
+                duration_s: 0,
+            });
+        }
+        Err(oms_command_plan::Error {
+            code: 2,
+            message: "supervise unavailable".into(),
+        })
+    }
+}
 impl Services for FeedbackMock {
     fn validate_context_pack(
         &self,
@@ -464,6 +488,14 @@ impl Services for FeedbackMock {
         call: &Invocation,
         _: &AtomicBool,
     ) -> oms_command_autonomy::Result<CommandResult> {
+        let peer_timeout = call
+            .environment
+            .iter()
+            .find_map(|(k, v)| (k == "OMS_PEER_TIMEOUT").then(|| v.to_string_lossy().into_owned()));
+        self.invocations
+            .lock()
+            .unwrap()
+            .push((call.tool.clone(), call.wall, peer_timeout));
         match call.tool.as_str() {
             "fail-ledger" => {
                 if self.mode == "review-replaced"
@@ -512,16 +544,21 @@ impl Services for FeedbackMock {
                     .collect();
                 let arg = |name: &str| args.windows(2).find(|w| w[0] == name).unwrap()[1].clone();
                 assert!(!args.iter().any(|arg| arg == "--repair"));
-                // Without an operator override, plan-run must not cut peer-delegate's
-                // own 20-minute write default.
-                if std::env::var_os("OMS_PEER_TIMEOUT").is_none() {
+                // Without OMS_PEER_TIMEOUT or --provider-timeout, plan-run and
+                // goal-drive omit OMS_PEER_TIMEOUT under the cap-plus-grace outer
+                // wall so peer-delegate's own stall check and 24-hour cap decide.
+                if std::env::var_os("OMS_PEER_TIMEOUT").is_none()
+                    && self.mode != "base-drift-wall-flag"
+                {
                     assert!(
-                        call.environment
+                        !call
+                            .environment
                             .iter()
-                            .any(|(key, value)| key == "OMS_PEER_TIMEOUT" && value == "1200s"),
+                            .any(|(key, _)| key == "OMS_PEER_TIMEOUT"),
                         "{:?}",
                         call.environment
                     );
+                    assert_eq!(call.wall, std::time::Duration::from_secs(86_400 + 60));
                 }
                 let binding =
                     serde_json::from_str::<serde_json::Value>(&arg("--plan-binding")).unwrap();
@@ -787,6 +824,20 @@ impl Services for FeedbackMock {
             }
             "patch-land" => {
                 self.lands.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert!(
+                    !call
+                        .environment
+                        .iter()
+                        .any(|(key, _)| key == "OMS_PEER_TIMEOUT"),
+                    "{:?}",
+                    call.environment
+                );
+                let expected_wall = if call.args.iter().any(|arg| arg == "--recover") {
+                    1800
+                } else {
+                    1200
+                };
+                assert_eq!(call.wall, std::time::Duration::from_secs(expected_wall));
                 if self.mode.starts_with("base-drift-ff") {
                     let encoded = call
                         .args
@@ -1149,7 +1200,146 @@ fn feedback_repair_claim_survives_crash_and_missing_send_acknowledgement() {
 
 #[test]
 fn goal_drive_reclaims_expired_claim_for_open_commit_intent() {
-    if scrubbed_child("goal_drive_reclaims_expired_claim_for_open_commit_intent") {
+    const NAME: &str = "goal_drive_reclaims_expired_claim_for_open_commit_intent";
+    const UNPINNED_WALL: std::time::Duration = std::time::Duration::from_secs(86_400 + 60);
+    const LAND_WALL: std::time::Duration = std::time::Duration::from_secs(1200);
+    let drive_fixture = |mode: &'static str| {
+        let mock = FeedbackMock::new(mode);
+        let repo = Repo::new();
+        repo.write(".git/info/exclude", ".oms/\n");
+        repo.write("seed.txt", "seed\n");
+        for args in [
+            vec!["symbolic-ref", "HEAD", "refs/heads/main"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "-qm",
+                "seed",
+            ],
+        ] {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&repo.0)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        }
+        mock.plan(
+            &repo.0,
+            &["init", "--goal", "provider walls", "--accept", "false"],
+        );
+        mock.plan(
+            &repo.0,
+            &[
+                "add",
+                "--id",
+                "work",
+                "--title",
+                "Delegate and land",
+                "--allowed",
+                "src",
+                "--verify",
+                "true",
+            ],
+        );
+        (mock, repo)
+    };
+    let select_calls = |mock: &FeedbackMock| {
+        mock.invocations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(tool, _, _)| matches!(tool.as_str(), "peer-delegate" | "patch-land"))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    if let Ok(subcase) = std::env::var("AUTONOMY_PINNED_TIMEOUT_SUBTEST") {
+        match subcase.as_str() {
+            "env-90s" => {
+                assert_eq!(std::env::var("OMS_PEER_TIMEOUT").as_deref(), Ok("90s"));
+                let (mock, repo) = drive_fixture("base-drift-wall-env");
+                let out = mock.run(&repo, "work", false);
+                assert_eq!(out.0, 1, "{out:?}");
+                assert_eq!(
+                    select_calls(&mock),
+                    vec![
+                        (
+                            "peer-delegate".into(),
+                            std::time::Duration::from_secs(90),
+                            Some("90s".into()),
+                        ),
+                        ("patch-land".into(), LAND_WALL, None),
+                    ]
+                );
+
+                let (mock, repo) = drive_fixture("base-drift-wall-env");
+                let out = run_with_services(
+                    "goal-drive",
+                    &["--max-cycles".into(), "1".into()],
+                    &repo.0,
+                    &AtomicBool::new(false),
+                    &mock,
+                );
+                assert_eq!(out.0, 3, "{out:?}");
+                assert_eq!(
+                    select_calls(&mock),
+                    vec![
+                        (
+                            "peer-delegate".into(),
+                            std::time::Duration::from_secs(90),
+                            Some("90s".into()),
+                        ),
+                        ("patch-land".into(), LAND_WALL, None),
+                    ]
+                );
+
+                let (mock, repo) = drive_fixture("base-drift-wall-flag");
+                let out = run_with_services(
+                    "goal-drive",
+                    &[
+                        "--max-cycles".into(),
+                        "1".into(),
+                        "--provider-timeout".into(),
+                        "45s".into(),
+                    ],
+                    &repo.0,
+                    &AtomicBool::new(false),
+                    &mock,
+                );
+                assert_eq!(out.0, 3, "{out:?}");
+                assert_eq!(
+                    select_calls(&mock),
+                    vec![
+                        (
+                            "peer-delegate".into(),
+                            std::time::Duration::from_secs(45),
+                            Some("45s".into()),
+                        ),
+                        ("patch-land".into(), LAND_WALL, None),
+                    ]
+                );
+            }
+            "env-bad" => {
+                let (mock, repo) = drive_fixture("base-drift-wall-env");
+                assert_eq!(mock.run(&repo, "work", false).0, 2);
+                assert_eq!(
+                    run_with_services("goal-drive", &[], &repo.0, &AtomicBool::new(false), &mock).0,
+                    2
+                );
+                assert!(select_calls(&mock).is_empty());
+            }
+            other => panic!("unknown subcase {other}"),
+        }
+        return;
+    }
+    if scrubbed_child(NAME) {
         return;
     }
     let mock = FeedbackMock::new("unknown-after-start-error");
@@ -1200,9 +1390,76 @@ fn goal_drive_reclaims_expired_claim_for_open_commit_intent() {
     assert_ne!(out.0, 0, "{out:?}");
     assert_eq!(FeedbackMock::count(&mock.lands), 0, "{out:?}");
     assert_eq!(FeedbackMock::count(&mock.sends), 1, "{out:?}");
+    assert_eq!(
+        select_calls(&mock),
+        vec![("peer-delegate".into(), UNPINNED_WALL, None)]
+    );
     let resumed = mock.plan(&repo.0, &["show", "--id", "expired"]);
     assert_eq!(resumed["state"], "running");
     assert_ne!(resumed["lease_id"], lease);
+
+    let (mock, repo) = drive_fixture("base-drift-wall-unpinned");
+    let out = run_with_services(
+        "goal-drive",
+        &["--max-cycles".into(), "1".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_eq!(out.0, 3, "{out:?}");
+    assert_eq!(
+        select_calls(&mock),
+        vec![
+            ("peer-delegate".into(), UNPINNED_WALL, None),
+            ("patch-land".into(), LAND_WALL, None),
+        ]
+    );
+
+    let (mock, repo) = drive_fixture("base-drift-wall-flag");
+    let out = run_with_services(
+        "goal-drive",
+        &[
+            "--max-cycles".into(),
+            "1".into(),
+            "--provider-timeout".into(),
+            "45s".into(),
+        ],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_eq!(out.0, 3, "{out:?}");
+    assert_eq!(
+        select_calls(&mock),
+        vec![
+            (
+                "peer-delegate".into(),
+                std::time::Duration::from_secs(45),
+                Some("45s".into()),
+            ),
+            ("patch-land".into(), LAND_WALL, None),
+        ]
+    );
+
+    for (subcase, env_timeout) in [("env-90s", "90s"), ("env-bad", "bad")] {
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        for (key, _) in std::env::vars_os().filter(|(k, _)| ambient(k)) {
+            child.env_remove(key);
+        }
+        let result = child
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env("AUTONOMY_PINNED_TIMEOUT_SUBTEST", subcase)
+            .env("OMS_PEER_TIMEOUT", env_timeout)
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.status.success(), "{subcase}: {text}");
+        assert!(text.contains("1 passed;"), "{subcase}: {text}");
+    }
 }
 
 #[test]

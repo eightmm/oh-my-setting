@@ -29,6 +29,33 @@ pub(crate) fn scan(raw: &[u8]) -> Result<()> {
         "outbound context contains sensitive-looking content",
     )
 }
+/// Peer cap (24h) plus fixed grace so the child's own stall check and cap decide.
+pub(crate) const UNPINNED_PROVIDER_WALL: std::time::Duration =
+    std::time::Duration::from_secs(86_400 + 60);
+const PROVIDER_TOOLS: [&str; 4] = ["agent-call", "peer-ask", "peer-delegate", "peer-review"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderWall {
+    Unpinned,
+    Pinned(std::time::Duration),
+}
+impl ProviderWall {
+    pub fn from_env() -> Result<Self> {
+        match std::env::var("OMS_PEER_TIMEOUT") {
+            Ok(raw) => Ok(Self::Pinned(verify::duration(&raw)?)),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Unpinned),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Err(Error::new(2, "OMS_PEER_TIMEOUT requires UTF-8 text"))
+            }
+        }
+    }
+    pub fn outer(self) -> std::time::Duration {
+        match self {
+            Self::Unpinned => UNPINNED_PROVIDER_WALL,
+            Self::Pinned(wall) => wall,
+        }
+    }
+}
 pub(crate) fn invoke(
     ctx: &Context<'_>,
     tool: &str,
@@ -44,13 +71,33 @@ pub(crate) fn invoke_configured(
     wall: std::time::Duration,
     environment: Vec<(OsString, OsString)>,
 ) -> Result<Output> {
+    invoke_with_wall(ctx, tool, args, ProviderWall::Pinned(wall), environment)
+}
+pub(crate) fn invoke_provider(
+    ctx: &Context<'_>,
+    tool: &str,
+    args: Vec<OsString>,
+    wall: ProviderWall,
+    environment: Vec<(OsString, OsString)>,
+) -> Result<Output> {
+    invoke_with_wall(ctx, tool, args, wall, environment)
+}
+fn invoke_with_wall(
+    ctx: &Context<'_>,
+    tool: &str,
+    args: Vec<OsString>,
+    wall: ProviderWall,
+    environment: Vec<(OsString, OsString)>,
+) -> Result<Output> {
     let mut command = Invocation::new(tool, &ctx.repo, args);
-    command.wall = wall;
+    command.wall = wall.outer();
     command.environment = environment;
-    if ["agent-call", "peer-ask", "peer-delegate", "peer-review"].contains(&tool) {
+    if let ProviderWall::Pinned(pinned) = wall
+        && PROVIDER_TOOLS.contains(&tool)
+    {
         command.environment.push((
             "OMS_PEER_TIMEOUT".into(),
-            format!("{}s", wall.as_secs()).into(),
+            format!("{}s", pinned.as_secs()).into(),
         ));
     }
     command
@@ -1298,4 +1345,72 @@ pub fn size_signal(paths: &[String], allowed: &[String]) -> Value {
         })
         .count();
     json!({"files": selected.len(), "dirs": dirs, "tests": tests, "capped": capped, "repo_wide": repo_wide, "large": repo_wide || capped || selected.len() > 40 || dirs > 8})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CommandResult, Services};
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<Invocation>>);
+    impl oms_command_plan::Services for Recorder {}
+    impl Services for Recorder {
+        fn invoke(&self, call: &Invocation, _: &AtomicBool) -> Result<CommandResult> {
+            self.0.lock().unwrap().push(call.clone());
+            Ok((0, Vec::new(), Vec::new()))
+        }
+    }
+
+    #[test]
+    fn invoke_provider_omits_peer_timeout_when_unpinned_and_forwards_when_pinned() {
+        let dir = std::env::temp_dir().join(value::random("oms-planning-wall-").unwrap());
+        std::fs::create_dir(&dir).unwrap();
+        let path = std::fs::canonicalize(&dir).unwrap();
+        let stop = AtomicBool::new(false);
+        let host = Recorder::default();
+        let ctx = Context::new(path.clone(), path, &host, &stop).unwrap();
+        for tool in PROVIDER_TOOLS {
+            invoke_provider(&ctx, tool, Vec::new(), ProviderWall::Unpinned, Vec::new()).unwrap();
+            invoke_provider(
+                &ctx,
+                tool,
+                Vec::new(),
+                ProviderWall::Pinned(Duration::from_secs(120)),
+                Vec::new(),
+            )
+            .unwrap();
+        }
+        invoke(&ctx, "patch-land", Vec::new(), Duration::from_secs(1200)).unwrap();
+        let recorded = host.0.lock().unwrap();
+        assert_eq!(recorded.len(), PROVIDER_TOOLS.len() * 2 + 1);
+        for [unpinned, pinned] in recorded[..PROVIDER_TOOLS.len() * 2].as_chunks::<2>().0 {
+            assert_eq!(unpinned.wall, UNPINNED_PROVIDER_WALL);
+            assert!(
+                !unpinned
+                    .environment
+                    .iter()
+                    .any(|(k, _)| k == "OMS_PEER_TIMEOUT")
+            );
+            assert_eq!(pinned.wall, Duration::from_secs(120));
+            assert!(
+                pinned
+                    .environment
+                    .iter()
+                    .any(|(k, v)| k == "OMS_PEER_TIMEOUT" && v == "120s")
+            );
+        }
+        let land = recorded.last().unwrap();
+        assert_eq!(land.wall, Duration::from_secs(1200));
+        assert!(
+            !land
+                .environment
+                .iter()
+                .any(|(k, _)| k == "OMS_PEER_TIMEOUT")
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
