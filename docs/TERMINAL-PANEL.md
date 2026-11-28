@@ -3547,9 +3547,9 @@ refused while any panel remains installed for that alias:
   `oms-panel` entries, and Git-tracked `.agents/mcp_config.json` files, and adds
   `/.agents/mcp_config.json` to `<common-git-dir>/info/exclude` when untracked and
   not ignored. When OMS created the file and nothing else remains in it, uninstall unlinks it (plus `.agents` if OMS
-  created it and it is empty, and last-owner exclude lines); otherwise uninstall
+  created it and it is empty); otherwise uninstall
   removes only `oms-panel` (and `mcpServers` if OMS created that key and it is now
-  empty, preserving and reporting edited entries via `preservedFiles`) and writes 2-space pretty JSON. That rewrite keeps the other keys, their order and values, but not always their exact bytes: string escapes and number spellings are normalized and a trailing newline is added. Install does not read `~/.gemini` or report trust fields;
+  empty, preserving and reporting edited entries via `preservedFiles`) and writes 2-space pretty JSON. That rewrite keeps the other keys, their order and values, but not always their exact bytes: string escapes and number spellings are normalized and a trailing newline is added. Unless it preserves an edited entry, uninstall also removes last-owner exclude lines or hands them to a remaining owner. Install does not read `~/.gemini` or report trust fields;
   interactive `agy` can ask "Trust this folder?", and the panel loads only in
   sessions where `agy` loads that workspace's `.agents` customizations.
 

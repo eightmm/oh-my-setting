@@ -407,8 +407,7 @@ not ignored, and recording `scope: "project"`, canonical `entry_sha256`, `create
 `~/.gemini` or emitting trust fields (interactive `agy` can ask "Trust this folder?", and
 the panel loads only in sessions where `agy` loads that workspace's `.agents`
 customizations). Installing into an existing file rewrites it as 2-space pretty JSON
-(identical reruns and exact-match adoptions leave the file untouched); when OMS created the file and nothing else remains in it, uninstall unlinks it (plus `.agents` if OMS created it and it is empty, and
-last-owner exclude lines), and otherwise removes only `oms-panel` (plus `mcpServers` if
+(identical reruns and exact-match adoptions leave the file untouched); when OMS created the file and nothing else remains in it, uninstall unlinks it (plus `.agents` if OMS created it and it is empty), and otherwise removes only `oms-panel` (plus `mcpServers` if
 OMS created that key and it is now empty, or preserves and reports edited entries via
-`preservedFiles`) and writes 2-space pretty JSON, keeping other keys, their order and values but not always their exact bytes (escapes and number spellings are normalized; a trailing newline is added). `--unregister-project` refuses aliases that still
+`preservedFiles`) and writes 2-space pretty JSON, keeping other keys, their order and values but not always their exact bytes (escapes and number spellings are normalized; a trailing newline is added). Unless it preserves an edited entry, uninstall also removes last-owner exclude lines or hands them to a remaining owner. `--unregister-project` refuses aliases that still
 have any recorded panel.
