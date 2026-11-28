@@ -32,6 +32,8 @@ const CODEX_BLOCK_BEGIN: &str = "# BEGIN oh-my-setting codex-panel";
 const CODEX_BLOCK_END: &str = "# END oh-my-setting codex-panel";
 const CODEX_UNTRUSTED_REASON: &str = "codex-project-untrusted";
 const CODEX_TRUST_UNKNOWN_REASON: &str = "codex-trust-unknown";
+const ANTIGRAVITY_UNTRUSTED_REASON: &str = "antigravity-project-untrusted";
+const ANTIGRAVITY_TRUST_UNKNOWN_REASON: &str = "antigravity-trust-unknown";
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const VENDOR_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CAPTURE_BYTES: usize = 64 * 1024;
@@ -49,15 +51,17 @@ const GIT_ENV_OVERRIDES: &[&str] = &[
 pub(crate) enum PanelApp {
     Claude,
     Codex,
+    Antigravity,
 }
 
 impl PanelApp {
-    pub(crate) const SUPPORTED: &'static str = "claude, codex";
+    pub(crate) const SUPPORTED: &'static str = "claude, codex, antigravity";
 
     pub(crate) fn parse(raw: &str) -> Result<Self> {
         match raw {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
+            "antigravity" => Ok(Self::Antigravity),
             _ => Err(Error::new(format!(
                 "unsupported panel app '{raw}' (supported: {})",
                 Self::SUPPORTED
@@ -69,13 +73,14 @@ impl PanelApp {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Antigravity => "antigravity",
         }
     }
 
     const fn expected_scope(self) -> &'static str {
         match self {
             Self::Claude => "local",
-            Self::Codex => "project",
+            Self::Codex | Self::Antigravity => "project",
         }
     }
 }
@@ -102,15 +107,25 @@ pub(super) struct PanelRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_config: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_codex_dir: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_agents_dir: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_exclude: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub separator_added: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_separator_added: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_mcp_servers: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prior_ws: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,11 +138,87 @@ struct CodexRowMeta {
     exclude_separator_added: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AntigravityRowMeta {
+    entry_sha256: String,
+    created_config: bool,
+    created_agents_dir: bool,
+    created_exclude: bool,
+    separator_added: bool,
+    exclude_separator_added: bool,
+    created_mcp_servers: bool,
+    prior_sha256: Option<String>,
+    prior_ws: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RowMeta {
+    Claude,
+    Codex(CodexRowMeta),
+    Antigravity(AntigravityRowMeta),
+}
+
 fn valid_sha256_hex(raw: &str) -> bool {
     raw.len() == 64
         && raw
             .bytes()
             .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+}
+
+fn decode_ws_runs(encoded: &str) -> Option<Vec<String>> {
+    if encoded.len() > MAX_BYTES {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut total_decoded = 0usize;
+    for part in encoded.split(',') {
+        let mut s = String::new();
+        let bytes = part.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let num_start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            let count = if i == num_start {
+                1usize
+            } else {
+                let digits = &part[num_start..i];
+                if digits.starts_with('0') {
+                    return None;
+                }
+                let n = digits.parse::<usize>().ok()?;
+                if !(2..=MAX_CONFIG_BYTES).contains(&n) {
+                    return None;
+                }
+                n
+            };
+            if i >= bytes.len() {
+                return None;
+            }
+            let ch = match bytes[i] {
+                b's' => ' ',
+                b'n' => '\n',
+                b'r' => '\r',
+                b't' => '\t',
+                _ => return None,
+            };
+            i += 1;
+            total_decoded = total_decoded.checked_add(count)?;
+            if total_decoded > MAX_CONFIG_BYTES {
+                return None;
+            }
+            for _ in 0..count {
+                s.push(ch);
+            }
+        }
+        out.push(s);
+    }
+    (out.len() >= 2).then_some(out)
+}
+
+fn valid_prior_ws(raw: &str) -> bool {
+    !raw.is_empty() && decode_ws_runs(raw).is_some()
 }
 
 pub(super) type PanelMap = BTreeMap<String, Vec<PanelRecord>>;
@@ -185,6 +276,7 @@ fn validate_panel_map(panels: &PanelMap) -> Result<()> {
         "Invalid OMS project panel map: exceeds 128 entries",
     )?;
     let mut seen_codex_paths = BTreeSet::new();
+    let mut seen_antigravity_paths = BTreeSet::new();
     for (alias, rows) in panels {
         require(
             valid_alias(alias) && !rows.is_empty() && rows.len() <= 8,
@@ -198,22 +290,55 @@ fn validate_panel_map(panels: &PanelMap) -> Result<()> {
             let fields_valid = match app {
                 PanelApp::Claude => {
                     row.block_sha256.is_none()
+                        && row.entry_sha256.is_none()
                         && row.created_config.is_none()
                         && row.created_codex_dir.is_none()
+                        && row.created_agents_dir.is_none()
                         && row.created_exclude.is_none()
                         && row.separator_added.is_none()
                         && row.exclude_separator_added.is_none()
+                        && row.created_mcp_servers.is_none()
+                        && row.prior_sha256.is_none()
+                        && row.prior_ws.is_none()
                 }
                 PanelApp::Codex => {
                     row.block_sha256.as_deref().is_some_and(valid_sha256_hex)
+                        && row.entry_sha256.is_none()
                         && row.created_config.is_some()
                         && row.created_codex_dir.is_some()
+                        && row.created_agents_dir.is_none()
                         && row.created_exclude.is_some()
+                        && row.created_mcp_servers.is_none()
+                        && row.prior_sha256.is_none()
+                        && row.prior_ws.is_none()
                         && !(row.created_codex_dir == Some(true)
                             && row.created_config == Some(false))
                         && !(row.exclude_separator_added == Some(true)
                             && row.created_exclude != Some(true))
                         && seen_codex_paths.insert(row.path.clone())
+                }
+                PanelApp::Antigravity => {
+                    row.entry_sha256.as_deref().is_some_and(valid_sha256_hex)
+                        && row.block_sha256.is_none()
+                        && row.created_config.is_some()
+                        && row.created_agents_dir.is_some()
+                        && row.created_codex_dir.is_none()
+                        && row.created_exclude.is_some()
+                        && !(row.created_agents_dir == Some(true)
+                            && row.created_config == Some(false))
+                        && !(row.exclude_separator_added == Some(true)
+                            && row.created_exclude != Some(true))
+                        && row.exclude_separator_added != Some(false)
+                        && row.separator_added != Some(false)
+                        && row.created_mcp_servers != Some(false)
+                        && row.prior_sha256.as_deref().is_none_or(valid_sha256_hex)
+                        && row.prior_ws.as_deref().is_none_or(valid_prior_ws)
+                        && !(row.prior_sha256.is_some() && row.created_config != Some(false))
+                        && !(row.separator_added.is_some()
+                            && (row.created_config != Some(false) || row.prior_sha256.is_none()))
+                        && !(row.prior_ws.is_some()
+                            && (row.created_config != Some(false) || row.prior_sha256.is_none()))
+                        && seen_antigravity_paths.insert(row.path.clone())
                 }
             };
             require(
@@ -513,6 +638,255 @@ fn table_with_expected_oms_panel(
     };
     servers.insert(PANEL_ENTRY_NAME.into(), oms_toml::Value::Table(server));
     Ok(base)
+}
+
+fn expected_antigravity_panel_entry_for_version(
+    launcher: &Path,
+    physical_repo: &Path,
+    resource_version: &str,
+) -> Result<serde_json::Value> {
+    let launcher_str = launcher
+        .to_str()
+        .ok_or_else(|| Error::new("launcher path must be valid UTF-8"))?;
+    let repo_str = physical_repo
+        .to_str()
+        .ok_or_else(|| Error::new("project path must be valid UTF-8"))?;
+    let mut env_map = serde_json::Map::new();
+    env_map.insert("OMS_MCP_TOOL_PROFILE".into(), json!("chatgpt-panel"));
+    env_map.insert("OMS_PANEL_REPO".into(), json!(repo_str));
+    env_map.insert(
+        "OMS_MCP_PANEL_RESOURCE_VERSION".into(),
+        json!(resource_version),
+    );
+    let mut entry = serde_json::Map::new();
+    entry.insert("command".into(), json!(launcher_str));
+    entry.insert("args".into(), json!(["mcp-server"]));
+    entry.insert("env".into(), serde_json::Value::Object(env_map));
+    Ok(serde_json::Value::Object(entry))
+}
+
+fn expected_antigravity_panel_entry(
+    launcher: &Path,
+    physical_repo: &Path,
+) -> Result<serde_json::Value> {
+    expected_antigravity_panel_entry_for_version(
+        launcher,
+        physical_repo,
+        codex_panel_resource_version(),
+    )
+}
+
+fn canonicalize_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonicalize_json_value).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<&str, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.as_str(), canonicalize_json_value(v)))
+                .collect();
+            let mut out = serde_json::Map::with_capacity(sorted.len());
+            for (k, v) in sorted {
+                out.insert(k.to_owned(), v);
+            }
+            serde_json::Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
+fn canonical_json_sha256(value: &serde_json::Value) -> Result<String> {
+    let canonical = canonicalize_json_value(value);
+    let bytes = serde_json::to_vec(&canonical).map_err(Error::new)?;
+    Ok(oms_panel_core::digest(&bytes))
+}
+
+fn ordered_json_sha256(map: &serde_json::Map<String, serde_json::Value>) -> Result<String> {
+    let bytes = serde_json::to_vec(map).map_err(Error::new)?;
+    Ok(oms_panel_core::digest(&bytes))
+}
+
+fn parse_strict_json_object_bounded(
+    raw: &[u8],
+    label: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
+    require(
+        raw.len() <= MAX_CONFIG_BYTES,
+        &format!("Invalid {label}: exceeds 1 MiB"),
+    )?;
+    let _ = std::str::from_utf8(raw)
+        .map_err(|_| Error::new(format!("Invalid {label}: file is not valid UTF-8")))?;
+    let opts = oms_json::ParseOptions {
+        max_bytes: MAX_CONFIG_BYTES,
+        max_depth: 128,
+        ..oms_json::ParseOptions::strict()
+    };
+    oms_json::parse_with_options(raw, &opts)
+        .map_err(|e| Error::new(format!("Invalid {label}: {e}")))?;
+    let parsed: serde_json::Value =
+        serde_json::from_slice(raw).map_err(|e| Error::new(format!("Invalid {label}: {e}")))?;
+    match parsed {
+        serde_json::Value::Object(map) => Ok(map),
+        _ => Err(Error::new(format!(
+            "Invalid {label}: root value must be a JSON object"
+        ))),
+    }
+}
+
+fn encode_pretty_2space_json(
+    map: &serde_json::Map<String, serde_json::Value>,
+    omit_trailing_newline: bool,
+) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(map).map_err(Error::new)?;
+    if !omit_trailing_newline {
+        bytes.push(b'\n');
+    }
+    Ok(bytes)
+}
+
+fn split_json_tokens_and_ws(text: &str) -> Option<(Vec<&str>, Vec<&str>)> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut ws = Vec::new();
+    let mut pos = 0usize;
+    loop {
+        let ws_start = pos;
+        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\r' | b'\n') {
+            pos += 1;
+        }
+        ws.push(&text[ws_start..pos]);
+        if pos >= bytes.len() {
+            break;
+        }
+        let tok_start = pos;
+        match bytes[pos] {
+            b'{' | b'}' | b'[' | b']' | b':' | b',' => {
+                pos += 1;
+            }
+            b'"' => {
+                pos += 1;
+                let mut escaped = false;
+                let mut closed = false;
+                while pos < bytes.len() {
+                    let b = bytes[pos];
+                    pos += 1;
+                    if escaped {
+                        escaped = false;
+                    } else if b == b'\\' {
+                        escaped = true;
+                    } else if b == b'"' {
+                        closed = true;
+                        break;
+                    }
+                }
+                if !closed {
+                    return None;
+                }
+            }
+            _ => {
+                while pos < bytes.len()
+                    && !matches!(
+                        bytes[pos],
+                        b' ' | b'\t'
+                            | b'\r'
+                            | b'\n'
+                            | b'{'
+                            | b'}'
+                            | b'['
+                            | b']'
+                            | b':'
+                            | b','
+                            | b'"'
+                    )
+                {
+                    pos += 1;
+                }
+            }
+        }
+        tokens.push(&text[tok_start..pos]);
+    }
+    (!tokens.is_empty()).then_some((tokens, ws))
+}
+
+fn encode_ws_runs(ws: &[&str]) -> Option<String> {
+    let mut out = String::new();
+    for (idx, segment) in ws.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        let bytes = segment.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let b = bytes[i];
+            let code = match b {
+                b' ' => 's',
+                b'\n' => 'n',
+                b'\r' => 'r',
+                b'\t' => 't',
+                _ => return None,
+            };
+            let start = i;
+            while i < bytes.len() && bytes[i] == b {
+                i += 1;
+            }
+            let count = i - start;
+            if count > 1 {
+                use std::fmt::Write;
+                let _ = write!(&mut out, "{count}");
+            }
+            out.push(code);
+        }
+    }
+    Some(out)
+}
+
+fn reassemble_json_with_ws(
+    map: &serde_json::Map<String, serde_json::Value>,
+    encoded_ws: &str,
+) -> Option<Vec<u8>> {
+    let compact = serde_json::to_string(map).ok()?;
+    let (tokens, _) = split_json_tokens_and_ws(&compact)?;
+    let ws = decode_ws_runs(encoded_ws)?;
+    if ws.len() != tokens.len() + 1 {
+        return None;
+    }
+    let total_len =
+        tokens.iter().map(|t| t.len()).sum::<usize>() + ws.iter().map(String::len).sum::<usize>();
+    if total_len > MAX_CONFIG_BYTES {
+        return None;
+    }
+    let mut out = String::with_capacity(total_len);
+    for (tok, w) in tokens.iter().zip(ws.iter()) {
+        out.push_str(w);
+        out.push_str(tok);
+    }
+    out.push_str(ws.last()?);
+    Some(out.into_bytes())
+}
+
+fn capture_prior_json_formatting(
+    prior_bytes: &[u8],
+    prior_map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(bool, Option<String>, Option<String>)> {
+    let pretty_with_nl = encode_pretty_2space_json(prior_map, false)?;
+    if prior_bytes == pretty_with_nl.as_slice() {
+        return Ok((false, None, None));
+    }
+    let prior_sha = ordered_json_sha256(prior_map)?;
+    let pretty_no_nl = encode_pretty_2space_json(prior_map, true)?;
+    if prior_bytes == pretty_no_nl.as_slice() {
+        return Ok((true, Some(prior_sha), None));
+    }
+    if let Ok(prior_str) = std::str::from_utf8(prior_bytes)
+        && let Some((_, ws_runs)) = split_json_tokens_and_ws(prior_str)
+        && let Some(encoded) = encode_ws_runs(&ws_runs)
+        && valid_prior_ws(&encoded)
+        && reassemble_json_with_ws(prior_map, &encoded).as_deref() == Some(prior_bytes)
+    {
+        return Ok((false, Some(prior_sha), Some(encoded)));
+    }
+    Ok((false, None, None))
 }
 
 fn open_dir_nofollow(path: &Path, label: &str) -> Result<OwnedFd> {
@@ -1250,6 +1624,545 @@ fn attach_codex_trust_fields(report: &mut serde_json::Value, trust: &CodexTrustS
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AntigravityTrustStatus {
+    Trusted,
+    Untrusted,
+    Unknown { hint: String },
+}
+
+fn resolve_antigravity_trust_in_json(
+    raw: &[u8],
+    physical_repo: &Path,
+    config_label: &Path,
+) -> AntigravityTrustStatus {
+    if raw.len() > MAX_CONFIG_BYTES {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: {} exceeds 1 MiB.",
+                config_label.display()
+            )),
+        };
+    }
+    let opts = oms_json::ParseOptions {
+        allow_duplicate_keys: true,
+        max_bytes: MAX_CONFIG_BYTES,
+        max_depth: 128,
+        ..oms_json::ParseOptions::strict()
+    };
+    if oms_json::parse_with_options(raw, &opts).is_err() {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: {} is not valid JSON.",
+                config_label.display()
+            )),
+        };
+    }
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: {} is not valid JSON.",
+                config_label.display()
+            )),
+        };
+    };
+    let Some(entries) = parsed.as_object() else {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: {} must be a JSON object.",
+                config_label.display()
+            )),
+        };
+    };
+
+    let mut max_trusted_depth: Option<usize> = None;
+    let mut max_untrusted_depth: Option<usize> = None;
+
+    for (key, value) in entries {
+        let Some(level) = value.as_str() else {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: {} has a non-string trust entry.",
+                    config_label.display()
+                )),
+            };
+        };
+        let rule_path = Path::new(key);
+        if !rule_path.is_absolute()
+            || rule_path
+                .components()
+                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        {
+            continue;
+        }
+        match level {
+            "TRUST_FOLDER" if physical_repo.starts_with(rule_path) => {
+                let depth = rule_path.components().count();
+                max_trusted_depth = Some(max_trusted_depth.map_or(depth, |d| d.max(depth)));
+            }
+            "TRUST_PARENT" => {
+                let eff = rule_path.parent().unwrap_or(rule_path);
+                if physical_repo.starts_with(eff) {
+                    let depth = eff.components().count();
+                    max_trusted_depth = Some(max_trusted_depth.map_or(depth, |d| d.max(depth)));
+                }
+            }
+            "DO_NOT_TRUST" if physical_repo.starts_with(rule_path) => {
+                let depth = rule_path.components().count();
+                max_untrusted_depth = Some(max_untrusted_depth.map_or(depth, |d| d.max(depth)));
+            }
+            _ => {}
+        }
+    }
+
+    match (max_trusted_depth, max_untrusted_depth) {
+        (Some(td), Some(ud)) if ud >= td => AntigravityTrustStatus::Untrusted,
+        (Some(_), _) => AntigravityTrustStatus::Trusted,
+        (None, _) => AntigravityTrustStatus::Untrusted,
+    }
+}
+
+fn check_antigravity_project_trust_at(
+    home_dir: &Path,
+    physical_repo: &Path,
+    expected_uid: u32,
+) -> AntigravityTrustStatus {
+    use std::os::unix::fs::MetadataExt;
+    let gemini_dir = home_dir.join(".gemini");
+    let config_path = gemini_dir.join("trustedFolders.json");
+
+    match std::fs::symlink_metadata(home_dir) {
+        Err(e) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: cannot inspect HOME ({}): {e}.",
+                    home_dir.display()
+                )),
+            };
+        }
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: HOME ({}) is a symlink.",
+                    home_dir.display()
+                )),
+            };
+        }
+        Ok(meta) if !meta.is_dir() => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: HOME ({}) is not a directory.",
+                    home_dir.display()
+                )),
+            };
+        }
+        Ok(meta) if meta.uid() != expected_uid => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: HOME ({}) is not owned by the current user.",
+                    home_dir.display()
+                )),
+            };
+        }
+        Ok(_) => {}
+    }
+
+    let home_fd = match fs::open(
+        home_dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::LOOP) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: HOME ({}) is a symlink.",
+                    home_dir.display()
+                )),
+            };
+        }
+        Err(e) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: cannot open HOME ({}): {e}.",
+                    home_dir.display()
+                )),
+            };
+        }
+    };
+    let Ok(home_stat) = fs::fstat(&home_fd) else {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: cannot inspect HOME ({}).",
+                home_dir.display()
+            )),
+        };
+    };
+    if FileType::from_raw_mode(home_stat.st_mode) != FileType::Directory
+        || home_stat.st_uid != expected_uid
+    {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: HOME ({}) is not an owned directory.",
+                home_dir.display()
+            )),
+        };
+    }
+
+    match fs::statat(&home_fd, OsStr::new(".gemini"), AtFlags::SYMLINK_NOFOLLOW) {
+        Err(Errno::NOENT) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: {} does not exist.",
+                    config_path.display()
+                )),
+            };
+        }
+        Err(e) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: cannot inspect {}: {e}.",
+                    gemini_dir.display()
+                )),
+            };
+        }
+        Ok(stat) => {
+            let kind = FileType::from_raw_mode(stat.st_mode);
+            if kind == FileType::Symlink {
+                return AntigravityTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Antigravity folder trust: {} is a symlink.",
+                        gemini_dir.display()
+                    )),
+                };
+            }
+            if kind != FileType::Directory {
+                return AntigravityTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Antigravity folder trust: {} is not a directory.",
+                        gemini_dir.display()
+                    )),
+                };
+            }
+            if stat.st_uid != expected_uid {
+                return AntigravityTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Antigravity folder trust: {} is not owned by the current user.",
+                        gemini_dir.display()
+                    )),
+                };
+            }
+        }
+    }
+
+    let gemini_fd = match fs::openat(
+        &home_fd,
+        OsStr::new(".gemini"),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: {} does not exist.",
+                    config_path.display()
+                )),
+            };
+        }
+        Err(Errno::LOOP) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: {} is a symlink.",
+                    gemini_dir.display()
+                )),
+            };
+        }
+        Err(Errno::NOTDIR) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: {} is not a directory.",
+                    gemini_dir.display()
+                )),
+            };
+        }
+        Err(e) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: cannot open {}: {e}.",
+                    gemini_dir.display()
+                )),
+            };
+        }
+    };
+    let Ok(gemini_stat) = fs::fstat(&gemini_fd) else {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: cannot inspect {}.",
+                gemini_dir.display()
+            )),
+        };
+    };
+    if FileType::from_raw_mode(gemini_stat.st_mode) != FileType::Directory {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: {} is not a directory.",
+                gemini_dir.display()
+            )),
+        };
+    }
+    if gemini_stat.st_uid != expected_uid {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: {} is not owned by the current user.",
+                gemini_dir.display()
+            )),
+        };
+    }
+
+    let named = match fs::statat(
+        &gemini_fd,
+        OsStr::new("trustedFolders.json"),
+        AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Err(Errno::NOENT) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: {} does not exist.",
+                    config_path.display()
+                )),
+            };
+        }
+        Err(e) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: cannot inspect {}: {e}.",
+                    config_path.display()
+                )),
+            };
+        }
+        Ok(stat) => {
+            let kind = FileType::from_raw_mode(stat.st_mode);
+            if kind == FileType::Symlink {
+                return AntigravityTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Antigravity folder trust: {} is a symlink.",
+                        config_path.display()
+                    )),
+                };
+            }
+            if kind != FileType::RegularFile {
+                return AntigravityTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Antigravity folder trust: {} is not a regular file.",
+                        config_path.display()
+                    )),
+                };
+            }
+            if stat.st_uid != expected_uid {
+                return AntigravityTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Antigravity folder trust: {} is not owned by the current user.",
+                        config_path.display()
+                    )),
+                };
+            }
+            stat
+        }
+    };
+
+    let fd = match fs::openat(
+        &gemini_fd,
+        OsStr::new("trustedFolders.json"),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: {} does not exist.",
+                    config_path.display()
+                )),
+            };
+        }
+        Err(Errno::LOOP) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: {} is a symlink.",
+                    config_path.display()
+                )),
+            };
+        }
+        Err(e) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: cannot read {}: {e}.",
+                    config_path.display()
+                )),
+            };
+        }
+    };
+
+    let opened = match fs::fstat(&fd) {
+        Ok(stat) => stat,
+        Err(e) => {
+            return AntigravityTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Antigravity folder trust: cannot inspect {}: {e}.",
+                    config_path.display()
+                )),
+            };
+        }
+    };
+    if FileType::from_raw_mode(opened.st_mode) != FileType::RegularFile {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: {} is not a regular file.",
+                config_path.display()
+            )),
+        };
+    }
+    if opened.st_uid != expected_uid {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: {} is not owned by the current user.",
+                config_path.display()
+            )),
+        };
+    }
+    if !same_stat(&named, &opened) {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: {} changed while opening.",
+                config_path.display()
+            )),
+        };
+    }
+
+    let mut file = std::fs::File::from(fd);
+    let mut bytes = Vec::new();
+    if let Err(e) = (&mut file)
+        .take((MAX_CONFIG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+    {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: cannot read {}: {e}.",
+                config_path.display()
+            )),
+        };
+    }
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: {} exceeds 1 MiB.",
+                config_path.display()
+            )),
+        };
+    }
+    let Ok(after) = fs::fstat(&file) else {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: cannot verify {} after reading.",
+                config_path.display()
+            )),
+        };
+    };
+    if !same_stat(&opened, &after) {
+        return AntigravityTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Antigravity folder trust: {} changed while reading.",
+                config_path.display()
+            )),
+        };
+    }
+
+    resolve_antigravity_trust_in_json(&bytes, physical_repo, &config_path)
+}
+
+fn check_antigravity_project_trust_with_env(
+    physical_repo: &Path,
+    home_env: Option<&OsStr>,
+) -> AntigravityTrustStatus {
+    let Some(home) = home_env.filter(|v| !v.is_empty()) else {
+        return AntigravityTrustStatus::Unknown {
+            hint: "Cannot verify Antigravity folder trust: HOME is not set.".into(),
+        };
+    };
+    let home_path = PathBuf::from(home);
+    if !normalized_abs_utf8(&home_path) {
+        return AntigravityTrustStatus::Unknown {
+            hint: "Cannot verify Antigravity folder trust: HOME is not a normalized UTF-8 absolute path."
+                .into(),
+        };
+    }
+    check_antigravity_project_trust_at(
+        &home_path,
+        physical_repo,
+        rustix::process::geteuid().as_raw(),
+    )
+}
+
+fn check_antigravity_project_trust(physical_repo: &Path) -> AntigravityTrustStatus {
+    check_antigravity_project_trust_with_env(physical_repo, std::env::var_os("HOME").as_deref())
+}
+
+fn antigravity_untrusted_hint(physical_repo: &Path) -> String {
+    format!(
+        "Trust {} in Antigravity so it loads .agents/mcp_config.json.",
+        physical_repo.display()
+    )
+}
+
+fn attach_antigravity_trust_fields(
+    report: &mut serde_json::Value,
+    physical_repo: &Path,
+    trust: &AntigravityTrustStatus,
+) {
+    match trust {
+        AntigravityTrustStatus::Trusted => {
+            report["active"] = json!(true);
+        }
+        AntigravityTrustStatus::Untrusted => {
+            report["active"] = json!(false);
+            report["reason"] = json!(ANTIGRAVITY_UNTRUSTED_REASON);
+            report["hint"] = json!(antigravity_untrusted_hint(physical_repo));
+        }
+        AntigravityTrustStatus::Unknown { hint } => {
+            report["active"] = json!(false);
+            report["reason"] = json!(ANTIGRAVITY_TRUST_UNKNOWN_REASON);
+            report["hint"] = json!(hint);
+        }
+    }
+}
+
+fn format_antigravity_install_text(
+    alias: &str,
+    physical: &Path,
+    verb_prefix: &str,
+    trust: &AntigravityTrustStatus,
+) -> Vec<u8> {
+    match trust {
+        AntigravityTrustStatus::Trusted => format!(
+            "{verb_prefix} antigravity panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+            physical.display()
+        )
+        .into_bytes(),
+        AntigravityTrustStatus::Untrusted => format!(
+            "{verb_prefix} antigravity panel {PANEL_ENTRY_NAME} for {alias}: {} (inactive: {ANTIGRAVITY_UNTRUSTED_REASON})\nhint: {}\n",
+            physical.display(),
+            antigravity_untrusted_hint(physical),
+        )
+        .into_bytes(),
+        AntigravityTrustStatus::Unknown { hint } => format!(
+            "{verb_prefix} antigravity panel {PANEL_ENTRY_NAME} for {alias}: {} (inactive: {ANTIGRAVITY_TRUST_UNKNOWN_REASON})\nhint: {hint}\n",
+            physical.display(),
+        )
+        .into_bytes(),
+    }
+}
+
 fn claude_panel_entry_json(launcher: &Path, physical_repo: &Path) -> Result<String> {
     debug_assert_ne!(PANEL_ENTRY_NAME, LIFECYCLE_OWNED_KEY);
     let launcher_str = launcher
@@ -1669,14 +2582,54 @@ fn has_any_ancestor_git_marker(path: &Path) -> bool {
     false
 }
 
-fn inspect_git_codex_config(physical: &Path, stop: &AtomicBool) -> Result<GitConfigState> {
+#[derive(Clone, Copy)]
+struct ProjectConfigSpec {
+    app: PanelApp,
+    app_title: &'static str,
+    dir_name: &'static str,
+    dir_label: &'static str,
+    file_name: &'static str,
+    rel_path: &'static str,
+}
+
+const CODEX_CONFIG_SPEC: ProjectConfigSpec = ProjectConfigSpec {
+    app: PanelApp::Codex,
+    app_title: "Codex",
+    dir_name: ".codex",
+    dir_label: ".codex directory",
+    file_name: "config.toml",
+    rel_path: ".codex/config.toml",
+};
+
+const ANTIGRAVITY_CONFIG_SPEC: ProjectConfigSpec = ProjectConfigSpec {
+    app: PanelApp::Antigravity,
+    app_title: "Antigravity",
+    dir_name: ".agents",
+    dir_label: ".agents directory",
+    file_name: "mcp_config.json",
+    rel_path: ".agents/mcp_config.json",
+};
+
+fn project_config_spec(app: PanelApp) -> Option<ProjectConfigSpec> {
+    match app {
+        PanelApp::Claude => None,
+        PanelApp::Codex => Some(CODEX_CONFIG_SPEC),
+        PanelApp::Antigravity => Some(ANTIGRAVITY_CONFIG_SPEC),
+    }
+}
+
+fn inspect_git_project_config(
+    physical: &Path,
+    rel_path: &str,
+    stop: &AtomicBool,
+) -> Result<GitConfigState> {
     if !has_any_ancestor_git_marker(physical) {
         return Ok(GitConfigState::NotGit);
     }
     let git_bin = find_on_path(Path::new("git")).ok_or_else(|| {
-        Error::new(
-            "git executable was not found on PATH; cannot verify whether .codex/config.toml is tracked",
-        )
+        Error::new(format!(
+            "git executable was not found on PATH; cannot verify whether {rel_path} is tracked"
+        ))
     })?;
     let physical_str = physical
         .to_str()
@@ -1709,7 +2662,7 @@ fn inspect_git_codex_config(physical: &Path, stop: &AtomicBool) -> Result<GitCon
         "ls-files",
         "--error-unmatch",
         "--",
-        ".codex/config.toml",
+        rel_path,
     ])?;
     match ls_out.code {
         Some(0) => return Ok(GitConfigState::Tracked),
@@ -1749,19 +2702,12 @@ fn inspect_git_codex_config(physical: &Path, stop: &AtomicBool) -> Result<GitCon
     }
     let prefix = prefix_out.stdout.trim_matches(|c| c == '\n' || c == '\r');
     let exclude_line = if prefix.is_empty() {
-        "/.codex/config.toml".to_owned()
+        format!("/{rel_path}")
     } else {
-        format!("/{prefix}.codex/config.toml")
+        format!("/{prefix}{rel_path}")
     };
 
-    let ign_out = run_git(&[
-        "-C",
-        physical_str,
-        "check-ignore",
-        "-q",
-        "--",
-        ".codex/config.toml",
-    ])?;
+    let ign_out = run_git(&["-C", physical_str, "check-ignore", "-q", "--", rel_path])?;
     let already_ignored = match ign_out.code {
         Some(0) => true,
         Some(1) => false,
@@ -1773,6 +2719,10 @@ fn inspect_git_codex_config(physical: &Path, stop: &AtomicBool) -> Result<GitCon
         exclude_line,
         already_ignored,
     })
+}
+
+fn inspect_git_codex_config(physical: &Path, stop: &AtomicBool) -> Result<GitConfigState> {
+    inspect_git_project_config(physical, CODEX_CONFIG_SPEC.rel_path, stop)
 }
 
 fn contains_exact_line(text: &str, target: &str) -> bool {
@@ -1885,62 +2835,64 @@ fn restore_exclude_backup(backup: &ExcludeBackup) -> Result<()> {
 }
 
 struct ConfigBackup {
+    spec: ProjectConfigSpec,
     physical_repo: PathBuf,
-    created_codex_dir: bool,
+    created_subdir: bool,
     prior_config: Option<(Vec<u8>, Stat)>,
     published_stat: Option<Stat>,
 }
 
 fn restore_config_backup(backup: &ConfigBackup) -> Result<()> {
+    let spec = backup.spec;
     let repo_fd = open_dir_nofollow(&backup.physical_repo, "project checkout")?;
     match &backup.prior_config {
         Some((bytes, stat)) => {
-            let (codex_fd, _) = ensure_subdir_nofollow_at(
+            let (sub_fd, _) = ensure_subdir_nofollow_at(
                 &repo_fd,
-                OsStr::new(".codex"),
+                OsStr::new(spec.dir_name),
                 0o700,
-                ".codex directory",
+                spec.dir_label,
             )?;
             write_regular_file_atomic_at(
-                &codex_fd,
-                OsStr::new("config.toml"),
+                &sub_fd,
+                OsStr::new(spec.file_name),
                 backup.published_stat.as_ref(),
                 bytes,
                 stat.st_mode & 0o777,
-                ".codex/config.toml",
+                spec.rel_path,
             )?;
         }
         None => {
-            let Some(codex_fd) = open_existing_subdir_nofollow_at(
+            let Some(sub_fd) = open_existing_subdir_nofollow_at(
                 &repo_fd,
-                OsStr::new(".codex"),
-                ".codex directory",
+                OsStr::new(spec.dir_name),
+                spec.dir_label,
             )?
             else {
                 return Ok(());
             };
             unlink_regular_file_checked_at(
-                &codex_fd,
-                OsStr::new("config.toml"),
+                &sub_fd,
+                OsStr::new(spec.file_name),
                 backup.published_stat.as_ref(),
-                ".codex/config.toml",
+                spec.rel_path,
             )?;
-            drop(codex_fd);
-            if backup.created_codex_dir {
-                let _ = try_rmdir_if_empty_at(&repo_fd, OsStr::new(".codex"), ".codex directory")?;
+            drop(sub_fd);
+            if backup.created_subdir {
+                let _ = try_rmdir_if_empty_at(&repo_fd, OsStr::new(spec.dir_name), spec.dir_label)?;
             }
         }
     }
     Ok(())
 }
 
-fn rollback_codex_files(
+fn rollback_project_panel_files(
+    spec: ProjectConfigSpec,
     want_json: bool,
     alias: &str,
     physical: &Path,
     action: &str,
-    config_backup: Option<&ConfigBackup>,
-    exclude_backup: Option<&ExcludeBackup>,
+    (config_backup, exclude_backup): (Option<&ConfigBackup>, Option<&ExcludeBackup>),
     primary: Error,
 ) -> Result<Output> {
     let mut rb_errors = Vec::new();
@@ -1959,8 +2911,8 @@ fn rollback_codex_files(
         return Err(Error {
             code: primary.code,
             message: format!(
-                "{}; rolled back Codex panel in .codex/config.toml",
-                primary.message
+                "{}; rolled back {} panel in {}",
+                primary.message, spec.app_title, spec.rel_path
             ),
             publication_uncertain: primary.publication_uncertain,
         });
@@ -1968,9 +2920,11 @@ fn rollback_codex_files(
 
     let code = if primary.code != 0 { primary.code } else { 1 };
     let message = format!(
-        "{}; Codex panel rollback for {alias} failed ({}): .codex/config.toml state is uncertain",
+        "{}; {} panel rollback for {alias} failed ({}): {} state is uncertain",
         primary.message,
-        rb_errors.join("; ")
+        spec.app_title,
+        rb_errors.join("; "),
+        spec.rel_path
     );
     let err = Error {
         code,
@@ -1979,14 +2933,8 @@ fn rollback_codex_files(
     };
     if want_json {
         let (_, _, stderr) = crate::failure(err);
-        let mut report = panel_action_json(
-            PanelApp::Codex,
-            alias,
-            physical,
-            PANEL_ENTRY_NAME,
-            action,
-            false,
-        );
+        let mut report =
+            panel_action_json(spec.app, alias, physical, PANEL_ENTRY_NAME, action, false);
         report["uncertain"] = json!(true);
         report["error"] = json!(message);
         return Ok((code, json(&report)?, stderr));
@@ -1994,8 +2942,9 @@ fn rollback_codex_files(
     Err(err)
 }
 
-fn find_conflicting_codex_alias<'a>(
+fn find_conflicting_project_panel_alias<'a>(
     panels: &'a PanelMap,
+    app: PanelApp,
     alias: &str,
     physical: &Path,
 ) -> Option<&'a str> {
@@ -2005,7 +2954,7 @@ fn find_conflicting_codex_alias<'a>(
         }
         if rows
             .iter()
-            .any(|r| r.app == PanelApp::Codex.as_str() && r.path == physical)
+            .any(|r| r.app == app.as_str() && r.path == physical)
         {
             return Some(other_alias.as_str());
         }
@@ -2013,8 +2962,9 @@ fn find_conflicting_codex_alias<'a>(
     None
 }
 
-fn find_other_codex_panel_sharing_exclude(
+fn find_other_panel_sharing_exclude(
     panels: &PanelMap,
+    spec: ProjectConfigSpec,
     excluding_alias: &str,
     common_git_dir: &Path,
     exclude_line: &str,
@@ -2025,14 +2975,14 @@ fn find_other_codex_panel_sharing_exclude(
             continue;
         }
         for row in rows {
-            if row.app != PanelApp::Codex.as_str() || !row.path.is_dir() {
+            if row.app != spec.app.as_str() || !row.path.is_dir() {
                 continue;
             }
             if let Ok(GitConfigState::Untracked {
                 common_git_dir: other_common,
                 exclude_line: other_line,
                 ..
-            }) = inspect_git_codex_config(&row.path, stop)
+            }) = inspect_git_project_config(&row.path, spec.rel_path, stop)
                 && other_common == common_git_dir
                 && other_line == exclude_line
             {
@@ -2043,34 +2993,263 @@ fn find_other_codex_panel_sharing_exclude(
     None
 }
 
-fn find_other_codex_panel_owning_exclude_in_common_dir(
+fn find_other_panel_owning_exclude_in_common_dir(
     panels: &PanelMap,
     excluding_alias: &str,
+    excluding_app: PanelApp,
     common_git_dir: &Path,
     stop: &AtomicBool,
-) -> Option<String> {
+) -> Option<(String, PanelApp)> {
     for (other_alias, rows) in panels {
-        if other_alias == excluding_alias {
-            continue;
-        }
         for row in rows {
-            if row.app != PanelApp::Codex.as_str()
-                || row.created_exclude != Some(true)
-                || !row.path.is_dir()
-            {
+            let Ok(row_app) = PanelApp::parse(&row.app) else {
+                continue;
+            };
+            if other_alias == excluding_alias && row_app == excluding_app {
+                continue;
+            }
+            let Some(other_spec) = project_config_spec(row_app) else {
+                continue;
+            };
+            if row.created_exclude != Some(true) || !row.path.is_dir() {
                 continue;
             }
             if let Ok(GitConfigState::Untracked {
                 common_git_dir: other_common,
                 ..
-            }) = inspect_git_codex_config(&row.path, stop)
+            }) = inspect_git_project_config(&row.path, other_spec.rel_path, stop)
                 && other_common == common_git_dir
             {
-                return Some(other_alias.clone());
+                return Some((other_alias.clone(), row_app));
             }
         }
     }
     None
+}
+
+fn apply_install_config_write(
+    spec: ProjectConfigSpec,
+    physical: &Path,
+    prior_config: Option<(Vec<u8>, Stat)>,
+    candidate_bytes: &[u8],
+) -> Result<(bool, bool, ConfigBackup)> {
+    let repo_fd = open_dir_nofollow(physical, "project checkout")?;
+    let (sub_fd, created_dir) =
+        ensure_subdir_nofollow_at(&repo_fd, OsStr::new(spec.dir_name), 0o700, spec.dir_label)?;
+    let before_stat = prior_config.as_ref().map(|(_, st)| st);
+    let target_mode = match before_stat {
+        Some(st) => st.st_mode & 0o777,
+        None => 0o600,
+    };
+    let created_file = before_stat.is_none();
+    let published_cfg_stat = match write_regular_file_atomic_at(
+        &sub_fd,
+        OsStr::new(spec.file_name),
+        before_stat,
+        candidate_bytes,
+        target_mode,
+        spec.rel_path,
+    ) {
+        Ok(st) => st,
+        Err(write_err) => {
+            drop(sub_fd);
+            if created_dir {
+                let _ = try_rmdir_if_empty_at(&repo_fd, OsStr::new(spec.dir_name), spec.dir_label);
+            }
+            return Err(write_err);
+        }
+    };
+    let backup = ConfigBackup {
+        spec,
+        physical_repo: physical.to_path_buf(),
+        created_subdir: created_dir,
+        prior_config,
+        published_stat: Some(published_cfg_stat),
+    };
+    Ok((created_file, created_dir, backup))
+}
+
+fn apply_install_exclude_step(
+    common_git_dir: PathBuf,
+    exclude_line: &str,
+) -> Result<(bool, bool, Option<ExcludeBackup>)> {
+    let common_fd = open_dir_nofollow(&common_git_dir, "git common directory")?;
+    let (info_fd, created_info_dir) =
+        ensure_subdir_nofollow_at(&common_fd, OsStr::new("info"), 0o700, "git info directory")?;
+    let prior_exclude =
+        read_regular_file_nofollow_at(&info_fd, OsStr::new("exclude"), "git info/exclude")?;
+    let (next_bytes, added, sep_added) = append_exclude_line_bytes(
+        prior_exclude.as_ref().map(|(b, _)| b.as_slice()),
+        exclude_line,
+    )?;
+    if added {
+        let before_stat = prior_exclude.as_ref().map(|(_, st)| st);
+        let mode = match before_stat {
+            Some(st) => st.st_mode & 0o777,
+            None => 0o600,
+        };
+        let published_excl_stat = write_regular_file_atomic_at(
+            &info_fd,
+            OsStr::new("exclude"),
+            before_stat,
+            &next_bytes,
+            mode,
+            "git info/exclude",
+        )?;
+        Ok((
+            true,
+            sep_added,
+            Some(ExcludeBackup {
+                common_git_dir,
+                created_info_dir,
+                prior_exclude,
+                published_stat: Some(published_excl_stat),
+            }),
+        ))
+    } else {
+        if created_info_dir {
+            drop(info_fd);
+            let _ = try_rmdir_if_empty_at(&common_fd, OsStr::new("info"), "git info directory")?;
+        }
+        Ok((false, false, None))
+    }
+}
+
+fn apply_uninstall_config_clean_remove(
+    spec: ProjectConfigSpec,
+    target_repo: &Path,
+    remaining_bytes: Option<Vec<u8>>,
+    prior_config: Option<(Vec<u8>, Stat)>,
+) -> Result<(bool, Option<ConfigBackup>)> {
+    let repo_fd = open_dir_nofollow(target_repo, "project checkout")?;
+    let Some(sub_fd) =
+        open_existing_subdir_nofollow_at(&repo_fd, OsStr::new(spec.dir_name), spec.dir_label)?
+    else {
+        return Ok((false, None));
+    };
+    let before_stat = prior_config.as_ref().map(|(_, st)| st);
+    let published_cfg_stat = match remaining_bytes {
+        Some(bytes) => {
+            let mode = before_stat.map_or(0o600, |st| st.st_mode & 0o777);
+            Some(write_regular_file_atomic_at(
+                &sub_fd,
+                OsStr::new(spec.file_name),
+                before_stat,
+                &bytes,
+                mode,
+                spec.rel_path,
+            )?)
+        }
+        None => {
+            unlink_regular_file_checked_at(
+                &sub_fd,
+                OsStr::new(spec.file_name),
+                before_stat,
+                spec.rel_path,
+            )?;
+            None
+        }
+    };
+    Ok((
+        true,
+        Some(ConfigBackup {
+            spec,
+            physical_repo: target_repo.to_path_buf(),
+            created_subdir: false,
+            prior_config,
+            published_stat: published_cfg_stat,
+        }),
+    ))
+}
+
+fn apply_uninstall_exclude_step(
+    panels: &mut PanelMap,
+    spec: ProjectConfigSpec,
+    alias: &str,
+    git_state: GitConfigState,
+    created_exclude: bool,
+    exclude_separator_added: bool,
+    stop: &AtomicBool,
+) -> Result<Option<ExcludeBackup>> {
+    if !created_exclude {
+        return Ok(None);
+    }
+    let GitConfigState::Untracked {
+        common_git_dir,
+        exclude_line,
+        ..
+    } = git_state
+    else {
+        return Ok(None);
+    };
+
+    if let Some(handover_alias) =
+        find_other_panel_sharing_exclude(panels, spec, alias, &common_git_dir, &exclude_line, stop)
+    {
+        if let Some(other_rows) = panels.get_mut(&handover_alias)
+            && let Some(other_row) = other_rows.iter_mut().find(|r| r.app == spec.app.as_str())
+        {
+            other_row.created_exclude = Some(true);
+            if exclude_separator_added {
+                other_row.exclude_separator_added = Some(true);
+            }
+        }
+        return Ok(None);
+    }
+
+    let mut separator_removed = false;
+    let mut exclude_backup = None;
+    let common_fd = open_dir_nofollow(&common_git_dir, "git common directory")?;
+    if let Some(info_fd) =
+        open_existing_subdir_nofollow_at(&common_fd, OsStr::new("info"), "git info directory")?
+        && let Some((prior_bytes, prior_stat)) =
+            read_regular_file_nofollow_at(&info_fd, OsStr::new("exclude"), "git info/exclude")?
+        && let Some((next_bytes, sep_removed)) =
+            remove_exact_line_bytes(&prior_bytes, &exclude_line, exclude_separator_added)?
+    {
+        separator_removed = sep_removed;
+        let published_excl_stat = if next_bytes.is_empty() {
+            unlink_regular_file_checked_at(
+                &info_fd,
+                OsStr::new("exclude"),
+                Some(&prior_stat),
+                "git info/exclude",
+            )?;
+            None
+        } else {
+            Some(write_regular_file_atomic_at(
+                &info_fd,
+                OsStr::new("exclude"),
+                Some(&prior_stat),
+                &next_bytes,
+                prior_stat.st_mode & 0o777,
+                "git info/exclude",
+            )?)
+        };
+        exclude_backup = Some(ExcludeBackup {
+            common_git_dir: common_git_dir.clone(),
+            created_info_dir: false,
+            prior_exclude: Some((prior_bytes, prior_stat)),
+            published_stat: published_excl_stat,
+        });
+    }
+
+    if exclude_separator_added
+        && !separator_removed
+        && let Some((sep_alias, sep_app)) = find_other_panel_owning_exclude_in_common_dir(
+            panels,
+            alias,
+            spec.app,
+            &common_git_dir,
+            stop,
+        )
+        && let Some(other_rows) = panels.get_mut(&sep_alias)
+        && let Some(other_row) = other_rows.iter_mut().find(|r| r.app == sep_app.as_str())
+    {
+        other_row.exclude_separator_added = Some(true);
+    }
+
+    Ok(exclude_backup)
 }
 
 fn sanitized_vendor_reason(out: &CmdOutput) -> Option<String> {
@@ -2380,50 +3559,66 @@ fn upsert_panel_row(
     alias: &str,
     app: PanelApp,
     physical: &Path,
-    codex_meta: Option<CodexRowMeta>,
+    meta: RowMeta,
 ) {
-    let (
-        block_sha256,
-        created_config,
-        created_codex_dir,
-        created_exclude,
-        separator_added,
-        exclude_separator_added,
-    ) = match codex_meta {
-        Some(m) => (
-            Some(m.block_sha256),
-            Some(m.created_config),
-            Some(m.created_codex_dir),
-            Some(m.created_exclude),
-            m.separator_added.then_some(true),
-            m.exclude_separator_added.then_some(true),
-        ),
-        None => (None, None, None, None, None, None),
-    };
-    let rows = panels.entry(alias.to_owned()).or_default();
-    if let Some(slot) = rows.iter_mut().find(|r| r.app == app.as_str()) {
-        slot.scope = app.expected_scope().to_owned();
-        slot.name = PANEL_ENTRY_NAME.to_owned();
-        slot.path = physical.to_path_buf();
-        slot.block_sha256 = block_sha256;
-        slot.created_config = created_config;
-        slot.created_codex_dir = created_codex_dir;
-        slot.created_exclude = created_exclude;
-        slot.separator_added = separator_added;
-        slot.exclude_separator_added = exclude_separator_added;
-    } else {
-        rows.push(PanelRecord {
+    let record = match meta {
+        RowMeta::Claude => PanelRecord {
             app: app.as_str().to_owned(),
             scope: app.expected_scope().to_owned(),
             name: PANEL_ENTRY_NAME.to_owned(),
             path: physical.to_path_buf(),
-            block_sha256,
-            created_config,
-            created_codex_dir,
-            created_exclude,
-            separator_added,
-            exclude_separator_added,
-        });
+            block_sha256: None,
+            entry_sha256: None,
+            created_config: None,
+            created_codex_dir: None,
+            created_agents_dir: None,
+            created_exclude: None,
+            separator_added: None,
+            exclude_separator_added: None,
+            created_mcp_servers: None,
+            prior_sha256: None,
+            prior_ws: None,
+        },
+        RowMeta::Codex(m) => PanelRecord {
+            app: app.as_str().to_owned(),
+            scope: app.expected_scope().to_owned(),
+            name: PANEL_ENTRY_NAME.to_owned(),
+            path: physical.to_path_buf(),
+            block_sha256: Some(m.block_sha256),
+            entry_sha256: None,
+            created_config: Some(m.created_config),
+            created_codex_dir: Some(m.created_codex_dir),
+            created_agents_dir: None,
+            created_exclude: Some(m.created_exclude),
+            separator_added: m.separator_added.then_some(true),
+            exclude_separator_added: m.exclude_separator_added.then_some(true),
+            created_mcp_servers: None,
+            prior_sha256: None,
+            prior_ws: None,
+        },
+        RowMeta::Antigravity(m) => PanelRecord {
+            app: app.as_str().to_owned(),
+            scope: app.expected_scope().to_owned(),
+            name: PANEL_ENTRY_NAME.to_owned(),
+            path: physical.to_path_buf(),
+            block_sha256: None,
+            entry_sha256: Some(m.entry_sha256),
+            created_config: Some(m.created_config),
+            created_codex_dir: None,
+            created_agents_dir: Some(m.created_agents_dir),
+            created_exclude: Some(m.created_exclude),
+            separator_added: m.separator_added.then_some(true),
+            exclude_separator_added: m.exclude_separator_added.then_some(true),
+            created_mcp_servers: m.created_mcp_servers.then_some(true),
+            prior_sha256: m.prior_sha256,
+            prior_ws: m.prior_ws,
+        },
+    };
+    let rows = panels.entry(alias.to_owned()).or_default();
+    if let Some(slot) = rows.iter_mut().find(|r| r.app == app.as_str()) {
+        *slot = record;
+    } else {
+        rows.push(record);
     }
 }
 
@@ -2729,6 +3924,227 @@ fn format_codex_install_text(
     }
 }
 
+enum AntigravityInstallPlan {
+    NoOp,
+    Adopt {
+        entry_sha256: String,
+    },
+    EnsureExcludeOnly {
+        entry_sha256: String,
+    },
+    Write {
+        candidate_bytes: Vec<u8>,
+        entry_sha256: String,
+        replaced_existing_entry: bool,
+        outside_doc: serde_json::Map<String, serde_json::Value>,
+        created_mcp_servers_now: bool,
+        added_separator_now: bool,
+        prior_sha256_now: Option<String>,
+        prior_ws_now: Option<String>,
+    },
+}
+
+struct PreparedAntigravityInstall {
+    plan: AntigravityInstallPlan,
+    agents_dir_existed: bool,
+    prior_config: Option<(Vec<u8>, Stat)>,
+    exclude_target: Option<(PathBuf, String)>,
+}
+
+fn prepare_antigravity_install(
+    alias: &str,
+    physical: &Path,
+    launcher: &Path,
+    recorded_row: Option<&PanelRecord>,
+    stop: &AtomicBool,
+) -> Result<PreparedAntigravityInstall> {
+    let spec = ANTIGRAVITY_CONFIG_SPEC;
+    let repo_fd = open_dir_nofollow(physical, "project checkout")?;
+    let agents_fd =
+        open_existing_subdir_nofollow_at(&repo_fd, OsStr::new(spec.dir_name), spec.dir_label)?;
+    let agents_dir_existed = agents_fd.is_some();
+    let prior_config = match &agents_fd {
+        Some(fd) => read_regular_file_nofollow_at(fd, OsStr::new(spec.file_name), spec.rel_path)?,
+        None => None,
+    };
+
+    let exclude_target = match inspect_git_project_config(physical, spec.rel_path, stop)? {
+        GitConfigState::NotGit => None,
+        GitConfigState::Tracked => {
+            return Err(Error::new(format!(
+                "refusing to modify tracked file {} in {}; untrack it first",
+                spec.rel_path,
+                physical.display()
+            )));
+        }
+        GitConfigState::Untracked {
+            common_git_dir,
+            exclude_line,
+            already_ignored,
+        } => (!already_ignored).then_some((common_git_dir, exclude_line)),
+    };
+
+    let expected_entry = expected_antigravity_panel_entry(launcher, physical)?;
+    let expected_sha = canonical_json_sha256(&expected_entry)?;
+
+    let plan = if let Some((ref prior_bytes, _)) = prior_config {
+        let prior_root = parse_strict_json_object_bounded(prior_bytes, spec.rel_path)?;
+        let (had_mcp_servers, on_disk_entry) = match prior_root.get("mcpServers") {
+            None => (false, None),
+            Some(serde_json::Value::Object(servers)) => {
+                (true, servers.get(PANEL_ENTRY_NAME).cloned())
+            }
+            Some(_) => {
+                return Err(Error::new(
+                    "Invalid .agents/mcp_config.json: mcpServers must be a JSON object",
+                ));
+            }
+        };
+
+        if let Some(entry_val) = on_disk_entry {
+            if !entry_val.is_object() {
+                return Err(Error::new(if recorded_row.is_some() {
+                    format!(
+                        "mcpServers.{PANEL_ENTRY_NAME} in .agents/mcp_config.json for '{alias}' was modified outside OMS; restore it or run `oms panel --uninstall-panel antigravity --project {alias}` first"
+                    )
+                } else {
+                    format!(
+                        "an unmanaged mcpServers.{PANEL_ENTRY_NAME} entry exists in .agents/mcp_config.json; remove it first"
+                    )
+                }));
+            }
+            let on_disk_sha = canonical_json_sha256(&entry_val)?;
+            if let Some(existing) = recorded_row {
+                if existing.entry_sha256.as_deref() != Some(on_disk_sha.as_str()) {
+                    return Err(Error::new(format!(
+                        "mcpServers.{PANEL_ENTRY_NAME} in .agents/mcp_config.json for '{alias}' was modified outside OMS; restore it or run `oms panel --uninstall-panel antigravity --project {alias}` first"
+                    )));
+                }
+                if on_disk_sha == expected_sha {
+                    if exclude_target.is_none() {
+                        AntigravityInstallPlan::NoOp
+                    } else {
+                        AntigravityInstallPlan::EnsureExcludeOnly {
+                            entry_sha256: expected_sha,
+                        }
+                    }
+                } else {
+                    let mut outside_doc = prior_root.clone();
+                    let drop_empty = existing.created_mcp_servers == Some(true);
+                    if let Some(serde_json::Value::Object(servers)) =
+                        outside_doc.get_mut("mcpServers")
+                    {
+                        servers.remove(PANEL_ENTRY_NAME);
+                        if servers.is_empty() && drop_empty {
+                            outside_doc.remove("mcpServers");
+                        }
+                    }
+                    let mut updated_root = prior_root;
+                    let servers = updated_root
+                        .get_mut("mcpServers")
+                        .and_then(serde_json::Value::as_object_mut)
+                        .ok_or_else(|| {
+                            Error::new(
+                                "Invalid .agents/mcp_config.json: mcpServers must be a JSON object",
+                            )
+                        })?;
+                    servers.insert(PANEL_ENTRY_NAME.into(), expected_entry);
+                    let candidate_bytes = encode_pretty_2space_json(&updated_root, false)?;
+                    let verified = parse_strict_json_object_bounded(
+                        &candidate_bytes,
+                        "generated .agents/mcp_config.json",
+                    )?;
+                    require(
+                        verified == updated_root,
+                        "generated .agents/mcp_config.json did not parse to the expected mcpServers.oms-panel object",
+                    )?;
+                    AntigravityInstallPlan::Write {
+                        candidate_bytes,
+                        entry_sha256: expected_sha,
+                        replaced_existing_entry: true,
+                        outside_doc,
+                        created_mcp_servers_now: false,
+                        added_separator_now: false,
+                        prior_sha256_now: None,
+                        prior_ws_now: None,
+                    }
+                }
+            } else if on_disk_sha == expected_sha {
+                AntigravityInstallPlan::Adopt {
+                    entry_sha256: expected_sha,
+                }
+            } else {
+                return Err(Error::new(format!(
+                    "an unmanaged mcpServers.{PANEL_ENTRY_NAME} entry exists in .agents/mcp_config.json; remove it first"
+                )));
+            }
+        } else {
+            let (added_separator_now, prior_sha256_now, prior_ws_now) =
+                capture_prior_json_formatting(prior_bytes, &prior_root)?;
+            let mut updated_root = prior_root.clone();
+            let entry = updated_root
+                .entry("mcpServers")
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            let serde_json::Value::Object(servers) = entry else {
+                return Err(Error::new(
+                    "Invalid .agents/mcp_config.json: mcpServers must be a JSON object",
+                ));
+            };
+            servers.insert(PANEL_ENTRY_NAME.into(), expected_entry);
+            let candidate_bytes = encode_pretty_2space_json(&updated_root, false)?;
+            let verified = parse_strict_json_object_bounded(
+                &candidate_bytes,
+                "generated .agents/mcp_config.json",
+            )?;
+            require(
+                verified == updated_root,
+                "generated .agents/mcp_config.json did not parse to the expected mcpServers.oms-panel object",
+            )?;
+            AntigravityInstallPlan::Write {
+                candidate_bytes,
+                entry_sha256: expected_sha,
+                replaced_existing_entry: false,
+                outside_doc: prior_root,
+                created_mcp_servers_now: !had_mcp_servers,
+                added_separator_now,
+                prior_sha256_now,
+                prior_ws_now,
+            }
+        }
+    } else {
+        let mut servers = serde_json::Map::new();
+        servers.insert(PANEL_ENTRY_NAME.into(), expected_entry);
+        let mut updated_root = serde_json::Map::new();
+        updated_root.insert("mcpServers".into(), serde_json::Value::Object(servers));
+        let candidate_bytes = encode_pretty_2space_json(&updated_root, false)?;
+        let verified = parse_strict_json_object_bounded(
+            &candidate_bytes,
+            "generated .agents/mcp_config.json",
+        )?;
+        require(
+            verified == updated_root,
+            "generated .agents/mcp_config.json did not parse to the expected mcpServers.oms-panel object",
+        )?;
+        AntigravityInstallPlan::Write {
+            candidate_bytes,
+            entry_sha256: expected_sha,
+            replaced_existing_entry: false,
+            outside_doc: serde_json::Map::new(),
+            created_mcp_servers_now: false,
+            added_separator_now: false,
+            prior_sha256_now: None,
+            prior_ws_now: None,
+        }
+    };
+
+    Ok(PreparedAntigravityInstall {
+        plan,
+        agents_dir_existed,
+        prior_config,
+        exclude_target,
+    })
+}
+
 pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) -> Result<Output> {
     parent_only()?;
     let app = PanelApp::parse(&options.required("install-panel")?)?;
@@ -2821,7 +4237,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
             }
             PanelApp::Codex => {
                 if let Some(existing_alias) =
-                    find_conflicting_codex_alias(&panels, &alias, &physical)
+                    find_conflicting_project_panel_alias(&panels, app, &alias, &physical)
                 {
                     return Err(Error::new(format!(
                         "checkout {} already has a recorded codex panel under project alias '{existing_alias}'; use '{existing_alias}' or run `oms panel --uninstall-panel codex --project {existing_alias}` first",
@@ -2847,6 +4263,36 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 return Ok((
                     0,
                     format_codex_install_text(&alias, &physical, "would install", &trust),
+                    vec![],
+                ));
+            }
+            PanelApp::Antigravity => {
+                if let Some(existing_alias) =
+                    find_conflicting_project_panel_alias(&panels, app, &alias, &physical)
+                {
+                    return Err(Error::new(format!(
+                        "checkout {} already has a recorded antigravity panel under project alias '{existing_alias}'; use '{existing_alias}' or run `oms panel --uninstall-panel antigravity --project {existing_alias}` first",
+                        physical.display()
+                    )));
+                }
+                let _prepared =
+                    prepare_antigravity_install(&alias, &physical, &launcher, recorded_row, stop)?;
+                let trust = check_antigravity_project_trust(&physical);
+                if want_json {
+                    let mut report = panel_action_json(
+                        app,
+                        &alias,
+                        &physical,
+                        PANEL_ENTRY_NAME,
+                        "install",
+                        false,
+                    );
+                    attach_antigravity_trust_fields(&mut report, &physical, &trust);
+                    return Ok((0, json(&report)?, vec![]));
+                }
+                return Ok((
+                    0,
+                    format_antigravity_install_text(&alias, &physical, "would install", &trust),
                     vec![],
                 ));
             }
@@ -2923,7 +4369,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                         vec![],
                     ));
                 }
-                upsert_panel_row(&mut panels, &alias, app, &physical, None);
+                upsert_panel_row(&mut panels, &alias, app, &physical, RowMeta::Claude);
                 write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)?;
                 if want_json {
                     let report = panel_action_json(
@@ -3001,7 +4447,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 }
             }
 
-            upsert_panel_row(&mut panels, &alias, app, &physical, None);
+            upsert_panel_row(&mut panels, &alias, app, &physical, RowMeta::Claude);
             if let Err(record_err) =
                 write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)
             {
@@ -3032,7 +4478,10 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
             ))
         }
         PanelApp::Codex => {
-            if let Some(existing_alias) = find_conflicting_codex_alias(&panels, &alias, &physical) {
+            let spec = CODEX_CONFIG_SPEC;
+            if let Some(existing_alias) =
+                find_conflicting_project_panel_alias(&panels, app, &alias, &physical)
+            {
                 return Err(Error::new(format!(
                     "checkout {} already has a recorded codex panel under project alias '{existing_alias}'; use '{existing_alias}' or run `oms panel --uninstall-panel codex --project {existing_alias}` first",
                     physical.display()
@@ -3098,46 +4547,13 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                     replaced_existing_block,
                     added_separator,
                 } => {
-                    let repo_fd = open_dir_nofollow(&physical, "project checkout")?;
-                    let (codex_fd, created_dir) = ensure_subdir_nofollow_at(
-                        &repo_fd,
-                        OsStr::new(".codex"),
-                        0o700,
-                        ".codex directory",
-                    )?;
-                    let before_stat = prepared.prior_config.as_ref().map(|(_, st)| st);
-                    let target_mode = match before_stat {
-                        Some(st) => st.st_mode & 0o777,
-                        None => 0o600,
-                    };
-                    let created_file = before_stat.is_none();
-                    let published_cfg_stat = match write_regular_file_atomic_at(
-                        &codex_fd,
-                        OsStr::new("config.toml"),
-                        before_stat,
+                    let (created_file, created_dir, backup) = apply_install_config_write(
+                        spec,
+                        &physical,
+                        prepared.prior_config,
                         &candidate_bytes,
-                        target_mode,
-                        ".codex/config.toml",
-                    ) {
-                        Ok(st) => st,
-                        Err(write_err) => {
-                            drop(codex_fd);
-                            if created_dir {
-                                let _ = try_rmdir_if_empty_at(
-                                    &repo_fd,
-                                    OsStr::new(".codex"),
-                                    ".codex directory",
-                                );
-                            }
-                            return Err(write_err);
-                        }
-                    };
-                    config_backup = Some(ConfigBackup {
-                        physical_repo: physical.clone(),
-                        created_codex_dir: created_dir,
-                        prior_config: prepared.prior_config,
-                        published_stat: Some(published_cfg_stat),
-                    });
+                    )?;
+                    config_backup = Some(backup);
                     (
                         "install",
                         "installed",
@@ -3153,69 +4569,26 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
             let mut added_exclude_now = false;
             let mut added_exclude_sep_now = false;
             if let Some((common_git_dir, exclude_line)) = prepared.exclude_target {
-                let exclude_step: Result<()> = (|| {
-                    let common_fd = open_dir_nofollow(&common_git_dir, "git common directory")?;
-                    let (info_fd, created_info_dir) = ensure_subdir_nofollow_at(
-                        &common_fd,
-                        OsStr::new("info"),
-                        0o700,
-                        "git info directory",
-                    )?;
-                    let prior_exclude = read_regular_file_nofollow_at(
-                        &info_fd,
-                        OsStr::new("exclude"),
-                        "git info/exclude",
-                    )?;
-                    let (next_bytes, added, sep_added) = append_exclude_line_bytes(
-                        prior_exclude.as_ref().map(|(b, _)| b.as_slice()),
-                        &exclude_line,
-                    )?;
-                    if added {
-                        let before_stat = prior_exclude.as_ref().map(|(_, st)| st);
-                        let mode = match before_stat {
-                            Some(st) => st.st_mode & 0o777,
-                            None => 0o600,
-                        };
-                        let published_excl_stat = write_regular_file_atomic_at(
-                            &info_fd,
-                            OsStr::new("exclude"),
-                            before_stat,
-                            &next_bytes,
-                            mode,
-                            "git info/exclude",
-                        )?;
-                        added_exclude_now = true;
+                match apply_install_exclude_step(common_git_dir, &exclude_line) {
+                    Ok((added, sep_added, ex_backup)) => {
+                        added_exclude_now = added;
                         added_exclude_sep_now = sep_added;
-                        exclude_backup = Some(ExcludeBackup {
-                            common_git_dir,
-                            created_info_dir,
-                            prior_exclude,
-                            published_stat: Some(published_excl_stat),
-                        });
-                    } else if created_info_dir {
-                        drop(info_fd);
-                        let _ = try_rmdir_if_empty_at(
-                            &common_fd,
-                            OsStr::new("info"),
-                            "git info directory",
-                        )?;
+                        exclude_backup = ex_backup;
                     }
-                    Ok(())
-                })();
-
-                if let Err(ex_err) = exclude_step {
-                    if config_backup.is_some() {
-                        return rollback_codex_files(
-                            want_json,
-                            &alias,
-                            &physical,
-                            action_str,
-                            config_backup.as_ref(),
-                            None,
-                            ex_err,
-                        );
+                    Err(ex_err) => {
+                        if config_backup.is_some() {
+                            return rollback_project_panel_files(
+                                spec,
+                                want_json,
+                                &alias,
+                                &physical,
+                                action_str,
+                                (config_backup.as_ref(), None),
+                                ex_err,
+                            );
+                        }
+                        return Err(ex_err);
                     }
-                    return Err(ex_err);
                 }
             }
 
@@ -3249,7 +4622,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 &alias,
                 app,
                 &physical,
-                Some(CodexRowMeta {
+                RowMeta::Codex(CodexRowMeta {
                     block_sha256,
                     created_config,
                     created_codex_dir,
@@ -3262,13 +4635,13 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)
             {
                 if config_backup.is_some() || exclude_backup.is_some() {
-                    return rollback_codex_files(
+                    return rollback_project_panel_files(
+                        spec,
                         want_json,
                         &alias,
                         &physical,
                         action_str,
-                        config_backup.as_ref(),
-                        exclude_backup.as_ref(),
+                        (config_backup.as_ref(), exclude_backup.as_ref()),
                         record_err,
                     );
                 }
@@ -3284,6 +4657,295 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
             Ok((
                 0,
                 format_codex_install_text(&alias, &physical, text_prefix, &trust),
+                vec![],
+            ))
+        }
+        PanelApp::Antigravity => {
+            let spec = ANTIGRAVITY_CONFIG_SPEC;
+            if let Some(existing_alias) =
+                find_conflicting_project_panel_alias(&panels, app, &alias, &physical)
+            {
+                return Err(Error::new(format!(
+                    "checkout {} already has a recorded antigravity panel under project alias '{existing_alias}'; use '{existing_alias}' or run `oms panel --uninstall-panel antigravity --project {existing_alias}` first",
+                    physical.display()
+                )));
+            }
+            let prepared = prepare_antigravity_install(
+                &alias,
+                &physical,
+                &launcher,
+                recorded_row.as_ref(),
+                stop,
+            )?;
+            let trust = check_antigravity_project_trust(&physical);
+
+            if matches!(prepared.plan, AntigravityInstallPlan::NoOp) {
+                if want_json {
+                    let mut report = panel_action_json(
+                        app,
+                        &alias,
+                        &physical,
+                        PANEL_ENTRY_NAME,
+                        "install",
+                        false,
+                    );
+                    attach_antigravity_trust_fields(&mut report, &physical, &trust);
+                    return Ok((0, json(&report)?, vec![]));
+                }
+                return Ok((
+                    0,
+                    format_antigravity_install_text(&alias, &physical, "already installed", &trust),
+                    vec![],
+                ));
+            }
+
+            if stop.load(Ordering::Acquire) {
+                return Err(Error {
+                    code: 130,
+                    message: "interrupted before writing .agents/mcp_config.json".into(),
+                    publication_uncertain: false,
+                });
+            }
+
+            let mut config_backup: Option<ConfigBackup> = None;
+            let mut exclude_backup: Option<ExcludeBackup> = None;
+
+            enum AgyWriteOutcome {
+                Adopted(String),
+                ExcludeOnly(String),
+                Written {
+                    entry_sha256: String,
+                    created_config_now: bool,
+                    created_agents_dir_now: bool,
+                    replaced_existing_entry: bool,
+                    outside_doc: serde_json::Map<String, serde_json::Value>,
+                    created_mcp_servers_now: bool,
+                    added_separator_now: bool,
+                    prior_sha256_now: Option<String>,
+                    prior_ws_now: Option<String>,
+                },
+            }
+
+            let (action_str, text_prefix, outcome) = match prepared.plan {
+                AntigravityInstallPlan::NoOp => unreachable!(),
+                AntigravityInstallPlan::Adopt { entry_sha256 } => (
+                    "adopted",
+                    "adopted existing",
+                    AgyWriteOutcome::Adopted(entry_sha256),
+                ),
+                AntigravityInstallPlan::EnsureExcludeOnly { entry_sha256 } => (
+                    "install",
+                    "installed",
+                    AgyWriteOutcome::ExcludeOnly(entry_sha256),
+                ),
+                AntigravityInstallPlan::Write {
+                    candidate_bytes,
+                    entry_sha256,
+                    replaced_existing_entry,
+                    outside_doc,
+                    created_mcp_servers_now,
+                    added_separator_now,
+                    prior_sha256_now,
+                    prior_ws_now,
+                } => {
+                    let (created_file, created_dir, backup) = apply_install_config_write(
+                        spec,
+                        &physical,
+                        prepared.prior_config,
+                        &candidate_bytes,
+                    )?;
+                    config_backup = Some(backup);
+                    (
+                        "install",
+                        "installed",
+                        AgyWriteOutcome::Written {
+                            entry_sha256,
+                            created_config_now: created_file,
+                            created_agents_dir_now: created_dir,
+                            replaced_existing_entry,
+                            outside_doc,
+                            created_mcp_servers_now,
+                            added_separator_now,
+                            prior_sha256_now,
+                            prior_ws_now,
+                        },
+                    )
+                }
+            };
+
+            let mut added_exclude_now = false;
+            let mut added_exclude_sep_now = false;
+            if let Some((common_git_dir, exclude_line)) = prepared.exclude_target {
+                match apply_install_exclude_step(common_git_dir, &exclude_line) {
+                    Ok((added, sep_added, ex_backup)) => {
+                        added_exclude_now = added;
+                        added_exclude_sep_now = sep_added;
+                        exclude_backup = ex_backup;
+                    }
+                    Err(ex_err) => {
+                        if config_backup.is_some() {
+                            return rollback_project_panel_files(
+                                spec,
+                                want_json,
+                                &alias,
+                                &physical,
+                                action_str,
+                                (config_backup.as_ref(), None),
+                                ex_err,
+                            );
+                        }
+                        return Err(ex_err);
+                    }
+                }
+            }
+
+            let (created_exclude, exclude_separator_added) = if added_exclude_now {
+                (true, added_exclude_sep_now)
+            } else if let Some(prev) = &recorded_row
+                && prev.created_exclude == Some(true)
+            {
+                (true, prev.exclude_separator_added == Some(true))
+            } else {
+                (false, false)
+            };
+
+            let mut agy_meta = match outcome {
+                AgyWriteOutcome::Adopted(entry_sha256) => AntigravityRowMeta {
+                    entry_sha256,
+                    created_config: false,
+                    created_agents_dir: false,
+                    created_exclude,
+                    separator_added: false,
+                    exclude_separator_added,
+                    created_mcp_servers: false,
+                    prior_sha256: None,
+                    prior_ws: None,
+                },
+                AgyWriteOutcome::ExcludeOnly(entry_sha256) => {
+                    let prev = recorded_row
+                        .as_ref()
+                        .expect("recorded row for exclude-only");
+                    AntigravityRowMeta {
+                        entry_sha256,
+                        created_config: prev.created_config == Some(true),
+                        created_agents_dir: prev.created_agents_dir == Some(true),
+                        created_exclude,
+                        separator_added: prev.separator_added == Some(true),
+                        exclude_separator_added,
+                        created_mcp_servers: prev.created_mcp_servers == Some(true),
+                        prior_sha256: prev.prior_sha256.clone(),
+                        prior_ws: prev.prior_ws.clone(),
+                    }
+                }
+                AgyWriteOutcome::Written {
+                    entry_sha256,
+                    created_config_now,
+                    created_agents_dir_now,
+                    replaced_existing_entry,
+                    outside_doc,
+                    created_mcp_servers_now,
+                    added_separator_now,
+                    prior_sha256_now,
+                    prior_ws_now,
+                } => {
+                    let created_config = match &recorded_row {
+                        Some(prev) if !created_config_now => prev.created_config == Some(true),
+                        _ => created_config_now,
+                    };
+                    let created_agents_dir = match &recorded_row {
+                        Some(prev) if prepared.agents_dir_existed => {
+                            prev.created_agents_dir == Some(true)
+                        }
+                        _ => created_agents_dir_now,
+                    };
+                    let (created_mcp_servers, separator_added, prior_sha256, prior_ws) =
+                        if created_config {
+                            (created_mcp_servers_now, false, None, None)
+                        } else if replaced_existing_entry {
+                            let prev = recorded_row.as_ref().expect("recorded row on refresh");
+                            let outside_sha = ordered_json_sha256(&outside_doc)?;
+                            if prev.prior_sha256.as_deref() == Some(outside_sha.as_str()) {
+                                (
+                                    prev.created_mcp_servers == Some(true),
+                                    prev.separator_added == Some(true),
+                                    prev.prior_sha256.clone(),
+                                    prev.prior_ws.clone(),
+                                )
+                            } else if outside_doc.is_empty()
+                                && prev.created_mcp_servers == Some(true)
+                            {
+                                (true, false, None, None)
+                            } else {
+                                (!outside_doc.contains_key("mcpServers"), false, None, None)
+                            }
+                        } else {
+                            (
+                                created_mcp_servers_now,
+                                added_separator_now,
+                                prior_sha256_now,
+                                prior_ws_now,
+                            )
+                        };
+                    AntigravityRowMeta {
+                        entry_sha256,
+                        created_config,
+                        created_agents_dir,
+                        created_exclude,
+                        separator_added,
+                        exclude_separator_added,
+                        created_mcp_servers,
+                        prior_sha256,
+                        prior_ws,
+                    }
+                }
+            };
+
+            let had_optional_fmt = agy_meta.prior_ws.is_some();
+            upsert_panel_row(
+                &mut panels,
+                &alias,
+                app,
+                &physical,
+                RowMeta::Antigravity(agy_meta.clone()),
+            );
+            if had_optional_fmt && encode_panels_json(&panels).is_err() {
+                agy_meta.prior_ws = None;
+                agy_meta.prior_sha256 = None;
+                agy_meta.separator_added = false;
+                upsert_panel_row(
+                    &mut panels,
+                    &alias,
+                    app,
+                    &physical,
+                    RowMeta::Antigravity(agy_meta),
+                );
+            }
+            if let Err(record_err) =
+                write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)
+            {
+                if config_backup.is_some() || exclude_backup.is_some() {
+                    return rollback_project_panel_files(
+                        spec,
+                        want_json,
+                        &alias,
+                        &physical,
+                        action_str,
+                        (config_backup.as_ref(), exclude_backup.as_ref()),
+                        record_err,
+                    );
+                }
+                return Err(record_err);
+            }
+
+            if want_json {
+                let mut report =
+                    panel_action_json(app, &alias, &physical, PANEL_ENTRY_NAME, action_str, true);
+                attach_antigravity_trust_fields(&mut report, &physical, &trust);
+                return Ok((0, json(&report)?, vec![]));
+            }
+            Ok((
+                0,
+                format_antigravity_install_text(&alias, &physical, text_prefix, &trust),
                 vec![],
             ))
         }
@@ -3383,6 +5045,120 @@ fn inspect_codex_config_for_uninstall(
             }
         }
     }
+}
+
+fn inspect_antigravity_config_for_uninstall(
+    target_repo: &Path,
+    row: &PanelRecord,
+) -> Result<CodexUninstallInspect> {
+    let spec = ANTIGRAVITY_CONFIG_SPEC;
+    let expected_sha = row.entry_sha256.as_deref().ok_or_else(|| {
+        Error::new("Invalid OMS project panel map: missing Antigravity entry_sha256")
+    })?;
+    let created_config = row.created_config == Some(true);
+    let created_mcp_servers = row.created_mcp_servers == Some(true);
+    let separator_added = row.separator_added == Some(true);
+
+    let repo_fd = open_dir_nofollow(target_repo, "project checkout")?;
+    let Some(agents_fd) =
+        open_existing_subdir_nofollow_at(&repo_fd, OsStr::new(spec.dir_name), spec.dir_label)?
+    else {
+        return Ok(CodexUninstallInspect::AlreadyGone);
+    };
+    let Some((raw_bytes, stat)) =
+        read_regular_file_nofollow_at(&agents_fd, OsStr::new(spec.file_name), spec.rel_path)?
+    else {
+        return Ok(CodexUninstallInspect::AlreadyGone);
+    };
+
+    let Ok(root) = parse_strict_json_object_bounded(&raw_bytes, spec.rel_path) else {
+        return Ok(CodexUninstallInspect::Edited);
+    };
+
+    let has_entry = match root.get("mcpServers") {
+        None => {
+            if root.is_empty() && created_config {
+                return Ok(CodexUninstallInspect::CleanRemove {
+                    remaining_bytes: None,
+                    prior_config: Some((raw_bytes, stat)),
+                });
+            }
+            return Ok(CodexUninstallInspect::AlreadyGone);
+        }
+        Some(serde_json::Value::Object(servers)) => servers.get(PANEL_ENTRY_NAME).cloned(),
+        Some(_) => return Ok(CodexUninstallInspect::Edited),
+    };
+
+    let Some(entry_val) = has_entry else {
+        let empty_only_mcp = root.len() == 1
+            && root
+                .get("mcpServers")
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(serde_json::Map::is_empty);
+        if empty_only_mcp && created_config {
+            return Ok(CodexUninstallInspect::CleanRemove {
+                remaining_bytes: None,
+                prior_config: Some((raw_bytes, stat)),
+            });
+        }
+        return Ok(CodexUninstallInspect::AlreadyGone);
+    };
+
+    if !entry_val.is_object() {
+        return Ok(CodexUninstallInspect::Edited);
+    }
+    let Ok(on_disk_sha) = canonical_json_sha256(&entry_val) else {
+        return Ok(CodexUninstallInspect::Edited);
+    };
+    if on_disk_sha != expected_sha {
+        return Ok(CodexUninstallInspect::Edited);
+    }
+
+    let mut remaining_root = root;
+    let drop_empty_mcp = created_config || created_mcp_servers;
+    if let Some(serde_json::Value::Object(servers)) = remaining_root.get_mut("mcpServers") {
+        servers.remove(PANEL_ENTRY_NAME);
+        if servers.is_empty() && drop_empty_mcp {
+            remaining_root.remove("mcpServers");
+        }
+    }
+
+    if remaining_root.is_empty() && created_config {
+        return Ok(CodexUninstallInspect::CleanRemove {
+            remaining_bytes: None,
+            prior_config: Some((raw_bytes, stat)),
+        });
+    }
+
+    let matches_prior = if !created_config && let Some(ref p_sha) = row.prior_sha256 {
+        ordered_json_sha256(&remaining_root)? == *p_sha
+    } else {
+        false
+    };
+
+    let bytes = if matches_prior {
+        if let Some(ref ws) = row.prior_ws
+            && let Some(exact) = reassemble_json_with_ws(&remaining_root, ws)
+        {
+            exact
+        } else {
+            encode_pretty_2space_json(&remaining_root, separator_added)?
+        }
+    } else {
+        encode_pretty_2space_json(&remaining_root, false)?
+    };
+
+    let Ok(verified) = parse_strict_json_object_bounded(&bytes, spec.rel_path) else {
+        return Ok(CodexUninstallInspect::Edited);
+    };
+    if verified != remaining_root {
+        return Ok(CodexUninstallInspect::Edited);
+    }
+
+    Ok(CodexUninstallInspect::CleanRemove {
+        remaining_bytes: Some(bytes),
+        prior_config: Some((raw_bytes, stat)),
+    })
 }
 
 pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) -> Result<Output> {
@@ -3497,7 +5273,8 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                 )?);
                 return Ok((0, text.into_bytes(), vec![]));
             }
-            PanelApp::Codex => {
+            PanelApp::Codex | PanelApp::Antigravity => {
+                let spec = project_config_spec(app).expect("project config spec");
                 let action = if checkout_exists {
                     "uninstall"
                 } else {
@@ -3505,20 +5282,23 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                 };
                 if checkout_exists {
                     let repo_fd = open_dir_nofollow(&row.path, "project checkout")?;
-                    if let Some(codex_fd) = open_existing_subdir_nofollow_at(
+                    if let Some(sub_fd) = open_existing_subdir_nofollow_at(
                         &repo_fd,
-                        OsStr::new(".codex"),
-                        ".codex directory",
+                        OsStr::new(spec.dir_name),
+                        spec.dir_label,
                     )? {
                         let _ = read_regular_file_nofollow_at(
-                            &codex_fd,
-                            OsStr::new("config.toml"),
-                            ".codex/config.toml",
+                            &sub_fd,
+                            OsStr::new(spec.file_name),
+                            spec.rel_path,
                         )?;
                     }
-                    if let GitConfigState::Tracked = inspect_git_codex_config(&row.path, stop)? {
+                    if let GitConfigState::Tracked =
+                        inspect_git_project_config(&row.path, spec.rel_path, stop)?
+                    {
                         return Err(Error::new(format!(
-                            "refusing to modify tracked file .codex/config.toml in {}; untrack it first",
+                            "refusing to modify tracked file {} in {}; untrack it first",
+                            spec.rel_path,
                             row.path.display()
                         )));
                     }
@@ -3530,12 +5310,14 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                 }
                 let msg = if checkout_exists {
                     format!(
-                        "would uninstall codex panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+                        "would uninstall {} panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+                        app.as_str(),
                         row.path.display()
                     )
                 } else {
                     format!(
-                        "codex panel {PANEL_ENTRY_NAME} for {alias} ({}): checkout is gone; would drop the record\n",
+                        "{} panel {PANEL_ENTRY_NAME} for {alias} ({}): checkout is gone; would drop the record\n",
+                        app.as_str(),
                         row.path.display()
                     )
                 };
@@ -3603,7 +5385,7 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
             PanelApp::Claude => {
                 "dropped the record (the Claude entry stored for that path is inert)"
             }
-            PanelApp::Codex => "dropped the record",
+            PanelApp::Codex | PanelApp::Antigravity => "dropped the record",
         };
         return Ok((
             0,
@@ -3674,30 +5456,43 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
             };
             Ok((0, msg.into_bytes(), vec![]))
         }
-        PanelApp::Codex => {
-            let expected_sha = row.block_sha256.as_deref().ok_or_else(|| {
-                Error::new("Invalid OMS project panel map: missing Codex block_sha256")
-            })?;
-            let created_config = row.created_config == Some(true);
-            let created_codex_dir = row.created_codex_dir == Some(true);
+        PanelApp::Codex | PanelApp::Antigravity => {
+            let spec = project_config_spec(app).expect("project config spec");
+            let (inspect, created_subdir, edited_subject) = match app {
+                PanelApp::Codex => {
+                    let expected_sha = row.block_sha256.as_deref().ok_or_else(|| {
+                        Error::new("Invalid OMS project panel map: missing Codex block_sha256")
+                    })?;
+                    let inspect = inspect_codex_config_for_uninstall(
+                        &row.path,
+                        expected_sha,
+                        row.created_config == Some(true),
+                        row.separator_added == Some(true),
+                    )?;
+                    (inspect, row.created_codex_dir == Some(true), "OMS block")
+                }
+                PanelApp::Antigravity => {
+                    let inspect = inspect_antigravity_config_for_uninstall(&row.path, &row)?;
+                    (
+                        inspect,
+                        row.created_agents_dir == Some(true),
+                        "mcpServers.oms-panel entry",
+                    )
+                }
+                PanelApp::Claude => unreachable!(),
+            };
             let created_exclude = row.created_exclude == Some(true);
-            let separator_added = row.separator_added == Some(true);
             let exclude_separator_added = row.exclude_separator_added == Some(true);
 
-            let inspect = inspect_codex_config_for_uninstall(
-                &row.path,
-                expected_sha,
-                created_config,
-                separator_added,
-            )?;
-            let git_state = inspect_git_codex_config(&row.path, stop)?;
+            let git_state = inspect_git_project_config(&row.path, spec.rel_path, stop)?;
             if matches!(git_state, GitConfigState::Tracked) {
                 return Err(Error::new(format!(
-                    "refusing to modify tracked file .codex/config.toml in {}; untrack it first",
+                    "refusing to modify tracked file {} in {}; untrack it first",
+                    spec.rel_path,
                     row.path.display()
                 )));
             }
-            let config_path = row.path.join(".codex/config.toml");
+            let config_path = row.path.join(spec.rel_path);
 
             if matches!(inspect, CodexUninstallInspect::Edited) {
                 drop_panel_row(&mut panels, &alias, app);
@@ -3717,7 +5512,7 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                 return Ok((
                     0,
                     format!(
-                        "the OMS block in {} was edited outside OMS; left it in place and dropped ownership record for {alias}\n",
+                        "the {edited_subject} in {} was edited outside OMS; left it in place and dropped ownership record for {alias}\n",
                         config_path.display()
                     )
                     .into_bytes(),
@@ -3726,66 +5521,36 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
             }
 
             let mut config_backup: Option<ConfigBackup> = None;
-            let mut exclude_backup: Option<ExcludeBackup> = None;
-            let mut removed_config_or_block = false;
+            let mut removed_config_or_entry = false;
 
             if let CodexUninstallInspect::CleanRemove {
                 remaining_bytes,
                 prior_config,
             } = inspect
             {
-                let repo_fd = open_dir_nofollow(&row.path, "project checkout")?;
-                if let Some(codex_fd) = open_existing_subdir_nofollow_at(
-                    &repo_fd,
-                    OsStr::new(".codex"),
-                    ".codex directory",
-                )? {
-                    let before_stat = prior_config.as_ref().map(|(_, st)| st);
-                    let published_cfg_stat = match remaining_bytes {
-                        Some(bytes) => {
-                            let mode = before_stat.map_or(0o600, |st| st.st_mode & 0o777);
-                            Some(write_regular_file_atomic_at(
-                                &codex_fd,
-                                OsStr::new("config.toml"),
-                                before_stat,
-                                &bytes,
-                                mode,
-                                ".codex/config.toml",
-                            )?)
-                        }
-                        None => {
-                            unlink_regular_file_checked_at(
-                                &codex_fd,
-                                OsStr::new("config.toml"),
-                                before_stat,
-                                ".codex/config.toml",
-                            )?;
-                            None
-                        }
-                    };
-                    removed_config_or_block = true;
-                    config_backup = Some(ConfigBackup {
-                        physical_repo: row.path.clone(),
-                        created_codex_dir: false,
-                        prior_config,
-                        published_stat: published_cfg_stat,
-                    });
-                }
+                let (removed, backup) = apply_uninstall_config_clean_remove(
+                    spec,
+                    &row.path,
+                    remaining_bytes,
+                    prior_config,
+                )?;
+                removed_config_or_entry = removed;
+                config_backup = backup;
             }
 
-            if created_codex_dir {
+            if created_subdir {
                 let repo_fd = open_dir_nofollow(&row.path, "project checkout")?;
                 if let Err(e) =
-                    try_rmdir_if_empty_at(&repo_fd, OsStr::new(".codex"), ".codex directory")
+                    try_rmdir_if_empty_at(&repo_fd, OsStr::new(spec.dir_name), spec.dir_label)
                 {
                     if config_backup.is_some() {
-                        return rollback_codex_files(
+                        return rollback_project_panel_files(
+                            spec,
                             want_json,
                             &alias,
                             &row.path,
                             "uninstall",
-                            config_backup.as_ref(),
-                            None,
+                            (config_backup.as_ref(), None),
                             e,
                         );
                     }
@@ -3793,129 +5558,44 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                 }
             }
 
-            if created_exclude
-                && let GitConfigState::Untracked {
-                    common_git_dir,
-                    exclude_line,
-                    ..
-                } = git_state
-            {
-                if let Some(handover_alias) = find_other_codex_panel_sharing_exclude(
-                    &panels,
-                    &alias,
-                    &common_git_dir,
-                    &exclude_line,
-                    stop,
-                ) {
-                    if let Some(other_rows) = panels.get_mut(&handover_alias)
-                        && let Some(other_codex) = other_rows
-                            .iter_mut()
-                            .find(|r| r.app == PanelApp::Codex.as_str())
-                    {
-                        other_codex.created_exclude = Some(true);
-                        if exclude_separator_added {
-                            other_codex.exclude_separator_added = Some(true);
-                        }
-                    }
-                } else {
-                    let mut separator_removed = false;
-                    let exclude_step: Result<()> = (|| {
-                        let common_fd = open_dir_nofollow(&common_git_dir, "git common directory")?;
-                        let Some(info_fd) = open_existing_subdir_nofollow_at(
-                            &common_fd,
-                            OsStr::new("info"),
-                            "git info directory",
-                        )?
-                        else {
-                            return Ok(());
-                        };
-                        let Some((prior_bytes, prior_stat)) = read_regular_file_nofollow_at(
-                            &info_fd,
-                            OsStr::new("exclude"),
-                            "git info/exclude",
-                        )?
-                        else {
-                            return Ok(());
-                        };
-                        if let Some((next_bytes, sep_removed)) = remove_exact_line_bytes(
-                            &prior_bytes,
-                            &exclude_line,
-                            exclude_separator_added,
-                        )? {
-                            separator_removed = sep_removed;
-                            let published_excl_stat = if next_bytes.is_empty() {
-                                unlink_regular_file_checked_at(
-                                    &info_fd,
-                                    OsStr::new("exclude"),
-                                    Some(&prior_stat),
-                                    "git info/exclude",
-                                )?;
-                                None
-                            } else {
-                                Some(write_regular_file_atomic_at(
-                                    &info_fd,
-                                    OsStr::new("exclude"),
-                                    Some(&prior_stat),
-                                    &next_bytes,
-                                    prior_stat.st_mode & 0o777,
-                                    "git info/exclude",
-                                )?)
-                            };
-                            exclude_backup = Some(ExcludeBackup {
-                                common_git_dir: common_git_dir.clone(),
-                                created_info_dir: false,
-                                prior_exclude: Some((prior_bytes, prior_stat)),
-                                published_stat: published_excl_stat,
-                            });
-                        }
-                        Ok(())
-                    })();
-
-                    if let Err(ex_err) = exclude_step {
-                        if config_backup.is_some() {
-                            return rollback_codex_files(
-                                want_json,
-                                &alias,
-                                &row.path,
-                                "uninstall",
-                                config_backup.as_ref(),
-                                None,
-                                ex_err,
-                            );
-                        }
-                        return Err(ex_err);
-                    }
-
-                    if exclude_separator_added
-                        && !separator_removed
-                        && let Some(sep_alias) = find_other_codex_panel_owning_exclude_in_common_dir(
-                            &panels,
+            let exclude_backup = match apply_uninstall_exclude_step(
+                &mut panels,
+                spec,
+                &alias,
+                git_state,
+                created_exclude,
+                exclude_separator_added,
+                stop,
+            ) {
+                Ok(backup) => backup,
+                Err(ex_err) => {
+                    if config_backup.is_some() {
+                        return rollback_project_panel_files(
+                            spec,
+                            want_json,
                             &alias,
-                            &common_git_dir,
-                            stop,
-                        )
-                        && let Some(other_rows) = panels.get_mut(&sep_alias)
-                        && let Some(other_codex) = other_rows
-                            .iter_mut()
-                            .find(|r| r.app == PanelApp::Codex.as_str())
-                    {
-                        other_codex.exclude_separator_added = Some(true);
+                            &row.path,
+                            "uninstall",
+                            (config_backup.as_ref(), None),
+                            ex_err,
+                        );
                     }
+                    return Err(ex_err);
                 }
-            }
+            };
 
             drop_panel_row(&mut panels, &alias, app);
             if let Err(record_err) =
                 write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)
             {
                 if config_backup.is_some() || exclude_backup.is_some() {
-                    return rollback_codex_files(
+                    return rollback_project_panel_files(
+                        spec,
                         want_json,
                         &alias,
                         &row.path,
                         "uninstall",
-                        config_backup.as_ref(),
-                        exclude_backup.as_ref(),
+                        (config_backup.as_ref(), exclude_backup.as_ref()),
                         record_err,
                     );
                 }
@@ -3927,14 +5607,16 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                     panel_action_json(app, &alias, &row.path, PANEL_ENTRY_NAME, "uninstall", true);
                 return Ok((0, json(&report)?, vec![]));
             }
-            let msg = if removed_config_or_block {
+            let msg = if removed_config_or_entry {
                 format!(
-                    "uninstalled codex panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+                    "uninstalled {} panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+                    app.as_str(),
                     row.path.display()
                 )
             } else {
                 format!(
-                    "codex panel {PANEL_ENTRY_NAME} for {alias} was already gone; dropped ownership record ({})\n",
+                    "{} panel {PANEL_ENTRY_NAME} for {alias} was already gone; dropped ownership record ({})\n",
+                    app.as_str(),
                     row.path.display()
                 )
             };
@@ -3946,13 +5628,19 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeScope, CmdOutput, CodexRowMeta, CodexTrustStatus, OMS_PACKAGE_VERSION, PanelApp,
-        PanelMap, PanelRecord, attach_codex_trust_fields, check_codex_project_trust_at,
+        AntigravityRowMeta, AntigravityTrustStatus, ClaudeScope, CmdOutput, CodexRowMeta,
+        CodexTrustStatus, OMS_PACKAGE_VERSION, PanelApp, PanelMap, PanelRecord, RowMeta,
+        attach_antigravity_trust_fields, attach_codex_trust_fields, canonical_json_sha256,
+        capture_prior_json_formatting, check_antigravity_project_trust_at,
+        check_antigravity_project_trust_with_env, check_codex_project_trust_at,
         check_codex_project_trust_with_env, claude_panel_entry_json, codex_panel_block,
         codex_panel_block_for_versions, codex_panel_resource_version, encode_panels_json,
-        expected_codex_panel_server_table, format_codex_install_text, is_mcp_entry_missing,
-        parse_claude_mcp_get, parse_panels_json, resolve_codex_trust_in_toml,
-        split_codex_panel_block, upsert_panel_row,
+        expected_antigravity_panel_entry, expected_antigravity_panel_entry_for_version,
+        expected_codex_panel_server_table, format_antigravity_install_text,
+        format_codex_install_text, is_mcp_entry_missing, parse_claude_mcp_get, parse_panels_json,
+        parse_strict_json_object_bounded, reassemble_json_with_ws,
+        resolve_antigravity_trust_in_json, resolve_codex_trust_in_toml, split_codex_panel_block,
+        upsert_panel_row,
     };
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
@@ -4202,6 +5890,183 @@ trust_level = "trusted"
     }
 
     #[test]
+    fn antigravity_entry_json_canonical_sha_ws_roundtrip_and_trust_checks() {
+        let launcher = Path::new("/tmp/runtime-owner/.local/bin/oms");
+        let repo = Path::new("/srv/checkouts/PoseFixer");
+        let entry = expected_antigravity_panel_entry(launcher, repo).unwrap();
+        assert_eq!(entry["command"], "/tmp/runtime-owner/.local/bin/oms");
+        assert_eq!(entry["args"], serde_json::json!(["mcp-server"]));
+        assert_eq!(entry["env"]["OMS_MCP_TOOL_PROFILE"], "chatgpt-panel");
+        assert_eq!(entry["env"]["OMS_PANEL_REPO"], "/srv/checkouts/PoseFixer");
+        assert_eq!(
+            entry["env"]["OMS_MCP_PANEL_RESOURCE_VERSION"],
+            codex_panel_resource_version()
+        );
+        assert!(entry.get("type").is_none());
+
+        let reordered = serde_json::json!({
+            "env": {
+                "OMS_PANEL_REPO": "/srv/checkouts/PoseFixer",
+                "OMS_MCP_PANEL_RESOURCE_VERSION": codex_panel_resource_version(),
+                "OMS_MCP_TOOL_PROFILE": "chatgpt-panel",
+            },
+            "args": ["mcp-server"],
+            "command": "/tmp/runtime-owner/.local/bin/oms",
+        });
+        assert_eq!(
+            canonical_json_sha256(&entry).unwrap(),
+            canonical_json_sha256(&reordered).unwrap()
+        );
+        let older =
+            expected_antigravity_panel_entry_for_version(launcher, repo, "v0-older").unwrap();
+        assert_ne!(
+            canonical_json_sha256(&entry).unwrap(),
+            canonical_json_sha256(&older).unwrap()
+        );
+
+        for sample in [
+            b"{}".as_slice(),
+            b"{\n}\n".as_slice(),
+            b"{\"mcpServers\":{\"other\":{\"command\":\"/usr/local/bin/other\",\"args\":[\"--serve\"]}}}".as_slice(),
+            b"{\r\n    \"otherTop\": true,\r\n    \"mcpServers\": {\r\n        \"sqlite\": { \"command\": \"sqlite-mcp\", \"args\": [\"/tmp/db\"] }\r\n    }\r\n}".as_slice(),
+            b"{\n  \"mcpServers\": {\n    \"z\": {\n      \"command\": \"z-bin\"\n    },\n    \"a\": {\n      \"command\": \"a-bin\"\n    }\n  }\n}".as_slice(),
+        ] {
+            let parsed = parse_strict_json_object_bounded(sample, "sample").unwrap();
+            let (sep, sha, ws) = capture_prior_json_formatting(sample, &parsed).unwrap();
+            let restored = if let Some(ref w) = ws {
+                reassemble_json_with_ws(&parsed, w).unwrap()
+            } else {
+                super::encode_pretty_2space_json(&parsed, sep).unwrap()
+            };
+            assert_eq!(restored.as_slice(), sample);
+            if ws.is_some() || sep {
+                assert!(sha.is_some());
+            }
+        }
+
+        // Duplicate keys in JSON config are rejected.
+        assert!(
+            parse_strict_json_object_bounded(
+                br#"{"mcpServers":{},"mcpServers":{}}"#,
+                ".agents/mcp_config.json"
+            )
+            .is_err()
+        );
+
+        let trust_label = Path::new("/tmp/agy-home/.gemini/trustedFolders.json");
+        let sub = Path::new("/srv/checkouts/PoseFixer/packages/sub");
+        let sibling_prefix = Path::new("/srv/checkouts/PoseFixer-extra");
+        let other = Path::new("/srv/checkouts/other");
+
+        let folder_trusted = br#"{"/srv/checkouts/PoseFixer": "TRUST_FOLDER"}"#;
+        assert_eq!(
+            resolve_antigravity_trust_in_json(folder_trusted, repo, trust_label),
+            AntigravityTrustStatus::Trusted
+        );
+        assert_eq!(
+            resolve_antigravity_trust_in_json(folder_trusted, sub, trust_label),
+            AntigravityTrustStatus::Trusted
+        );
+        assert_eq!(
+            resolve_antigravity_trust_in_json(folder_trusted, sibling_prefix, trust_label),
+            AntigravityTrustStatus::Untrusted
+        );
+        assert_eq!(
+            resolve_antigravity_trust_in_json(folder_trusted, other, trust_label),
+            AntigravityTrustStatus::Untrusted
+        );
+
+        // Ancestor TRUST_FOLDER covers checkout, and TRUST_PARENT on a sibling covers parent's children.
+        let ancestor_trusted = br#"{"/srv/checkouts": "TRUST_FOLDER"}"#;
+        assert_eq!(
+            resolve_antigravity_trust_in_json(ancestor_trusted, repo, trust_label),
+            AntigravityTrustStatus::Trusted
+        );
+        let parent_trusted = br#"{"/srv/checkouts/other": "TRUST_PARENT"}"#;
+        assert_eq!(
+            resolve_antigravity_trust_in_json(parent_trusted, repo, trust_label),
+            AntigravityTrustStatus::Trusted
+        );
+
+        // Explicit DO_NOT_TRUST on checkout overrides trusted ancestor, while specific TRUST_FOLDER overrides DO_NOT_TRUST ancestor.
+        let blocked_child = br#"{
+            "/srv/checkouts": "TRUST_FOLDER",
+            "/srv/checkouts/PoseFixer": "DO_NOT_TRUST"
+        }"#;
+        assert_eq!(
+            resolve_antigravity_trust_in_json(blocked_child, repo, trust_label),
+            AntigravityTrustStatus::Untrusted
+        );
+        let allowed_child = br#"{
+            "/srv/checkouts": "DO_NOT_TRUST",
+            "/srv/checkouts/PoseFixer": "TRUST_FOLDER"
+        }"#;
+        assert_eq!(
+            resolve_antigravity_trust_in_json(allowed_child, repo, trust_label),
+            AntigravityTrustStatus::Trusted
+        );
+
+        for bad_json in [
+            b"{broken".as_slice(),
+            b"[]".as_slice(),
+            br#"{"/srv/checkouts/PoseFixer": true}"#.as_slice(),
+            br#"{"/srv/checkouts/PoseFixer": 1}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                resolve_antigravity_trust_in_json(bad_json, repo, trust_label),
+                AntigravityTrustStatus::Unknown { .. }
+            ));
+        }
+
+        // Unset, empty, or non-normalized HOME reports antigravity-trust-unknown.
+        for bad_home in [
+            None,
+            Some(OsStr::new("")),
+            Some(OsStr::new("relative/home")),
+        ] {
+            let status = check_antigravity_project_trust_with_env(repo, bad_home);
+            assert!(matches!(status, AntigravityTrustStatus::Unknown { .. }));
+            let mut report = serde_json::json!({});
+            attach_antigravity_trust_fields(&mut report, repo, &status);
+            assert_eq!(report["active"], false);
+            assert_eq!(report["reason"], "antigravity-trust-unknown");
+            let plain = String::from_utf8(format_antigravity_install_text(
+                "PoseFixer",
+                repo,
+                "installed",
+                &status,
+            ))
+            .unwrap();
+            assert!(plain.contains("(inactive: antigravity-trust-unknown)\nhint: "));
+        }
+
+        // Missing .gemini / missing trustedFolders.json / foreign UID all report Unknown.
+        let tmp = std::env::temp_dir().join(format!("oms-agy-trust-uid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let euid = rustix::process::geteuid().as_raw();
+        assert!(matches!(
+            check_antigravity_project_trust_at(&tmp, repo, euid),
+            AntigravityTrustStatus::Unknown { .. }
+        ));
+        std::fs::create_dir_all(tmp.join(".gemini")).unwrap();
+        assert!(matches!(
+            check_antigravity_project_trust_at(&tmp, repo, euid),
+            AntigravityTrustStatus::Unknown { .. }
+        ));
+        std::fs::write(tmp.join(".gemini/trustedFolders.json"), folder_trusted).unwrap();
+        assert_eq!(
+            check_antigravity_project_trust_at(&tmp, repo, euid),
+            AntigravityTrustStatus::Trusted
+        );
+        assert!(matches!(
+            check_antigravity_project_trust_at(&tmp, repo, euid.wrapping_add(1)),
+            AntigravityTrustStatus::Unknown { ref hint } if hint.contains("not owned by the current user")
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn panel_app_and_sidecar_validation_stay_strict() {
         assert_eq!(
             oms_scrub::scan(include_bytes!("project_panels.rs"), &[]),
@@ -4209,21 +6074,29 @@ trust_level = "trusted"
         );
         assert_eq!(PanelApp::parse("claude").unwrap(), PanelApp::Claude);
         assert_eq!(PanelApp::parse("codex").unwrap(), PanelApp::Codex);
-        let err = PanelApp::parse("antigravity").unwrap_err();
+        assert_eq!(
+            PanelApp::parse("antigravity").unwrap(),
+            PanelApp::Antigravity
+        );
+        let err = PanelApp::parse("agy").unwrap_err();
         assert!(
-            err.message.contains("supported: claude, codex"),
+            err.message
+                .contains("supported: claude, codex, antigravity"),
             "{}",
             err.message
         );
 
         let sha = "a".repeat(64);
         let ok = format!(
-            r#"{{"PoseFixer":[{{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/PoseFixer"}},{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/PoseFixer","block_sha256":"{sha}","created_config":false,"created_codex_dir":false,"created_exclude":true,"separator_added":true,"exclude_separator_added":true}}]}}"#
+            r#"{{"PoseFixer":[{{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/PoseFixer"}},{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/PoseFixer","block_sha256":"{sha}","created_config":false,"created_codex_dir":false,"created_exclude":true,"separator_added":true,"exclude_separator_added":true}},{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/PoseFixer","entry_sha256":"{sha}","created_config":true,"created_agents_dir":true,"created_exclude":true}}]}}"#
         );
-        assert_eq!(parse_panels_json(&ok).unwrap()["PoseFixer"].len(), 2);
+        assert_eq!(parse_panels_json(&ok).unwrap()["PoseFixer"].len(), 3);
 
         let claude_with_codex_fields = format!(
             r#"{{"alpha":[{{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":false,"created_codex_dir":false,"created_exclude":false}}]}}"#
+        );
+        let claude_with_agy_fields = format!(
+            r#"{{"alpha":[{{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}"}}]}}"#
         );
         let claude_with_sep_field = r#"{"alpha":[{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha","separator_added":true}]}"#;
         let codex_old_plugin_shape = format!(
@@ -4238,6 +6111,27 @@ trust_level = "trusted"
         );
         let codex_dir_without_file = format!(
             r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":false,"created_codex_dir":true,"created_exclude":false}}]}}"#
+        );
+        let codex_with_agy_field = format!(
+            r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":false,"created_agents_dir":false}}]}}"#
+        );
+        let agy_with_codex_field = format!(
+            r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","block_sha256":"{sha}","created_config":true,"created_agents_dir":true,"created_exclude":false}}]}}"#
+        );
+        let agy_dir_without_file = format!(
+            r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":false,"created_agents_dir":true,"created_exclude":false}}]}}"#
+        );
+        let agy_excl_sep_without_excl = format!(
+            r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":true,"created_agents_dir":true,"created_exclude":false,"exclude_separator_added":true}}]}}"#
+        );
+        let agy_duplicate_checkout_aliases = format!(
+            r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":true,"created_agents_dir":true,"created_exclude":true}}],"beta":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":false,"created_agents_dir":false,"created_exclude":false}}]}}"#
+        );
+        let agy_prior_ws_without_sha = format!(
+            r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":false,"created_agents_dir":false,"created_exclude":false,"prior_ws":",,"}}]}}"#
+        );
+        let agy_bad_prior_ws = format!(
+            r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":false,"created_agents_dir":false,"created_exclude":false,"prior_sha256":"{sha}","prior_ws":"0s,x"}}]}}"#
         );
         let codex_sep_with_created_file = format!(
             r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":false,"separator_added":true}}]}}"#
@@ -4254,7 +6148,7 @@ trust_level = "trusted"
             "alpha",
             PanelApp::Claude,
             Path::new("/srv/alpha"),
-            None,
+            RowMeta::Claude,
         );
         let claude_bytes = encode_panels_json(&claude_only).unwrap();
         assert_eq!(
@@ -4281,32 +6175,54 @@ trust_level = "trusted"
                         "PoseFixer",
                         PanelApp::Codex,
                         Path::new("/srv/PoseFixer"),
-                        Some(meta.clone()),
+                        RowMeta::Codex(meta.clone()),
                     );
                     let encoded = encode_panels_json(&single).unwrap();
                     let round_tripped =
                         parse_panels_json(std::str::from_utf8(&encoded).unwrap()).unwrap();
                     assert_eq!(round_tripped, single, "round-trip mismatch for {meta:?}");
 
-                    let mut paired = PanelMap::new();
+                    let agy_meta = AntigravityRowMeta {
+                        entry_sha256: sha.clone(),
+                        created_config,
+                        created_agents_dir: created_codex_dir,
+                        created_exclude,
+                        separator_added: !created_config && separator_added,
+                        exclude_separator_added,
+                        created_mcp_servers: !created_config,
+                        prior_sha256: (!created_config && separator_added).then(|| sha.clone()),
+                        prior_ws: (!created_config && !separator_added).then(|| "n2s,s,n".into()),
+                    };
+                    let mut agy_meta_fixed = agy_meta;
+                    if agy_meta_fixed.prior_ws.is_some() {
+                        agy_meta_fixed.prior_sha256 = Some(sha.clone());
+                    }
+                    let mut trio = PanelMap::new();
                     upsert_panel_row(
-                        &mut paired,
+                        &mut trio,
                         "PoseFixer",
                         PanelApp::Claude,
                         Path::new("/srv/PoseFixer"),
-                        None,
+                        RowMeta::Claude,
                     );
                     upsert_panel_row(
-                        &mut paired,
+                        &mut trio,
                         "PoseFixer",
                         PanelApp::Codex,
                         Path::new("/srv/PoseFixer"),
-                        Some(meta),
+                        RowMeta::Codex(meta),
                     );
-                    let paired_bytes = encode_panels_json(&paired).unwrap();
+                    upsert_panel_row(
+                        &mut trio,
+                        "PoseFixer",
+                        PanelApp::Antigravity,
+                        Path::new("/srv/PoseFixer"),
+                        RowMeta::Antigravity(agy_meta_fixed),
+                    );
+                    let trio_bytes = encode_panels_json(&trio).unwrap();
                     assert_eq!(
-                        parse_panels_json(std::str::from_utf8(&paired_bytes).unwrap()).unwrap(),
-                        paired
+                        parse_panels_json(std::str::from_utf8(&trio_bytes).unwrap()).unwrap(),
+                        trio
                     );
                 }
             }
@@ -4321,16 +6237,27 @@ trust_level = "trusted"
         for bad in [
             r#"{"alpha":[]}"#,
             claude_with_codex_fields.as_str(),
+            claude_with_agy_fields.as_str(),
             claude_with_sep_field,
             codex_old_plugin_shape.as_str(),
             codex_upper_hash.as_str(),
             codex_missing_flags.as_str(),
             codex_dir_without_file.as_str(),
+            codex_with_agy_field.as_str(),
+            agy_with_codex_field.as_str(),
+            agy_dir_without_file.as_str(),
+            agy_excl_sep_without_excl.as_str(),
+            agy_duplicate_checkout_aliases.as_str(),
+            agy_prior_ws_without_sha.as_str(),
+            agy_bad_prior_ws.as_str(),
             codex_excl_sep_without_excl.as_str(),
             codex_duplicate_checkout_aliases.as_str(),
             r#"{"alpha":[{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha"}]}"#,
+            r#"{"alpha":[{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha"}]}"#,
+            r#"{"alpha":[{"app":"antigravity","scope":"local","name":"oms-panel","path":"/srv/alpha","entry_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_config":true,"created_agents_dir":true,"created_exclude":true}]}"#,
             r#"{"alpha":[{"app":"codex","scope":"user","name":"oms-panel","path":"/srv/alpha"}]}"#,
             r#"{"alpha":[{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"short","created_config":true,"created_codex_dir":true,"created_exclude":true}]}"#,
+            r#"{"alpha":[{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"short","created_config":true,"created_agents_dir":true,"created_exclude":true}]}"#,
             r#"{"alpha":[{"app":"claude","scope":"user","name":"oms-panel","path":"/srv/alpha"}]}"#,
             r#"{"alpha":[{"app":"claude","scope":"local","name":"oh-my-setting","path":"/srv/alpha"}]}"#,
             r#"{"alpha":[{"app":"claude","scope":"local","name":"oms-panel","path":"relative/alpha"}]}"#,
@@ -4349,11 +6276,33 @@ trust_level = "trusted"
             name: "oms-panel".into(),
             path: PathBuf::from("/srv/alpha"),
             block_sha256: Some(sha.clone()),
+            entry_sha256: None,
             created_config: Some(true),
             created_codex_dir: Some(true),
+            created_agents_dir: None,
             created_exclude: Some(false),
             separator_added: None,
             exclude_separator_added: None,
+            created_mcp_servers: None,
+            prior_sha256: None,
+            prior_ws: None,
+        };
+        let base_agy = || PanelRecord {
+            app: "antigravity".into(),
+            scope: "project".into(),
+            name: "oms-panel".into(),
+            path: PathBuf::from("/srv/alpha"),
+            block_sha256: None,
+            entry_sha256: Some(sha.clone()),
+            created_config: Some(true),
+            created_codex_dir: None,
+            created_agents_dir: Some(true),
+            created_exclude: Some(false),
+            separator_added: None,
+            exclude_separator_added: None,
+            created_mcp_servers: None,
+            prior_sha256: None,
+            prior_ws: None,
         };
         let invalid_maps: Vec<PanelMap> = vec![
             BTreeMap::new(),
@@ -4370,6 +6319,14 @@ trust_level = "trusted"
             BTreeMap::from([(
                 "alpha".into(),
                 vec![PanelRecord {
+                    created_config: Some(false),
+                    created_agents_dir: Some(true),
+                    ..base_agy()
+                }],
+            )]),
+            BTreeMap::from([(
+                "alpha".into(),
+                vec![PanelRecord {
                     created_exclude: Some(false),
                     exclude_separator_added: Some(true),
                     ..base_codex()
@@ -4378,8 +6335,23 @@ trust_level = "trusted"
             BTreeMap::from([(
                 "alpha".into(),
                 vec![PanelRecord {
+                    created_exclude: Some(false),
+                    exclude_separator_added: Some(true),
+                    ..base_agy()
+                }],
+            )]),
+            BTreeMap::from([(
+                "alpha".into(),
+                vec![PanelRecord {
                     block_sha256: Some("short".into()),
                     ..base_codex()
+                }],
+            )]),
+            BTreeMap::from([(
+                "alpha".into(),
+                vec![PanelRecord {
+                    entry_sha256: Some("short".into()),
+                    ..base_agy()
                 }],
             )]),
             BTreeMap::from([(
@@ -4393,6 +6365,10 @@ trust_level = "trusted"
             BTreeMap::from([
                 ("alpha".into(), vec![base_codex()]),
                 ("beta".into(), vec![base_codex()]),
+            ]),
+            BTreeMap::from([
+                ("alpha".into(), vec![base_agy()]),
+                ("beta".into(), vec![base_agy()]),
             ]),
         ];
         for bad_map in &invalid_maps {

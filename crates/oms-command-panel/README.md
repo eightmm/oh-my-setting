@@ -320,8 +320,8 @@ alias to path:
 oms panel --register-project [PATH] [--alias NAME] [--area NAME]
 oms panel --unregister-project ALIAS
 oms panel --projects [--json]
-oms panel --install-panel claude|codex --project ALIAS [--dry-run] [--json]
-oms panel --uninstall-panel claude|codex --project ALIAS [--dry-run] [--json]
+oms panel --install-panel claude|codex|antigravity --project ALIAS [--dry-run] [--json]
+oms panel --uninstall-panel claude|codex|antigravity --project ALIAS [--dry-run] [--json]
 ```
 
 `--register-project` resolves `PATH` (defaulting to the current directory) to its
@@ -393,5 +393,20 @@ checkouts (`action: "forgotten"`), removes only an OMS block whose bytes match `
 `info/exclude` line (plus `exclude_separator_added`, or hands `created_exclude` and its
 separator flag to another Codex row in the same sidecar that still shares that exclude rule so
 the last uninstall removes it) only when OMS created them and they are now empty or unchanged,
-and drops the sidecar row, while `--unregister-project` refuses aliases that still have a
-recorded panel.
+and drops the sidecar row. `--install-panel antigravity --project ALIAS` and
+`--uninstall-panel antigravity --project ALIAS` mirror the Codex flow for
+`<checkout>/.agents/mcp_config.json` (`0600` when created, `.agents` `0700` if missing,
+preserving every other key, server, key order, and mode, and rewriting with 2-space pretty
+JSON only when OMS changes the file), defining `mcpServers.oms-panel` with the same launcher,
+`args`, and `env` as Codex, refusing invalid JSON, non-object `mcpServers`, symlinks,
+non-regular files, differing unmanaged `oms-panel` entries (adopting exact matches), and
+Git-tracked `.agents/mcp_config.json`, adding `/.agents/mcp_config.json` to
+`<common-git-dir>/info/exclude` when untracked and not ignored, recording `scope: "project"`,
+canonical `entry_sha256`, `created_config`, `created_agents_dir`, `created_exclude`, and
+optional separator/formatting metadata in `desktop-project-panels.json`, restoring exact
+original bytes on uninstall when OMS's only change was adding or refreshing `oms-panel` (and
+removing OMS-created empty artifacts and last-owner exclude lines, or reporting edited entries
+via `preservedFiles`), and reading `~/.gemini/trustedFolders.json` read-only without following
+symlinks, failing the install, or writing under `~/.gemini` (`"active": true`,
+`"antigravity-project-untrusted"`, or `"antigravity-trust-unknown"`). `--unregister-project`
+refuses aliases that still have any recorded panel.

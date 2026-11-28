@@ -3504,6 +3504,59 @@ explicitly through room publishing.
 Sources: [Desktop shared configuration](https://code.claude.com/docs/en/desktop#shared-configuration),
 [native inbox and inbound controls](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket).
 
+### Desktop projects and per-project panels
+
+Host-side desktop project map and per-project panel commands manage
+`oh-my-setting/desktop-projects.json` (or `OMS_PANEL_PROJECTS_FILE`),
+`desktop-project-areas.json`, and `desktop-project-panels.json` (`0600` private
+sidecars; blocked inside `OMS_PANEL_REPO` sessions and delegated workers):
+
+```bash
+oms panel --register-project [PATH] [--alias NAME] [--area NAME]
+oms panel --unregister-project ALIAS
+oms panel --projects [--json]
+oms panel --install-panel claude|codex|antigravity --project ALIAS [--dry-run] [--json]
+oms panel --uninstall-panel claude|codex|antigravity --project ALIAS [--dry-run] [--json]
+```
+
+Each installed panel exposes an `oms-panel` MCP server (`~/.local/bin/oms` with
+`args = ["mcp-server"]`, `OMS_MCP_TOOL_PROFILE=chatgpt-panel`, and `OMS_PANEL_REPO`
+pinned to the physical checkout). Deleted checkouts are forgotten on uninstall
+(`action: "forgotten"`), failed writes roll back, and `--unregister-project` is
+refused while any panel remains installed for that alias:
+
+- `claude` registers a local-scope `oms-panel` MCP entry via `OMS_CLAUDE_BIN` or
+  `claude` on `PATH` (adopting an exact match and refusing unmanaged local entries).
+- `codex` creates or extends `<checkout>/.codex/config.toml` (`0600` when created,
+  preserving every other byte of an existing file) with a
+  `# BEGIN oh-my-setting codex-panel` .. `# END oh-my-setting codex-panel` block
+  including `OMS_MCP_PANEL_RESOURCE_VERSION`, adds `/.codex/config.toml` to
+  `<common-git-dir>/info/exclude` when untracked and not ignored, and checks
+  `$CODEX_HOME/config.toml` read-only (`active: true`, `codex-project-untrusted`,
+  or `codex-trust-unknown`).
+- `antigravity` creates or updates `<checkout>/.agents/mcp_config.json` (`0600` when
+  created and `.agents` `0700` if missing) with `mcpServers.oms-panel` (`command`,
+  `args`, `OMS_MCP_TOOL_PROFILE`, `OMS_PANEL_REPO`, and
+  `OMS_MCP_PANEL_RESOURCE_VERSION`), preserving every other key, server, key order,
+  and file mode. Because JSON has no comment markers, OMS tracks ownership via the
+  sidecar row and the SHA-256 of the canonical serialized `oms-panel` entry, and
+  rewrites `.agents/mcp_config.json` with 2-space pretty JSON only when OMS changes
+  the file (no-op reruns and exact-match adoptions leave the file untouched). It
+  refuses invalid JSON, non-object `mcpServers`, symlinks, non-regular files,
+  differing unmanaged `oms-panel` entries, and Git-tracked `.agents/mcp_config.json`
+  files, and adds `/.agents/mcp_config.json` to `<common-git-dir>/info/exclude` when
+  untracked and not ignored. Uninstall removes only `oms-panel` (preserving and
+  reporting edited entries via `preservedFiles`), deletes OMS-created files, empty
+  OMS-created `.agents` directories, and last-owner exclude lines, and restores
+  exact original bytes when OMS's only change was adding or refreshing the entry.
+  Install also reads `~/.gemini/trustedFolders.json` read-only without following
+  symlinks, failing the install, or writing under `~/.gemini`, reporting
+  `"active": true` when the checkout or an ancestor is trusted (`TRUST_FOLDER` /
+  `TRUST_PARENT` without a more specific `DO_NOT_TRUST`), or `"active": false` with
+  `"reason": "antigravity-project-untrusted"` or `"antigravity-trust-unknown"` (when
+  `HOME` is unset or the path is missing, unreadable, a symlink, non-regular,
+  foreign-owned, or invalid JSON).
+
 
 ## Additional CLIs and adapters
 
