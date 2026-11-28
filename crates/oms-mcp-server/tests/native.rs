@@ -365,7 +365,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v39.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v40.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -4003,6 +4003,87 @@ fn project_scoped_lead_conversations() {
         "a2000000-0000-4000-8000-000000000002"
     );
 
+    // Explicitly requesting newSession: true clears resume, records fresh: true, and is idempotent.
+    std::fs::remove_file(source.join("resumed-session")).unwrap();
+    let turn3 = "10000000-0000-4000-8000-0000000000a3";
+    let fresh_turn = app.tool(
+        send,
+        json!({
+            "project":"approved","projectKey":key,"provider":"codex",
+            "leadRequestId":codex_req,"turnId":turn3,"text":"Fresh topic question","newSession":true
+        }),
+    );
+    good(&fresh_turn);
+    until(|| {
+        runs() == 4
+            && std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+                .unwrap()
+                .all(|e| e.unwrap().path().join("status").exists())
+    });
+    assert!(
+        !source.join("resumed-session").exists(),
+        "newSession=true must launch without --resume"
+    );
+    let anchor_dir = std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.join(format!("lead-turn-{turn3}.json")).exists())
+        .expect("lead-turn record");
+    let rec: Value = serde_json::from_slice(
+        &std::fs::read(anchor_dir.join(format!("lead-turn-{turn3}.json"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rec["fresh"], json!(true));
+    // Same turnId + newSession=true succeeds idempotently with zero extra run; mismatched mode is rejected.
+    good(&app.tool(
+        send,
+        json!({
+            "project":"approved","projectKey":key,"provider":"codex",
+            "leadRequestId":codex_req,"turnId":turn3,"text":"Fresh topic question","newSession":true
+        }),
+    ));
+    assert_eq!(runs(), 4);
+    bad(
+        &app.tool(
+            send,
+            json!({
+                "project":"approved","projectKey":key,"provider":"codex",
+                "leadRequestId":codex_req,"turnId":turn3,"text":"Fresh topic question"
+            }),
+        ),
+        "already belongs",
+    );
+    // Subsequent turn without newSession resumes turn 3's observed native session.
+    let turn3_prefs = app.tool(
+        prefs,
+        json!({"project":"approved","projectKey":key,"provider":"codex","leadRequestId":codex_req}),
+    );
+    good(&turn3_prefs);
+    let turn3_session = turn3_prefs["result"]["_meta"]["leadSettings"]["nativeSession"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(turn3_session, "a2000000-0000-4000-8000-000000000002");
+    let turn4 = "10000000-0000-4000-8000-0000000000a4";
+    good(&app.tool(
+        send,
+        json!({
+            "project":"approved","projectKey":key,"provider":"codex",
+            "leadRequestId":codex_req,"turnId":turn4,"text":"Continue fresh thread"
+        }),
+    ));
+    until(|| {
+        runs() == 5
+            && std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+                .unwrap()
+                .all(|e| e.unwrap().path().join("status").exists())
+    });
+    assert_eq!(
+        std::fs::read_to_string(source.join("resumed-session")).unwrap(),
+        turn3_session
+    );
+
     // Security boundaries remain enforced: bad projectKey, unknown alias, room in mcp-app, delegated child.
     bad(
         &app.tool(
@@ -4643,7 +4724,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v39.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v40.html");
     for name in [
         "oms_panel_usage",
         "oms_panel_project_graph",
@@ -10090,6 +10171,8 @@ fn fake_oms() {
                             | "Private fixture follow-up 2"
                             | "Private fixture follow-up 3"
                             | "Follow-up Codex question"
+                            | "Fresh topic question"
+                            | "Continue fresh thread"
                     );
                     assert_eq!(args.iter().any(|a| a == "--model"), explicit);
                     assert_eq!(args.iter().any(|a| a == "--reasoning-effort"), explicit);
@@ -10149,13 +10232,14 @@ fn fake_oms() {
                 use sha2::{Digest, Sha256};
                 use std::os::unix::fs::PermissionsExt;
                 assert_eq!(marker.as_deref(), Some(operation));
-                let followup = args
+                let prompt = args
                     .iter()
-                    .any(|a| a.to_str().is_some_and(|s| s.starts_with("--prompt=")));
-                let id = if followup {
-                    "a2000000-0000-4000-8000-000000000002"
-                } else {
-                    "a1000000-0000-4000-8000-000000000001"
+                    .filter_map(|a| a.to_str())
+                    .find_map(|a| a.strip_prefix("--prompt="));
+                let id = match prompt {
+                    Some("Fresh topic question") => "a3000000-0000-4000-8000-000000000003",
+                    Some(_) => "a2000000-0000-4000-8000-000000000002",
+                    None => "a1000000-0000-4000-8000-000000000001",
                 };
                 let proof = json!({"schema":1,"operation":operation,"provider":provider,
                     "sessionId":id,"model":(provider=="claude").then_some("claude-observed"),
