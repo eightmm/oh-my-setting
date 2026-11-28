@@ -2280,6 +2280,7 @@ const REMOTE_REASONS: &[&str] = &[
     "would-overwrite-untracked",
     "legacy-absolute",
     "timeout",
+    "active-job",
 ];
 const REMOTE_SCRIPT: &str = r#"export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_LITERAL_PATHSPECS=1 LC_ALL=C
 # Git and its hooks must not consume subsequent commands from sh -s input.
@@ -2298,7 +2299,9 @@ origin=$4
 sha=$5
 wanted=$6
 seconds=$7
+ops_key=$8
 reason=
+busy_op=
 exists=false
 is_git=false
 matches=false
@@ -2310,7 +2313,7 @@ before=
 after=
 finish() {
     printf '\nOMS_TARGET_V1\n'
-    printf '%s\000' "$reason" "$workdir" "$exists" "$is_git" "$matches" "$head" "$branch" "$clean" "$untracked" "$before" "$after"
+    printf '%s\000' "$reason" "$workdir" "$exists" "$is_git" "$matches" "$head" "$branch" "$clean" "$untracked" "$before" "$after" "$busy_op"
     if [ -n "$reason" ]; then exit 3; fi
     exit 0
 }
@@ -2376,6 +2379,62 @@ matches=true
 if [ "$mode" = status ]; then finish; fi
 [ "$clean" = true ] || fail dirty
 [ "$branch" = "$wanted" ] || fail wrong-branch
+# A recorded `ssh-adapter exec --op-id` run (remote experiments) executes in this
+# checkout. Its op directory is resolved exactly as exec resolves it and judged
+# with exec's own helpers (prepended): finished once result.json or reaped.done
+# exists; otherwise live while its runner (same boot, same start time) is alive or
+# reconcile would verify its command process group, and while it is younger than
+# two minutes without meta.json (launch). Best effort: exec takes no lock shared
+# with sync, and plain exec without an op id or scheduler-submitted jobs leave no
+# op directory.
+read_host_id
+cur_pg=$(LC_ALL=C ps -p $$ -o pgid= 2>/dev/null | tr -d ' \t\r\n' || true)
+if [ -n "${OMS_REMOTE_STATE_DIR:-}" ]; then
+    ops=$OMS_REMOTE_STATE_DIR
+elif [ -d "$workdir/.git" ]; then
+    ops=$workdir/.git/oms-remote-ops
+else
+    ops=${TMPDIR:-/tmp}/oms-remote-ops-$(id -u)/$ops_key
+fi
+op_live() {
+    op_dir=$1
+    if [ -f "$op_dir/result.json" ] || [ -f "$op_dir/reaped.done" ]; then return 1; fi
+    if [ ! -r "$op_dir/meta.json" ]; then
+        # The runner writes meta.json right after exec creates the directory; an
+        # older directory without it is a launch that never started.
+        [ -n "$(find "$op_dir" -prune -mmin -2 2>/dev/null)" ]
+        return
+    fi
+    mpid=$(sed -n 's/.*"pid":\([0-9][0-9]*\).*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+    m_bid=$(sed -n 's/.*"boot_id":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+    m_tag=$(sed -n 's/.*"op_tag":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+    m_ls=$(sed -n 's/.*"lstart":"\([^"]*\)".*/\1/p' "$op_dir/meta.json" | head -n 1 || true)
+    if [ -n "$m_bid" ] && [ "$m_bid" != unknown ] && [ "$cur_bid" != unknown ] && [ "$m_bid" != "$cur_bid" ]; then
+        return 1
+    fi
+    if pid_live "$mpid"; then
+        cur_ls=$(LC_ALL=C ps -p "$mpid" -o lstart= 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-' || true)
+        if [ -z "$m_ls" ] || [ -z "$cur_ls" ] || [ "$(norm "$m_ls")" = "$(norm "$cur_ls")" ]; then
+            return 0
+        fi
+    fi
+    read_cpg
+    check_orphan_cpg
+    [ "$cpg_verdict" != none ]
+}
+# A sync that leaves HEAD where it is changes no file a running job reads.
+guard_jobs() {
+    [ "$head" != "$sha" ] && [ -d "$ops" ] || return 0
+    for op in "$ops"/*; do
+        [ -d "$op" ] && [ ! -L "$op" ] || continue
+        # Only names `exec --op-id` accepts are op directories.
+        name=${op##*/}
+        case "$name" in *[!A-Za-z0-9._-]*|-*|.*|*..*) continue ;; esac
+        [ "${#name}" -le 64 ] || continue
+        if op_live "$op"; then busy_op=$name; fail active-job; fi
+    done
+}
+guard_jobs
 network limited_git fetch origin "+refs/heads/$wanted:refs/remotes/origin/$wanted"
 git merge-base --is-ancestor "$sha" "refs/remotes/origin/$wanted" 2>/dev/null || fail unpushed
 if ! git merge-base --is-ancestor "$head" "$sha"; then
@@ -2409,6 +2468,8 @@ git diff --no-renames --name-only --diff-filter=A -z "$head" "$sha" -- |
 )
 collision_status=$?
 case "$collision_status" in 10) fail would-overwrite-ignored ;; 11) fail would-overwrite-untracked ;; esac
+# Again after the fetch, which can take long enough for a job to start.
+guard_jobs
 limited_git merge --ff-only "$sha" >/dev/null 2>&1 || {
     case "$?" in 124|137) fail timeout ;; *) fail diverged ;; esac
 }
@@ -2515,17 +2576,17 @@ fn network_reason(stderr: &[u8]) -> &'static str {
     }
 }
 
-/// The remote reply as its 11 fields, or `None` unless it is exactly the
+/// The remote reply as its 12 fields, or `None` unless it is exactly the
 /// sentinel-framed, NUL-delimited, self-consistent shape the script emits:
 /// exit 0 iff no reason, known reasons only, booleans, an absolute workdir and
 /// empty-or-full object ids.
-fn parse_remote_reply(code: i32, stdout: &str) -> Option<[&str; 11]> {
+fn parse_remote_reply(code: i32, stdout: &str) -> Option<[&str; 12]> {
     let (_, payload) = stdout.rsplit_once(REMOTE_SENTINEL)?;
     let fields: Vec<&str> = payload.split('\0').collect();
-    if fields.len() != 12 || !fields[11].is_empty() || !matches!(code, 0 | 3) {
+    if fields.len() != 13 || !fields[12].is_empty() || !matches!(code, 0 | 3) {
         return None;
     }
-    let fields: [&str; 11] = fields[..11].try_into().ok()?;
+    let fields: [&str; 12] = fields[..12].try_into().ok()?;
     let [
         reason,
         workdir,
@@ -2538,6 +2599,7 @@ fn parse_remote_reply(code: i32, stdout: &str) -> Option<[&str; 11]> {
         untracked,
         before,
         after,
+        busy_op,
     ] = fields;
     let truthy = |s: &str| matches!(s, "true" | "false");
     let oid = |s: &str| s.is_empty() || is_hex_oid(&s.to_ascii_lowercase());
@@ -2546,7 +2608,14 @@ fn parse_remote_reply(code: i32, stdout: &str) -> Option<[&str; 11]> {
             .into_iter()
             .all(truthy)
         && workdir.starts_with('/')
-        && [head, before, after].into_iter().all(oid))
+        && [head, before, after].into_iter().all(oid)
+        && (reason == "active-job") == !busy_op.is_empty()
+        && busy_op.len() <= 64
+        && !busy_op.starts_with(['-', '.'])
+        && !busy_op.contains("..")
+        && busy_op
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')))
     .then_some(fields)
 }
 
@@ -2705,6 +2774,9 @@ impl RuntimeServices<'_> {
             &requested,
             &branch,
             &seconds.to_string(),
+            // The key `ssh-adapter exec` gives this checkout's op directory when
+            // it has no `.git` directory: the stored workdir string, hashed.
+            &sha_hex(request.workdir.as_bytes())[..16],
         ];
         let control = oms_runtime::ssh_adapter::ssh_control_path(&request.ssh_alias, None)?;
         let deadline = Instant::now() + request.timeout;
@@ -2768,7 +2840,9 @@ impl RuntimeServices<'_> {
                     return timed_out(&mut result);
                 }
                 let mut spec = ChildSpec::new(argv, remaining_wall, GIT_LIMIT);
-                spec.stdin = REMOTE_SCRIPT.as_bytes().to_vec();
+                spec.stdin = [oms_runtime::ssh_adapter::REMOTE_SH_HELPERS, REMOTE_SCRIPT]
+                    .concat()
+                    .into_bytes();
                 let remote = match self.child_raw(spec) {
                     Ok(out) => out,
                     Err(e) if e.starts_with(LAUNCH_FAILED) => {
@@ -2816,6 +2890,7 @@ impl RuntimeServices<'_> {
                 untracked,
                 before,
                 after,
+                busy_op,
             ],
         ) = parse_remote_reply(remote.code, &text)
         else {
@@ -2861,6 +2936,15 @@ impl RuntimeServices<'_> {
                 rvalue::string("push first: requested commit is not on the remote origin branch"),
             )?,
             "timeout" => result.set("state_unknown", rvalue::b(true))?,
+            "active-job" => {
+                result.set("active_operation", rvalue::string(busy_op))?;
+                result.set(
+                    "message",
+                    rvalue::string(format!(
+                        "remote operation {busy_op} is still running in the target checkout; sync after it finishes or is cancelled"
+                    )),
+                )?;
+            }
             _ => {}
         }
         Ok(result)
@@ -4193,7 +4277,8 @@ exit 92
         let head = "a".repeat(40);
         let good = |reason: &str| {
             format!(
-                "noise{REMOTE_SENTINEL}{reason}\0/srv/w\0true\0true\0true\0{head}\0main\0true\0false\0{head}\0{head}\0"
+                "noise{REMOTE_SENTINEL}{reason}\0/srv/w\0true\0true\0true\0{head}\0main\0true\0false\0{head}\0{head}\0{}\0",
+                if reason == "active-job" { "op-1" } else { "" }
             )
         };
         let framed = good("");
@@ -4209,6 +4294,26 @@ exit 92
             "exit 3 without reason"
         );
         assert!(parse_remote_reply(3, &good("bogus")).is_none());
+        assert_eq!(
+            parse_remote_reply(3, &good("active-job")).unwrap()[11],
+            "op-1"
+        );
+        assert!(
+            parse_remote_reply(3, &good("active-job").replace("op-1", "op/1")).is_none(),
+            "op id outside the exec charset"
+        );
+        assert!(
+            parse_remote_reply(3, &good("active-job").replace("op-1", "")).is_none(),
+            "active-job without an op id"
+        );
+        assert!(
+            parse_remote_reply(
+                3,
+                &good("dirty").replace(&format!("{head}\0\0"), &format!("{head}\0op-1\0"))
+            )
+            .is_none(),
+            "op id on another reason"
+        );
         assert!(parse_remote_reply(1, &good("")).is_none());
         assert!(parse_remote_reply(0, "no sentinel").is_none());
         assert!(parse_remote_reply(0, &good("").replace("true", "yes")).is_none());
@@ -5939,6 +6044,103 @@ exit 92
         );
         assert!(ok.get("origin_matches").truth() && ok.get("clean").truth());
         assert!(ok.text("workdir").ends_with("work/tree"));
+        // Sync refuses to fast-forward a checkout a recorded `exec --op-id` run on
+        // this boot is still running in, and proceeds once that run has finished.
+        remote.git(&["commit", "-q", "--allow-empty", "-m", "next"]);
+        let next = rt.repository_view(&work).unwrap().head;
+        let bare = home.path().join("origin.git");
+        remote.git(&["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
+        remote.git(&["reset", "-q", "--keep", "HEAD~1"]);
+        let rewrite = format!("url.{}.insteadOf", bare.display());
+        for dir in [&repo, &remote] {
+            dir.git(&["config", &rewrite, origin]);
+        }
+        let boot = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("if [ -r /proc/sys/kernel/random/boot_id ]; then tr -d ' \\t\\r\\n' < /proc/sys/kernel/random/boot_id | tr -cd 'A-Za-z0-9._: +=,-'; else sysctl -n kern.boottime 2>/dev/null | tr -cd 'A-Za-z0-9._: +=,-'; fi")
+            .output()
+            .unwrap()
+            .stdout;
+        let boot = String::from_utf8(boot).unwrap();
+        assert!(!boot.is_empty());
+        let mut job = {
+            use std::os::unix::process::CommandExt;
+            std::process::Command::new("sleep")
+                .arg("60")
+                .process_group(0)
+                .spawn()
+                .unwrap()
+        };
+        let started = std::process::Command::new("ps")
+            .args(["-p", &job.id().to_string(), "-o", "lstart="])
+            .env("LC_ALL", "C")
+            .output()
+            .unwrap()
+            .stdout;
+        let started: String = String::from_utf8(started)
+            .unwrap()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || "._: +=,-".contains(*c))
+            .collect();
+        assert!(!started.is_empty());
+        let ops = work.join(".git/oms-remote-ops");
+        // A finished run, a run from an earlier boot, a reused group id (another
+        // start time), and a launch that never wrote meta.json are not live.
+        for (op, boot_id, group_start, finished) in [
+            ("done-op", boot.as_str(), started.as_str(), true),
+            ("old-boot", "previous-boot", started.as_str(), false),
+            (
+                "reused-pgid",
+                boot.as_str(),
+                "Mon Jan  1 00:00:00 2001",
+                false,
+            ),
+            ("live-op", boot.as_str(), started.as_str(), false),
+        ] {
+            let dir = ops.join(op);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("meta.json"),
+                format!(r#"{{"hostname":"h","boot_id":"{boot_id}","pid":2147483646,"lstart":"","command_sha256":"x","snapshot":"","op_tag":""}}"#),
+            )
+            .unwrap();
+            std::fs::write(dir.join("child.pgid"), format!("{}\n", job.id())).unwrap();
+            std::fs::write(dir.join("child.lstart"), format!("{group_start}\n")).unwrap();
+            if finished {
+                std::fs::write(dir.join("result.json"), "{\"exit_code\":0}\n").unwrap();
+            }
+        }
+        let crashed = ops.join("crashed-launch");
+        std::fs::create_dir_all(&crashed).unwrap();
+        std::fs::File::open(&crashed)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(600))
+            .unwrap();
+        let sync = TargetRequest {
+            sync: true,
+            sha: Some(next.clone()),
+            ..request("work/tree")
+        };
+        let busy = rt.target_transport(repo.path(), &sync).unwrap();
+        assert_eq!(
+            (
+                busy.get("ok").truth(),
+                busy.text("reason"),
+                busy.text("active_operation")
+            ),
+            (false, "active-job", "live-op"),
+            "{busy:?}"
+        );
+        assert_eq!(rt.repository_view(&work).unwrap().head, head);
+        std::fs::write(ops.join("live-op/result.json"), "{\"exit_code\":0}\n").unwrap();
+        let synced = rt.target_transport(repo.path(), &sync).unwrap();
+        let _ = job.kill();
+        let _ = job.wait();
+        assert!(synced.get("ok").truth(), "{synced:?}");
+        assert_eq!(
+            (synced.text("before_sha"), synced.text("after_sha")),
+            (head.as_str(), next.as_str())
+        );
         let missing = rt
             .target_transport(repo.path(), &request("work/absent"))
             .unwrap();

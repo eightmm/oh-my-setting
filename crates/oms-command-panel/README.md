@@ -385,7 +385,7 @@ non-repository ancestor) only when that key is absent, reporting `"active": fals
 `"reason": "codex-project-untrusted"`, and a one-line hint naming `<physical-checkout>` when
 its own `trust_level` is set (or outside Git) and `<repo-root>` otherwise, or `"active": false`,
 `"reason": "codex-trust-unknown"`, and a hint explaining why without failing the install when
-neither `CODEX_HOME` nor `HOME` is set or `CODEX_HOME` or `config.toml` is a symlink,
+`CODEX_HOME` or `config.toml` is a symlink,
 non-regular, not owned by the current user, unreadable, or invalid TOML. `--uninstall-panel codex --project ALIAS` forgets deleted
 checkouts (`action: "forgotten"`), removes only an OMS block whose bytes match `block_sha256`
 (leaving edited blocks in place and reporting them via `preservedFiles`), removes
@@ -409,5 +409,5 @@ the panel loads only in sessions where `agy` loads that workspace's `.agents`
 customizations). Installing into an existing file rewrites it as 2-space pretty JSON
 (identical reruns and exact-match adoptions leave the file untouched); when OMS created the file and nothing else remains in it, uninstall unlinks it (plus `.agents` if OMS created it and it is empty), and otherwise removes only `oms-panel` (plus `mcpServers` if
 OMS created that key and it is now empty, or preserves and reports edited entries via
-`preservedFiles`) and writes 2-space pretty JSON, keeping other keys, their order and values but not always their exact bytes (escapes and number spellings are normalized; a trailing newline is added). Unless it preserves an edited entry, uninstall also removes last-owner exclude lines or hands them to a remaining owner. `--unregister-project` refuses aliases that still
+`preservedFiles`) and writes 2-space pretty JSON, keeping other keys, their order and values but not always their exact bytes (escapes and number spellings are normalized; a trailing newline is added). If that rewrite would not parse back to the same content (for example a file over 1 MiB once pretty-printed), uninstall and its dry run refuse and change nothing, keeping the entry and its ownership row. Unless it preserves an edited entry, uninstall also removes last-owner exclude lines or hands them to a remaining owner. `--unregister-project` refuses aliases that still
 have any recorded panel.

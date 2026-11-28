@@ -3549,7 +3549,7 @@ refused while any panel remains installed for that alias:
   not ignored. When OMS created the file and nothing else remains in it, uninstall unlinks it (plus `.agents` if OMS
   created it and it is empty); otherwise uninstall
   removes only `oms-panel` (and `mcpServers` if OMS created that key and it is now
-  empty, preserving and reporting edited entries via `preservedFiles`) and writes 2-space pretty JSON. That rewrite keeps the other keys, their order and values, but not always their exact bytes: string escapes and number spellings are normalized and a trailing newline is added. Unless it preserves an edited entry, uninstall also removes last-owner exclude lines or hands them to a remaining owner. Install does not read `~/.gemini` or report trust fields;
+  empty, preserving and reporting edited entries via `preservedFiles`) and writes 2-space pretty JSON. That rewrite keeps the other keys, their order and values, but not always their exact bytes: string escapes and number spellings are normalized and a trailing newline is added. If that rewrite would not parse back to the same content (for example a file over 1 MiB once pretty-printed), uninstall and its dry run refuse and change nothing, keeping the entry and its ownership row. Unless it preserves an edited entry, uninstall also removes last-owner exclude lines or hands them to a remaining owner. Install does not read `~/.gemini` or report trust fields;
   interactive `agy` can ask "Trust this folder?", and the panel loads only in
   sessions where `agy` loads that workspace's `.agents` customizations.
 

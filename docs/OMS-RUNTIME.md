@@ -731,6 +731,16 @@ contains no additional ignored or untracked files. Added paths and parent files
 that would overwrite ignored or untracked data are refused, including rename
 and copy destinations.
 Older or divergent SHAs are refused; success requires exact HEAD equality.
+A sync that would move HEAD is refused as `active-job`, naming the run in
+`active_operation`, while a recorded `ssh-adapter exec --op-id` run (remote
+experiments) is still running in that checkout on the current boot. Sync
+judges op directories with exec's own reconcile helpers: a run with a result is
+finished; otherwise it is live while its runner is alive with its recorded start
+time or its command process group verifies the way reconcile verifies it, and
+for two minutes after launch before its metadata exists. The check runs before
+and again after the remote fetch. It is best effort: exec and sync
+share no lock, and plain exec without an op id or scheduler-submitted jobs
+leave no record to find.
 JSON sync results include `before_sha`, `after_sha`, `ok`, and `reason`.
 Full SHAs may be 40 or 64 hex characters; SHA-256 repositories require Git
 support on both hosts. Target trees with filenames containing newlines are
@@ -739,8 +749,8 @@ checks without `xargs -0`.
 
 Failure reasons are `unknown-target`, `missing`, `not-git`, `dirty`, `diverged`, `behind`,
 `foreign-origin`, `wrong-branch`, `unpushed`, `auth`, `no-network`,
-`would-overwrite-ignored`, `would-overwrite-untracked`, `legacy-absolute`, and
-`timeout`. An unregistered name returns `unknown-target` and exits 2; `missing` means a registered checkout
+`would-overwrite-ignored`, `would-overwrite-untracked`, `legacy-absolute`,
+`active-job`, and `timeout`. An unregistered name returns `unknown-target` and exits 2; `missing` means a registered checkout
 is absent. Other target failures exit 3. Invalid command arguments or registry
 data exit 2. Legacy records include the full fix command:
 `oms runtime backend target remove NAME && oms runtime backend target add NAME --ssh-alias A`.
