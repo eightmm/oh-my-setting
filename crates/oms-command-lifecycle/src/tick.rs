@@ -190,24 +190,6 @@ pub(crate) fn run(
         ];
         let reconcile =
             oms_command_operations::run(oms_command_operations::App::Events, &args, &repo, flag);
-        let memory = if repo.join(".oms/memory").is_dir() {
-            Some(
-                oms_command_memory::run_with_source(
-                    &[
-                        "--repo".into(),
-                        repo.as_os_str().to_owned(),
-                        "health".into(),
-                        "--json".into(),
-                    ],
-                    &repo,
-                    &paths.source,
-                    flag,
-                )
-                .0,
-            )
-        } else {
-            None
-        };
         let telemetry = oms_command_telemetry::run(
             &[
                 "telemetry".into(),
@@ -218,25 +200,18 @@ pub(crate) fn run(
             &repo,
             flag,
         );
-        let mut row = json!({"schema":1,"ran_at":r::now(),"repo":repo,"status":"failed","journal_rc":null,"reconcile_rc":reconcile.0,"memory_rc":memory,"telemetry_rc":telemetry.0,"gc":"skipped","threads_closed":[],"tasks_closed":0,"plans_retired":0,"artifacts_resolved":0,"artifacts_superseded":0,"failures_retired":0,"wake":"skipped","unavailable":[]});
+        let mut row = json!({"schema":1,"ran_at":r::now(),"repo":repo,"status":"failed","journal_rc":null,"reconcile_rc":reconcile.0,"memory_rc":null,"telemetry_rc":telemetry.0,"gc":"skipped","threads_closed":[],"tasks_closed":0,"plans_retired":0,"artifacts_resolved":0,"artifacts_superseded":0,"failures_retired":0,"wake":"skipped","unavailable":[]});
         let output = services.tick_maintenance(&repo, &paths.source, flag);
         let maintenance = if output.0 == 0 {
             r::parse(&output.1).ok().filter(valid_maintenance)
         } else {
             None
         };
+        let maintenance_ok = maintenance.is_some();
         if let Some(maintenance) = maintenance {
             for (key, value) in maintenance.as_object().unwrap() {
                 row[key] = value.clone();
             }
-            row["status"] = json!(if reconcile.0 == 0
-                && telemetry.0 == 0
-                && memory.is_none_or(|n| n == 0)
-            {
-                "ok"
-            } else {
-                "failed"
-            });
         } else {
             row["unavailable"] =
                 json!(["native journal/CI/retirement/artifact/failure maintenance receipt"]);
@@ -254,16 +229,41 @@ pub(crate) fn run(
                 row["failure"] = r::parse(&classified.1).unwrap_or(Value::Null);
             }
         }
-        row["catalog_rc"] = json!(catalog.0);
-        if catalog.0 != 0 {
-            row["status"] = json!("failed");
-        }
+        let mut gc_ok = true;
         if std::env::var_os("OMS_TICK_GC").is_some_and(|v| v == "1") {
             let gc = services.garbage_collect(&repo, flag);
             row["gc"] = json!(gc.0);
-            if gc.0 != 0 {
-                row["status"] = json!("failed");
-            }
+            gc_ok = gc.0 == 0;
+        }
+        let memory = if repo.join(".oms/memory").is_dir() {
+            Some(
+                oms_command_memory::run_with_source(
+                    &[
+                        "--repo".into(),
+                        repo.as_os_str().to_owned(),
+                        "health".into(),
+                        "--sync".into(),
+                        "--json".into(),
+                    ],
+                    &repo,
+                    &paths.source,
+                    flag,
+                )
+                .0,
+            )
+        } else {
+            None
+        };
+        row["memory_rc"] = json!(memory);
+        row["catalog_rc"] = json!(catalog.0);
+        if maintenance_ok
+            && reconcile.0 == 0
+            && telemetry.0 == 0
+            && memory.is_none_or(|n| n == 0)
+            && catalog.0 == 0
+            && gc_ok
+        {
+            row["status"] = json!("ok");
         }
         if let Some(wakes) = kept.get("wakes") {
             row["wakes"] = wakes.clone();

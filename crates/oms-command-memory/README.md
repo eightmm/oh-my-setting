@@ -68,7 +68,7 @@ historical porting anchors, not current runtime backends or missing router work.
 | `context`, `compact` | Active pins and uncited/unscoped summaries; full debug view; sensitive sections withheld |
 | `search`, `recall` | Schema-three SQLite, substring/full Unicode folding, FTS5 BM25, fallback ranking, access decay, citations and stale/superseded filters |
 | `recall --all-repos` | Read-only registered indexes, per-repository limits, bounded hit report, no recall receipts |
-| `health`, `rebuild` | Read-only source/index diagnostics; derived SQLite regeneration |
+| `health`, `rebuild` | Source/index diagnostics (read-only by default; `--sync` refreshes the index first); derived SQLite regeneration |
 | `sources` | Provider-native instruction/memory locations, stat-only sizes/counts/times |
 | `import` | Candidate bounds, source labels and hashes, duplicate/withheld status, explicit selection and append-only imported notes |
 | `review` | Pending automatic notes/corrections; accept, retire, or reject; append-only decision receipts |
@@ -138,7 +138,7 @@ contradiction normalization reuses the workspace's pinned Unicode normalizer.
 A hard kill can leave private same-directory temporary files or lock-protocol
 recovery state. Multi-file operations are not an atomic filesystem transaction;
 redaction can leave a tombstone with missing derived outputs and must be retried.
-No unrelated file, document, ref, or registry is written. Read-only health,
+No unrelated file, document, ref, or registry is written. Read-only `health` (without `--sync`),
 hygiene, sources, graduation, import preview, redaction preview and all-repository
 recall create no OMS record or synchronization receipt.
 
