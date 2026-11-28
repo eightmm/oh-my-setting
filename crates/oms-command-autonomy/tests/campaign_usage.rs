@@ -559,6 +559,17 @@ impl Services for DeadlineHost {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
+        if adding {
+            // Modes of a worktree checked out under umask 002, whatever the caller's
+            // umask, so the candidate store is read only through the host proof.
+            use std::os::unix::fs::PermissionsExt;
+            for (path, mode) in [
+                (scratch.clone(), 0o775),
+                (scratch.join("problem.txt"), 0o664),
+            ] {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+            }
+        }
         if adding && self.expire_stage == "scratch"
             || !adding
                 && self.expire_stage == "final-cleanup"
