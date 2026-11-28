@@ -1487,6 +1487,112 @@ fn inbox_warns_on_recent_failure_repeat_without_command_text() {
         codes.iter().any(|c| c == code),
         "valid rows keep the same stalls evidence: {codes:?}"
     );
+
+    // Current-HEAD single-commit failures stay actionable in state/inbox (never misclassified as
+    // stale), while aged non-current multi-head failures and legacy read_guard_changed become stale.
+    let git_repo = TempRepo::new();
+    seed(git_repo.path());
+    let commit = |msg: &str| {
+        fs::write(git_repo.path().join("f.txt"), msg).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["-C", &git_repo.path().to_string_lossy(), "add", "f.txt"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args([
+                    "-C",
+                    &git_repo.path().to_string_lossy(),
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "-qm",
+                    msg,
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let out = Command::new("git")
+            .args([
+                "-C",
+                &git_repo.path().to_string_lossy(),
+                "rev-parse",
+                "HEAD",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    let head_a = commit("a");
+    let head_b = commit("b");
+    let head_c = commit("c");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let stamp = |offset: i64| {
+        chrono::DateTime::<chrono::Utc>::from_timestamp((now - offset).max(0), 0)
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    };
+    let recent_ts = stamp(3600);
+    let old_ts = stamp(20 * 86400);
+    let stamped_row = |fp: &str, head: &str, ts: &str, extra: &str| {
+        format!(
+            "{{\"schema\":2,\"event\":\"fail\",\"ts\":\"{ts}\",\"agent\":\"a\",\"fingerprint\":\"{fp}\",\"kind\":\"cmd\",\"cmd\":\"cmd-{fp}\",\"exit\":1,\"state_fingerprint\":\"{head}:tree:untracked\"{extra}}}\n"
+        )
+    };
+    // 1) Current-HEAD single-commit failure stays actionable in state + inbox.
+    put(
+        git_repo.path(),
+        ".oms/failures.jsonl",
+        &stamped_row("curr1", &head_c, &recent_ts, ""),
+        0o600,
+    );
+    let curr_failures = view_json("state", git_repo.path()).get("failures").clone();
+    assert_eq!(curr_failures.get("actionable_total").int().unwrap(), 1);
+    assert_eq!(curr_failures.get("stale_total").int().unwrap(), 0);
+    assert!(
+        inbox_codes(git_repo.path())
+            .iter()
+            .any(|c| c == "open-failures")
+    );
+
+    // 2) Aged non-current multi-head and legacy read_guard_changed become stale; recent
+    // non-current multi-head and current-HEAD multi-head remain actionable.
+    let mixed_rows = [
+        stamped_row("aged_multi", &head_a, &old_ts, ""),
+        stamped_row("aged_multi", &head_b, &old_ts, ""),
+        stamped_row(
+            "read_guard",
+            &head_a,
+            &recent_ts,
+            ",\"failure_code\":\"read_guard_changed\"",
+        ),
+        stamped_row(
+            "read_guard",
+            &head_b,
+            &recent_ts,
+            ",\"failure_code\":\"read_guard_changed\"",
+        ),
+        stamped_row("recent_multi", &head_a, &recent_ts, ""),
+        stamped_row("recent_multi", &head_b, &recent_ts, ""),
+        stamped_row("curr_multi", &head_a, &old_ts, ""),
+        stamped_row("curr_multi", &head_c, &recent_ts, ""),
+    ]
+    .concat();
+    put(git_repo.path(), ".oms/failures.jsonl", &mixed_rows, 0o600);
+    let mixed_failures = view_json("state", git_repo.path()).get("failures").clone();
+    assert_eq!(mixed_failures.get("actionable_total").int().unwrap(), 2);
+    assert_eq!(mixed_failures.get("stale_total").int().unwrap(), 2);
 }
 
 #[test]
@@ -2112,6 +2218,65 @@ fn state_projects_stale_task_packet_and_bounded_dated_plan() {
     assert_eq!(
         fresh_panel.get("dashboard").text("goalAvailability"),
         "available"
+    );
+
+    // Default OMS_THREAD_STALE_TTL (259200s / 3d) matches `oms thread list --stale`.
+    let threads_dir = repo.path().join(".oms/threads");
+    fs::create_dir_all(&threads_dir).unwrap();
+    let two_days_ago = stamp(2 * 86400);
+    fs::write(
+        threads_dir.join("th-two-days.jsonl"),
+        format!(
+            "{{\"schema\":1,\"ts\":\"{two_days_ago}\",\"thread\":\"th-two-days\",\"seq\":1,\"role\":\"topic\",\"agent\":\"agent\",\"text\":\"recent\"}}\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(
+        threads_dir.join("th-two-days.jsonl"),
+        Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let two_day_state = state(repo.path(), &host);
+    assert_eq!(
+        two_day_state
+            .get("threads")
+            .get("stale_open")
+            .int()
+            .unwrap(),
+        0,
+        "2-day thread must not be stale under 3d default TTL"
+    );
+    assert!(
+        !inbox_codes(repo.path())
+            .iter()
+            .any(|c| c == "stale-threads")
+    );
+    let four_days_ago = stamp(4 * 86400);
+    fs::write(
+        threads_dir.join("th-four-days.jsonl"),
+        format!(
+            "{{\"schema\":1,\"ts\":\"{four_days_ago}\",\"thread\":\"th-four-days\",\"seq\":1,\"role\":\"topic\",\"agent\":\"agent\",\"text\":\"old\"}}\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(
+        threads_dir.join("th-four-days.jsonl"),
+        Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let four_day_state = state(repo.path(), &host);
+    assert_eq!(
+        four_day_state
+            .get("threads")
+            .get("stale_open")
+            .int()
+            .unwrap(),
+        1
+    );
+    assert!(
+        inbox_codes(repo.path())
+            .iter()
+            .any(|c| c == "stale-threads")
     );
 
     // Unreadable, symlinked, oversized, or concurrently removed packets must fail closed

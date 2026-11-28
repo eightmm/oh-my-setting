@@ -1295,6 +1295,72 @@ fn call_routed(
         },
     };
     let stalled_secs = result.stalled.map(rounded_secs);
+    fn with_settling_context<T>(context: &Context<'_>, f: impl FnOnce(&Context<'_>) -> T) -> T {
+        let settling = std::sync::atomic::AtomicBool::new(false);
+        let finished = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let watchdog = scope.spawn(|| {
+                std::thread::park_timeout(std::time::Duration::from_secs(2));
+                if !finished.load(Ordering::Acquire) {
+                    settling.store(true, Ordering::Release);
+                }
+            });
+            let bounded = Context {
+                cwd: context.cwd,
+                source: context.source,
+                interrupted: &settling,
+                executor: context.executor,
+                heartbeat: None,
+            };
+            let result = f(&bounded);
+            finished.store(true, Ordering::Release);
+            watchdog.thread().unpark();
+            result
+        })
+    }
+    if let Some(tree) = private {
+        let check_and_remove = |ctx: &Context<'_>| -> Option<&'static [u8]> {
+            let unchanged = tree.identity(ctx).is_ok()
+                && process::git(
+                    ctx,
+                    &tree.path,
+                    &[
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--binary",
+                        "HEAD",
+                        "--",
+                    ],
+                )
+                .ok()
+                .as_ref()
+                    == before.as_ref().ok()
+                && process::git(
+                    ctx,
+                    &tree.path,
+                    &["ls-files", "--others", "--exclude-standard", "-z"],
+                )
+                .is_ok_and(|out| out.is_empty());
+            if !unchanged {
+                Some(b"read-only provider changed its isolated worktree; retained for inspection\n")
+            } else if tree.remove(ctx).is_err() {
+                Some(b"read worktree cleanup failed; reconcile before repeating the call\n")
+            } else {
+                None
+            }
+        };
+        let guard_err = if context.interrupted.load(Ordering::Acquire) {
+            with_settling_context(context, check_and_remove)
+        } else {
+            check_and_remove(context)
+        };
+        if let Some(msg) = guard_err {
+            result.code = 125;
+            result.complete = false;
+            result.stderr.extend_from_slice(msg);
+        }
+    }
     if let Some(id) = live_attempt {
         // Re-recorded because a capacity overflow can move the call to another account.
         let account = providers::panel_account(&route);
@@ -1312,26 +1378,8 @@ fn call_routed(
                 let transitioned = if args.has("team-requests") {
                     // Cleanup/terminal bookkeeping has an independent finite
                     // budget; cancellation never authorizes a new provider call.
-                    let settling = std::sync::atomic::AtomicBool::new(false);
-                    let finished = std::sync::atomic::AtomicBool::new(false);
-                    std::thread::scope(|scope| {
-                        let watchdog = scope.spawn(|| {
-                            std::thread::park_timeout(std::time::Duration::from_secs(2));
-                            if !finished.load(Ordering::Acquire) {
-                                settling.store(true, Ordering::Release);
-                            }
-                        });
-                        let bounded = Context {
-                            cwd: context.cwd,
-                            source: context.source,
-                            interrupted: &settling,
-                            executor: context.executor,
-                            heartbeat: None,
-                        };
-                        let result = crate::delegate::transition(repo, &id, state, refs, &bounded);
-                        finished.store(true, Ordering::Release);
-                        watchdog.thread().unpark();
-                        result
+                    with_settling_context(context, |bounded| {
+                        crate::delegate::transition(repo, &id, state, refs, bounded)
                     })
                 } else {
                     crate::delegate::transition(repo, &id, state, refs, context)
@@ -1365,43 +1413,6 @@ fn call_routed(
             result
                 .stderr
                 .extend_from_slice(format!("\nfailed finalizing attempt {id}: {err}\n").as_bytes());
-        }
-    }
-    if let Some(tree) = private {
-        let unchanged = tree.identity(context).is_ok()
-            && process::git(
-                context,
-                &tree.path,
-                &[
-                    "diff",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--binary",
-                    "HEAD",
-                    "--",
-                ],
-            )
-            .ok()
-            .as_ref()
-                == before.as_ref().ok()
-            && process::git(
-                context,
-                &tree.path,
-                &["ls-files", "--others", "--exclude-standard", "-z"],
-            )?
-            .is_empty();
-        if !unchanged {
-            result.code = 125;
-            result.complete = false;
-            result.stderr.extend_from_slice(
-                b"read-only provider changed its isolated worktree; retained for inspection\n",
-            );
-        } else if tree.remove(context).is_err() {
-            result.code = 125;
-            result.complete = false;
-            result.stderr.extend_from_slice(
-                b"read worktree cleanup failed; reconcile before repeating the call\n",
-            );
         }
     }
     let answer = String::from_utf8_lossy(&safety::redact(&result.stdout)?).into_owned();
@@ -1493,8 +1504,13 @@ fn call_routed(
     }
     if result.complete {
         bytes.extend_from_slice(format!("\n## Exit\n\n{}\n", result.code).as_bytes());
-        if result.code == 0 && unresolved_count > 0 {
-            seat_resolve(repo, &cmd_key, context.interrupted)?;
+        if result.code == 0 {
+            if unresolved_count > 0 {
+                seat_resolve(repo, &cmd_key, context.interrupted)?;
+            }
+            if tool == "peer-review" && seat_unresolved(repo, "peer-review read guard").0 > 0 {
+                seat_resolve(repo, "peer-review read guard", context.interrupted)?;
+            }
         }
     }
     let artifact_sha256 = storage::hash(&bytes);
