@@ -3136,7 +3136,17 @@ mod tests {
             self.0.join(".oms/plan").join(name)
         }
         fn write_receipt(&self, row: &Value) {
-            std::fs::write(self.plan("autopilot-run.json"), value::pretty(row).unwrap()).unwrap();
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(self.plan("autopilot-run.json"))
+                .unwrap()
+                .write_all(&value::pretty(row).unwrap())
+                .unwrap();
         }
     }
     impl Drop for Dir {
@@ -3356,8 +3366,13 @@ mod tests {
     fn adaptive_fixture(host: &AdaptiveHost, stop: &AtomicBool) -> (Dir, Value) {
         let dir = Dir::new();
         git(&dir.0, &["init", "--quiet", "-b", "main"]);
-        std::fs::create_dir_all(dir.0.join("tests")).unwrap();
-        std::fs::create_dir_all(dir.0.join("src")).unwrap();
+        for sub in ["tests", "src"] {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(dir.0.join(sub))
+                .unwrap();
+        }
         private(&dir.0.join("tests/check.sh"), b"exit 1\n");
         private(&dir.0.join("src/one.rs"), b"pub fn one() {}\n");
         private(&dir.0.join("PROJECT.md"),b"# Project\n\n## Status\n- State: confirmed\n\n## Goal\n- Goal: Check the behavior\n\n## Scope\n- Allowed: src\n\n## Acceptance\n- Behavior one is checked\n- Behavior two is checked\n\n## Verification\n- Required checks: bash tests/check.sh\n- Required check files: tests/check.sh\n");

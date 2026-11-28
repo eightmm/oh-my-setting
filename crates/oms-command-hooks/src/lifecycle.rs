@@ -2425,6 +2425,12 @@ mod tests {
             "# Project\n\n- State: draft\n\n## Goal\n\nDraft contract blocking work\n",
         )
         .expect("write draft PROJECT.md");
+        // An explicit mode keeps the contract readable under a group-writable umask.
+        fs::set_permissions(
+            repo.join("PROJECT.md"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o644),
+        )
+        .expect("chmod draft PROJECT.md");
         write_plan_doc(
             &repo,
             "Contract-blocked plan goal",

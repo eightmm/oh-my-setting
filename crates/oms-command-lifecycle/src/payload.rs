@@ -807,6 +807,8 @@ mod tests {
                     .unwrap()
                     .success()
             );
+            // tar honors a group-writable umask; the importer refuses that mode.
+            fs::set_permissions(&archive, fs::Permissions::from_mode(0o644)).unwrap();
             r::hash(&fs::read(&archive).unwrap())
         };
         let flag = AtomicBool::new(false);
@@ -841,6 +843,10 @@ mod tests {
         fs::remove_file(payload.join("foreign")).unwrap();
 
         let cached = paths.source.join("target/oms-native").join(&revision);
+        // Preparation secures these before publishing; a umask must not decide them.
+        for dir in ["", "target", "target/oms-native"] {
+            secure_dir(&paths.source.join(dir)).unwrap();
+        }
         let mut tx = Transaction::begin(&paths).unwrap();
         imported.publish_new(&cached, &mut tx).unwrap();
         tx.commit().unwrap();
