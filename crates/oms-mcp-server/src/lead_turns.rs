@@ -20,6 +20,7 @@ mod observation;
 
 #[path = "lead_settings.rs"]
 mod settings;
+pub(in crate::panel) use settings::default_settings;
 
 const INVALID: &str = "The Lead conversation receipt is unavailable or changed.";
 const HEAD: &str = "lead-turn-head.json";

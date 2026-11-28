@@ -39,6 +39,54 @@ pub(crate) fn observe(provider: &str, raw: &[u8]) -> Option<Observation> {
             model: None,
         });
     }
+    if provider == "codex" {
+        let mut id = None;
+        let mut saw_answer = false;
+        let mut complete = false;
+        let mut rows = 0;
+        for line in std::str::from_utf8(raw)
+            .ok()?
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            rows += 1;
+            if rows > 2048 {
+                return None;
+            }
+            let row = oms_json::parse_strict(line.as_bytes()).ok()?;
+            if crate::providers::native_stopped_early(&row) {
+                return None;
+            }
+            let kind = string(&row, "type")?;
+            match kind.as_str() {
+                "thread.started" => {
+                    let parsed = session(string(&row, "thread_id")?)?;
+                    if id.as_ref().is_some_and(|existing| existing != &parsed) {
+                        return None;
+                    }
+                    id = Some(parsed);
+                }
+                "item.completed" => {
+                    if let Some(item) = row.get("item")
+                        && string(item, "type").as_deref() == Some("agent_message")
+                        && string(item, "text").is_some_and(|t| !t.trim().is_empty())
+                    {
+                        saw_answer = true;
+                    }
+                }
+                "turn.completed" => complete = true,
+                "error" | "turn.failed" => return None,
+                _ => {}
+            }
+        }
+        if !complete || !saw_answer {
+            return None;
+        }
+        return Some(Observation {
+            session: id?,
+            model: None,
+        });
+    }
     if provider != "claude" {
         return None;
     }
@@ -683,5 +731,34 @@ mod tests {
             agy["conversation_id"] = json!(bad);
             assert!(observe("antigravity", agy.to_string().as_bytes()).is_none());
         }
+    }
+
+    #[test]
+    fn codex_observation_requires_thread_id_agent_message_and_turn_completed() {
+        let id = "12345678-1234-7234-8234-123456789abc";
+        let start = json!({"type":"thread.started","thread_id":id});
+        let msg = json!({"type":"item.completed","item":{"type":"agent_message","text":"Codex answer"}});
+        let done = json!({"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}});
+        let run = |rows: &[&serde_json::Value]| {
+            observe(
+                "codex",
+                rows.iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .as_bytes(),
+            )
+        };
+        let obs = run(&[&start, &msg, &done]).unwrap();
+        assert_eq!(obs.session, id);
+        assert!(obs.model.is_none());
+        assert!(run(&[&start, &msg]).is_none());
+        assert!(run(&[&start, &done]).is_none());
+        let empty = json!({"type":"item.completed","item":{"type":"agent_message","text":"  "}});
+        assert!(run(&[&start, &empty, &done]).is_none());
+        let failed = json!({"type":"turn.failed","error":{"message":"boom"}});
+        assert!(run(&[&start, &msg, &failed]).is_none());
+        let bad_id = json!({"type":"thread.started","thread_id":"not-a-uuid"});
+        assert!(run(&[&bad_id, &msg, &done]).is_none());
     }
 }

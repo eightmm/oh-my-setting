@@ -907,7 +907,8 @@ let retryStart;
 let contextTypes;
 const hasContext=()=>Boolean(contextTypes?.text || contextTypes?.structuredContent);
 
-let canOpenLinks=false, readOnly=false, contextKey, contextQueue=Promise.resolve();
+let canOpenLinks=false, readOnly=false, leadChatEnabled=false, contextKey, contextQueue=Promise.resolve();
+const leadScope=ctl=>ctl?.room?{room:ctl.room}:{};
 const MODES=['inline','fullscreen','pip'];
 let hostModes=[],displayMode='',autoExpanded=false,modeBusy=false;
 function updateContext(data, textOnly = false, current = ()=>true) {
@@ -1096,8 +1097,11 @@ window.addEventListener('message', event => {
 
 async function tool(name, args = {}, expected = generation) {
   if (expected !== generation) throw uiError('projChanged');
-  if ((readOnly || staleView) && ['oms_start_main','oms_decide_approval','oms_record_reviewed_issue',
-    'oms_open_lead_conversations','oms_send_lead_message','oms_update_lead_settings'].includes(name))throw uiError('snapshot.stale');
+  const roomWrites=['oms_start_main','oms_decide_approval','oms_record_reviewed_issue','oms_open_lead_conversations'],
+    leadWrites=['oms_send_lead_message','oms_stop_lead_message','oms_update_lead_settings'];
+  if ((staleView && (roomWrites.includes(name) || leadWrites.includes(name))) ||
+    (readOnly && roomWrites.includes(name)) ||
+    (readOnly && !leadChatEnabled && leadWrites.includes(name)))throw uiError('snapshot.stale');
   const scoped = project && name !== 'oms_list_projects' ? {...args, project} : args;
   const result = await request('tools/call', {name, arguments: scoped});
   if (expected !== generation) throw uiError('projChanged');
@@ -1500,7 +1504,7 @@ async function readWorkerOutput(s,paged=false){
   finally{if(selectedOutput===s){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('output-refresh').disabled=el('output-more').disabled=el('output-first').disabled=blocked;}}
 }
 function openWorkerOutput(lead,worker,origin){
-  if(hostToolsUnavailable || !currentLeadControl(leadControl) || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
+  if(hostToolsUnavailable || !currentLeadControl(leadControl) || !leadControl.room || !leadControl.observed || !leadControl.projectKey || !rows.includes(lead) || !lead.workers.includes(worker))return;
   const label=()=>[workerName(worker),worker.attempt.taskTitle].filter(Boolean).join(' · ');
   const s={ctl:leadControl,room:leadControl.room,projectKey:leadControl.projectKey,leadAttempt:lead.attempt.id,workerAttempt:worker.attempt.id,label,origin};
   selectedOutput=s;el('output-refresh').disabled=hostToolsUnavailable || disposed;
@@ -1543,7 +1547,7 @@ function currentFullAnswer(s){
     s.projectKey===bindingKey && s.member===selectedChat && canChat(s.member) && el('conversation').open);
 }
 async function loadResultPage(ref,cursor,expected){
-  const scope={projectKey:ref.projectKey,room:ref.room};
+  const scope={projectKey:ref.projectKey,...(ref.room?{room:ref.room}:{})};
   if(ref.kind==='worker-output'){
     const args={...scope,leadAttempt:ref.leadAttempt,workerAttempt:ref.workerAttempt,answerPage:cursor};
     const out=checkedWorkerOutput(await tool('oms_worker_output',args,expected),args,true);
@@ -1553,12 +1557,12 @@ async function loadResultPage(ref,cursor,expected){
   if(ref.kind==='lead-answer'){
     const args={...scope,provider:ref.provider,leadRequestId:ref.leadRequestId,turnId:ref.turnId,answerPage:cursor};
     const result=await tool('oms_lead_conversation_status',args,expected);
-    const item=validatedTeam(result,scope,ref.provider).items.get(ref.provider),data=result._meta?.leadConversation;
-    if(item.status!=='ready' || item.requestId!==ref.leadRequestId || data?.room!==ref.room ||
+    const item=validatedTeam(result,{...scope,room:ref.room??null},ref.provider).items.get(ref.provider),data=result._meta?.leadConversation;
+    if(item.status!=='ready' || item.requestId!==ref.leadRequestId || data?.room!==(ref.room??null) ||
       data.provider!==ref.provider || data.requestId!==ref.leadRequestId || data.answer?.turnId!==ref.turnId ||
       data.answer.source!=='recorded-answer')throw uiError('answer.changed');
     const handoff=data.answer.handoff;
-    const valid=handoff && handoff.room===ref.room && handoff.provider===ref.provider && handoff.leadRequestId===ref.leadRequestId &&
+    const valid=handoff && handoff.room===(ref.room??null) && handoff.provider===ref.provider && handoff.leadRequestId===ref.leadRequestId &&
       handoff.turnId===ref.turnId && typeof handoff.participant==='string' && typeof handoff.operation==='string' &&
       /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.participant) && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,159}$/.test(handoff.operation);
     return {page:data.answer,source:valid?{kind:ref.kind,...scope,summary:[roleTitle('Lead',ref.provider),t('answer.title')].join(' · '),
@@ -1584,7 +1588,7 @@ async function readFullAnswer(s){
     if(!currentFullAnswer(s))return;
     acceptChunk(s,page);s.pageCursor=cursor;s.source=source;el('full-answer-body').textContent=s.text;
     put('answer-status',()=>t('answer.loaded',{start:s.text?s.start+1:0,n:s.end,total:s.total}));
-    el('answer-first').hidden=!s.start;el('answer-more').hidden=!s.cursor;el('answer-copy').hidden=!s.text;el('answer-followup').hidden=!source || !joinedMain();
+    el('answer-first').hidden=!s.start;el('answer-more').hidden=!s.cursor;el('answer-copy').hidden=!s.text;el('answer-followup').hidden=!source || !joinedMain() || s.kind==='lead' && !s.c?.ctl?.room;
   }catch{
     if(currentFullAnswer(s)){s.text='';s.cursor=null;s.source=null;el('full-answer-body').textContent='';el('answer-first').hidden=el('answer-more').hidden=el('answer-copy').hidden=el('answer-followup').hidden=true;put('answer-status','answer.changed');}
   }finally{if(currentFullAnswer(s)){s.loading=false;const blocked=hostToolsUnavailable || disposed;el('answer-more').disabled=el('answer-first').disabled=blocked;}}
@@ -1633,8 +1637,9 @@ function renderLeadSlots(leads,complete) {
 }
 function currentLeadControl(ctl) {
   const m=joinedMain();
-  return Boolean(ctl && ctl===leadControl && !disposed && m?.provider==='codex' && ctl.generation===generation &&
-    ctl.room===m.room && ctl.owner===m.participant);
+  if(!ctl || ctl!==leadControl || disposed || staleView || ctl.generation!==generation)return false;
+  if(ctl.room)return Boolean(m?.provider==='codex' && ctl.room===m.room && ctl.owner===m.participant);
+  return Boolean(leadChatEnabled && bindingKey && ctl.projectKey===bindingKey && m?.provider!=='codex');
 }
 function preferenceKey(ctl) {
   return ctl?.projectKey && 'oms.lead-conversations.v1:'+hostOrigin+':'+ctl.projectKey;
@@ -1646,15 +1651,15 @@ function rememberLeads(ctl,on) {
   try {const key=preferenceKey(ctl);if(key)localStorage.setItem(key,on?'on':'off');} catch {}
 }
 function paintLeadControls(){
-  const ctl=leadControl, known=currentLeadControl(ctl), blocked=hostToolsUnavailable || disposed;
-  for(const lead of rows)for(const worker of lead.workers)if(worker.outputButton)worker.outputButton.disabled=blocked || !(known && ctl.observed && ctl.projectKey);
+  const ctl=leadControl, known=currentLeadControl(ctl), roomMode=known && Boolean(ctl.room), blocked=hostToolsUnavailable || disposed;
+  for(const lead of rows)for(const worker of lead.workers)if(worker.outputButton)worker.outputButton.disabled=blocked || !(roomMode && ctl.observed && ctl.projectKey);
   if(selectedOutput && !currentWorkerOutput(selectedOutput))closeWorkerOutput();
   const opener=el('open-leads');
-  opener.hidden=!known;opener.disabled=blocked || !known || !ctl.observed || ctl.reading || ctl.writing;
-  const auto=known && autoLeads(ctl);
-  el('lead-auto-label').hidden=!known;el('lead-auto').checked=Boolean(auto);
-  el('lead-auto').disabled=blocked || !known || !ctl.observed;
-  el('lead-opt-in-note').hidden=!known;el('lead-settings').hidden=!known;
+  opener.hidden=!roomMode;opener.disabled=blocked || !roomMode || !ctl.observed || ctl.reading || ctl.writing;
+  const auto=roomMode && autoLeads(ctl);
+  el('lead-auto-label').hidden=!roomMode;el('lead-auto').checked=Boolean(auto);
+  el('lead-auto').disabled=blocked || !roomMode || !ctl.observed;
+  el('lead-opt-in-note').hidden=!roomMode;el('lead-settings').hidden=!roomMode;
   const pendingTurn=known && [...ctl.items.values()].some(r=>['reserved','running','unconfirmed'].includes(r.latestTurn?.status) || r.turnState);
   el('lead-refresh').hidden=!known || !(ctl.failed || ctl.pollPaused || pendingTurn);
   el('lead-refresh').disabled=blocked || !known || ctl.reading || ctl.writing;
@@ -1673,8 +1678,8 @@ function paintLeadControls(){
     slot.open.hidden=!ready;
     slot.open.disabled=blocked || !known || !ctl.observed || ctl.writing;
     if(ready)put(slot.open,()=>t('lead.ready',{provider:names[provider]}));else slot.open.textContent='';
-    slot.connect.hidden=!known || row?.status!=='not_started';
-    slot.connect.disabled=blocked || !known || !ctl.observed || ctl.reading || ctl.writing;
+    slot.connect.hidden=!roomMode || row?.status!=='not_started';
+    slot.connect.disabled=blocked || !roomMode || !ctl.observed || ctl.reading || ctl.writing;
     if(!slot.connect.hidden)put(slot.connect,()=>t('lead.connect',{provider:names[provider]}));else slot.connect.textContent='';
     const latest=row?.latestTurn,turnState=row?.turnState;
     put(slot.turn,()=>!latest?(turnState?t(Object.hasOwn(messages,'turn.'+turnState.reason)?'turn.'+turnState.reason:'turn.unconfirmed'):''):['reserved','running','unconfirmed'].includes(latest.status)?t('lead.waitingReply'):
@@ -1735,13 +1740,13 @@ async function observeLeads(ctl,poll=false){
   if(!poll){ctl.pollUntil=Date.now()+120000;ctl.pollDelay=8000;ctl.pollPaused=false;}
   ctl.reading=true;paintLeadControls();
   try{
-    const result=await tool('oms_lead_conversation_status',{room:ctl.room},ctl.generation);
+    const result=await tool('oms_lead_conversation_status',leadScope(ctl),ctl.generation);
     if(!currentLeadControl(ctl))return;
     Object.assign(ctl,validatedTeam(result,ctl),{observed:true,failed:false});
   }catch{if(currentLeadControl(ctl)){ctl.observed=false;ctl.failed=true;ctl.items.clear();leadIntent=undefined;}}
   finally{if(currentLeadControl(ctl)){
     ctl.reading=false;paintLeadControls();
-    if(!poll || leadIntent)considerLeadOpen(ctl,!poll);
+    if(ctl.room && (!poll || leadIntent))considerLeadOpen(ctl,!poll);
     scheduleLeadRead(ctl);
   }}
 }
@@ -1787,7 +1792,7 @@ function clearSettings(){
   for(const id of ['settings-model','settings-effort'])el(id).replaceChildren();
   for(const id of ['settings-fields','settings-actual','settings-save','settings-read'])el(id).hidden=true;
 }
-function settingsScope(c){return {projectKey:c.ctl.projectKey,room:c.ctl.room,provider:c.provider,leadRequestId:c.requestId};}
+function settingsScope(c){return {projectKey:c.ctl.projectKey,...leadScope(c.ctl),provider:c.provider,leadRequestId:c.requestId};}
 function confirmedSettings(c,response){
   const meta=response._meta?.leadSettings, data=response.structuredContent, scope=settingsScope(c);
   const validOptionText=v=>typeof v==='string' && v.length>0 && v.length<=256 && !/\p{Cc}/u.test(v);
@@ -1821,7 +1826,7 @@ function showSettings(c,data,observedTurn){
   const served=data.lastServed, session=data.nativeSession;
   const modelReported=c.provider==='claude' && served?.effort===null && typeof served.model==='string' &&
     /^[a-z0-9][a-z0-9._:/-]{0,159}$/i.test(served.model) && !served.model.includes('..') && !['auto','provider-default'].includes(served.model);
-  const sessionReported=['claude','agy'].includes(c.provider) && session?.source==='provider-result' &&
+  const sessionReported=['codex','claude','agy'].includes(c.provider) && session?.source==='provider-result' &&
     session.scope==='invocation' && session.resumable===true && typeof session.id==='string' &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(session.id);
   put('settings-scope',()=>data.scope?t('prefs.scope')+'\n'+t('prefs.continuity'):t('prefs.next'));
@@ -1999,7 +2004,7 @@ async function readManaged(c,before=null){
   c.reading=true;el('chat-older').disabled=true;paintComposer(c);
   const p=before?null:c.session.pending;
   try{
-    const result=await tool('oms_lead_conversation_status',{room:c.ctl.room,provider:c.provider,...(before?{before}:{}),...(p?{turnId:p.id}:{})},c.ctl.generation);
+    const result=await tool('oms_lead_conversation_status',{...leadScope(c.ctl),provider:c.provider,...(before?{before}:{}),...(p?{turnId:p.id}:{})},c.ctl.generation);
     if(!currentManaged(c))return;
     const item=validatedTeam(result,c.ctl,c.provider).items.get(c.provider), page=result._meta?.leadConversation;
     if(item.status!=='ready' || item.requestId!==c.requestId || page?.status!=='ready' || page.room!==c.ctl.room ||
@@ -2039,7 +2044,7 @@ async function sendManaged(c,retry=false){
   const p=retry?s.pending:{id:crypto.randomUUID(),text:s.draft,status:'unconfirmed'};
   c.latestTurn=p.id;s.pending=p;s.outcome='';s.writing=true;c.until=Date.now()+120000;c.pollPaused=false;clearTimeout(c.timer);paintComposer(c);
   try{
-    const result=await tool('oms_send_lead_message',{room:c.ctl.room,projectKey:c.ctl.projectKey,provider:c.provider,
+    const result=await tool('oms_send_lead_message',{...leadScope(c.ctl),projectKey:c.ctl.projectKey,provider:c.provider,
       leadRequestId:c.requestId,turnId:p.id,text:p.text},c.ctl.generation);
     if(!currentManaged(c))return;
     const item=validatedTeam(result,c.ctl,c.provider).items.get(c.provider);
@@ -2056,7 +2061,7 @@ async function stopManaged(c){
   const id=c.session.pending?.id || c.latestTurn;
   if(hostToolsUnavailable || !currentManaged(c) || c.stopping || !turnUuid(id))return;
   c.stopping=true;paintComposer(c);
-  try{await tool('oms_stop_lead_message',{room:c.ctl.room,projectKey:c.ctl.projectKey,provider:c.provider,leadRequestId:c.requestId,turnId:id},c.ctl.generation);}catch{}
+  try{await tool('oms_stop_lead_message',{...leadScope(c.ctl),projectKey:c.ctl.projectKey,provider:c.provider,leadRequestId:c.requestId,turnId:id},c.ctl.generation);}catch{}
   finally{c.stopping=false;if(currentManaged(c)){c.until=Date.now()+120000;c.pollPaused=false;await readManaged(c);}}
 }
 onClick('chat-stop',()=>stopManaged(managedChat));
@@ -2067,7 +2072,7 @@ async function streamManaged(c){
   if(c.stream?.turn!==id)c.stream={turn:id,cursor:0,text:'',tool:''};
   const st=c.stream;c.streaming=true;clearTimeout(c.streamTimer);
   try{
-    const r=(await tool('oms_read_lead_stream',{room:c.ctl.room,projectKey:c.ctl.projectKey,provider:c.provider,leadRequestId:c.requestId,turnId:id,cursor:st.cursor},c.ctl.generation))._meta?.leadConversation?.stream;
+    const r=(await tool('oms_read_lead_stream',{...leadScope(c.ctl),projectKey:c.ctl.projectKey,provider:c.provider,leadRequestId:c.requestId,turnId:id,cursor:st.cursor},c.ctl.generation))._meta?.leadConversation?.stream;
     if(c.stream===st && r?.turnId===id && typeof r.text==='string' && Number.isInteger(r.cursor) && r.cursor>=st.cursor){
       st.cursor=r.cursor;st.text+=r.text;if(typeof r.tool==='string')st.tool=r.tool;if(r.end)st.end=true;
       if(currentManaged(c)){paintComposer(c);if(!['reserved','running'].includes(r.status)){clearTimeout(c.timer);readManaged(c);}}
@@ -2807,12 +2812,14 @@ for(const k of ['pr','work','results'])onClick('more-'+k,()=>{
 function render(d) {
   for(const element of bindings.keys())if(element.isConnected===false)bindings.delete(element);
   const prior=joinedMain();dashboardData=d;const main=joinedMain();
-  if(main?.provider!=='codex'){resetLeadControl();leadIntent=undefined;}
-  else if(!currentLeadControl(leadControl)){
-    resetLeadControl();
-    leadControl={room:main.room,owner:main.participant,generation,items:new Map()};
-  }
-  if(readOnly || prior?.room!==main?.room || prior?.participant!==main?.participant){closeDialogs();resetIssue();clearFollowup();}
+  if(main?.provider==='codex'){
+    if(!currentLeadControl(leadControl)){resetLeadControl();leadControl={room:main.room,owner:main.participant,generation,items:new Map()};}
+  }else if(leadChatEnabled && !staleView && bindingKey){
+    leadIntent=undefined;
+    if(!currentLeadControl(leadControl)){resetLeadControl();leadControl={room:null,owner:null,projectKey:bindingKey,generation,items:new Map()};}
+  }else{resetLeadControl();leadIntent=undefined;}
+  if((readOnly && !leadChatEnabled) || prior?.room!==main?.room || prior?.participant!==main?.participant)closeDialogs();
+  if(readOnly || prior?.room!==main?.room || prior?.participant!==main?.participant){resetIssue();clearFollowup();}
   const goal=(!Object.hasOwn(d,'goalAvailability') || d.goalAvailability==='available') && typeof d.goal==='string' && d.goal.trim()?d.goal:'';
   put('goal',()=>goal || t(d.goalAvailability==='absent' && d.goal==null?'goalNone':'goalUnknown'));
 
@@ -3103,8 +3110,8 @@ async function loadStatus(expected,recover=true) {
     const registry=(await tool('oms_list_projects',{},expected)).structuredContent||{};
     const {projects:aliases,binding}=registry;
     if(!Array.isArray(aliases) || (binding!==undefined && (!['catalog','pinned','cwd','unbound'].includes(binding) || (binding==='catalog')!==Boolean(aliases.length))))throw uiError('status.badList');
-    readOnly=registry.readOnly===true;
-    if(binding==='unbound'){resetAutoRetry();project='';clearProject();el('scope').hidden=true;setStatus('project.unbound');return;}
+    readOnly=registry.readOnly===true;leadChatEnabled=registry.leadChat===true;
+    if(binding==='unbound'){leadChatEnabled=false;resetAutoRetry();project='';clearProject();el('scope').hidden=true;setStatus('project.unbound');return;}
     if(!chooseProject(aliases)){resetAutoRetry();return;}
     const key=project?registry.projectKeys?.[project]:registry.projectKey;
     confirmedBinding=typeof key==='string' && /^[a-f0-9]{64}$/.test(key)?key:null;
@@ -3128,7 +3135,11 @@ async function loadStatus(expected,recover=true) {
     staleView=false;render(d);syncMore();lastGoodBinding=confirmedBinding;lastGoodGeneration=generation;
     renderedToolSnapshot={seq:++snapshotClock,generation:expected,project:project||(typeof d.project==='string'&&d.project)||null};
     syncHostTools();resetAutoRetry();lastLoadedAt=Date.now();statusNotice(d);
-    if(readOnly){retryStart=undefined;el('approval-card').hidden=true;el('approvals').replaceChildren();approvalButtons.length=0;return;}
+    if(readOnly){
+      retryStart=undefined;el('approval-card').hidden=true;el('approvals').replaceChildren();approvalButtons.length=0;
+      if(expected===generation && !hostToolsUnavailable && leadControl)observeLeads(leadControl);
+      return;
+    }
     try{
       const response=await tool('oms_list_approvals',{},expected);
       if(!Array.isArray(response.structuredContent?.approvals))throw uiError('appr.bad');
