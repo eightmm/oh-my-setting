@@ -18,7 +18,7 @@ mod lead_plan_context;
 mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
-const URI: &str = "ui://oms/conversation-panel/v39.html";
+const URI: &str = "ui://oms/conversation-panel/v40.html";
 const HOME_URI: &str = "ui://oms/home/v1.html";
 const V38: &str = "ui://oms/conversation-panel/v38.html";
 const V37: &str = "ui://oms/conversation-panel/v37.html";
@@ -533,7 +533,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
     let mut send = make(
         SEND_LEAD,
         "Send a user's explicit message to this Lead's existing OMS conversation. Repeated submissions with the same turn ID never start another call.",
-        json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"},"turnId":turn_id,"text":{"type":"string","minLength":1,"maxLength":4000}}),
+        json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"},"turnId":turn_id,"text":{"type":"string","minLength":1,"maxLength":4000},"newSession":{"type":"boolean","description":"Start a fresh native provider session for this message instead of resuming the last observed session. Preserves OMS thread history."}}),
         &["projectKey", "provider", "leadRequestId", "turnId", "text"],
         true,
     );
@@ -1711,6 +1711,7 @@ impl Server<'_> {
                         "leadRequestId",
                         "turnId",
                         "text",
+                        "newSession",
                     ],
                     STOP_LEAD => &[
                         "project",
