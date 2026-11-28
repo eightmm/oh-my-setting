@@ -1534,6 +1534,41 @@ fn routed_serve_inner(ws: &TempWorkspace) {
         (ENV_WEBHOOK_CRED, &sig_val),
         (ENV_ACCESS_CRED, &runtime_acc_val()),
     ]);
+    // Library callers get the same startup checks the CLI table filter gives.
+    let loaded = oms_command_intake::routes::load(&table).unwrap();
+    let checked = |routes: Vec<Route>| {
+        oms_command_intake::serve::validate_serve_room(
+            &ServeConfig {
+                source: Arc::new(LinearSource::with_endpoint(
+                    EndpointUrl::parse(&api.url()).unwrap(),
+                )),
+                routes,
+                binding_flags: BTreeMap::from([
+                    ("--organization".into(), "org-r".into()),
+                    ("--app-user".into(), "app-r".into()),
+                ]),
+                listen: "127.0.0.1:0".parse().unwrap(),
+                secrets: secrets.clone(),
+            },
+            &LocalServices,
+            &AtomicBool::new(false),
+        )
+    };
+    let mut foreign = loaded[0].clone();
+    foreign.source = "other".into();
+    assert!(
+        checked(vec![foreign])
+            .unwrap_err()
+            .contains("belongs to source 'other'")
+    );
+    assert!(
+        checked(vec![loaded[0].clone(), loaded[0].clone()])
+            .unwrap_err()
+            .contains("two intake routes for team")
+    );
+    let mut bad = loaded[0].clone();
+    bad.team = "-x".into();
+    assert!(checked(vec![bad]).is_err());
     let server = ServerHandle::spawn(ServeConfig {
         source: Arc::new(LinearSource::with_endpoint(
             EndpointUrl::parse(&api.url()).unwrap(),

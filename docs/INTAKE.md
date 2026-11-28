@@ -116,8 +116,9 @@ oms intake serve --source linear --routes --organization "$LINEAR_ORG_ID" \
 - **Table**: `$XDG_CONFIG_HOME/oh-my-setting/intake-routes.json` (or
   `~/.config/oh-my-setting/intake-routes.json`, or the absolute `OMS_INTAKE_ROUTES_FILE`), a
   `0600` single-link regular file owned by you in a directory nobody else can write (anything else
-  is refused). Edits hold an adjacent lock and publish atomically; at most 64 routes, one per
-  source and team. `route add` checks that the Room exists, is open and enrolls both participants,
+  is refused). A relative `XDG_CONFIG_HOME` is ignored, and an empty or relative `HOME` is an
+  error rather than a path under the working directory. Edits hold an adjacent lock and publish
+  atomically; at most 64 routes and 64 KiB, one route per source and team. `route add` checks that the Room exists, is open and enrolls both participants,
   stores the physical `--repo` path, and replaces an existing route for the same team.
 - **Matching**: `TEAM` is a Linear team key (`JAE`), a team id, or `*`. Each `AgentSessionEvent`
   carries `agentSession.issue` with `team.key`, `teamId` and `team.id` (the published Linear webhook

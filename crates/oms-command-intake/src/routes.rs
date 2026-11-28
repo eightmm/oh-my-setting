@@ -121,21 +121,52 @@ pub fn resolve<'a>(routes: &'a [Route], source: &str, keys: &[String]) -> Option
 }
 
 pub fn routes_path() -> Result<PathBuf, String> {
-    if let Some(raw) = std::env::var_os(ENV_ROUTES_FILE) {
+    path_from(|name| std::env::var_os(name))
+}
+
+fn path_from(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+    if let Some(raw) = env(ENV_ROUTES_FILE) {
         let path = PathBuf::from(raw);
-        if !path.is_absolute() || path.file_name().is_none() {
-            return Err(format!("{ENV_ROUTES_FILE} must be an absolute file path"));
-        }
-        return Ok(path);
+        return normalized(&path)
+            .then_some(path)
+            .ok_or_else(|| format!("{ENV_ROUTES_FILE} must be a normalized absolute file path"));
     }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
+    // XDG ignores a relative XDG_CONFIG_HOME; an empty or relative HOME fails
+    // closed rather than resolving the table inside the working directory.
+    let base = env("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            env("HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|h| h.join(".config"))
+        })
         .ok_or_else(|| {
-            format!("cannot locate the route table: set XDG_CONFIG_HOME, HOME or {ENV_ROUTES_FILE}")
+            format!(
+                "cannot locate the route table: set an absolute XDG_CONFIG_HOME, HOME or {ENV_ROUTES_FILE}"
+            )
         })?;
-    Ok(base.join(DEFAULT_ROUTES_REL))
+    let path = base.join(DEFAULT_ROUTES_REL);
+    normalized(&path)
+        .then_some(path)
+        .ok_or_else(|| "route table directory must be a normalized absolute path".into())
+}
+
+fn normalized(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let raw = path.as_os_str().as_bytes();
+    path.is_absolute()
+        && !raw.ends_with(b"/")
+        && !raw.ends_with(b"/.")
+        && path.file_name().is_some()
+        && !path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+        && !raw.windows(3).any(|w| w == b"/./")
 }
 
 fn uid() -> u32 {
@@ -188,6 +219,9 @@ pub fn load(path: &Path) -> Result<Vec<Route>, String> {
     file.take(MAX_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("route table unreadable: {e}"))?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("route table is larger than 64 KiB".into());
+    }
     parse(&bytes)
 }
 
@@ -269,6 +303,10 @@ pub fn update(
     if routes.len() > MAX_ROUTES {
         return Err(format!("route table holds at most {MAX_ROUTES} routes"));
     }
+    let encoded = encode(&routes);
+    if encoded.len() as u64 > MAX_BYTES {
+        return Err("route table would exceed 64 KiB".into());
+    }
     let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let written = (|| {
@@ -278,7 +316,7 @@ pub fn update(
             .mode(0o600)
             .custom_flags(OFlags::NOFOLLOW.bits() as i32)
             .open(&tmp)?;
-        file.write_all(&encode(&routes))?;
+        file.write_all(&encoded)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)
     })();
@@ -338,5 +376,45 @@ mod tests {
         assert!(parse(&encode(&[bad])).is_err());
         assert!(validate_team("-x").is_err());
         assert!(validate_team("3ab2f60d-b9bc-44c3-ae45-33d562c43ce9").is_ok());
+    }
+
+    #[test]
+    fn route_table_path_needs_an_absolute_root() {
+        let at = |pairs: &[(&str, &str)]| {
+            let pairs: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect();
+            path_from(move |name| pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v.into()))
+        };
+        let table = |root: &str| Ok(PathBuf::from(root).join(DEFAULT_ROUTES_REL));
+        assert_eq!(
+            at(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")]),
+            table("/x")
+        );
+        assert_eq!(
+            at(&[("XDG_CONFIG_HOME", "rel"), ("HOME", "/h")]),
+            table("/h/.config")
+        );
+        assert_eq!(
+            at(&[("XDG_CONFIG_HOME", ""), ("HOME", "/h")]),
+            table("/h/.config")
+        );
+        for env in [
+            &[("HOME", "")][..],
+            &[("HOME", "rel")],
+            &[("XDG_CONFIG_HOME", "rel")],
+            &[],
+        ] {
+            assert!(at(env).is_err(), "{env:?}");
+        }
+        assert!(at(&[("XDG_CONFIG_HOME", "/x/../y")]).is_err());
+        assert_eq!(
+            at(&[(ENV_ROUTES_FILE, "/t/r.json")]),
+            Ok(PathBuf::from("/t/r.json"))
+        );
+        for bad in ["r.json", "/t/", "/t/.", "/t/./r.json", "/t/../r.json"] {
+            assert!(at(&[(ENV_ROUTES_FILE, bad)]).is_err(), "{bad}");
+        }
     }
 }

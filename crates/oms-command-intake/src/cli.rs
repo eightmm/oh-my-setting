@@ -259,7 +259,7 @@ fn parse(args: &[OsString], cwd: &Path) -> Result<ParsedCommand, String> {
         return Ok(ParsedCommand::Help);
     }
     let Some(first) = args.first() else {
-        return Err("missing subcommand (choose serve, reply, or sources)".into());
+        return Err("missing subcommand (choose serve, reply, route, or sources)".into());
     };
     let action = first
         .to_str()
@@ -412,14 +412,14 @@ fn parse_route(args: &[OsString], cwd: &Path) -> Result<ParsedCommand, String> {
         .first()
         .and_then(|a| a.to_str())
         .ok_or_else(|| "missing route action (choose add, remove, or list)".to_owned())?;
-    let allowed: &[&str] = if verb == "list" { JSON_FLAGS } else { &[] };
-    let (values, flags) = collect_options(args, &format!("route {verb}"), allowed)?;
     let expected: &[&str] = match verb {
         "add" => ROUTE_ADD_VALUES,
         "remove" => &["--source", "--team"],
         "list" => &[],
         _ => return Err("invalid route action (choose add, remove, or list)".into()),
     };
+    let allowed: &[&str] = if verb == "list" { JSON_FLAGS } else { &[] };
+    let (values, flags) = collect_options(args, &format!("route {verb}"), allowed)?;
     if let Some(key) = values.keys().find(|k| !expected.contains(&k.as_str())) {
         return Err(format!(
             "unrecognized option for route {verb}: {}",

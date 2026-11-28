@@ -90,6 +90,20 @@ pub fn validate_serve_room(
         }
     }
     cfg.source.validate_endpoint()?;
+    for (i, route) in cfg.routes.iter().enumerate() {
+        crate::routes::validate_team(&route.team)?;
+        if route.source != cfg.source.name() {
+            return Err(format!(
+                "route team {} belongs to source '{}', not '{}'",
+                route.team,
+                route.source,
+                cfg.source.name()
+            ));
+        }
+        if cfg.routes[..i].iter().any(|r| r.team == route.team) {
+            return Err(format!("two intake routes for team {}", route.team));
+        }
+    }
     for route in &cfg.routes {
         validate_route_room(route, room_services, interrupted).map_err(|e| {
             if cfg.routes.len() == 1 && route.team == crate::routes::ANY_TEAM {
