@@ -1061,8 +1061,21 @@ mod tests {
         super::touch_last_output(&dir_fd);
         let mut buf = [0u8; 8];
         // Opening and immediately closing the write end after `fstat` rejects the FIFO
-        // yields EOF (0 bytes) with nothing written.
-        assert_eq!(rustix::io::read(&reader, &mut buf), Ok(0));
+        // yields EOF (0 bytes) with nothing written. A process spawned by a parallel
+        // test can briefly inherit the CLOEXEC write end until its exec, reading as
+        // EAGAIN; that copy never writes, so wait for EOF, but any byte still fails.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rustix::io::read(&reader, &mut buf) {
+                Err(rustix::io::Errno::AGAIN) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                read => {
+                    assert_eq!(read, Ok(0));
+                    break;
+                }
+            }
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }
