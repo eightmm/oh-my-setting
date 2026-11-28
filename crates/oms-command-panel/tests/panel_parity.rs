@@ -7493,6 +7493,35 @@ fn project_panels_codex_lifecycle_parity() {
             .is_none()
     );
 
+    // A rewrite that would not round-trip (here: over 1 MiB once pretty-printed) fails
+    // uninstall without touching the file or dropping the ownership row.
+    let mut bulky = parsed_after_install.clone();
+    bulky["bulk"] = json!(vec![0; 200_000]);
+    let bulky_bytes = serde_json::to_vec(&bulky).unwrap();
+    std::fs::write(&alpha_agy_cfg, &bulky_bytes).unwrap();
+    let (code, _, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "antigravity",
+            "--project",
+            "alpha-service",
+        ],
+        false,
+        &[],
+    );
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("cannot rewrite .agents/mcp_config.json"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read(&alpha_agy_cfg).unwrap(), bulky_bytes);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&panels_sidecar).unwrap()).unwrap(),
+        sidecar_after_custom
+    );
+    std::fs::write(&alpha_agy_cfg, &on_disk_after_install).unwrap();
+
     assert_eq!(
         run_panel(
             base,

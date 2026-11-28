@@ -4258,13 +4258,15 @@ fn inspect_antigravity_config_for_uninstall(
         });
     }
 
+    // A rewrite that fails to round-trip (over the size bound once pretty-printed,
+    // or a value that does not survive re-encoding) is OMS's failure, not a user
+    // edit: refuse before any change so the entry and its ownership row both stay.
     let bytes = encode_pretty_2space_json(&remaining_root)?;
-
-    let Ok(verified) = parse_strict_json_object_bounded(&bytes, spec.rel_path) else {
-        return Ok(CodexUninstallInspect::Edited);
-    };
-    if verified != remaining_root {
-        return Ok(CodexUninstallInspect::Edited);
+    if parse_strict_json_object_bounded(&bytes, spec.rel_path).ok() != Some(remaining_root) {
+        return Err(Error::new(format!(
+            "cannot rewrite {} without changing its other entries; left it and the ownership record unchanged",
+            spec.rel_path
+        )));
     }
 
     Ok(CodexUninstallInspect::CleanRemove {
