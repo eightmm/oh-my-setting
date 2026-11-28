@@ -344,7 +344,7 @@ impl oms_command_plan::Services for FeedbackMock {
         &self,
         _: &oms_command_plan::services::SupervisedCommand,
     ) -> oms_command_plan::Result<oms_command_plan::services::Execution> {
-        if self.mode.starts_with("base-drift-wall") {
+        if self.mode.starts_with("base-drift-wall") || self.mode == "goal-orphan-recovery" {
             return Ok(oms_command_plan::services::Execution {
                 exit: 1,
                 runner_exit: 1,
@@ -723,7 +723,9 @@ impl Services for FeedbackMock {
                         )),
                     };
                 }
-                if self.mode.starts_with("unknown-after-start") {
+                if self.mode.starts_with("unknown-after-start")
+                    || self.mode == "goal-orphan-recovery"
+                {
                     let issued = self.plan(
                         &call.cwd,
                         &["evidence-snapshot", "--id", arg("--plan-task").as_str()],
@@ -740,7 +742,9 @@ impl Services for FeedbackMock {
                             binding["lease_id"].as_str().unwrap(),
                         ],
                     );
-                    if self.mode == "unknown-after-start-error" {
+                    if self.mode == "unknown-after-start-error"
+                        || self.mode == "goal-orphan-recovery"
+                    {
                         return Err(oms_command_autonomy::Error::new(
                             2,
                             "worker response unavailable",
@@ -751,6 +755,110 @@ impl Services for FeedbackMock {
                         vec![],
                         b"worker timed out without acknowledgement".to_vec(),
                     ));
+                }
+                if matches!(
+                    self.mode,
+                    "dead-marker-after-start"
+                        | "dead-marker-after-start-err"
+                        | "failed-index-after-start"
+                        | "failed-index-live-marker"
+                        | "failed-index-empty-lease-live-marker"
+                        | "failed-index-unattributed-live-marker"
+                ) {
+                    let id = arg("--plan-task");
+                    let lease = binding["lease_id"].as_str().unwrap().to_owned();
+                    let op = call
+                        .environment
+                        .iter()
+                        .find_map(|(k, v)| (k == "OMS_OPERATION_ID").then_some(v))
+                        .and_then(|v| v.to_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    self.plan(&call.cwd, &["start", "--id", &id, "--lease-id", &lease]);
+                    if self.mode.starts_with("dead-marker-after-start") {
+                        let mut dead = Command::new("true").spawn().unwrap();
+                        let status = dead.wait().unwrap();
+                        assert!(status.success());
+                        write_private(
+                            &call.cwd.join(".oms/delegations/dead-worker.json"),
+                            serde_json::to_vec(&json!({
+                                "schema": 1,
+                                "id": "dead-worker",
+                                "pid": dead.id(),
+                                "task_id": id,
+                                "lease_id": lease,
+                            }))
+                            .unwrap()
+                            .as_slice(),
+                        );
+                        if self.mode == "dead-marker-after-start-err" {
+                            return Err(oms_command_autonomy::Error::new(
+                                2,
+                                "worker crashed after marker",
+                            ));
+                        }
+                        return Ok((1, vec![], b"worker exited after start\n".to_vec()));
+                    }
+                    let mut row = serde_json::to_vec(&json!({
+                        "schema": 1,
+                        "kind": "delegate",
+                        "event_id": "evt_failed",
+                        "attempt_id": "att_failed",
+                        "operation_id": op,
+                        "task_id": id,
+                        "provider": "codex",
+                        "base_sha": binding["base_sha"],
+                        "exit": 1,
+                        "verification": "failed",
+                        "state": "failed",
+                        "no_change": false,
+                        "plan_binding": binding,
+                    }))
+                    .unwrap();
+                    row.push(b'\n');
+                    write_private(&call.cwd.join(".oms/artifacts/index.jsonl"), &row);
+                    if self.mode == "failed-index-live-marker" {
+                        write_private(
+                            &call.cwd.join(".oms/delegations/live-worker.json"),
+                            serde_json::to_vec(&json!({
+                                "schema": 1,
+                                "id": "live-worker",
+                                "pid": std::process::id(),
+                                "task_id": id,
+                                "lease_id": lease,
+                            }))
+                            .unwrap()
+                            .as_slice(),
+                        );
+                    } else if self.mode == "failed-index-empty-lease-live-marker" {
+                        write_private(
+                            &call.cwd.join(".oms/delegations/live-worker.json"),
+                            serde_json::to_vec(&json!({
+                                "schema": 1,
+                                "id": "live-worker",
+                                "pid": std::process::id(),
+                                "task_id": id,
+                                "lease_id": "",
+                            }))
+                            .unwrap()
+                            .as_slice(),
+                        );
+                    } else if self.mode == "failed-index-unattributed-live-marker" {
+                        write_private(
+                            &call.cwd.join(".oms/delegations/live-worker.json"),
+                            serde_json::to_vec(&json!({
+                                "schema": 1,
+                                "id": "live-worker",
+                                "pid": std::process::id(),
+                                "task_id": "",
+                                "lease_id": "",
+                                "access": "write",
+                            }))
+                            .unwrap()
+                            .as_slice(),
+                        );
+                    }
+                    return Ok((1, vec![], b"worker failed after start\n".to_vec()));
                 }
                 assert!(args.iter().any(|a| a == "--terminalize-resumed-repair"));
                 let packet: serde_json::Value =
@@ -1571,6 +1679,157 @@ fn goal_drive_reclaims_expired_claim_for_open_commit_intent() {
             "{mode}"
         );
     }
+
+    // Confirmed-dead or cleanly failed post-Start running leases recover to ready;
+    // live markers and unknown-outcome running leases stay retained.
+    for (mode, expected_state) in [
+        ("dead-marker-after-start", "ready"),
+        ("dead-marker-after-start-err", "ready"),
+        ("failed-index-after-start", "ready"),
+        ("failed-index-live-marker", "running"),
+        ("failed-index-empty-lease-live-marker", "running"),
+        ("failed-index-unattributed-live-marker", "running"),
+    ] {
+        let (mock, repo) = drive_fixture(mode);
+        let out = run_with_services(
+            "plan-run",
+            &["--to".into(), "codex".into(), "--id".into(), "work".into()],
+            &repo.0,
+            &AtomicBool::new(false),
+            &mock,
+        );
+        assert_ne!(out.0, 0, "{mode}: {out:?}");
+        let after = mock.plan(&repo.0, &["show", "--id", "work"]);
+        assert_eq!(after["state"], expected_state, "{mode}: {after}");
+        assert_eq!(
+            after["lease_id"].as_str().unwrap().is_empty(),
+            expected_state == "ready",
+            "{mode}: {after}"
+        );
+    }
+
+    // goal-drive and plan-run --parallel preflight recover confirmed-dead running
+    // leases even before TTL expiry while retaining unknown-outcome running leases.
+    let spawn_dead_pid = || {
+        let mut child = Command::new("true").spawn().unwrap();
+        assert!(child.wait().unwrap().success());
+        child.id()
+    };
+    let (mock, repo) = drive_fixture("goal-orphan-recovery");
+    mock.plan(&repo.0, &["claim", "--id", "work", "--provider", "codex"]);
+    let claimed = mock.plan(&repo.0, &["show", "--id", "work"]);
+    mock.plan(
+        &repo.0,
+        &[
+            "start",
+            "--id",
+            "work",
+            "--lease-id",
+            claimed["lease_id"].as_str().unwrap(),
+        ],
+    );
+    let out = run_with_services(
+        "goal-drive",
+        &["--max-cycles".into(), "1".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_eq!(out.0, 3, "{out:?}");
+    assert_eq!(FeedbackMock::count(&mock.sends), 0);
+    assert_eq!(
+        mock.plan(&repo.0, &["show", "--id", "work"])["lease_id"],
+        claimed["lease_id"],
+        "unknown-outcome running task must not be reclaimed by goal-drive"
+    );
+
+    write_private(
+        &repo.0.join(".oms/delegations/dead-work.json"),
+        serde_json::to_vec(&json!({
+            "schema": 1,
+            "id": "dead-work",
+            "pid": spawn_dead_pid(),
+            "task_id": "work",
+            "lease_id": claimed["lease_id"],
+        }))
+        .unwrap()
+        .as_slice(),
+    );
+    let out = run_with_services(
+        "goal-drive",
+        &["--max-cycles".into(), "1".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_eq!(out.0, 3, "{out:?}");
+    assert_eq!(FeedbackMock::count(&mock.sends), 1);
+    assert_ne!(
+        mock.plan(&repo.0, &["show", "--id", "work"])["lease_id"],
+        claimed["lease_id"],
+        "confirmed-dead running task must be recovered and re-dispatched by goal-drive"
+    );
+
+    let (mock, repo) = drive_fixture("goal-orphan-recovery");
+    mock.plan(
+        &repo.0,
+        &[
+            "add",
+            "--id",
+            "unknown",
+            "--title",
+            "Unknown running sibling",
+            "--allowed",
+            "other",
+            "--verify",
+            "true",
+        ],
+    );
+    for id in ["work", "unknown"] {
+        mock.plan(&repo.0, &["claim", "--id", id, "--provider", "codex"]);
+        let shown = mock.plan(&repo.0, &["show", "--id", id]);
+        mock.plan(
+            &repo.0,
+            &[
+                "start",
+                "--id",
+                id,
+                "--lease-id",
+                shown["lease_id"].as_str().unwrap(),
+            ],
+        );
+    }
+    let work_before = mock.plan(&repo.0, &["show", "--id", "work"]);
+    let unknown_before = mock.plan(&repo.0, &["show", "--id", "unknown"]);
+    write_private(
+        &repo.0.join(".oms/delegations/dead-work.json"),
+        serde_json::to_vec(&json!({
+            "schema": 1,
+            "id": "dead-work",
+            "pid": spawn_dead_pid(),
+            "task_id": "work",
+            "lease_id": work_before["lease_id"],
+        }))
+        .unwrap()
+        .as_slice(),
+    );
+    let out = run_with_services(
+        "plan-run",
+        &["--to".into(), "codex".into(), "--parallel".into()],
+        &repo.0,
+        &AtomicBool::new(false),
+        &mock,
+    );
+    assert_ne!(out.0, 0, "{out:?}");
+    assert_eq!(FeedbackMock::count(&mock.sends), 1);
+    assert_ne!(
+        mock.plan(&repo.0, &["show", "--id", "work"])["lease_id"],
+        work_before["lease_id"]
+    );
+    assert_eq!(
+        mock.plan(&repo.0, &["show", "--id", "unknown"])["lease_id"],
+        unknown_before["lease_id"]
+    );
 
     for (subcase, env_timeout) in [("env-90s", "90s"), ("env-2h", "2h"), ("env-bad", "bad")] {
         let mut child = Command::new(std::env::current_exe().unwrap());
