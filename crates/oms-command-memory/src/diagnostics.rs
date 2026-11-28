@@ -2,19 +2,40 @@ pub(crate) use crate::sources::run as sources;
 use crate::{db, store::Store, *};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::sync::atomic::AtomicBool;
 fn push(v: &mut Value, s: &str) {
-    v.as_array_mut().unwrap().push(s.into());
+    let items = v.as_array_mut().unwrap();
+    if !items.iter().any(|x| x.as_str() == Some(s)) {
+        items.push(s.into());
+    }
 }
-pub(crate) fn health(s: &Store, as_json: bool) -> Result<Output> {
-    let images = db::snapshots(s)?;
-    let mut report = json!({"schema":1,"action":"health","assessment":"index-health-not-memory-quality","status":"empty","sources":{},"failures":{},"index":{"present":s.database.exists(),"readable":false,"current":false,"schema_version":null,"expected_schema":3,"integrity":"not-run","fts":false,"fts_entries":null,"fts_current":null,"entries":0,"by_source":{"shared":0,"pins":0,"failures":0},"provenance":{"total":0,"modern":0,"legacy":0,"task_id":0,"session_hash":0,"git_sha":0,"git_dirty":0,"git_state":0},"problems":[]},"problems":[]});
+pub(crate) fn health(s: &Store, sync: bool, as_json: bool, flag: &AtomicBool) -> Result<Output> {
+    let (sync_guard, sync_state, images) = if sync {
+        match db::sync_for_health(s, flag) {
+            Ok((guard, images)) => (Some(guard), "synced", images),
+            Err(e) if e.0 == 130 => return Err(e),
+            Err(_) => (None, "failed", db::snapshots(s)?),
+        }
+    } else {
+        (None, "not-run", db::snapshots(s)?)
+    };
+    let present = fs::symlink_metadata(&s.database).is_ok();
+    let mut report = json!({"schema":1,"action":"health","assessment":"index-health-not-memory-quality","status":"empty","sources":{},"failures":{},"index":{"present":present,"readable":false,"writable":false,"current":false,"syncable":false,"sync":sync_state,"schema_version":null,"expected_schema":3,"integrity":"not-run","fts":false,"fts_entries":null,"fts_current":null,"entries":0,"by_source":{"shared":0,"pins":0,"failures":0},"provenance":{"total":0,"modern":0,"legacy":0,"task_id":0,"session_hash":0,"git_sha":0,"git_dirty":0,"git_state":0},"problems":[]},"problems":[]});
     let mut total = 0;
     let (mut valid, mut invalid) = (0, 0);
     let mut states = HashMap::new();
+    let mut seen_ids = HashSet::new();
+    let mut duplicate_ids = false;
     for (source, image, entries) in &images {
         report["sources"][*source] =
             json!({"present":image.size>=0,"bytes":image.size.max(0),"entries":entries.len()});
         total += entries.len();
+        for entry in entries {
+            if !seen_ids.insert(entry.event_id.as_str()) {
+                duplicate_ids = true;
+            }
+        }
         if *source == "failures" {
             for l in String::from_utf8_lossy(&image.bytes)
                 .lines()
@@ -37,15 +58,44 @@ pub(crate) fn health(s: &Store, as_json: bool) -> Result<Output> {
     if invalid > 0 {
         push(&mut report["problems"], "failure-ledger-invalid");
     }
+    if duplicate_ids {
+        push(&mut report["problems"], "duplicate-event-id");
+    } else if sync_state != "synced" {
+        match db::dry_run_sync(s, &images, flag) {
+            Ok(()) => {}
+            Err(e) if e.0 == 130 => return Err(e),
+            Err(_) => push(&mut report["problems"], "sync-check-failed"),
+        }
+    }
+    let dir_writable = s.memory_dir_writable();
+    let index_writable = s.index_files_writable();
+    report["index"]["writable"] = (dir_writable && index_writable).into();
+    if !dir_writable {
+        push(&mut report["index"]["problems"], "memory-dir-unwritable");
+    }
+    if !index_writable {
+        push(&mut report["index"]["problems"], "index-unwritable");
+    }
+    if sync_state == "failed" {
+        push(&mut report["index"]["problems"], "sync-failed");
+    }
     let mut code = 0;
-    if !s.database.exists() {
-        if invalid > 0 {
+    if !present {
+        drop(sync_guard);
+        let has_defects = !report["problems"].as_array().unwrap().is_empty()
+            || !report["index"]["problems"].as_array().unwrap().is_empty();
+        if total > 0 || valid > 0 {
+            push(&mut report["index"]["problems"], "index-missing");
+        }
+        if has_defects {
             report["status"] = "degraded".into();
             code = 1;
         } else if total > 0 || valid > 0 {
+            report["index"]["syncable"] = true.into();
             report["status"] = "missing".into();
-            push(&mut report["index"]["problems"], "index-missing");
             code = 1;
+        } else {
+            report["index"]["syncable"] = true.into();
         }
     } else {
         let result = (|| -> Result<()> {
@@ -77,8 +127,15 @@ pub(crate) fn health(s: &Store, as_json: bool) -> Result<Output> {
                     push(&mut ix["problems"], "required-columns-missing");
                 }
             }
+            let entries_checkable = tables.contains("memory_entries")
+                && ["event_id", "source", "ordinal"]
+                    .iter()
+                    .all(|c| columns.contains(*c));
             let mut current = true;
-            for (source, image, _) in &images {
+            for (source, image, src_entries) in &images {
+                if *source == "failures" && s.failures.as_os_str().is_empty() {
+                    continue;
+                }
                 let row = if tables.contains("memory_sources") {
                     db.query_row(
                         "select path,size,mtime_ns,digest from memory_sources where source=?",
@@ -96,13 +153,26 @@ pub(crate) fn health(s: &Store, as_json: bool) -> Result<Output> {
                 } else {
                     None
                 };
-                current &= row
+                let mut source_current = row
                     == Some((
                         image.path.as_os_str().as_encoded_bytes().to_vec(),
                         image.size,
                         image.mtime,
                         image.digest.clone(),
                     ));
+                if source_current && entries_checkable {
+                    let indexed = db
+                        .prepare(
+                            "select event_id from memory_entries where source=? order by ordinal",
+                        )?
+                        .query_map([source], |r| r.get::<_, String>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    source_current &= indexed
+                        .iter()
+                        .map(String::as_str)
+                        .eq(src_entries.iter().map(|e| e.event_id.as_str()));
+                }
+                current &= source_current;
             }
             ix["current"] = current.into();
             if !current {
@@ -140,26 +210,19 @@ pub(crate) fn health(s: &Store, as_json: bool) -> Result<Output> {
             }
             Ok(())
         })();
+        drop(sync_guard);
         if result.is_err() {
             push(&mut report["index"]["problems"], "database-unreadable");
             report["status"] = "degraded".into();
             code = 1;
         } else {
-            let degraded = invalid > 0
+            let degraded = !report["problems"].as_array().unwrap().is_empty()
                 || report["index"]["problems"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|s| {
-                        [
-                            "required-tables-missing",
-                            "required-columns-missing",
-                            "fts-entry-mismatch",
-                            "schema-version-mismatch",
-                            "integrity-check-failed",
-                        ]
-                        .contains(&s.as_str().unwrap_or(""))
-                    });
+                    .any(|s| s.as_str() != Some("source-index-mismatch"));
+            report["index"]["syncable"] = (!degraded).into();
             report["status"] = if degraded {
                 "degraded"
             } else if report["index"]["current"] != true {
@@ -187,9 +250,14 @@ pub(crate) fn health(s: &Store, as_json: bool) -> Result<Output> {
         invalid
     );
     if ix["present"] == true {
-        out.push_str(&format!("index: current={} schema={}/3 integrity={} fts={} entries={}\nprovenance: modern={} legacy={} task={} session={} git-sha={}\n",if ix["current"]==true{"yes"}else{"no"},if ix["schema_version"].is_null(){"None".into()}else{ix["schema_version"].to_string()},text(ix,"integrity"),if ix["fts"]==true{"yes"}else{"fallback"},ix["entries"],p["modern"],p["legacy"],p["task_id"],p["session_hash"],p["git_sha"]));
+        out.push_str(&format!("index: current={} writable={} syncable={} sync={} schema={}/3 integrity={} fts={} entries={}\nprovenance: modern={} legacy={} task={} session={} git-sha={}\n",if ix["current"]==true{"yes"}else{"no"},if ix["writable"]==true{"yes"}else{"no"},if ix["syncable"]==true{"yes"}else{"no"},text(ix,"sync"),if ix["schema_version"].is_null(){"None".into()}else{ix["schema_version"].to_string()},text(ix,"integrity"),if ix["fts"]==true{"yes"}else{"fallback"},ix["entries"],p["modern"],p["legacy"],p["task_id"],p["session_hash"],p["git_sha"]));
     } else {
-        out.push_str("index: absent\n");
+        out.push_str(&format!(
+            "index: absent writable={} syncable={} sync={}\n",
+            if ix["writable"] == true { "yes" } else { "no" },
+            if ix["syncable"] == true { "yes" } else { "no" },
+            text(ix, "sync")
+        ));
     }
     let problems: Vec<_> = report["problems"]
         .as_array()

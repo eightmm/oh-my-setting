@@ -224,6 +224,57 @@ pub(crate) fn validate_owned(path: &Path) -> Result<()> {
         Err(e) => Err(e.into()),
     }
 }
+fn dir_writable(dir: &Path) -> bool {
+    let euid = rustix::process::geteuid().as_raw();
+    for ancestor in dir.ancestors() {
+        let target = if ancestor.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            ancestor
+        };
+        match fs::symlink_metadata(target) {
+            Ok(meta) => {
+                return meta.is_dir()
+                    && !meta.file_type().is_symlink()
+                    && (meta.uid() != euid || (meta.mode() & 0o300) == 0o300)
+                    && rustix::fs::accessat(
+                        rustix::fs::CWD,
+                        target,
+                        rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK,
+                        rustix::fs::AtFlags::EACCESS,
+                    )
+                    .is_ok();
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return false,
+        }
+    }
+    false
+}
+fn writable_regular(path: &Path) -> bool {
+    if validate_owned(path).is_err() {
+        return false;
+    }
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    let euid = rustix::process::geteuid().as_raw();
+    (meta.uid() != euid || (meta.mode() & 0o200) != 0)
+        && rustix::fs::accessat(
+            rustix::fs::CWD,
+            path,
+            rustix::fs::Access::WRITE_OK,
+            rustix::fs::AtFlags::EACCESS,
+        )
+        .is_ok()
+        && rustix::fs::openat(
+            rustix::fs::CWD,
+            path,
+            rustix::fs::OFlags::RDWR | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .is_ok()
+}
 pub(crate) fn read(path: &Path) -> Result<Vec<u8>> {
     read_bounded(path, MAX)
 }
@@ -363,6 +414,41 @@ impl Store {
     pub(crate) fn canonical_repo(&self) -> Option<&Path> {
         (self.shared.parent() == Some(self.repo.join(".oms/memory").as_path()))
             .then_some(self.repo.as_path())
+    }
+    pub(crate) fn memory_dir_writable(&self) -> bool {
+        if self.shared.starts_with(self.repo.join(".oms")) {
+            let ignore = self.repo.join(".oms/.gitignore");
+            match fs::symlink_metadata(&ignore) {
+                Ok(_) if validate_owned(&ignore).is_err() => return false,
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if !dir_writable(&self.repo.join(".oms")) {
+                        return false;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+        dir_writable(self.database.parent().unwrap_or(Path::new(".")))
+    }
+    pub(crate) fn index_files_writable(&self) -> bool {
+        match fs::symlink_metadata(&self.database) {
+            Ok(_) if !writable_regular(&self.database) => return false,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let mut sidecar = self.database.as_os_str().to_owned();
+            sidecar.push(suffix);
+            match fs::symlink_metadata(Path::new(&sidecar)) {
+                Ok(_) if !writable_regular(Path::new(&sidecar)) => return false,
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return false,
+            }
+        }
+        true
     }
     pub(crate) fn logs(&self) -> Result<(Vec<Entry>, Vec<Entry>)> {
         Ok((

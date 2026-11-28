@@ -182,6 +182,7 @@ fn parse(args: &[OsString]) -> Result<Options> {
             "--stdin",
             "--full",
             "--json",
+            "--sync",
             "--apply",
             "--include-stale",
             "--include-superseded",
@@ -472,6 +473,9 @@ fn execute_inner(
     if o.has("--json") && !["search", "recall", "health", "sources"].contains(&o.mode.as_str()) {
         return err("--json applies only to search, recall, health, or sources");
     }
+    if o.has("--sync") && o.mode != "health" {
+        return err("--sync applies only to health");
+    }
     if child()
         && (global || explicit)
         && ([
@@ -486,7 +490,8 @@ fn execute_inner(
             "retire",
         ]
         .contains(&o.mode.as_str())
-            || (o.mode == "context" && !o.has("--full")))
+            || (o.mode == "context" && !o.has("--full"))
+            || (o.mode == "health" && o.has("--sync")))
     {
         return err(
             "a harness child cannot mutate parent-owned host or global state; return the request to the parent agent",
@@ -680,7 +685,7 @@ fn execute_inner(
                 flag,
             )
         }
-        "health" => diagnostics::health(&s, o.has("--json")),
+        "health" => diagnostics::health(&s, o.has("--sync"), o.has("--json"), flag),
         "sources" => {
             if global || explicit {
                 return err("sources reports one repository; use --repo, not --global or --file");
