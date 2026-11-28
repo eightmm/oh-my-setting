@@ -1296,12 +1296,14 @@ fn project_cards_catalog() {
             "planProgress": {"verified": 2, "total": 4},
             "attention": [{"summary": "Review PR"}],
             "nextStep": {"id": "review", "summary": "Review pending PR", "scope": "repository"},
-            "active": 3,
+            "active": 9,
+            "commandStatus": {"executing": 3},
             "conversationMain": {"provider": "codex"},
             "activeAttempts": [
-                {"id": "main-1", "tool": "panel-main", "provider": "agy", "updated": "2026-11-27T06:00:00Z"},
-                {"id": "worker-b", "tool": "peer-delegate", "provider": "claude", "role": "reviewer", "created": "2026-11-27T05:56:00Z"},
-                {"id": "worker-a", "tool": "peer-delegate", "provider": "codex", "role": "impl", "created": "2026-11-27T05:55:00Z"}
+                {"id": "main-1", "tool": "panel-main", "provider": "agy", "state": "working", "updated": "2026-11-27T06:00:00Z"},
+                {"id": "worker-b", "tool": "peer-delegate", "provider": "claude", "role": "reviewer", "state": "working", "created": "2026-11-27T05:56:00Z"},
+                {"id": "worker-a", "tool": "peer-delegate", "provider": "codex", "role": "impl", "state": "verifying", "created": "2026-11-27T05:55:00Z"},
+                {"id": "worker-old", "tool": "peer-delegate", "provider": "codex", "role": "parked", "state": "review", "created": "2026-11-27T05:00:00Z"}
             ],
             "degraded": false
         }
@@ -1580,10 +1582,10 @@ fn project_cards_catalog() {
             "goal": "Short",
             "conversationMain": {"provider": "claude"},
             "activeAttempts": [
-                {"id": "worker-d", "tool": "peer-delegate", "provider": "codex", "role": "fourth", "created": "2026-11-27T06:04:00Z"},
-                {"id": "worker-b", "tool": "peer-delegate", "provider": "agy", "role": "rev", "created": "2026-11-27T06:02:00Z"},
-                {"id": "worker-a", "tool": "peer-delegate", "provider": "codex", "role": "dev", "created": "2026-11-27T06:01:00Z"},
-                {"id": "worker-c", "tool": "peer-delegate", "provider": "pi", "role": "", "created": "2026-11-27T06:02:00Z"}
+                {"id": "worker-d", "tool": "peer-delegate", "state": "working", "provider": "codex", "role": "fourth", "created": "2026-11-27T06:04:00Z"},
+                {"id": "worker-b", "tool": "peer-delegate", "state": "working", "provider": "agy", "role": "rev", "created": "2026-11-27T06:02:00Z"},
+                {"id": "worker-a", "tool": "peer-delegate", "state": "working", "provider": "codex", "role": "dev", "created": "2026-11-27T06:01:00Z"},
+                {"id": "worker-c", "tool": "peer-delegate", "state": "working", "provider": "pi", "role": "", "created": "2026-11-27T06:02:00Z"}
             ],
             "degraded": false
         }
@@ -1663,7 +1665,7 @@ fn project_cards_catalog() {
             "goal": "Clean goal with tripping worker role",
             "conversationMain": {"provider": "claude"},
             "activeAttempts": [
-                {"id": "w1", "tool": "peer-delegate", "provider": "codex", "role": format!("r-{runtime_tripped}")}
+                {"id": "w1", "tool": "peer-delegate", "state": "working", "provider": "codex", "role": format!("r-{runtime_tripped}")}
             ],
             "degraded": false
         }
@@ -1865,10 +1867,10 @@ fn project_cards_catalog() {
             "active": 4,
             "conversationMain": {"provider": "codex"},
             "activeAttempts": [
-                {"id": "main-rich", "tool": "panel-main", "provider": "agy", "updated": "2026-11-27T06:15:00Z"},
-                {"id": "crew-3", "tool": "peer-delegate", "provider": "agy", "role": "security-reviewer-worker", "created": "2026-11-27T06:13:00Z"},
-                {"id": "crew-1", "tool": "peer-delegate", "provider": "codex", "role": "backend-implementer-lead", "created": "2026-11-27T06:11:00Z"},
-                {"id": "crew-2", "tool": "peer-delegate", "provider": "claude", "role": "verification-specialist", "created": "2026-11-27T06:12:00Z"}
+                {"id": "main-rich", "tool": "panel-main", "state": "working", "provider": "agy", "updated": "2026-11-27T06:15:00Z"},
+                {"id": "crew-3", "tool": "peer-delegate", "state": "working", "provider": "agy", "role": "security-reviewer-worker", "created": "2026-11-27T06:13:00Z"},
+                {"id": "crew-1", "tool": "peer-delegate", "state": "working", "provider": "codex", "role": "backend-implementer-lead", "created": "2026-11-27T06:11:00Z"},
+                {"id": "crew-2", "tool": "peer-delegate", "state": "working", "provider": "claude", "role": "verification-specialist", "created": "2026-11-27T06:12:00Z"}
             ],
             "degraded": true
         }

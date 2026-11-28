@@ -4824,6 +4824,12 @@ fn open_card_cache_dir(cache_dir: &Path, create: bool) -> Option<std::os::fd::Ow
     Some(fd)
 }
 
+/// Running attempt states, matching the `executing` count in `oms state`.
+fn live_attempt(row: &Value) -> bool {
+    let state = row["state"].as_str().unwrap_or("");
+    matches!(state, "starting" | "working" | "verifying") || state.starts_with("waiting_")
+}
+
 fn clean_card_line(raw: &str, max_bytes: usize) -> String {
     let mut normalized = String::with_capacity(raw.len().min(max_bytes + 16));
     let mut prev_newline_cr = false;
@@ -4978,6 +4984,10 @@ impl StoredProjectCard {
                 });
                 continue;
             }
+            // Attempts awaiting review or blocked are not running; they reach the card through attention.
+            if !live_attempt(row) {
+                continue;
+            }
             if let Some(raw_role) = row["role"].as_str()
                 && !raw_role.is_empty()
                 && crate::output::outbound(raw_role.as_bytes(), &Value::Null).is_err()
@@ -5031,11 +5041,13 @@ impl StoredProjectCard {
         } else {
             clean_card_line(raw_next, CARD_NEXT_MAX_BYTES)
         };
-        let active = dashboard["active"].as_u64().unwrap_or_else(|| {
-            dashboard["activeAttempts"]
-                .as_array()
-                .map_or(0, |items| items.len() as u64)
-        });
+        let live_shown = active_attempts
+            .iter()
+            .filter(|row| live_attempt(row))
+            .count() as u64;
+        let active = dashboard["commandStatus"]["executing"]
+            .as_u64()
+            .unwrap_or(live_shown);
         let main = if source_withheld {
             None
         } else {
@@ -5052,11 +5064,8 @@ impl StoredProjectCard {
             };
             created_cmp.then_with(|| id_a.cmp(id_b))
         });
-        // The snapshot keeps only a window of active rows; count the omitted ones as workers too.
-        let omitted = dashboard["active"]
-            .as_u64()
-            .map_or(0, |all| all.saturating_sub(active_attempts.len() as u64))
-            .max(dashboard["activeAttemptsTrimmed"].as_u64().unwrap_or(0));
+        // The snapshot keeps only a window of unfinished rows; running ones outside it still count.
+        let omitted = active.saturating_sub(live_shown);
         let crew_total = if source_withheld {
             0
         } else {
@@ -6282,14 +6291,25 @@ mod work_items_tests {
     #[test]
     fn project_card_counts_omitted_workers_and_fits_long_aliases() {
         let rows: Vec<Value> = (0..8)
-            .map(|i| json!({"id": format!("att-{i}"), "tool": "peer-delegate", "provider": "codex", "created": format!("2026-11-27T05:5{i}:00Z")}))
+            .map(|i| json!({"id": format!("att-{i}"), "tool": "peer-delegate", "provider": "codex", "state": "working", "created": format!("2026-11-27T05:5{i}:00Z")}))
             .collect();
-        let dashboard = json!({"active": 12, "activeAttempts": rows});
+        let dashboard =
+            json!({"active": 400, "commandStatus": {"executing": 12}, "activeAttempts": rows});
         let card = StoredProjectCard::from_dashboard(&dashboard);
         assert_eq!(card.crew.len(), CARD_CREW_MAX_ITEMS);
-        assert_eq!(card.crew_total, 12);
-        let trimmed = json!({"activeAttempts": [], "activeAttemptsTrimmed": 4});
+        assert_eq!((card.active, card.crew_total), (12, 12));
+        let trimmed = json!({"activeAttempts": [], "activeAttemptsTrimmed": 4, "commandStatus": {"executing": 4}});
         assert_eq!(StoredProjectCard::from_dashboard(&trimmed).crew_total, 4);
+        // Unfinished attempts waiting for review or blocked are not busy workers.
+        let parked: Vec<Value> = ["review", "blocked", "review"]
+            .iter()
+            .enumerate()
+            .map(|(i, state)| json!({"id": format!("old-{i}"), "tool": "peer-delegate", "provider": "codex", "state": state}))
+            .collect();
+        let idle = StoredProjectCard::from_dashboard(
+            &json!({"active": 423, "commandStatus": {"executing": 0}, "activeAttempts": parked}),
+        );
+        assert_eq!((idle.active, idle.crew_total, idle.crew.len()), (0, 0, 0));
 
         let long_alias = format!("a{}", "b".repeat(79));
         let rendered = render_project_card(&long_alias, "fresh", Some("infra"), Some(&card), 150);
@@ -6429,10 +6449,10 @@ mod work_items_tests {
             "goal": "Keep goal intact",
             "planProgress": {"verified": 1, "total": 2},
             "nextStep": {"id": "s", "summary": "Keep next intact", "scope": "repository"},
-            "active": 2,
+            "commandStatus": {"executing": 2},
             "conversationMain": {"provider": "codex"},
             "activeAttempts": [
-                {"id": "w1", "tool": "peer-delegate", "provider": "claude", "role": "dev", "created": "2026-11-27T05:50:00Z"}
+                {"id": "w1", "tool": "peer-delegate", "provider": "claude", "role": "dev", "state": "working", "created": "2026-11-27T05:50:00Z"}
             ],
             "degraded": false,
         }));
@@ -6483,16 +6503,17 @@ mod work_items_tests {
             "attention": [{"code": "a"}, {"code": "b"}],
             "attentionTrimmed": 1,
             "nextStep": {"id": "verify", "summary": multibyte_next, "scope": "repository"},
-            "active": 5,
+            "commandStatus": {"executing": 5},
             "conversationMain": {"provider": "codex"},
             "activeAttempts": [
                 {"id": "main-older", "tool": "panel-main", "provider": "codex", "updated": "2026-11-27T05:55:00Z"},
                 {"id": "main-newer", "tool": "panel-main", "provider": "agy", "updated": "2026-11-27T05:59:00Z"},
-                {"id": "", "tool": "peer-delegate", "provider": "claude", "role": "ignored", "created": "2026-11-27T05:50:00Z"},
-                {"id": "att-late", "tool": "peer-delegate", "provider": "claude", "role": "late-worker", "created": "2026-11-27T05:58:00Z"},
-                {"id": "att-tie-b", "tool": "peer-delegate", "provider": "agy", "role": multibyte_role, "created": "2026-11-27T05:56:00Z"},
-                {"id": "att-early", "tool": "peer-delegate", "provider": "codex", "role": "  architect\n\t ", "created": "2026-11-27T05:54:00Z"},
-                {"id": "att-tie-a", "tool": "agent-supervisor", "provider": "pi", "role": "   ", "created": "2026-11-27T05:56:00Z"},
+                {"id": "", "tool": "peer-delegate", "state": "working", "provider": "claude", "role": "ignored", "created": "2026-11-27T05:50:00Z"},
+                {"id": "att-late", "tool": "peer-delegate", "state": "working", "provider": "claude", "role": "late-worker", "created": "2026-11-27T05:58:00Z"},
+                {"id": "att-tie-b", "tool": "peer-delegate", "state": "working", "provider": "agy", "role": multibyte_role, "created": "2026-11-27T05:56:00Z"},
+                {"id": "att-early", "tool": "peer-delegate", "state": "working", "provider": "codex", "role": "  architect\n\t ", "created": "2026-11-27T05:54:00Z"},
+                {"id": "att-tie-a", "tool": "agent-supervisor", "state": "working", "provider": "pi", "role": "   ", "created": "2026-11-27T05:56:00Z"},
+                {"id": "att-review", "tool": "peer-delegate", "provider": "codex", "role": "parked", "state": "review", "created": "2026-11-27T05:40:00Z"},
             ],
             "degraded": false,
         });
@@ -6575,12 +6596,12 @@ mod work_items_tests {
             "goal": "g".repeat(200),
             "planProgress": {"verified": 1, "total": 3},
             "nextStep": {"id": "n", "summary": "n".repeat(160), "scope": "repository"},
-            "active": 4,
+            "commandStatus": {"executing": 4},
             "activeAttempts": [
-                {"id": "m1", "tool": "panel-main", "provider": "claude", "updated": "2026-11-27T06:00:00Z"},
-                {"id": "c1", "tool": "peer-delegate", "provider": "codex", "role": "impl", "created": "2026-11-27T05:50:00Z"},
-                {"id": "c2", "tool": "peer-delegate", "provider": "claude", "role": "review", "created": "2026-11-27T05:51:00Z"},
-                {"id": "c3", "tool": "peer-delegate", "provider": "agy", "role": "verify", "created": "2026-11-27T05:52:00Z"}
+                {"id": "m1", "tool": "panel-main", "provider": "claude", "state": "working", "updated": "2026-11-27T06:00:00Z"},
+                {"id": "c1", "tool": "peer-delegate", "provider": "codex", "role": "impl", "state": "working", "created": "2026-11-27T05:50:00Z"},
+                {"id": "c2", "tool": "peer-delegate", "provider": "claude", "role": "review", "state": "verifying", "created": "2026-11-27T05:51:00Z"},
+                {"id": "c3", "tool": "peer-delegate", "provider": "agy", "role": "verify", "state": "waiting_input", "created": "2026-11-27T05:52:00Z"}
             ],
             "degraded": false,
         }));
@@ -6735,7 +6756,7 @@ mod work_items_tests {
             "goal": "Clean goal",
             "conversationMain": {"provider": "claude"},
             "activeAttempts": [
-                {"id": "w-secret", "tool": "peer-delegate", "provider": "codex", "role": format!("role-{tripped}")}
+                {"id": "w-secret", "tool": "peer-delegate", "provider": "codex", "state": "working", "role": format!("role-{tripped}")}
             ],
             "degraded": false,
         });
