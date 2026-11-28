@@ -2075,10 +2075,10 @@ async function stopManaged(c){
   finally{c.stopping=false;if(currentManaged(c)){c.until=Date.now()+120000;c.pollPaused=false;await readManaged(c);}}
 }
 onClick('chat-stop',()=>stopManaged(managedChat));
-// Claude's scanned partial reply; the verified transcript still settles the turn.
+// Claude and Codex scanned partial/activity stream; the verified transcript still settles the turn.
 async function streamManaged(c){
   const id=c.session.pending?.id || c.latestTurn,live=()=>currentManaged(c) && !hostToolsUnavailable && !c.pollPaused && ['reserved','running'].includes(c.previous || c.session.pending?.status);
-  if(c.provider!=='claude' || c.streaming || !turnUuid(id) || !live())return;
+  if(!['claude','codex'].includes(c.provider) || c.streaming || !turnUuid(id) || !live())return;
   if(c.stream?.turn!==id)c.stream={turn:id,cursor:0,text:'',tool:''};
   const st=c.stream;c.streaming=true;clearTimeout(c.streamTimer);
   try{

@@ -10338,7 +10338,7 @@ fn peer_delegate_help_flags_parse_and_do_not_always_refuse_and_next_step_require
 
 #[test]
 fn native_lead_observation_is_private_and_bound_to_published_answer() {
-    for provider in ["claude", "antigravity"] {
+    for provider in ["codex", "claude", "antigravity"] {
         if std::env::var("TEST_LEAD_PROVIDER").is_ok_and(|selected| selected != provider) {
             continue;
         }
@@ -10409,6 +10409,13 @@ fn native_lead_answer_fixture(provider: &str) {
                     serde_json::json!({"type":"assistant","parent_tool_use_id":null,"session_id":id,"message":{"model":"claude-sonnet-5-5","content":[{"type":"text","text":"actual fixture answer"}]}}),
                     serde_json::json!({"type":"result","subtype":"success","is_error":false,"session_id":id,"result":"actual fixture answer"})
                 ].map(|row|row.to_string()).join("\n"))
+            } else if provider == "codex" {
+                ("codex", [
+                    serde_json::json!({"type":"thread.started","thread_id":id}),
+                    serde_json::json!({"type":"item.started","item":{"type":"command_execution","command":"cargo test"}}),
+                    serde_json::json!({"type":"item.completed","item":{"type":"agent_message","text":"actual fixture answer"}}),
+                    serde_json::json!({"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}})
+                ].map(|row|row.to_string()).join("\n"))
             } else {
                 ("agy",serde_json::json!({"status":"SUCCESS","conversation_id":id,"response":"actual fixture answer"}).to_string())
             };
@@ -10452,6 +10459,11 @@ fn native_lead_answer_fixture(provider: &str) {
                 fs::metadata(&receipt).unwrap().permissions().mode() & 0o077,
                 0
             );
+            if provider == "codex" {
+                let activity = fs::read_to_string(dir.join("lead-stream.jsonl")).unwrap();
+                assert!(activity.contains("\"kind\":\"tool\""), "{activity}");
+                assert!(activity.contains("Run cargo test"), "{activity}");
+            }
             let prompt_of = |artifact: &Path| {
                 let text = fs::read_to_string(artifact).unwrap();
                 text.split("\n## Output\n").next().unwrap().to_owned()

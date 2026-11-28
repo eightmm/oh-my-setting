@@ -1236,7 +1236,7 @@ fn call_routed(
         && args.has("no-current")
         && args.get("providers") == target.provider
         && !args.has("debate")
-        && matches!(target.provider.as_str(), "claude" | "antigravity"))
+        && matches!(target.provider.as_str(), "codex" | "claude" | "antigravity"))
     .then(|| {
         crate::lead_observation::Scope::from_owner(
             repo,
