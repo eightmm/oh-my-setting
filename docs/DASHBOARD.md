@@ -262,7 +262,7 @@ Text clients can request the same pages with `oms_panel_tui_view`, a registered 
 
 ### Claude and Antigravity
 
-The cross-host connection serves the same OMS panel and project-scoped read-only tools.
+The cross-host connection serves the same OMS panel, project-scoped read-only tools and project Lead conversations.
 Choose a registered project to inspect its graph, progress, Git and GitHub work, usage,
 a Board view, or the execution host’s command catalog. `oms_panel_capabilities`
 lists the names and descriptions from `oms list --all`. When it returns
@@ -292,7 +292,8 @@ the next call uses that checkout. Removing the alias, substituting a symlink,
 or loosening the catalog permissions causes the next call to fail, including
 after the client reconnects.
 Client `_meta`, Room and participant names, and raw paths are ignored or
-rejected; mutating tools are refused by name. This does not add public-transport
+rejected; mutating tools are refused by name, except the room-less project Lead
+conversation tools described under the catalog binding below. This does not add public-transport
 authentication, and `mcp-app` exposes no Room view.
 
 In **Git → GitHub Projects**, open a repository-linked board and select
@@ -462,12 +463,11 @@ the write and directs you to open the panel in that project's conversation.
 
 Project Lead conversations are the exception: `oms_send_lead_message`,
 `oms_stop_lead_message` and `oms_update_lead_settings` without a `room` work
-from any conversation on the connection, for any registered alias. A message
-starts an `ask` consultation without write mode, in an isolated worktree when
-the checkout has a HEAD; Claude and Antigravity asks are not OS-sandboxed by
-default. Each message spends provider quota and records its thread and results
-under the project's `.oms/` state. Settings choose only that Lead's model and
-effort.
+from any conversation on the connection, for any registered alias, including
+the `mcp-app` profile. A message starts an `ask` consultation with the same
+read access as `oms peer-ask`, never a write-mode worker. Each message spends
+provider quota and records its thread and results under the project's `.oms/`
+state. Settings choose only that Lead's model and effort.
 
 Keep access to that map and SSH account restricted to the intended operators.
 Refresh OMS after changing the map to see the current choices. Each call on a
