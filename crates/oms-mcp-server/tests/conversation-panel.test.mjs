@@ -1903,10 +1903,14 @@ test('Inspect reads only the selected view and renders usage, paged routes, cata
   assert.deepEqual(p.calls.filter(c=>inspectReads.includes(c.name)).map(c=>c.name),['oms_panel_usage']);
   const content=p.get('inspect-content');
   assert.match(content.textContent,/Observed context used0%Cache read shareStatus unknown/);
-  assert.match(content.textContent,/tokens in the last 7 days/);
-  assert.match(content.textContent,/Left100%Used0%.*Observed agejust now/);
-  assert.match(content.textContent,/Claude · repository totals.*Reported calls10Reported tokens2,048Token-reported calls9Estimated cost \(USD\)1\.545/);
-  assert.match(content.textContent,/AGY · repository totals.*Reported calls4Reported tokens512Token-reported calls3/);
+  assert.match(content.textContent,/Last 7 days · tokensReported calls1Input tokens0Output tokens17Cache read tokensStatus unknown/);
+  assert.match(content.textContent,/5 hourStale100% leftUsed0%.*Observed agejust now/);assert.doesNotMatch(content.textContent,/Resets at/);
+  assert.match(content.textContent,/ClaudeNo recorded quota windowRepository totalsReported calls10Reported tokens2,048Token-reported calls9Estimated cost \(USD\)1\.545/);
+  assert.match(content.textContent,/AGYNo recorded quota windowRepository totalsReported calls4Reported tokens512Token-reported calls3/);
+  // One card per provider; raw attempts stay last and collapsed. More keeps the generic chrome and section chooser.
+  assert.deepEqual(content.children.map(c=>c.tagName),['section','section','section','details']);
+  assert.ok(!content.children.at(-1).open);assert.match(content.children.at(-1).textContent,/^Recent attempt records \(2\)/);
+  assert.equal(p.get('inspect-title').textContent,'Inspect project');assert.equal(p.get('inspect-kind').hidden,false);
   assert.match(content.textContent,/Reported tokens0SourceUsage receipt/);
   assert.match(content.textContent,/Reported cost \(USD\)1.5/);assert.match(content.textContent,/Reported tokensStatus unknown/);
   assert.doesNotMatch(content.textContent,/PRIVATE DEBUG JSON|"providers"|"scope"/);
@@ -1932,7 +1936,7 @@ test('Inspect reads only the selected view and renders usage, paged routes, cata
   assert.equal(p.host.messages.length,0);assert.ok(!p.calls.some(c=>/^oms_(start|send|update|open_lead|assign)/.test(c.name)));
   const readOnly=await panel(['one'],dashboard,{locale:'en',tools:inspectionTools({key:'b'.repeat(64),readOnly:true})});
   await readOnly.open('input',{arguments:{project:'one'}});await readOnly.event('inspect-open','click');
-  assert.match(readOnly.get('inspect-content').textContent,/provider observation/);assert.equal(readOnly.get('followup-open').hidden,true);
+  assert.match(readOnly.get('inspect-content').textContent,/Repository totals/);assert.equal(readOnly.get('followup-open').hidden,true);
 });
 
 test('Inspect drops late views and private scope changes, and clears unverifiable or malformed results',async()=>{
@@ -1944,7 +1948,7 @@ test('Inspect drops late views and private scope changes, and clears unverifiabl
   p.host.delayTool='oms_panel_usage';p.get('inspect-kind').value='usage';await p.event('inspect-kind','change');
   state.key='d'.repeat(64);p.host.release();await setImmediate();
   assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Read result unconfirmed/);
-  state.key='b'.repeat(64);await p.event('inspect-refresh','click');assert.match(p.get('inspect-content').textContent,/provider observation/);
+  state.key='b'.repeat(64);await p.event('inspect-refresh','click');assert.match(p.get('inspect-content').textContent,/Repository totals/);
   p.host.delayTool='oms_panel_usage';await p.event('inspect-refresh','click');const before=p.calls.length;
   await p.event('inspect-close','click');p.host.release();await setImmediate();
   assert.equal(p.calls.length,before);assert.equal(p.get('inspect-content').textContent,'');
@@ -2082,12 +2086,41 @@ test('v35 usage strip reads once after the first screen, shows only recorded win
   assert.equal(uses[0].textContent,'14%Stale');assert.equal(uses[1].textContent,'62%');assert.doesNotMatch(p.get('usage-rows').textContent,/0%$|No record/);
   assert.match(p.get('usage-strip').getAttribute('aria-label'),/^Usage left · Codex Weekly 14% left, Stale · 45m ago · Claude Weekly 62% left, 2m ago · open for detail$/);
   await p.event('refresh','click');await settle();assert.equal(count(p,'oms_panel_usage'),1);
+  const reset=Date.UTC(2026,0,2)/1000;
+  f.tools.oms_panel_usage=()=>({scope:'repository-recent-attempts',attempts:[],providers:[
+    {provider:'antigravity',windows:[{name:'weekly',used:100,stale:false,resets_at:reset},{name:'daily',used:null,stale:false,resets_at:null}],contextUsed:null,cacheReadShare:null}],
+    providerTotals:[{provider:'agy',calls:2,tokens:0,tokenReports:null}]});
   await p.event('usage-strip','click');await settle();assert.equal(count(p,'oms_panel_usage'),2);
-  assert.equal(p.get('inspection').open,true);assert.equal(p.get('inspect-kind').value,'usage');
+  assert.equal(p.get('inspection').open,true);assert.equal(p.get('inspect-kind').value,'usage');assert.ok(p.get('inspect-close').focused);
+  assert.equal(p.get('inspect-title').textContent,'Usage');
+  assert.equal(p.get('inspect-kind').hidden,true);assert.equal(p.get('inspect-kind-label').hidden,true);
+  assert.match(p.get('inspect-note').textContent,/not this Room alone/);
+  // agy and antigravity share one group; a spent window is a recorded 0%, an unrecorded one has no fill.
+  const groups=p.get('inspect-content').children;assert.equal(groups.length,1);
+  const [spent,unknown]=groups[0].children.filter(c=>c.className==='usage-window');
+  const track=w=>w.children.find(c=>c.className==='progress-track');
+  assert.match(spent.textContent,/^Weekly0% leftUsed100%Resets at/);assert.equal(spent.getAttribute('data-tone'),'warn');
+  assert.equal(track(spent).getAttribute('data-missing'),'false');assert.equal(kids(track(spent))[0].style.width,'0%');
+  assert.match(unknown.textContent,/^dailyStatus unknownUsedStatus unknown$/);
+  assert.equal(track(unknown).getAttribute('data-missing'),'true');assert.equal(kids(track(unknown)).length,0);
+  assert.match(groups[0].textContent,/Reported calls2Reported tokens0Token-reported callsStatus unknown/);
+  assert.doesNotMatch(groups[0].textContent,/Stale|Observed context|No recorded quota window/);
+  await choose(p,'ko');
+  assert.equal(p.get('inspect-title').textContent,'사용량');assert.match(groups[0].textContent,/주간0% 남음.*저장소 누적/);
+  await choose(p,'en');
+  await p.event('inspect-refresh','click');await settle();assert.equal(count(p,'oms_panel_usage'),3);
+  assert.equal(p.get('inspect-title').textContent,'Usage');assert.equal(p.get('inspect-kind').hidden,true);
   p.get('inspection').close();await settle();assert.ok(p.get('usage-strip').focused);
+  await p.event('inspect-open','click');await settle();
+  assert.equal(p.get('inspect-title').textContent,'Inspect project');
+  assert.equal(p.get('inspect-kind').hidden,false);assert.equal(p.get('inspect-kind-label').hidden,false);
+  f.tools.oms_panel_tui_view=inspectionTools(state).oms_panel_tui_view;
+  p.get('inspect-kind').value='routes';await p.event('inspect-kind','change');await settle();
+  assert.match(p.get('inspect-content').textContent,/reviewer 1/);
+  p.get('inspection').close();await settle();assert.ok(p.get('inspect-open').focused);
   f.tools.oms_panel_usage=()=>({scope:'repository-recent-attempts',providers:[],attempts:[]});
   await p.open('input',{arguments:{project:'two'}});await settle();
-  assert.equal(kids(p.get('usage-rows')).length,0);await f.fire(1500);assert.equal(count(p,'oms_panel_usage'),3);
+  assert.equal(kids(p.get('usage-rows')).length,0);await f.fire(1500);assert.equal(count(p,'oms_panel_usage'),5);
   assert.equal(p.get('usage-rows').textContent,'No record');assert.match(p.get('usage-strip').getAttribute('aria-label'),/No record/);
 });
 
