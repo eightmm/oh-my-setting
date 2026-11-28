@@ -1371,11 +1371,12 @@ fn council_seat_publication_stops_after_thread_append_failure() {
                             // completed turn is made available to thread readers.
                             let deadline = std::time::Instant::now() + Duration::from_secs(5);
                             loop {
+                                // An unlocked read can race the other seat's append; retry.
                                 let turns = oms_command_peer::storage::load(
                                     &self.repo.0,
                                     Path::new(".oms/threads/fixture-council.jsonl"),
                                 )
-                                .unwrap();
+                                .unwrap_or_default();
                                 let published = turns
                                     .iter()
                                     .filter(|turn| {
