@@ -1455,7 +1455,7 @@ impl CollabServices<'_> {
         // The trusted worker reports only after its exclusive WholeTree reactor
         // has reaped every descendant. Never deserialize or synthesize its
         // opaque proof: retain only the outer reactor's actual call/group proof.
-        let child = supervise_worker_result(report).map_err(fail)?;
+        let child = supervise_worker_result(report, inner.requests_stall()).map_err(fail)?;
         let complete = done.stop.is_none()
             && !child.timed_out
             && !child.output_limited
@@ -3748,7 +3748,10 @@ mod tests {
                     .bytes
                     .starts_with(crate::services_control::SUPERVISE_STARTED)
             );
-            assert!(crate::services_control::supervise_worker_result(&done.stdout.bytes).is_err());
+            assert!(
+                crate::services_control::supervise_worker_result(&done.stdout.bytes, false)
+                    .is_err()
+            );
         }
     }
 
@@ -4614,6 +4617,126 @@ mod tests {
             (0, true, None, &b"......"[..])
         );
         assert!(cancel_dir.join("last-output").is_file());
+
+        // Current worker always emits `stalled_ms` (including `null` when no stall was
+        // requested); an older worker response omitting `stalled_ms` fails closed when
+        // the request carried a non-null `stall_ms` and remains accepted when `stall` is None.
+        let no_stall_spawn = crate::services_control::Spawn::new(
+            Scope::ProcessGroup,
+            sh("printf ok"),
+            Duration::from_secs(5),
+            1024,
+        );
+        let req_bytes =
+            crate::services_control::supervise_worker_request(&no_stall_spawn, true).unwrap();
+        let worker = host.control.supervise_worker();
+        let current_report = std::process::Command::new(&worker[0])
+            .args(&worker[1..])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(&req_bytes)?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(current_report.status.success());
+        let current_json = current_report
+            .stdout
+            .strip_prefix(crate::services_control::SUPERVISE_STARTED)
+            .expect("worker start marker");
+        let parsed_current: serde_json::Value = serde_json::from_slice(current_json).unwrap();
+        assert_eq!(
+            parsed_current.get("stalled_ms"),
+            Some(&serde_json::Value::Null),
+            "current worker must always emit stalled_ms key"
+        );
+        assert!(
+            crate::services_control::supervise_worker_result(current_json, true)
+                .unwrap()
+                .stalled
+                .is_none()
+        );
+
+        let legacy_worker = sh(
+            "cat >/dev/null; printf 'OMS_SUPERVISE_STARTED\\n{\"ok\":true,\"code\":0,\"stdout\":\"6f6b\",\"stderr\":\"\",\"elapsed_ms\":1,\"timed_out\":false,\"output_limited\":false,\"cancelled\":false,\"dropped\":0}'",
+        );
+        let legacy_host = CollabServices::new(&stop, source())
+            .expect("source is available")
+            .with_supervise_worker(legacy_worker);
+        let run_legacy = |stall: Option<Duration>| {
+            PeerProcessExecutor::execute(
+                &legacy_host,
+                Invocation {
+                    argv: sh("printf ok"),
+                    cwd: dir.path().to_owned(),
+                    input: None,
+                    environment: Vec::new(),
+                    remove_environment: Vec::new(),
+                    timeout: Duration::from_secs(10),
+                    stall,
+                    max_bytes: 1024,
+                    merge: false,
+                    launch_fence: None,
+                    physical_call: None,
+                    heartbeat: None,
+                    stream: None,
+                },
+                &stop,
+            )
+        };
+        let err = run_legacy(Some(Duration::from_millis(250)))
+            .expect_err("legacy worker omitting stalled_ms must fail closed when stall is active");
+        assert!(
+            err.message
+                .contains("supervise worker does not support the stall check"),
+            "{}",
+            err.message
+        );
+        let ok_without_stall =
+            run_legacy(None).expect("legacy worker remains accepted when stall_ms is null");
+        assert_eq!(
+            (
+                ok_without_stall.code,
+                ok_without_stall.complete,
+                ok_without_stall.stalled,
+                ok_without_stall.stdout.as_slice()
+            ),
+            (0, true, None, &b"ok"[..])
+        );
+        let legacy_control_worker = sh(
+            "cat >/dev/null; printf '{\"ok\":true,\"code\":0,\"stdout\":\"6f6b\",\"stderr\":\"\",\"elapsed_ms\":1,\"timed_out\":false,\"output_limited\":false,\"cancelled\":false,\"dropped\":0}'",
+        );
+        let mut stall_spawn = crate::services_control::Spawn::new(
+            Scope::WholeTree,
+            sh("printf ok"),
+            Duration::from_secs(5),
+            1024,
+        );
+        assert_eq!(
+            crate::services_control::run_via_supervise_worker(
+                &legacy_control_worker,
+                &stall_spawn,
+                &stop
+            )
+            .unwrap()
+            .stdout,
+            b"ok"
+        );
+        stall_spawn.stall = Some(Duration::from_millis(250));
+        let control_err = crate::services_control::run_via_supervise_worker(
+            &legacy_control_worker,
+            &stall_spawn,
+            &stop,
+        )
+        .err()
+        .expect("run_via_supervise_worker must reject missing stalled_ms when stall is active");
+        assert_eq!(
+            control_err,
+            "supervise worker does not support the stall check"
+        );
     }
 
     #[test]

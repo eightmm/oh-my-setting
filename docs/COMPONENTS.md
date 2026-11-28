@@ -1761,9 +1761,10 @@ The detailed operating contract is in the harness state-memory reference.
 draft spec and does not alter the plan until the proposal is explicitly
 applied. `oms plan-run` claims and executes at most one ready task; unpinned
 provider calls omit `OMS_PEER_TIMEOUT` under a 24-hour-plus-grace outer wall so
-`peer-delegate`'s own stall check (`OMS_PEER_STALL`, default 20 minutes) and
-24-hour cap govern (`OMS_PEER_TIMEOUT` pins a fixed provider wall), while
-`patch-land` keeps its 20-minute wall. `oms
+`peer-delegate`'s own limits govern: a 20-minute `OMS_PEER_STALL` check plus a
+24-hour cap for streaming workers and a 20-minute wall for non-streaming
+workers (`OMS_PEER_TIMEOUT` pins a fixed provider wall), while `patch-land`
+keeps its 20-minute wall. `oms
 goal-drive` repeats within a cycle cap and acceptance command using the same
 provider wall rule (`--provider-timeout` or `OMS_PEER_TIMEOUT` pins a fixed
 wall); the cap counts
