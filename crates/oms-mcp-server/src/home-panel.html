@@ -66,8 +66,9 @@ button:disabled{opacity:.55;cursor:default}
 .nx{font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .goal{font-size:12.5px;color:var(--soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cnt{display:inline-block;margin-right:6px;padding:0 7px;border-radius:999px;font-size:11.5px;font-weight:700;line-height:18px;background:color-mix(in srgb,var(--need) 14%,var(--bg));color:color-mix(in srgb,var(--need) 85%,var(--ink));vertical-align:1px}
-.pl{display:grid;gap:5px;font-size:12px;color:var(--soft)}
-.pl b{font-weight:500;color:var(--ink);font-variant-numeric:tabular-nums;justify-self:end;margin-top:-17px}
+.pl{display:grid;grid-template-columns:1fr auto;gap:5px 8px;align-items:baseline;font-size:12px;color:var(--soft)}
+.pl b{font-weight:500;color:var(--ink);font-variant-numeric:tabular-nums}
+.pl .track{grid-column:1/-1}
 .track{height:4px;border-radius:2px;background:var(--line);overflow:hidden}
 .track i{display:block;height:100%;background:var(--ink);min-width:2px}
 .cr{display:flex;align-items:center;gap:5px;min-width:0;overflow:hidden;padding:4px;font-size:11.5px;color:var(--soft);font-variant-numeric:tabular-nums}
@@ -185,6 +186,7 @@ function groups(list){
   g.need.sort((a,b)=>b.attention-a.attention||byAlias(a,b));for(const k of SECT.slice(1))g[k].sort(byAlias);return g;
 }
 function stateWord(c){return L.st[c.state]+(c.degraded?' · '+L.degraded:'')}
+const seenText=c=>ago(c.observedAt)+' · '+stateWord(c)+(c.area?' · '+c.area:'');
 function label(c){
   const parts=[c.alias,L.sect[sectOf(c)],stateWord(c)];
   if(c.attention)parts.push(L.attn(c.attention));
@@ -232,7 +234,7 @@ function detail(c){
   const mid=document.createElement('div');mid.style.display='grid';mid.style.gap='12px';
   if(c.branch)mid.append(block(L.branch,para(c.branch+' · '+(c.dirty?L.dirty:L.clean),'mono')));
   if(c.plan)mid.append(block(L.plan,para(`${c.plan.done} / ${c.plan.total} (${pct(c)}%)`)));
-  mid.append(block(L.seen,para(ago(c.observedAt)+' · '+stateWord(c)+(c.area?' · '+c.area:''))));
+  const seen=para(seenText(c));seen.dataset.seen=c.alias;mid.append(block(L.seen,seen));
   const ul=document.createElement('ul');ul.className='crew';
   const li=(p,t,main)=>{const x=document.createElement('li');x.innerHTML=mono(p,main);x.append(t);ul.append(x)};
   if(c.main)li(c.main,L.main+' · '+c.main,true);
@@ -296,6 +298,13 @@ function hud(){
   age();
 }
 function age(){const a=el('age');a.textContent=failed?L.failShort+(lastLoad?' · '+L.updated+' '+ago(new Date(lastLoad).toISOString()):''):lastLoad?L.updated+' '+ago(new Date(lastLoad).toISOString()):'';a.style.color=failed?'var(--warn)':''}
+// Relative ages, the open detail's updated line and row labels follow the clock without rebuilding the list.
+function tick(){
+  if(!cards)return;const by=new Map(cards.map(c=>[c.alias,c])),box=el('list');
+  for(const a of box.querySelectorAll('[data-at]'))a.textContent=ago(a.dataset.at);
+  for(const p of box.querySelectorAll('[data-seen]')){const c=by.get(p.dataset.seen);if(c)p.textContent=seenText(c)}
+  for(const b of box.querySelectorAll('[data-alias]')){const c=by.get(b.dataset.alias);if(c)b.setAttribute('aria-label',label(c))}
+}
 function select(alias,back){
   const prev=picked;picked=alias;render();
   if(!alias&&back&&prev)for(const b of el('list').querySelectorAll('[data-alias]'))if(b.dataset.alias===prev){b.focus();break}
@@ -377,7 +386,7 @@ function wire(){
   el('find').addEventListener('keydown',e=>{if(e.key!=='Enter')return;const b=el('list').querySelector('[data-alias]');if(b){e.preventDefault();select(b.dataset.alias,false);el('list').querySelector('[data-alias][aria-expanded="true"]')?.focus()}});
   document.addEventListener('visibilitychange',due);
   // Row ages tick in place so an unchanged payload never leaves them frozen.
-  setInterval(()=>{due();age();for(const a of el('list').querySelectorAll('[data-at]'))a.textContent=ago(a.dataset.at)},15000);
+  setInterval(()=>{due();age();tick()},15000);
 }
 setLang(navigator.language);wire();
 if(window.parent===window)status(L.openApp);else refresh();

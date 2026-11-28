@@ -428,10 +428,12 @@ non-`catalog` binding leaves the response unchanged. Every successful
 `oms_panel_snapshot` for a configured alias updates its cached card, and nothing
 is written inside any project checkout. Each card derives `observedAt`,
 `branch`, `dirty`, `goal`, `plan` (`{done, total}`), `attention`, `next`,
-`active`, `main` (`"codex"`, `"claude"`, `"antigravity"`, or `null`), `crew`
-(up to three `{provider, role, id}` active worker entries), `crewTotal` (active
-worker count before the cap of three), and `degraded` from the snapshot
-dashboard. Each `crew[].id` is an opaque hash label that stays stable for a
+`active` (running attempts: `starting`, `working`, `verifying` or `waiting_*`,
+the `executing` count of `oms state`; attempts awaiting review or blocked are
+left out and reach the card through `attention`), `main` (`"codex"`,
+`"claude"`, `"antigravity"`, or `null`), `crew` (up to three
+`{provider, role, id}` running worker entries), `crewTotal` (running worker
+count before the cap of three), and `degraded` from the snapshot dashboard. Each `crew[].id` is an opaque hash label that stays stable for a
 worker’s whole run and is not the raw attempt id. Each card carries one `state`:
 
 - `fresh`: cached card is at most 10 minutes old and at least as new as the
