@@ -2462,6 +2462,7 @@ test('mcp-app hosts open direct Lead chat without a Room or kickoff round and ke
     const all=['codex','claude','agy'].map(leadRow);
     const leads=a.provider?all.filter(r=>r.provider===a.provider):all;
     const out={projectKey:key,room:null,leads};
+    if(a.turnId)out.turn={turnId:a.turnId,status:turns.some(r=>r.turnId===a.turnId)?'replied':'not_found'};
     if(a.provider)out._private={room:null,provider:a.provider,requestId:leads[0].requestId,status:'ready',transcript:{turns,cursor:null,hasMore:false}};
     return out;
   };
@@ -2510,12 +2511,38 @@ test('mcp-app hosts open direct Lead chat without a Room or kickoff round and ke
   await p.event('chat-compose','submit');await setImmediate();
   assert.match(p.get('chat-messages').textContent,/Codex direct reply/);
 
-  // Settings work without room in project-scoped mode.
+  // Settings work without room in project-scoped mode, and continuity copy names Codex, Claude and AGY.
   await p.event('settings-toggle','click');await setImmediate();
+  assert.match(p.get('settings-scope').textContent,/Codex, Claude and AGY/);
   p.get('settings-model').value='gpt-5.4';await p.event('settings-model','change');
   p.get('settings-effort').value='high';await p.event('settings-effort','change');
   await p.event('settings-save','click');await setImmediate();
   assert.match(p.get('settings-saved').textContent,/gpt-5\.4 · high/);
+
+  // Explicit newSession flag sends newSession:true, survives not_found retry, and clears on accept.
+  let freshAttempts=0;
+  p.host.tools.oms_send_lead_message=a=>{
+    assert.equal(Object.hasOwn(a,'room'),false);
+    freshAttempts++;
+    if(freshAttempts===1)return {...leadResp(a),turn:{turnId:a.turnId,status:'not_found'}};
+    turns.push({role:'user',text:a.text,turnId:a.turnId},{role:'codex',text:'Fresh Codex reply',turnId:a.turnId});
+    return {...leadResp(a),turn:{turnId:a.turnId,status:'replied'}};
+  };
+  p.get('chat-text').value='Start fresh please';await p.event('chat-text','input');
+  p.get('chat-fresh').checked=true;await p.event('chat-fresh','change');
+  await p.event('chat-compose','submit');await setImmediate();
+  let sendCalls=p.calls.filter(c=>c.name==='oms_send_lead_message');
+  assert.equal(sendCalls.at(-1).args.newSession,true);
+  assert.equal(p.get('chat-fresh').checked,true);
+  await p.event('chat-check','click');await setImmediate();
+  sendCalls=p.calls.filter(c=>c.name==='oms_send_lead_message');
+  assert.equal(sendCalls.length,3);
+  assert.equal(sendCalls.at(-1).args.newSession,true);
+  assert.equal(p.get('chat-fresh').checked,false);
+  p.get('chat-text').value='Resume new thread';await p.event('chat-text','input');
+  await p.event('chat-compose','submit');await setImmediate();
+  sendCalls=p.calls.filter(c=>c.name==='oms_send_lead_message');
+  assert.equal(Object.hasOwn(sendCalls.at(-1).args,'newSession'),false);
 
   // Refresh keeps the open Lead chat alive.
   await p.event('refresh','click');await setImmediate();

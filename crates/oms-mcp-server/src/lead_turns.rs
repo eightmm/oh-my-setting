@@ -178,6 +178,9 @@ pub(super) fn validate(name: &str, args: &Value, provider: Option<&str>) -> Pane
                 "An exact project, Lead, message ID and 1–4000 bytes of text are required.".into(),
             );
         }
+        if args.get("newSession").is_some_and(|v| !v.is_boolean()) {
+            return Err("Invalid newSession flag.".into());
+        }
         crate::output::outbound(args["text"].as_str().unwrap().as_bytes(), &Value::Null)
             .map_err(|_| "OMS withheld this message during its outbound scan.")?;
     }
@@ -282,7 +285,21 @@ impl<'a> Conversation<'a> {
             })
             .transpose()
     }
-    fn binding(&self, id: &str, digest: &str, route: &Value) -> String {
+    fn binding(&self, id: &str, digest: &str, route: &Value, fresh: bool) -> String {
+        if fresh {
+            return hash(
+                json!([
+                    "lead-message-fresh-v1",
+                    self.scope,
+                    self.lead["request"],
+                    id,
+                    digest,
+                    route["model"],
+                    route["effort"]
+                ])
+                .to_string(),
+            );
+        }
         if !route["model"].is_null() {
             return hash(
                 json!([
@@ -317,12 +334,16 @@ impl<'a> Conversation<'a> {
         };
         let text = v["text"].as_str().filter(|s| text_ok(s)).ok_or(INVALID)?;
         let digest = hash(text);
+        if v.get("fresh").is_some_and(|f| !f.is_boolean()) {
+            return Err(INVALID.into());
+        }
+        let fresh = v.get("fresh").and_then(Value::as_bool).unwrap_or(false);
         if v["id"] != id
             || v["scope"] != self.scope
             || v["digest"] != digest
             || v.get("route")
                 .is_some_and(|r| settings::selection(self.provider, r).is_err())
-            || v["binding"] != self.binding(id, &digest, &v["route"])
+            || v["binding"] != self.binding(id, &digest, &v["route"], fresh)
             || !v["at"].is_string()
             || !(v["previous"].is_null()
                 || v["previous"]
@@ -517,6 +538,10 @@ impl<'a> Conversation<'a> {
     ) -> PanelResult<()> {
         let id = args["turnId"].as_str().ok_or(INVALID)?;
         let text = args["text"].as_str().ok_or(INVALID)?;
+        let fresh = args
+            .get("newSession")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         // The kickoff has already exited. Its same private inode lock serializes
         // all panel writers across app processes; reads don't create/take a lock.
         let _guard = self.dir.lock().map_err(
@@ -524,7 +549,8 @@ impl<'a> Conversation<'a> {
         )?;
         check()?;
         if let Some(prior) = self.record(id)? {
-            if prior["text"] != text {
+            let prior_fresh = prior.get("fresh").and_then(Value::as_bool).unwrap_or(false);
+            if prior["text"] != text || prior_fresh != fresh {
                 return Err("That message ID already belongs to different text.".into());
             }
             return Ok(());
@@ -540,19 +566,25 @@ impl<'a> Conversation<'a> {
             }
         }
         // Continue the previous turn's verified native session, read before this
-        // record moves the head. No observation means a fresh native session.
-        let resume = self
-            .native_invocation(server)
-            .and_then(|(session, _)| session["id"].as_str().map(str::to_owned));
+        // record moves the head. No observation or newSession=true means a fresh session.
+        let resume = if fresh {
+            None
+        } else {
+            self.native_invocation(server)
+                .and_then(|(session, _)| session["id"].as_str().map(str::to_owned))
+        };
         let digest = hash(text);
         let route = self.current_settings()?["selection"].clone();
         let settings = settings::selection(self.provider, &route)?;
         if settings.is_some() {
             self.check_selection(server, &route)?;
         }
-        let binding = self.binding(id, &digest, &route);
+        let binding = self.binding(id, &digest, &route, fresh);
         let op = assignment_address(self.lead, &binding).ok_or(INVALID)?;
-        let record = json!({"id":id,"route":route,"scope":self.scope,"binding":binding,"digest":digest,"text":text,"previous":previous,"at":crate::storage::now()});
+        let mut record = json!({"id":id,"route":route,"scope":self.scope,"binding":binding,"digest":digest,"text":text,"previous":previous,"at":crate::storage::now()});
+        if fresh {
+            record["fresh"] = json!(true);
+        }
         self.bound()?;
         self.dir
             .publish_new(
