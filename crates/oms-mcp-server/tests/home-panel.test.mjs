@@ -123,3 +123,30 @@ test('calls only the read-only card tool and opens no network path', () => {
   assert.deepEqual([...new Set(html.match(/\boms_[a-z_]+/g))], ['oms_list_projects']);
   assert.doesNotMatch(script, /\bfetch\(|XMLHttpRequest|WebSocket|EventSource|\bimport\(/);
 });
+
+test('shows stale on need rows with branch, broadens search safely without leaking withheld fields, and avoids village wording', () => {
+  assert.doesNotMatch(html, /동네|평온|조용함|폴더 없음|folder missing|worker가|일하는 worker/);
+  assert.equal(typeof home.matches, 'function');
+  const staleNeed = home.norm({ alias: 'pay', state: 'stale', attention: 2, branch: 'feat/x', goal: 'Fix webhook', next: 'Approve', area: 'backend', main: 'claude', crewTotal: 3 });
+  assert.equal(home.matches(staleNeed, 'feat/x'), true);
+  assert.equal(home.matches(staleNeed, 'webhook'), true);
+  assert.equal(home.matches(staleNeed, 'approve'), true);
+  assert.equal(home.matches(staleNeed, 'backend'), true);
+  assert.equal(home.matches(staleNeed, 'claude'), true);
+  assert.equal(home.matches(staleNeed, 'missing-term'), false);
+  const withheldRaw = { alias: 'secret-repo', state: 'withheld', branch: 'top-secret-branch', goal: 'secret-goal', next: 'secret-next', area: 'secret-area', main: 'codex' };
+  const withheldNorm = home.norm(withheldRaw);
+  for (const term of ['top-secret-branch', 'secret-goal', 'secret-next', 'secret-area', 'codex']) {
+    assert.equal(home.matches(withheldNorm, term), false);
+    assert.equal(home.matches(withheldRaw, term), false);
+  }
+  assert.equal(home.matches(withheldNorm, 'secret-repo'), true);
+  assert.match(script, /c\.state==='stale'\?L\.st\.stale:null/);
+  assert.match(script, /wbadge/);
+  // Escape clears focused #find before clearing picked selection; HUD shows attention & active worker totals.
+  assert.match(script, /attnTotal/);
+  assert.match(script, /workersTotal/);
+  assert.match(script, /document\.activeElement===el\('find'\)&&query/);
+  home.setLang('en', true);
+  home.setLang('ko', true);
+});

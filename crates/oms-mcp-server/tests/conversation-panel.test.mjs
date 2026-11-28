@@ -1314,7 +1314,7 @@ test('chat refresh rereads the open Room or managed Lead conversation in place',
 test('opt-in auto refresh persists, pauses and clears, and Alt+R refreshes only outside typing and dialogs',async()=>{
   let now=1000;
   const jobs=new Map(), memory=new Map();
-  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const timers={Date:class extends Date{static now(){return now;}},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
   const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
   const autos=()=>[...jobs].filter(([,job])=>job.ms===20000);
   const p=await panel(['one'],{},{locale:'en',timers,storage,visibility:true});
@@ -1395,7 +1395,7 @@ test('transient snapshot failures auto-retry a bounded number of times and recov
 test('stale return triggers share the transient retry cap',async()=>{
   let now=1000, failing=false;
   const jobs=new Map(), memory=new Map([['oms.panel.auto-refresh.v1','on']]);
-  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const timers={Date:class extends Date{static now(){return now;}},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
   const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
   const p=await panel(['one'],{},{timers,storage,tools:{oms_panel_snapshot:()=>{if(failing)throw new Error('offline');return {dashboard:{project:'one'}};}}});
   const reads=()=>p.calls.filter(c=>c.name==='oms_panel_snapshot').length;
@@ -2203,7 +2203,7 @@ test('pending-turn polling pauses visibly and slot badges change only after a co
 test('auto-refresh pauses while the follow-up preview or finding Share is active and resumes on close without weakening rechecks',async()=>{
   let now=1000;
   const jobs=new Map(),memory=new Map([['oms.panel.auto-refresh.v1','on']]),key='b'.repeat(64),digest='d'.repeat(64),body='Scoped worker finding';
-  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const timers={Date:class extends Date{static now(){return now;}},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
   const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
   const autos=()=>[...jobs].filter(([,job])=>job.ms===20000);
   const d={...dashboard,conversationAttempts:[...dashboard.conversationAttempts,{id:'worker-0',parentAttempt:'l',provider:'codex',role:'worker',state:'done',task:'task-b'}]};
@@ -2443,7 +2443,7 @@ test('initial open renders _meta.dashboard without a second snapshot read until 
   const key='b'.repeat(64);
   let now=1000;
   const jobs=new Map(),memory=new Map([['oms.panel.auto-refresh.v1','on']]);
-  const timers={Date:{now:()=>now},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const timers={Date:class extends Date{static now(){return now;}},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
   const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
   const autos=()=>[...jobs].filter(([,job])=>job.ms===20000);
   const p=await panel(['one','two'],{...dashboard,goal:'Refreshed snapshot'},{
@@ -2626,4 +2626,125 @@ test('chatgpt-panel enables project-scoped Lead chat without a Codex Room and fe
   assert.equal(p.get('conversation').open,false);
   assert.ok(opener.hidden);
   await assert.rejects(p.run("tool('oms_send_lead_message',{})"));
+});
+
+test('HP-04 portfolio view renders cards on multi-project catalog, searches safely, switches projects and restores state on return',async()=>{
+  assert.ok(Buffer.byteLength(html)<256*1024,'conversation-panel.html must stay strictly under 256 KiB');
+  const projKeys={alpha:'a'.repeat(64),beta:'b'.repeat(64),gamma:'c'.repeat(64),delta:'d'.repeat(64),omega:'e'.repeat(64)};
+  let aliases=['alpha','beta','gamma','delta','omega'];
+  let cardPayload=[
+    {alias:'alpha',state:'stale',area:'backend',branch:'feat/auth',dirty:true,goal:'Fix auth race',next:'Approve patch',attention:2,active:1,main:'claude',crew:[{provider:'codex',role:'builder'}],crewTotal:2,plan:{done:2,total:3},observedAt:'2026-11-28T10:00:00Z'},
+    {alias:'beta',state:'fresh',area:'frontend',branch:'main',dirty:false,goal:'Ship dashboard',next:'',attention:0,active:1,main:'codex',crew:[{provider:'agy',role:'ui'}],crewTotal:1,plan:{done:1,total:2},observedAt:'2026-11-28T11:00:00Z'},
+    {alias:'gamma',state:'fresh',area:'backend',branch:'main',dirty:false,goal:'All green',next:'',attention:0,active:0,main:'antigravity',crew:[],crewTotal:0,observedAt:'2026-11-28T11:30:00Z'},
+    {alias:'delta',state:'missing',area:'ops',observedAt:null},
+    {alias:'omega',state:'withheld',area:'hidden-area',branch:'withheld-branch',goal:'withheld-goal',next:'withheld-next',main:'codex'}
+  ];
+  let now=1000;
+  const jobs=new Map(),memory=new Map([['oms.panel.auto-refresh.v1','on']]);
+  const timers={Date:class extends Date{static now(){return now;}},setTimeout(fn,ms){const id=Symbol();jobs.set(id,{fn,ms});return id;},clearTimeout(id){jobs.delete(id);}};
+  const storage={getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v)};
+  const p=await panel(aliases,dashboard,{locale:'en',timers,storage,visibility:true,tools:{
+    oms_list_projects:a=>({projects:aliases,projectKeys:projKeys,binding:'catalog',readOnly:false,leadChat:true,...(a?.cards?{cards:cardPayload}:{})}),
+    oms_panel_snapshot:a=>({dashboard:{...dashboard,project:a.project,goal:'Goal for '+a.project}})
+  }});
+  // Initial multi-project catalog without requestedProject enters #portfolio with {cards:true}.
+  const firstList=p.calls.find(c=>c.name==='oms_list_projects');
+  assert.deepEqual({...firstList.args},{cards:true});
+  assert.equal(p.calls.some(c=>c.name==='oms_panel_snapshot'),false);
+  assert.equal(p.get('portfolio').hidden,false);
+  assert.equal(p.get('view').hidden,true);
+  assert.equal(p.get('all-projects').hidden,true);
+  // Area chips show when >=2 areas; withheld project's area/goal/branch never leak.
+  const areaChips=p.get('pf-areas').children;
+  assert.ok(areaChips.length>=3);
+  assert.doesNotMatch(p.get('pf-list').textContent,/hidden-area|withheld-branch|withheld-goal|withheld-next/);
+  assert.match(p.get('pf-list').textContent,/stale/);
+  // Auto-refresh pauses when document is hidden and resumes when visible.
+  assert.ok([...jobs.values()].some(j=>j.ms===20000));
+  p.document.show(false);
+  assert.equal([...jobs.values()].filter(j=>j.ms===20000||j.ms===4000||j.ms===8000).length,0);
+  p.document.show(true);
+  assert.ok([...jobs.values()].some(j=>j.ms===20000));
+  // Search across branch/next/goal/main and confirm withheld fields don't match.
+  p.get('pf-find').value='withheld-branch';await p.event('pf-find','input');
+  assert.match(p.get('pf-empty').textContent,/No project matches/);
+  p.get('pf-find').value='feat/auth';await p.event('pf-find','input');
+  assert.equal(p.get('pf-empty').hidden,true);
+  assert.match(p.get('pf-list').textContent,/alpha/);
+  assert.doesNotMatch(p.get('pf-list').textContent,/beta/);
+  // Filter by area chip ('frontend') then clear search with Escape.
+  p.get('pf-find').dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'Escape'}));
+  await setImmediate();
+  assert.equal(p.get('pf-find').value,'');
+  const backendChip=p.get('pf-areas').children.find(c=>c.textContent.startsWith('backend'));
+  backendChip.dispatchEvent(new Event('click'));await setImmediate();
+  p.get('pf-find').value='Approve';await p.event('pf-find','input');
+  p.window.scrollY=240;
+  // 1-click row opens project view with {} (no cards:true).
+  const pfButtons=()=>p.get('pf-list').children.flatMap(s=>s.children?.[2]?.children?.slice(1).map(li=>li.children[1])??[]);
+  const alphaRow=pfButtons()[0];
+  assert.equal(alphaRow.getAttribute('data-alias'),'alpha');
+  alphaRow.dispatchEvent(new Event('click'));await setImmediate();
+  assert.equal(p.get('portfolio').hidden,true);
+  assert.equal(p.get('view').hidden,false);
+  assert.equal(p.get('all-projects').hidden,false);
+  assert.equal(p.get('goal').textContent,'Goal for alpha');
+  assert.deepEqual({...p.calls.filter(c=>c.name==='oms_list_projects').at(-1).args},{});
+  // Open launcher draft & dialog, then click #all-projects: clears dialogs/drafts and restores {zone, query, scrollY, focusAlias}.
+  await p.event('new-goal','click');p.get('brief').value='Private draft';
+  assert.equal(p.get('launcher').open,true);
+  await p.event('all-projects','click');
+  assert.equal(p.get('launcher').open,false);
+  assert.equal(p.get('brief').value,'');
+  assert.equal(p.get('portfolio').hidden,false);
+  assert.equal(p.get('view').hidden,true);
+  assert.equal(p.get('pf-find').value,'Approve');
+  assert.equal(p.window.scrollY,240);
+  const restoredBtn=pfButtons()[0];
+  assert.equal(restoredBtn.getAttribute('data-alias'),'alpha');
+  assert.ok(restoredBtn.focused>=1);
+  // Late oms_list_projects({cards:true}) response is discarded across switchProject.
+  p.host.delayTool='oms_list_projects';
+  await p.event('refresh','click');
+  const staleCallCount=p.calls.length;
+  p.run("switchProject('beta')");
+  p.host.release();
+  await setImmediate();
+  assert.equal(p.get('portfolio').hidden,true);
+  assert.equal(p.get('project').textContent,'beta');
+  assert.ok(p.calls.length>=staleCallCount);
+  // Clearing #project-choice when alias was removed from catalog falls back safely to #pf-find.
+  aliases=['beta','gamma'];
+  cardPayload=null;
+  p.get('project-choice').value='';await p.event('project-choice','change');
+  assert.equal(p.get('portfolio').hidden,false);
+  assert.ok(p.get('pf-find').focused>=1);
+  p.get('pf-find').dispatchEvent(Object.assign(new Event('keydown',{cancelable:true}),{key:'Escape'}));
+  await setImmediate();
+  assert.match(p.get('pf-list').textContent,/beta/);
+});
+
+test('Lead presence shows working on reserved/running turns, focuses composer once ready, and adds no post-close timers',async()=>{
+  let turnStatus='running';
+  const id=randomUUID(),jobs=new Map();
+  const timers={Date:{now:()=>0},setTimeout(fn,ms){const k=Symbol();jobs.set(k,{fn,ms});return k;},clearTimeout:k=>jobs.delete(k)};
+  const p=await panel(['one'],dashboard,{locale:'en',timers,tools:{
+    [managedRead]:a=>{
+      const v=leadStatus(a,'ready');
+      const row=v.leads.find(r=>r.provider==='agy');
+      if(row)row.latestTurn={turnId:id,status:turnStatus,submittedAt:null,lastObservedAt:null};
+      if(a.provider)v._private={room:a.room,...v.leads[0],transcript:{turns:[{role:'user',text:'Hi',turnId:id,status:turnStatus}]}};
+      return v;
+    }
+  }});
+  const agySlot=p.get('leads').children[2];
+  const avatar=agySlot.children[1].children[1];
+  assert.equal(avatar.getAttribute('data-presence'),'working');
+  const open=agySlot.children[1].children.find(e=>e.type==='button');
+  open.dispatchEvent(new Event('click'));await setImmediate();
+  assert.ok(p.get('chat-text').focused>=1);
+  await p.event('chat-back','click');
+  assert.equal([...jobs.values()].filter(v=>v.ms>=4000 && v.ms<=15000).length,0);
+  turnStatus='replied';await p.event('lead-refresh','click');
+  assert.equal(avatar.getAttribute('data-presence'),'live');
 });

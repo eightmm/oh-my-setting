@@ -34,8 +34,8 @@ h1{font-size:18px;margin:0;line-height:1.2;letter-spacing:-.01em}
 .sub{margin:2px 0 0;color:var(--soft);font-size:12px}
 .tools{display:flex;gap:6px;align-items:center}
 .age{font-size:12px;color:var(--soft);white-space:nowrap}
-button{font:inherit;color:inherit;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);padding:4px 11px;min-height:32px;cursor:pointer}
-button:hover{border-color:var(--soft)}
+button,select{font:inherit;color:inherit;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);padding:4px 11px;min-height:32px;cursor:pointer}
+button:hover,select:hover{border-color:var(--soft)}
 button:disabled{opacity:.55;cursor:default}
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .bar-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
@@ -73,6 +73,7 @@ button:disabled{opacity:.55;cursor:default}
 .track i{display:block;height:100%;background:var(--ink);min-width:2px}
 .cr{display:flex;align-items:center;gap:5px;min-width:0;overflow:hidden;padding:4px;font-size:11.5px;color:var(--soft);font-variant-numeric:tabular-nums}
 .cr .lbl{margin:0 3px 0 1px}
+.wbadge{margin-left:auto;padding:1px 6px;border-radius:999px;font-size:11px;font-weight:600;background:color-mix(in srgb,var(--busy) 12%,var(--bg));color:var(--ink)}
 .mn{flex:none;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:7px;font:600 10.5px/1 var(--font-sans,system-ui,sans-serif);letter-spacing:.02em;background:var(--mb);color:var(--mf)}
 .mn.main{box-shadow:0 0 0 2px var(--surface),0 0 0 3.5px var(--mf)}
 .p-codex{--mb:light-dark(#edeff2,#30353d);--mf:light-dark(#2b3138,#dfe3e8)}
@@ -118,7 +119,7 @@ button:disabled{opacity:.55;cursor:default}
       <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><rect x="1" y="1" width="30" height="30" rx="9" fill="currentColor"></rect><circle cx="16" cy="16" r="6.5" fill="none" stroke="var(--bg)" stroke-width="2.4"></circle></svg>
       <div><h1 id="title"></h1><p class="sub" id="sub"></p></div>
     </div>
-    <div class="tools"><span class="age" id="age"></span><button id="expand" hidden></button><button id="refresh"></button></div>
+    <div class="tools"><span class="age" id="age"></span><select id="lang" aria-label="언어 / Language"><option value="ko">한국어</option><option value="en">English</option></select><button id="expand" hidden></button><button id="refresh"></button></div>
   </header>
   <div class="bar-row">
     <ul class="sum" id="sum" aria-label=""></ul>
@@ -133,23 +134,24 @@ button:disabled{opacity:.55;cursor:default}
 const PROVS=['codex','claude','antigravity'],ABBR={codex:'Cx',claude:'Cl',antigravity:'Ag'};
 const STATES=['fresh','stale','missing','unavailable','withheld'];
 const T={
-ko:{title:'OMS 홈',sub:n=>`프로젝트 ${n}개 · 읽기 전용`,mains:n=>` · Main 있음 ${n}`,refresh:'새로고침',refreshing:'갱신 중…',expand:'크게 보기',find:'프로젝트 찾기',all:'전체',summary:'상태 요약',
- sect:{need:'확인 필요',busy:'일하는 중',calm:'평온',quiet:'조용함',gone:'연결 안 됨'},
- hint:{need:'확인할 것이 많은 순',busy:'worker가 움직이는 프로젝트',calm:'최신이고 할 일 없음'},noMatch:'맞는 프로젝트가 없습니다.',
- st:{fresh:'최신',stale:'오래됨',missing:'기록 없음',unavailable:'폴더 없음',withheld:'비공개'},degraded:'일부만',
+ko:{title:'OMS 홈',sub:n=>`프로젝트 ${n}개 · 읽기 전용`,mains:n=>` · Main ${n}`,attnTotal:n=>` · 확인 필요 ${n}건`,workersTotal:n=>` · 활성 워커 ${n}명`,refresh:'새로고침',refreshing:'갱신 중…',expand:'크게 보기',find:'프로젝트 찾기',all:'전체',summary:'상태 요약',
+ sect:{need:'확인 필요',busy:'진행 중',calm:'정상',quiet:'대기',gone:'연결 안 됨'},
+ hint:{need:'확인할 것이 많은 순',busy:'활성 워커가 있는 프로젝트',calm:'최신이고 할 일 없음'},noMatch:'맞는 프로젝트가 없습니다.',
+ st:{fresh:'최신',stale:'오래됨',missing:'기록 없음',unavailable:'경로 접근 불가',withheld:'비공개'},degraded:'일부만',
  readOnly:'여기서는 보기만 합니다. 작업 시작과 승인은 이 프로젝트 대화에서 OMS 패널을 열어 하세요.',withheld:'이 프로젝트의 내용은 공개되지 않습니다.',
- main:'Main',area:'동네',goal:'목표',branch:'브랜치',dirty:'변경 있음',clean:'깨끗함',plan:'계획',next:'다음 할 일',seen:'갱신',crew:'일하는 worker',noCrew:'지금 일하는 worker는 없습니다.',
+ main:'Main',area:'영역',goal:'목표',branch:'브랜치',dirty:'변경 있음',clean:'깨끗함',plan:'계획',next:'다음 할 일',seen:'갱신',crew:'활성 워커',noCrew:'실행 중인 워커가 없습니다.',
  attn:n=>`확인 ${n}`,more:n=>`외 ${n}명`,other:'기타',unknown:'모름',noGoal:'목표 없음',
  now:'방금',m:'분 전',h:'시간 전',d:'일 전',loading:'불러오는 중…',bound:'이 연결은 프로젝트 하나에 묶여 있어 전체 목록을 볼 수 없습니다. 전체 프로젝트 연결에서 여세요.',fail:'불러오지 못했습니다. 잠시 뒤 다시 시도합니다.',failShort:'갱신 실패',openApp:'OMS 앱 안에서 열면 프로젝트가 보입니다.',empty:'등록된 프로젝트가 없습니다.',updated:'갱신'},
-en:{title:'OMS Home',sub:n=>`${n} project${n===1?'':'s'} · read only`,mains:n=>` · ${n} with a Main`,refresh:'Refresh',refreshing:'Refreshing…',expand:'Expand',find:'Find a project',all:'All',summary:'Status summary',
+en:{title:'OMS Home',sub:n=>`${n} project${n===1?'':'s'} · read only`,mains:n=>` · ${n} with a Main`,attnTotal:n=>` · ${n} to check`,workersTotal:n=>` · ${n} active worker${n===1?'':'s'}`,refresh:'Refresh',refreshing:'Refreshing…',expand:'Expand',find:'Find a project',all:'All',summary:'Status summary',
  sect:{need:'Needs you',busy:'Working',calm:'Calm',quiet:'Quiet',gone:'Out of reach'},
- hint:{need:'most items first',busy:'workers are moving',calm:'fresh, nothing waiting'},noMatch:'No project matches.',
- st:{fresh:'fresh',stale:'stale',missing:'no record',unavailable:'folder missing',withheld:'withheld'},degraded:'partial',
+ hint:{need:'most items first',busy:'active workers running',calm:'fresh, nothing waiting'},noMatch:'No project matches.',
+ st:{fresh:'fresh',stale:'stale',missing:'no record',unavailable:'unavailable',withheld:'withheld'},degraded:'partial',
  readOnly:'This page only reads. Start or approve work from the OMS panel in that project\'s own conversation.',withheld:'This project\'s details are withheld.',
  main:'Main',area:'Area',goal:'Goal',branch:'Branch',dirty:'uncommitted changes',clean:'clean',plan:'Plan',next:'Next',seen:'Updated',crew:'Workers',noCrew:'No worker is busy right now.',
  attn:n=>`${n} to check`,more:n=>`+${n} more`,other:'Other',unknown:'unknown',noGoal:'no goal',
  now:'just now',m:' min ago',h:' h ago',d:' d ago',loading:'Loading…',bound:'This connection is bound to one project, so the full list is not available. Open it from an all-projects connection.',fail:'Could not load. Retrying shortly.',failShort:'Refresh failed',openApp:'Open this inside the OMS app to see your projects.',empty:'No project is registered.',updated:'Updated'}};
-let lang='ko',L=T.ko;
+const LANG_KEY='oms.panel.language';let lang='ko',L=T.ko,storedLang=null;
+try{const s=globalThis.localStorage?.getItem(LANG_KEY);if(s==='ko'||s==='en')storedLang=s}catch{}
 
 const str=(v,n)=>typeof v==='string'&&v.trim()?v.trim().slice(0,n):null;
 const num=v=>typeof v==='number'&&Number.isFinite(v)&&v>=0?v:null;
@@ -208,8 +210,8 @@ const did=c=>'d-'+[...c.alias].map(ch=>/[A-Za-z0-9-]/.test(ch)?ch:'_'+ch.codePoi
 function row(c,k){
   const li=document.createElement('li'),b=document.createElement('button');
   b.className='row';b.type='button';b.dataset.alias=c.alias;b.setAttribute('aria-expanded',String(c.alias===picked));b.setAttribute('aria-controls',did(c));b.setAttribute('aria-label',label(c));
-  const meta=[c.branch,c.dirty?L.dirty:null,c.degraded?L.degraded:null].filter(Boolean).join(' · ')||stateWord(c);
-  const crew=c.crew.map(w=>mono(w.provider)).join('')+(c.total>c.crew.length?`<span class="lbl">+${Math.min(c.total-c.crew.length,99)}${c.total-c.crew.length>99?'+':''}</span>`:'');
+  const meta=[c.branch,c.dirty?L.dirty:null,c.state==='stale'?L.st.stale:null,c.degraded?L.degraded:null].filter(Boolean).join(' · ')||stateWord(c);
+  const crew=c.crew.map(w=>mono(w.provider)).join('')+(c.total>c.crew.length?`<span class="lbl">+${Math.min(c.total-c.crew.length,99)}${c.total-c.crew.length>99?'+':''}</span>`:'')+(c.total?`<span class="wbadge">${c.total}</span>`:'');
   b.innerHTML=`<span class="dot" aria-hidden="true"></span><span class="who"><span class="al">${esc(c.alias)}</span><span class="meta">${esc(meta)}</span></span>`
     +`<span class="why"><span class="nx">${c.attention?`<span class="cnt">${esc(L.attn(c.attention))}</span>`:''}${esc(c.next||c.goal||L.noGoal)}</span>${c.next&&c.goal?`<span class="goal">${esc(c.goal)}</span>`:''}</span>`
     +`<span class="pl">${c.plan?`${esc(L.plan)}<b>${c.plan.done} / ${c.plan.total}</b><span class="track"><i style="width:${pct(c)}%"></i></span>`:''}</span>`
@@ -262,11 +264,16 @@ function areas(){
   chip(null,L.all,cards.length);
   for(const k of[...n.keys()].sort((a,b)=>(a==='')-(b==='')||(a<b?-1:a>b?1:0)))chip(k,k||L.other,n.get(k));
 }
+function matches(c,q){
+  if(!q)return true;
+  const fields=c.state==='withheld'?[c.alias]:[c.alias,c.branch,c.goal,c.next,c.area,c.main,c.main==='antigravity'?'agy':null];
+  return fields.some(v=>typeof v==='string'&&v.toLowerCase().includes(q));
+}
 function render(){
   if(!cards)return;
   const box=el('list'),focus=document.activeElement?.closest?.('#list [data-alias]')?.dataset?.alias;
   areas();
-  const q=query.toLowerCase(),vis=cards.filter(c=>(zone==null||(c.area||'')===zone)&&(!q||c.alias.toLowerCase().includes(q))),g=groups(vis),parts=[];shown=vis;
+  const q=query.toLowerCase(),vis=cards.filter(c=>(zone==null||(c.area||'')===zone)&&matches(c,q)),g=groups(vis),parts=[];shown=vis;
   for(const k of SECT){
     const list=g[k];if(!list.length)continue;
     const sec=document.createElement('section');sec.id='sec-'+k;sec.setAttribute('aria-labelledby','h-'+k);
@@ -290,7 +297,8 @@ function render(){
 }
 function hud(){
   const vis=cards||[],g=groups(shown),mains=vis.filter(c=>c.main).length;
-  el('sub').textContent=L.sub(vis.length)+(mains?L.mains(mains):'');
+  const attn=vis.reduce((s,c)=>s+(c.attention||0),0),workers=vis.reduce((s,c)=>s+(c.total||0),0);
+  el('sub').textContent=L.sub(vis.length)+(mains?L.mains(mains):'')+(attn?L.attnTotal(attn):'')+(workers?L.workersTotal(workers):'');
   el('sum').setAttribute('aria-label',L.summary);
   const jump=document.activeElement?.closest?.('#sum [data-jump]')?.dataset?.jump;
   el('sum').innerHTML=SECT.filter(k=>g[k].length).map(k=>`<li><button type="button" class="pill k-${k}" data-jump="${k}">${esc(L.sect[k])} <b>${g[k].length}</b></button></li>`).join('');
@@ -337,7 +345,7 @@ addEventListener('message',e=>{
   if(e.source!==window.parent||(hostOrigin!=='*'&&e.origin!==hostOrigin)||!m||typeof m!=='object'||m.jsonrpc!=='2.0')return;
   if(typeof m.method==='string'&&(typeof m.id==='string'||typeof m.id==='number')){
     const o=e.origin&&e.origin!=='null'?e.origin:'*';
-    if(m.method==='ui/resource-teardown'){disposed=true;for(const p of pending.values()){clearTimeout(p.t);p.rej(new Error('closed'))}pending.clear()}
+    if(m.method==='ui/resource-teardown'){disposed=true;clearTimeout(warmupTimer);warmupTimer=null;for(const p of pending.values()){clearTimeout(p.t);p.rej(new Error('closed'))}pending.clear()}
     send({id:m.id,...(m.method==='ping'||m.method==='ui/resource-teardown'?{result:{}}:{error:{code:-32601,message:'Method not found'}})},o);return;
   }
   if(m.method==='ui/notifications/host-context-changed'){appearance(m.params);return}
@@ -361,17 +369,30 @@ async function refresh(){
     await initialize();
     const r=await request('tools/call',{name:'oms_list_projects',arguments:{cards:true}});
     if(!r||r.isError)throw new Error(r?.content?.[0]?.text||'tool error');
-    const list=cardsFrom(r);show(list||[]);if(!list)status(L.bound);
+    const list=cardsFrom(r);show(list||[]);if(!list)status(L.bound);scheduleWarmup();
   }catch{failed=true;lastTry=Date.now();if(!cards)status(L.fail);hud()}
   finally{loading=false;el('refresh').disabled=false;el('refresh').textContent=L.refresh}
 }
-const POLL=60000;
+const POLL=60000,WARMUP=[3000,6000];
+let warmupStep=0,warmupTimer=null;
+function scheduleWarmup(){
+  clearTimeout(warmupTimer);warmupTimer=null;
+  if(disposed||window.parent===window||document.visibilityState!=='visible')return;
+  const needs=Array.isArray(cards)&&cards.some(c=>c.state==='missing'||c.state==='stale');
+  if(!needs){warmupStep=0;return}
+  if(warmupStep>=WARMUP.length)return;
+  const delay=WARMUP[warmupStep++];
+  warmupTimer=setTimeout(()=>{warmupTimer=null;if(!disposed&&document.visibilityState==='visible')refresh()},delay);
+  warmupTimer?.unref?.();
+}
 function due(){if(document.visibilityState==='visible'&&Date.now()-Math.max(lastLoad,lastTry)>=POLL)refresh()}
 
 /* ---------- language + controls ---------- */
-function setLang(loc){
-  const next=/^en\b/i.test(loc||'')?'en':'ko';if(next===lang&&el('title').textContent)return;
-  lang=next;L=T[lang];document.documentElement.lang=lang;
+function setLang(loc,explicit=false){
+  const next=/^en\b/i.test(loc||'')?'en':'ko';
+  if(explicit){storedLang=next;try{globalThis.localStorage?.setItem(LANG_KEY,next)}catch{}}
+  if(next===lang&&el('title').textContent){el('lang').value=lang;return}
+  lang=next;L=T[lang];document.documentElement.lang=lang;el('lang').value=lang;
   el('title').textContent=L.title;document.title=L.title;
   el('refresh').textContent=L.refresh;el('expand').textContent=L.expand;el('find').placeholder=L.find;el('find').setAttribute('aria-label',L.find);
   if(cards)render();else hud();
@@ -379,18 +400,19 @@ function setLang(loc){
 function wire(){
   el('list').addEventListener('click',e=>{const b=e.target.closest?.('[data-alias]');if(!b)return;b.focus({preventScroll:true});select(b.dataset.alias===picked?null:b.dataset.alias,false)});
   el('sum').addEventListener('click',e=>{const k=e.target.closest?.('[data-jump]')?.dataset?.jump;const s=k&&el('sec-'+k);if(!s)return;s.scrollIntoView({block:'start',behavior:reduce.matches?'auto':'smooth'});s.querySelector('[data-alias]')?.focus({preventScroll:true})});
-  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&picked){e.preventDefault();select(null,true)}});
+  document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;if(document.activeElement===el('find')&&query){e.preventDefault();query='';el('find').value='';render();return}if(picked){e.preventDefault();select(null,true)}});
+  el('lang').addEventListener('change',e=>{if(e.target.value==='ko'||e.target.value==='en')setLang(e.target.value,true)});
   el('refresh').onclick=()=>refresh();
   el('expand').onclick=async()=>{try{const r=await request('ui/request-display-mode',{mode:'fullscreen'},5000);if(r?.mode==='fullscreen')el('expand').hidden=true}catch{}};
   el('find').addEventListener('input',e=>{query=e.target.value.trim();render()});
   el('find').addEventListener('keydown',e=>{if(e.key!=='Enter')return;const b=el('list').querySelector('[data-alias]');if(b){e.preventDefault();select(b.dataset.alias,false);el('list').querySelector('[data-alias][aria-expanded="true"]')?.focus()}});
-  document.addEventListener('visibilitychange',due);
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){due();scheduleWarmup()}else{clearTimeout(warmupTimer);warmupTimer=null}});
   // Row ages tick in place so an unchanged payload never leaves them frozen.
   setInterval(()=>{due();age();tick()},15000);
 }
-setLang(navigator.language);wire();
+setLang(storedLang||navigator.language);wire();
 if(window.parent===window)status(L.openApp);else refresh();
-globalThis.OMSHome={show,select,groups,norm,cardsFrom,label,setLang};
+globalThis.OMSHome={show,select,groups,norm,cardsFrom,label,setLang,matches};
 </script>
 </body>
 </html>
