@@ -98,13 +98,11 @@ test('groups projects by triage in any input order', () => {
   assert.deepEqual(plain(home.groups([home.norm({ alias: 'h', state: 'withheld' })]).gone.map(c => c.alias)), ['h']);
 });
 
-test('worker names are stable per worker id and distinct within a project', () => {
-  const card = home.norm({ alias: 'x', state: 'fresh', crew: ['a', 'b', 'c'].map(n => ({ provider: 'codex', id: n.repeat(12) })), crewTotal: 3 });
-  const names = home.crewOf(card).map(w => w.name);
-  assert.equal(new Set(names).size, 3);
-  assert.deepEqual(home.crewOf(card).map(w => w.name), names);
-  const renamed = home.norm({ alias: 'x', state: 'fresh', crew: [{ provider: 'codex', id: 'aaaaaaaaaaaa' }], crewTotal: 1 });
-  assert.equal(home.crewOf(renamed)[0].name, names[0]);
+test('labels say why a project sits in its band and hide withheld details', () => {
+  home.setLang('en');
+  const need = home.norm({ alias: 'n', state: 'fresh', attention: 3, main: 'claude', crewTotal: 2, crew: [{ provider: 'codex' }] });
+  assert.match(home.label(need), /^n, Needs you, fresh, 3 to check, Main claude, Workers 2/);
+  assert.equal(home.label(home.norm({ alias: 'w', state: 'withheld', goal: 'secret' })), 'w, Out of reach, withheld');
 });
 
 test('draws a mixed roster without throwing', () => {
