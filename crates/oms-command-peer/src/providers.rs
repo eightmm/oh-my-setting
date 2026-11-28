@@ -2634,6 +2634,7 @@ fn execute_env_with_output<P: crate::request_context::Input + ?Sized>(
                     account.as_deref(),
                     write,
                     &extra_env,
+                    context.executor.group_resolver(),
                     context.interrupted,
                     deadline,
                     binding,

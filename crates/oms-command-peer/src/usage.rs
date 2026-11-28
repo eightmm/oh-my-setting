@@ -130,6 +130,7 @@ pub fn begin_interactive_with_executor(
                 request.account,
                 true,
                 &extra,
+                executor.group_resolver(),
                 interrupted,
                 deadline,
                 contract,
@@ -229,6 +230,7 @@ impl Pending {
                         attempt.state_root,
                         extra,
                         &self.receipt.identity,
+                        executor.group_resolver(),
                         stop,
                         self.deadline,
                     )?
@@ -345,6 +347,7 @@ fn campaign_binding(
     repo: &Path,
     extra: &[(OsString, OsString)],
     identity: &Identity,
+    groups: Option<oms_command_plan::services::GroupResolver>,
     interrupted: &AtomicBool,
     deadline: Instant,
 ) -> Result<Option<Campaign>> {
@@ -368,7 +371,11 @@ fn campaign_binding(
         ));
     }
     let plan_error = |error: oms_command_plan::Error| Error::new(error.code, error.message);
-    let store = oms_command_plan::storage::Store::open(repo).map_err(plan_error)?;
+    // A state checkout cloned under umask 002 has a group-writable root; the
+    // executor's group proof decides it, as for every other plan reader.
+    let store = oms_command_plan::storage::Store::open(repo)
+        .map_err(plan_error)?
+        .with_group_resolver(groups);
     let read = |path: &str, limit| store.read(path, limit).map_err(plan_error);
     let manifest_path = format!("{directory}/manifest.json");
     let events_path = format!("{directory}/events.jsonl");
@@ -504,6 +511,7 @@ pub(crate) fn begin_before(
     account: Option<&str>,
     write: bool,
     extra: &[(OsString, OsString)],
+    groups: Option<oms_command_plan::services::GroupResolver>,
     interrupted: &AtomicBool,
     deadline: Instant,
     contract: crate::process::PhysicalContract<'_>,
@@ -532,7 +540,7 @@ pub(crate) fn begin_before(
     } else {
         None
     };
-    let campaign = campaign_binding(repo, extra, &identity, interrupted, deadline)?;
+    let campaign = campaign_binding(repo, extra, &identity, groups, interrupted, deadline)?;
     let campaign_deadline = campaign.as_ref().map(|campaign| campaign.deadline);
     let pinned_campaign = campaign.as_ref().map(|campaign| {
         vec![
@@ -846,6 +854,73 @@ mod tests {
             "total_tokens": 0
         }
     }"#;
+
+    #[test]
+    fn campaign_binding_reads_a_group_writable_state_root_through_the_executor_proof() {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+        fn private_group(
+            gid: u32,
+        ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+            let uid = rustix::process::getuid().as_raw();
+            Ok(oms_command_plan::services::GroupMembership {
+                gid,
+                explicit_member_uids: vec![uid],
+                primary_member_uids: vec![uid],
+            })
+        }
+        let root = std::env::temp_dir().join(crate::id("oms-campaign-binding-").unwrap());
+        let digest = "a".repeat(64);
+        let campaign = root.join(".oms/plan/campaigns").join(&digest[..16]);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&campaign)
+            .unwrap();
+        for name in ["manifest.json", "events.jsonl"] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(campaign.join(name))
+                .unwrap();
+        }
+        // The checkout root of a clone made under umask 002.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let identity = Identity {
+            call_id: "call_fixture".into(),
+            operation_id: "op_fixture".into(),
+            provider: "codex".into(),
+            selected_model: None,
+            account: None,
+            account_scope_sha256: None,
+            goal_id: Some(digest[..16].into()),
+            task_id: None,
+            attempt_id: None,
+            run_id: None,
+        };
+        let extra = vec![("OMS_CAMPAIGN_MANIFEST_SHA256".into(), digest.clone().into())];
+        let stop = AtomicBool::new(false);
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        let refused = campaign_binding(&root, &extra, &identity, None, &stop, deadline)
+            .err()
+            .unwrap()
+            .message;
+        assert!(refused.contains("private-group account proof"), "{refused}");
+        // With the proof the reads pass; the empty fixture manifest then fails to parse.
+        let proved = match campaign_binding(
+            &root,
+            &extra,
+            &identity,
+            Some(private_group),
+            &stop,
+            deadline,
+        ) {
+            Ok(_) => String::new(),
+            Err(error) => error.message,
+        };
+        assert!(!proved.contains("private-group account proof"), "{proved}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn antigravity_single_turn_reports_explicit_token_total() {
