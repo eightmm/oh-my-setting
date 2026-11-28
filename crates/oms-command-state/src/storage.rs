@@ -19,6 +19,20 @@ pub fn read(root: &Path, path: &Path, limit: usize, missing: bool) -> Result<Vec
         .map_err(|e| error(2, format!("state read: {e:?}")))
 }
 
+pub fn read_retrying(root: &Path, path: &Path, limit: usize, missing: bool) -> Result<Vec<u8>> {
+    let root = anchor(root, path);
+    Root::open(root)
+        .map_err(|e| error(2, format!("{e:?}")))?
+        .read_no_follow_retrying(
+            path,
+            ByteReadOptions {
+                missing_ok: missing,
+                max_bytes: limit,
+            },
+        )
+        .map_err(|e| error(2, format!("state read: {e:?}")))
+}
+
 pub fn lock(path: &Path) -> Result<oms_lock::Guard> {
     let settings = oms_lock::Settings::from_env().map_err(|e| error(e.exit_code(), e))?;
     oms_lock::Lock::for_file(path, settings)
@@ -73,6 +87,21 @@ pub fn replace_locked(root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub fn rows(root: &Path, path: &Path) -> Result<(Vec<Value>, usize)> {
     let bytes = read(root, path, MAX_STREAM, true)?;
+    Ok(parse_rows(&bytes))
+}
+
+pub fn thread_rows(root: &Path, path: &Path) -> Result<(Vec<Value>, usize)> {
+    let root = anchor(root, path);
+    let bytes = Root::open(root)
+        .map_err(|e| error(2, format!("{e:?}")))?
+        .read_no_follow_jsonl(
+            path,
+            ByteReadOptions {
+                missing_ok: true,
+                max_bytes: MAX_STREAM,
+            },
+        )
+        .map_err(|e| error(2, format!("state read: {e:?}")))?;
     Ok(parse_rows(&bytes))
 }
 

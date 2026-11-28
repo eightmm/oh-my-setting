@@ -645,6 +645,116 @@ fn atomic_read_races_detect_identity_timestamp_and_ancestry_changes() {
             Err(refused(ByteError::Changed))
         ]
     );
+
+    let race_fixture = Fixture::new();
+    let race_root = Root::open(&race_fixture.0).unwrap();
+    let log_path = race_fixture.0.join("race.jsonl");
+    std::fs::write(&log_path, b"{\"seq\":0}\n").unwrap();
+    let read_opts = ByteReadOptions {
+        missing_ok: true,
+        max_bytes: 1024 * 1024,
+    };
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let barrier = std::sync::Barrier::new(3);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let writer_root = Root::open(&race_fixture.0).unwrap();
+            let mut opts = options();
+            opts.max_output = 256;
+            opts.read.max_bytes = 256;
+            barrier.wait();
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .unwrap();
+            for seq in 1..=32 {
+                file.write_all(format!("{{\"seq\":{seq},\"body\":\"").as_bytes())
+                    .unwrap();
+                file.flush().unwrap();
+                if seq == 1 {
+                    std::thread::sleep(Duration::from_millis(12));
+                }
+                file.write_all(b"complete\"}\n").unwrap();
+                file.flush().unwrap();
+                change(
+                    &writer_root,
+                    Path::new("CURRENT"),
+                    opts,
+                    format!("race-{seq}\n").as_bytes(),
+                )
+                .unwrap();
+            }
+            done.store(true, Ordering::Release);
+        });
+        scope.spawn(|| {
+            barrier.wait();
+            let mut prev_lines = 1usize;
+            let mut reads = 0usize;
+            while !done.load(Ordering::Acquire) || reads < 32 {
+                let (bytes, stat) = race_root
+                    .read_no_follow_retrying_stat(Path::new("race.jsonl"), read_opts, true)
+                    .unwrap();
+                assert!(stat.is_some());
+                assert!(!unfinished_jsonl(&bytes));
+                let count = bytes
+                    .split(|&b| b == b'\n')
+                    .filter(|l| !l.is_empty())
+                    .count();
+                assert!(count >= prev_lines);
+                prev_lines = count;
+                reads += 1;
+            }
+            assert_eq!(prev_lines, 33);
+        });
+        scope.spawn(|| {
+            barrier.wait();
+            let mut reads = 0usize;
+            while !done.load(Ordering::Acquire) || reads < 32 {
+                let current = race_root
+                    .read_no_follow_retrying(Path::new("CURRENT"), read_opts)
+                    .unwrap();
+                assert!(current.is_empty() || current.ends_with(b"\n"));
+                reads += 1;
+            }
+        });
+    });
+    std::fs::write(race_fixture.0.join("crashed.jsonl"), b"{\"seq\":1").unwrap();
+    let crashed = race_root
+        .read_no_follow_jsonl(Path::new("crashed.jsonl"), read_opts)
+        .unwrap();
+    assert_eq!(crashed, b"{\"seq\":1");
+    assert!(unfinished_jsonl(&crashed));
+    symlink("race.jsonl", race_fixture.0.join("symlink.jsonl")).unwrap();
+    let fast = std::time::Instant::now();
+    assert_eq!(
+        race_root.read_no_follow_jsonl(
+            Path::new("absent.jsonl"),
+            ByteReadOptions {
+                missing_ok: false,
+                max_bytes: 1024,
+            },
+        ),
+        Err(ByteError::Missing)
+    );
+    assert_eq!(
+        race_root.read_no_follow_jsonl(Path::new("symlink.jsonl"), read_opts),
+        Err(ByteError::Unsafe)
+    );
+    assert_eq!(
+        race_root.read_no_follow_retrying(Path::new("../escape"), read_opts),
+        Err(ByteError::InvalidPath)
+    );
+    assert_eq!(
+        race_root.read_no_follow_jsonl(
+            Path::new("race.jsonl"),
+            ByteReadOptions {
+                missing_ok: false,
+                max_bytes: 4,
+            },
+        ),
+        Err(ByteError::InputTooLarge)
+    );
+    assert!(fast.elapsed() < Duration::from_millis(50));
 }
 
 #[test]

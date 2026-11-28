@@ -1239,6 +1239,150 @@ mod panel_room_tests {
                 threads_without_age(&crowded_reuse),
                 threads_without_age(&crowded_plain)
             );
+
+            // Concurrent council appends and CURRENT swaps neither fail state/verify
+            // nor count an active torn trailing line as a bad row.
+            let race_repo = init_repo(&root.join("race"));
+            let race_threads = race_repo.join(".oms/threads");
+            std::fs::create_dir_all(&race_threads).unwrap();
+            std::fs::set_permissions(&race_threads, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            std::fs::write(race_repo.join(".oms/.gitignore"), b"*\n").unwrap();
+            let council_id = "panel-council-0123456789abcdef01234567";
+            let council_path = race_threads.join(format!("{council_id}.jsonl"));
+            let now_ts = timestamp(epoch()).unwrap();
+            std::fs::write(
+                &council_path,
+                format!(
+                    "{{\"schema\":1,\"ts\":\"{now_ts}\",\"thread\":\"{council_id}\",\"seq\":1,\"role\":\"answer\",\"provider\":\"claude\",\"text\":\"pos-0\"}}\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&council_path, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let other_log = race_threads.join("room-stable.jsonl");
+            std::fs::write(
+                &other_log,
+                format!(
+                    "{{\"schema\":1,\"ts\":\"{now_ts}\",\"thread\":\"room-stable\",\"seq\":1,\"role\":\"note\",\"provider\":\"codex\",\"text\":\"stable\"}}\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&other_log, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let race_current = race_threads.join("CURRENT");
+            std::fs::write(&race_current, format!("{council_id}\n")).unwrap();
+            std::fs::set_permissions(&race_current, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let race_ctx = Context {
+                runtime: None,
+                cwd: race_repo.clone(),
+                repo: race_repo.clone(),
+                state_repo: race_repo.clone(),
+                interrupted: &stop,
+            };
+            let done = AtomicBool::new(false);
+            let barrier = std::sync::Barrier::new(3);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    use std::io::Write;
+                    let mut file = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&council_path)
+                        .unwrap();
+                    barrier.wait();
+                    for seq in 2..=25 {
+                        file.write_all(
+                            format!(
+                                "{{\"schema\":1,\"ts\":\"{now_ts}\",\"thread\":\"{council_id}\",\"seq\":{seq},\"role\":\"answer\",\"provider\":\"codex\",\"text\":\""
+                            )
+                            .as_bytes(),
+                        )
+                        .unwrap();
+                        file.flush().unwrap();
+                        if seq == 2 {
+                            std::thread::sleep(std::time::Duration::from_millis(12));
+                        }
+                        file.write_all(format!("pos-{seq}\"}}\n").as_bytes())
+                            .unwrap();
+                        file.flush().unwrap();
+                    }
+                    done.store(true, std::sync::atomic::Ordering::Release);
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    let mut step = 0usize;
+                    while !done.load(std::sync::atomic::Ordering::Acquire) {
+                        let target = if step.is_multiple_of(2) {
+                            council_id
+                        } else {
+                            "room-stable"
+                        };
+                        storage::replace_locked(
+                            &race_repo,
+                            Path::new(".oms/threads/CURRENT"),
+                            format!("{target}\n").as_bytes(),
+                        )
+                        .unwrap();
+                        step += 1;
+                    }
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    let mut prev_turns = 1i128;
+                    let mut reads = 0usize;
+                    while !done.load(std::sync::atomic::Ordering::Acquire) || reads < 16 {
+                        let mut snap = enrich_state();
+                        projection::enrich(
+                            &race_ctx,
+                            &crate::NoHostServices,
+                            &mut snap,
+                            false,
+                            None,
+                        )
+                        .unwrap();
+                        assert_eq!(snap.get("threads").get("open").int().unwrap(), 2);
+                        let turns = snap
+                            .get("threads")
+                            .get("recent")
+                            .array()
+                            .unwrap()
+                            .iter()
+                            .find(|r| r.text("id") == council_id)
+                            .expect("council thread stays visible during append")
+                            .get("turns")
+                            .int()
+                            .unwrap();
+                        assert!(turns >= prev_turns, "{turns} < {prev_turns}");
+                        prev_turns = turns;
+                        let mut findings = Vec::new();
+                        projection::verify(&race_ctx, &crate::NoHostServices, &snap, &mut findings)
+                            .unwrap();
+                        assert!(findings.is_empty(), "{findings:?}");
+                        reads += 1;
+                    }
+                    assert_eq!(prev_turns, 25);
+                });
+            });
+            {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&council_path)
+                    .unwrap();
+                file.write_all(format!("{{\"schema\":1,\"thread\":\"{council_id}\"").as_bytes())
+                    .unwrap();
+                file.flush().unwrap();
+            }
+            let mut crashed_state = enrich_state();
+            projection::enrich(
+                &race_ctx,
+                &crate::NoHostServices,
+                &mut crashed_state,
+                false,
+                None,
+            )
+            .unwrap();
+            assert_eq!(crashed_state.get("threads").get("open").int().unwrap(), 1);
         });
         let _ = std::fs::remove_dir_all(root);
         result.unwrap();

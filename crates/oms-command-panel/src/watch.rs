@@ -4022,7 +4022,7 @@ fn council_history(repo: &Path, thread: &str) -> Result<String> {
         return Ok("No linked council log recorded".into());
     };
     let store = oms_panel_core::Store::open(repo)?;
-    let raw = store.read(
+    let raw = store.read_jsonl(
         Path::new(&format!(".oms/threads/panel-council-{id}.jsonl")),
         2 * 1024 * 1024,
         true,
@@ -4701,6 +4701,79 @@ mod tests {
             "claude · answer\nOne recorded position"
         );
         assert!(super::council_log(log, "panel-council-other").is_err());
+
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "oms-watch-council-race-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let thread = "panel-council-0123456789abcdef01234567";
+        let log_path = root.join(format!(".oms/threads/{thread}.jsonl"));
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            use std::io::Write;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::time::Duration;
+            std::fs::write(
+                &log_path,
+                format!(
+                    "{{\"thread\":\"{thread}\",\"role\":\"answer\",\"agent\":\"claude\",\"text\":\"pos-0\"}}\n"
+                ),
+            )
+            .unwrap();
+            let done = AtomicBool::new(false);
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let mut file = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&log_path)
+                        .unwrap();
+                    barrier.wait();
+                    for seq in 1..=24 {
+                        file.write_all(
+                            format!(
+                                "{{\"thread\":\"{thread}\",\"role\":\"answer\",\"agent\":\"codex\",\"text\":\""
+                            )
+                            .as_bytes(),
+                        )
+                        .unwrap();
+                        file.flush().unwrap();
+                        if seq == 1 {
+                            std::thread::sleep(Duration::from_millis(12));
+                        }
+                        file.write_all(format!("pos-{seq}\"}}\n").as_bytes())
+                            .unwrap();
+                        file.flush().unwrap();
+                    }
+                    done.store(true, Ordering::Release);
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    let mut prev = 1usize;
+                    let mut reads = 0usize;
+                    while !done.load(Ordering::Acquire) || reads < 24 {
+                        let rendered = super::council_history(&root, thread).unwrap();
+                        let count = rendered.matches(" · answer\n").count();
+                        assert!(count >= prev, "{count} < {prev}");
+                        prev = count;
+                        reads += 1;
+                    }
+                    assert_eq!(prev, 25);
+                });
+            });
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .unwrap();
+            file.write_all(format!("{{\"thread\":\"{thread}\",\"role\":\"answer\"").as_bytes())
+                .unwrap();
+            file.flush().unwrap();
+            assert!(super::council_history(&root, thread).is_err());
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        result.unwrap();
     }
     #[test]
     fn provider_header_hit_and_history_layout() {

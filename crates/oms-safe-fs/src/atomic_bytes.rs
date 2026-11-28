@@ -7,6 +7,15 @@ use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+const READ_RACE_RETRIES: usize = 32;
+const READ_RACE_SLEEP: Duration = Duration::from_millis(3);
+
+/// True when non-empty JSONL bytes lack a terminating newline.
+pub fn unfinished_jsonl(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && !bytes.ends_with(b"\n")
+}
 
 /// Path-free byte storage failures; no owner restriction is imposed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,12 +305,20 @@ impl<'a> Anchor<'a> {
         Ok(())
     }
 
-    fn valid_leaf(&self, stat: &Stat) -> bool {
-        regular(stat)
+    fn valid_leaf_kind(&self, stat: &Stat) -> bool {
+        FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
             && (self.root.private_ancestry.is_none()
                 || (stat.st_uid == rustix::process::getuid().as_raw()
                     && stat.st_mode & 0o077 == 0
                     && stat.st_mode & 0o7000 == 0))
+    }
+
+    fn valid_leaf(&self, stat: &Stat) -> bool {
+        self.valid_leaf_kind(stat) && stat.st_nlink == 1
+    }
+
+    fn unlinked_leaf(&self, stat: &Stat) -> bool {
+        self.valid_leaf_kind(stat) && stat.st_nlink == 0
     }
 
     fn leaf_unchanged(&self, a: &Stat, b: &Stat) -> bool {
@@ -311,8 +328,13 @@ impl<'a> Anchor<'a> {
     }
 
     fn named(&self) -> Result<Option<Stat>, ByteError> {
+        self.named_with(false)
+    }
+
+    fn named_with(&self, unlinked_changed: bool) -> Result<Option<Stat>, ByteError> {
         match fs::statat(self.parent(), self.name(), AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) if self.valid_leaf(&stat) => Ok(Some(stat)),
+            Ok(stat) if unlinked_changed && self.unlinked_leaf(&stat) => Err(ByteError::Changed),
             Ok(_) => Err(ByteError::Unsafe),
             Err(Errno::NOENT) => Ok(None),
             Err(error) => Err(io_error(error)),
@@ -320,7 +342,15 @@ impl<'a> Anchor<'a> {
     }
 
     fn check_leaf(&self, before: Option<&Stat>) -> Result<(), ByteError> {
-        match (before, self.named()?) {
+        self.check_leaf_with(before, false)
+    }
+
+    fn check_leaf_with(
+        &self,
+        before: Option<&Stat>,
+        unlinked_changed: bool,
+    ) -> Result<(), ByteError> {
+        match (before, self.named_with(unlinked_changed)?) {
             (None, None) => Ok(()),
             (Some(before), Some(after)) if self.leaf_unchanged(before, &after) => Ok(()),
             _ => Err(ByteError::Changed),
@@ -330,10 +360,11 @@ impl<'a> Anchor<'a> {
     fn read<E: From<ByteError>>(
         &self,
         options: ByteReadOptions,
+        unlinked_changed: bool,
         hook: &mut impl FnMut(Stage) -> Result<(), Errno>,
         check_opened: impl FnOnce(&Stat) -> Result<(), E>,
     ) -> Result<(Vec<u8>, Option<ReadStats>), E> {
-        let named = self.named()?;
+        let named = self.named_with(unlinked_changed)?;
         hook(Stage::BeforeLeafOpen).map_err(io_error)?;
         let fd = match fs::openat(
             self.parent(),
@@ -351,7 +382,12 @@ impl<'a> Anchor<'a> {
         };
         let before = fs::fstat(&fd).map_err(io_error)?;
         if !self.valid_leaf(&before) {
-            return Err(ByteError::Unsafe.into());
+            return Err(if unlinked_changed && self.unlinked_leaf(&before) {
+                ByteError::Changed
+            } else {
+                ByteError::Unsafe
+            }
+            .into());
         }
         if !named
             .as_ref()
@@ -359,7 +395,7 @@ impl<'a> Anchor<'a> {
         {
             return Err(ByteError::Changed.into());
         }
-        self.check_leaf(Some(&before))?;
+        self.check_leaf_with(Some(&before), unlinked_changed)?;
         self.revalidate()?;
         check_opened(&before)?;
         hook(Stage::BeforeRead).map_err(io_error)?;
@@ -391,7 +427,7 @@ impl<'a> Anchor<'a> {
         if !self.leaf_unchanged(&before, &after) {
             return Err(ByteError::Changed.into());
         }
-        self.check_leaf(Some(&before))?;
+        self.check_leaf_with(Some(&before), unlinked_changed)?;
         self.revalidate()?;
         Ok((bytes, Some(ReadStats { before, after })))
     }
@@ -502,6 +538,72 @@ impl Root {
             .map(|(bytes, stats)| (bytes, stats.map(|s| s.after)))
     }
 
+    /// Like [`Self::read_no_follow`], retrying [`ByteError::Changed`] up to 32
+    /// times with a 3 ms pause and failing immediately on every other error.
+    pub fn read_no_follow_retrying(
+        &self,
+        path: &Path,
+        options: ByteReadOptions,
+    ) -> Result<Vec<u8>, ByteError> {
+        self.read_no_follow_retrying_stat(path, options, false)
+            .map(|(bytes, _)| bytes)
+    }
+
+    /// Like [`Self::read_no_follow_retrying`], also retrying within the same
+    /// bound when [`unfinished_jsonl`] reports an active append without its
+    /// trailing newline. After the bound, a stable unfinished tail is returned
+    /// as `Ok(bytes)` so callers keep their existing framing or bad-row handling.
+    pub fn read_no_follow_jsonl(
+        &self,
+        path: &Path,
+        options: ByteReadOptions,
+    ) -> Result<Vec<u8>, ByteError> {
+        self.read_no_follow_retrying_stat(path, options, true)
+            .map(|(bytes, _)| bytes)
+    }
+
+    /// Descriptor-stat variant of [`Self::read_no_follow_retrying`] and
+    /// [`Self::read_no_follow_jsonl`], returning the post-read [`Stat`] or
+    /// `None` for a permitted absent file.
+    pub fn read_no_follow_retrying_stat(
+        &self,
+        path: &Path,
+        options: ByteReadOptions,
+        jsonl: bool,
+    ) -> Result<(Vec<u8>, Option<Stat>), ByteError> {
+        for attempt in 0..=READ_RACE_RETRIES {
+            match self.read_snapshot_retrying(path, options) {
+                Ok((bytes, _))
+                    if jsonl && unfinished_jsonl(&bytes) && attempt < READ_RACE_RETRIES =>
+                {
+                    std::thread::sleep(READ_RACE_SLEEP);
+                }
+                Ok(snapshot) => return Ok(snapshot),
+                Err(ByteError::Changed) if attempt < READ_RACE_RETRIES => {
+                    std::thread::sleep(READ_RACE_SLEEP);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!()
+    }
+
+    fn read_snapshot_retrying(
+        &self,
+        path: &Path,
+        options: ByteReadOptions,
+    ) -> Result<(Vec<u8>, Option<Stat>), ByteError> {
+        let mut noop = |_| Ok(());
+        let anchor = match Anchor::open(self, path, false, &mut noop) {
+            Ok(anchor) => anchor,
+            Err(ByteError::Missing) if options.missing_ok => return Ok((Vec::new(), None)),
+            Err(error) => return Err(error),
+        };
+        anchor
+            .read::<ByteError>(options, true, &mut noop, |_| Ok(()))
+            .map(|(bytes, stats)| (bytes, stats.map(|s| s.after)))
+    }
+
     fn read_bytes_with(
         &self,
         path: &Path,
@@ -524,7 +626,7 @@ impl Root {
             Err(ByteError::Missing) if options.missing_ok => return Ok((Vec::new(), None)),
             Err(error) => return Err(error.into()),
         };
-        anchor.read(options, &mut hook, check_opened)
+        anchor.read(options, false, &mut hook, check_opened)
     }
 
     /// Copy-on-write byte mutation. Callers MUST hold the canonical external
@@ -674,7 +776,7 @@ impl Root {
         exclusive: bool,
     ) -> Result<MutationOutcome, MutationError<E>> {
         let anchor = Anchor::open(self, path, options.create_parent, &mut hook)?;
-        let (old, stats) = anchor.read::<ByteError>(options.read, &mut hook, |_| Ok(()))?;
+        let (old, stats) = anchor.read::<ByteError>(options.read, false, &mut hook, |_| Ok(()))?;
         let before = stats.map(|s| s.before);
         if options
             .expected_exists

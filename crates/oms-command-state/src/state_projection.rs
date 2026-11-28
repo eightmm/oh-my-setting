@@ -431,7 +431,7 @@ fn thread_rows(
     }
     #[cfg(test)]
     TEST_THREAD_FALLBACK.with(|c| c.set(c.get() + 1));
-    storage::rows(repo, path)
+    storage::thread_rows(repo, path)
 }
 
 pub(super) fn enrich(
@@ -698,7 +698,7 @@ pub(super) fn enrich(
         object([("outstanding", Value::Array(open.into_values().collect()))]),
     )?;
     let mut threads = Vec::new();
-    let current = storage::read(&ctx.repo, Path::new(".oms/threads/CURRENT"), 4096, true)?;
+    let current = storage::read_retrying(&ctx.repo, Path::new(".oms/threads/CURRENT"), 4096, true)?;
     let current = String::from_utf8_lossy(&current)
         .split_whitespace()
         .next()
@@ -1248,12 +1248,12 @@ pub(super) fn verify(
         );
     }
     for family in ["threads", "runs"] {
-        let raw = storage::read(
-            &ctx.repo,
-            &PathBuf::from(format!(".oms/{family}/CURRENT")),
-            4096,
-            true,
-        )?;
+        let path = PathBuf::from(format!(".oms/{family}/CURRENT"));
+        let raw = if family == "threads" {
+            storage::read_retrying(&ctx.repo, &path, 4096, true)?
+        } else {
+            storage::read(&ctx.repo, &path, 4096, true)?
+        };
         let id = String::from_utf8_lossy(&raw)
             .split_whitespace()
             .next()
