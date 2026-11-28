@@ -1769,10 +1769,14 @@ providers (`providers::streams_output`: `codex`, `claude`, `pi`) get the
 (such as `antigravity`) get a fixed default wall (15 minutes for `peer-ask`;
 20 minutes for `agent-call`, `peer-delegate`, and `peer-review`). Explicit
 `--provider-timeout`, `--ROLE-timeout`, or `OMS_PEER_TIMEOUT` pins that exact
-wall; `autopilot` freezes unpinned role timeouts as empty fields so recovery
-and re-entry stay unpinned while existing receipts with explicit timeouts keep
-their pins. `patch-land` uses a 20-minute wall (30 minutes with `--recover`),
-or the pinned provider wall when pinned longer. `oms goal-drive` repeats within
+wall; `oms goal-drive --campaign` research seats and wave consolidators are
+bounded by the remaining campaign deadline (never beyond a pinned wall or the
+24-hour-plus-60-second outer wall) and otherwise follow the same rule. An
+`autopilot` receipt freezes unpinned role timeouts as empty fields and re-reads
+`OMS_PEER_TIMEOUT` from the environment on each run, re-entry, and review while
+existing receipts with explicit timeouts keep their pins. `patch-land` uses a
+20-minute wall (30 minutes with `--recover`), or the pinned provider wall when
+pinned longer. `oms goal-drive` repeats within
 a cycle cap and acceptance command; the cap counts task attempts across resumes
 of one autopilot contract, bounds attempts rather than provider cost, and an
 exhausted contract is retired with `oms autopilot abandon`. It is not an
@@ -2511,8 +2515,8 @@ Re-running the same
 manifest resumes from the ledger: a solved or stopped campaign prints its summary
 and spends nothing, an interrupted wave re-runs in full, and settled and
 unsettled reservations stay spent. One controller runs a campaign at a time.
-The saved manifest supplies the ledger budget. Campaign mode accepts only
-`--repo`, `--campaign`, `--dry-run` and `--status`. `--status` is read-only,
+The saved manifest supplies the ledger budget. Campaign mode accepts
+`--repo`, `--campaign`, `--provider-timeout`, `--dry-run` and `--status`. `--status` is read-only,
 does not take the controller lock, and works for a harness child; it prints the
 state, waves, call budgets, last event, winner and handoff command if available.
 It exits 2 if no ledger exists and cannot be combined with `--dry-run`.

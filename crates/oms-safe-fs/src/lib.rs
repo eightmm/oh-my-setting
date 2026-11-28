@@ -11,7 +11,7 @@ pub use atomic_bytes::{
 
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};
 use std::ffi::OsStr;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
@@ -57,6 +57,14 @@ impl ManifestError {
             Self::Changed => Error::Changed,
         }
     }
+}
+
+/// Bounded header and tail slices returned by [`Root::read_head_and_tail_os`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadTail {
+    pub head: Vec<u8>,
+    pub tail: Vec<u8>,
+    pub truncated: bool,
 }
 
 /// Path-free diagnostics for a stored output capture.
@@ -561,6 +569,92 @@ impl Root {
         self.read_os(label.as_os_str(), limit, policy)
     }
 
+    /// Reads at most `limit` leading bytes from a regular file under `policy`,
+    /// returning `(bytes, truncated)` where `truncated` indicates a larger file.
+    pub fn read_head_os(
+        &self,
+        label: &OsStr,
+        limit: usize,
+        policy: Policy,
+    ) -> Result<(Vec<u8>, bool), Error> {
+        let parts = checked_parts(label, policy).map_err(ManifestError::coarse)?;
+        let (dirs, before, mut file) = self
+            .open_checked(&parts, policy, false, None, || {}, || {})
+            .map_err(|e| e.manifest().coarse())?;
+        let file_size = u64::try_from(before.st_size).map_err(|_| Error::Unsafe)?;
+        let want = usize::try_from(file_size).unwrap_or(usize::MAX).min(limit);
+        let bytes = read_exact_bound(&mut file, want).map_err(|e| e.manifest().coarse())?;
+        let truncated = file_size > limit as u64;
+        if !truncated {
+            confirm_eof(&mut file).map_err(|e| e.manifest().coarse())?;
+        }
+        self.finish_checked(&parts, &dirs, &file, &before, policy, None)
+            .map_err(|e| e.manifest().coarse())?;
+        Ok((bytes, truncated))
+    }
+
+    /// Reads the bounded header prefix and bounded tail suffix of a regular file
+    /// under `policy`. Files `<= tail_limit` return `truncated: false` and the
+    /// complete bytes in `tail`; larger files return `head_limit` leading bytes
+    /// and `tail_limit` trailing bytes with post-IO stability/identity rechecks.
+    pub fn read_head_and_tail_os(
+        &self,
+        label: &OsStr,
+        head_limit: usize,
+        tail_limit: usize,
+        policy: Policy,
+    ) -> Result<HeadTail, Error> {
+        self.read_head_and_tail_with_hooks(label, head_limit, tail_limit, policy, || {})
+    }
+
+    fn read_head_and_tail_with_hooks(
+        &self,
+        label: &OsStr,
+        head_limit: usize,
+        tail_limit: usize,
+        policy: Policy,
+        after_head: impl FnOnce(),
+    ) -> Result<HeadTail, Error> {
+        let parts = checked_parts(label, policy).map_err(ManifestError::coarse)?;
+        let (dirs, before, mut file) = self
+            .open_checked(&parts, policy, false, None, || {}, || {})
+            .map_err(|e| e.manifest().coarse())?;
+        let file_size = u64::try_from(before.st_size).map_err(|_| Error::Unsafe)?;
+        if file_size <= tail_limit as u64 {
+            let (tail, overflow) =
+                read_bounded_all(&mut file, tail_limit).map_err(|e| e.manifest().coarse())?;
+            after_head();
+            if overflow {
+                return Err(Error::Changed);
+            }
+            self.finish_checked(&parts, &dirs, &file, &before, policy, Some(tail.len()))
+                .map_err(|e| e.manifest().coarse())?;
+            let head = tail[..tail.len().min(head_limit)].to_vec();
+            return Ok(HeadTail {
+                head,
+                tail,
+                truncated: false,
+            });
+        }
+        let head_len = usize::try_from(file_size)
+            .unwrap_or(usize::MAX)
+            .min(head_limit);
+        let head = read_exact_bound(&mut file, head_len).map_err(|e| e.manifest().coarse())?;
+        after_head();
+        let start = file_size - tail_limit as u64;
+        file.seek(std::io::SeekFrom::Start(start))
+            .map_err(|_| Error::Unreadable)?;
+        let tail = read_exact_bound(&mut file, tail_limit).map_err(|e| e.manifest().coarse())?;
+        confirm_eof(&mut file).map_err(|e| e.manifest().coarse())?;
+        self.finish_checked(&parts, &dirs, &file, &before, policy, None)
+            .map_err(|e| e.manifest().coarse())?;
+        Ok(HeadTail {
+            head,
+            tail,
+            truncated: true,
+        })
+    }
+
     fn read_impl(
         &self,
         label: impl AsRef<OsStr>,
@@ -614,14 +708,38 @@ impl Root {
         hook: impl FnOnce(&mut Vec<u8>),
     ) -> Result<Vec<u8>, ReadDetail> {
         let (policy, capture) = options;
-        let parts: Vec<_> = label.as_ref().as_bytes().split(|b| *b == b'/').collect();
-        if policy.max_components.is_some_and(|max| parts.len() > max)
-            || parts
-                .iter()
-                .any(|p| p.is_empty() || *p == b"." || *p == b".." || p.contains(&0))
-        {
-            return Err(ManifestError::Path.into());
+        let parts = checked_parts(label.as_ref(), policy)?;
+        let (dirs, before, mut file) = self.open_checked(
+            &parts,
+            policy,
+            capture,
+            Some(limit),
+            before_open,
+            before_read,
+        )?;
+        let (mut bytes, overflow) = read_bounded_all(&mut file, limit)?;
+        hook(&mut bytes);
+        if overflow {
+            self.finish_checked(&parts, &dirs, &file, &before, policy, None)?;
+            return Err(if capture {
+                ReadDetail::FileChanged
+            } else {
+                ManifestError::Overflow.into()
+            });
         }
+        self.finish_checked(&parts, &dirs, &file, &before, policy, Some(bytes.len()))?;
+        Ok(bytes)
+    }
+
+    fn open_checked(
+        &self,
+        parts: &[&[u8]],
+        policy: Policy,
+        capture: bool,
+        limit: Option<usize>,
+        before_open: impl FnOnce(),
+        before_read: impl FnOnce(),
+    ) -> Result<(Vec<OwnedFd>, Stat, std::fs::File), ReadDetail> {
         let mut dirs = Vec::new();
         for part in &parts[..parts.len() - 1] {
             let parent = dirs.last().unwrap_or(&self.fd);
@@ -659,7 +777,11 @@ impl Root {
                 .into(),
             );
         }
-        if capture && named.st_size >= 0 && named.st_size as u64 > limit as u64 {
+        if capture
+            && let Some(limit) = limit
+            && named.st_size >= 0
+            && named.st_size as u64 > limit as u64
+        {
             return Err(ManifestError::InitialOversize.into());
         }
         before_open();
@@ -674,43 +796,29 @@ impl Root {
         if !stable(&named, &before) {
             return Err(ReadDetail::ChangedBeforeRead);
         }
-        if !valid_file(&before, policy) {
+        if !valid_file(&before, policy) || before.st_size < 0 {
             return Err(ManifestError::Policy.into());
         }
-        if before.st_size < 0 {
-            return Err(ManifestError::Policy.into());
-        }
-        if u64::try_from(before.st_size).map_err(|_| Error::Unsafe)? > limit as u64 {
+        if let Some(limit) = limit
+            && u64::try_from(before.st_size).map_err(|_| Error::Unsafe)? > limit as u64
+        {
             return Err(ManifestError::InitialOversize.into());
         }
         before_read();
-        let mut file = std::fs::File::from(fd);
-        let mut bytes = Vec::new();
-        let mut buf = [0u8; 65536];
-        let mut overflow = false;
-        loop {
-            let remaining = limit.saturating_sub(bytes.len());
-            let count = buf.len().min(remaining.saturating_add(1));
-            let n = match file.read(&mut buf[..count]) {
-                Ok(n) => n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return Err(ManifestError::Open(Error::Unreadable).into()),
-            };
-            if n == 0 {
-                break;
-            }
-            if n > remaining {
-                overflow = true;
-                break;
-            }
-            bytes.extend_from_slice(&buf[..n]);
-        }
-        hook(&mut bytes);
-        let after = fs::fstat(&file).map_err(|e| ReadDetail::PostIo(map_open(e)))?;
-        if !stable(&before, &after) || (!overflow && !size_matches(&after, bytes.len())) {
-            return Err(ReadDetail::FileChanged);
-        }
-        if capture && overflow {
+        Ok((dirs, before, std::fs::File::from(fd)))
+    }
+
+    fn finish_checked(
+        &self,
+        parts: &[&[u8]],
+        dirs: &[OwnedFd],
+        file: &std::fs::File,
+        before: &Stat,
+        policy: Policy,
+        expected_len: Option<usize>,
+    ) -> Result<(), ReadDetail> {
+        let after = fs::fstat(file).map_err(|e| ReadDetail::PostIo(map_open(e)))?;
+        if !stable(before, &after) || expected_len.is_some_and(|len| !size_matches(&after, len)) {
             return Err(ReadDetail::FileChanged);
         }
         for (i, dir) in dirs.iter().enumerate() {
@@ -728,12 +836,11 @@ impl Root {
                 return Err(ReadDetail::PathChanged);
             }
         }
+        let parent = dirs.last().unwrap_or(&self.fd);
+        let name = OsStr::from_bytes(parts[parts.len() - 1]);
         let named_after = fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
             .map_err(|e| ReadDetail::PostIo(map_open(e)))?;
-        if !identity(&after, &named_after) {
-            return Err(ReadDetail::PathChanged);
-        }
-        if !valid_file(&named_after, policy) {
+        if !identity(&after, &named_after) || !valid_file(&named_after, policy) {
             return Err(ReadDetail::PathChanged);
         }
         let root_now = fs::open(&self.path, directory_flags(), Mode::empty())
@@ -744,10 +851,73 @@ impl Root {
         ) {
             return Err(ReadDetail::RootChanged);
         }
-        if overflow {
-            return Err(ManifestError::Overflow.into());
+        Ok(())
+    }
+}
+
+fn checked_parts(label: &OsStr, policy: Policy) -> Result<Vec<&[u8]>, ManifestError> {
+    let parts: Vec<_> = label.as_bytes().split(|b| *b == b'/').collect();
+    if policy.max_components.is_some_and(|max| parts.len() > max)
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || *p == b"." || *p == b".." || p.contains(&0))
+    {
+        return Err(ManifestError::Path);
+    }
+    Ok(parts)
+}
+
+fn read_bounded_all(file: &mut std::fs::File, limit: usize) -> Result<(Vec<u8>, bool), ReadDetail> {
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 65536];
+    let mut overflow = false;
+    loop {
+        let remaining = limit.saturating_sub(bytes.len());
+        let count = buf.len().min(remaining.saturating_add(1));
+        let n = match file.read(&mut buf[..count]) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(ManifestError::Open(Error::Unreadable).into()),
+        };
+        if n == 0 {
+            break;
         }
-        Ok(bytes)
+        if n > remaining {
+            overflow = true;
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    Ok((bytes, overflow))
+}
+
+fn read_exact_bound(file: &mut std::fs::File, want: usize) -> Result<Vec<u8>, ReadDetail> {
+    let mut bytes = Vec::with_capacity(want.min(65536));
+    let mut buf = [0u8; 65536];
+    while bytes.len() < want {
+        let count = buf.len().min(want - bytes.len());
+        let n = match file.read(&mut buf[..count]) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(ManifestError::Open(Error::Unreadable).into()),
+        };
+        if n == 0 {
+            return Err(ReadDetail::FileChanged);
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    Ok(bytes)
+}
+
+fn confirm_eof(file: &mut std::fs::File) -> Result<(), ReadDetail> {
+    let mut probe = [0u8; 1];
+    loop {
+        match file.read(&mut probe) {
+            Ok(0) => return Ok(()),
+            Ok(_) => return Err(ReadDetail::FileChanged),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(ManifestError::Open(Error::Unreadable).into()),
+        }
     }
 }
 
@@ -1612,5 +1782,68 @@ mod tests {
         let unreadable = has_git_marker(&with_head);
         std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(unreadable);
+    }
+
+    #[test]
+    fn read_head_and_tail_enforces_limits_symlinks_and_stability() {
+        let f = Fixture::new();
+        let root = Root::open(&f.0).unwrap();
+        std::fs::write(f.0.join("small.txt"), b"hello").unwrap();
+        assert_eq!(
+            root.read_head_os(OsStr::new("small.txt"), 10, Policy::manifest())
+                .unwrap(),
+            (b"hello".to_vec(), false)
+        );
+        assert_eq!(
+            root.read_head_os(OsStr::new("small.txt"), 3, Policy::manifest())
+                .unwrap(),
+            (b"hel".to_vec(), true)
+        );
+        let small = root
+            .read_head_and_tail_os(OsStr::new("small.txt"), 3, 10, Policy::manifest())
+            .unwrap();
+        assert_eq!(
+            small,
+            HeadTail {
+                head: b"hel".to_vec(),
+                tail: b"hello".to_vec(),
+                truncated: false,
+            }
+        );
+
+        let big_payload = b"HDR\n0123456789abcdefghijklmnopqrstuvwxyz".to_vec();
+        std::fs::write(f.0.join("big.txt"), &big_payload).unwrap();
+        let ht = root
+            .read_head_and_tail_os(OsStr::new("big.txt"), 4, 12, Policy::manifest())
+            .unwrap();
+        assert_eq!(
+            ht,
+            HeadTail {
+                head: b"HDR\n".to_vec(),
+                tail: b"opqrstuvwxyz".to_vec(),
+                truncated: true,
+            }
+        );
+
+        symlink("big.txt", f.0.join("link.txt")).unwrap();
+        assert_eq!(
+            root.read_head_os(OsStr::new("link.txt"), 10, Policy::manifest()),
+            Err(Error::Unsafe)
+        );
+        assert_eq!(
+            root.read_head_and_tail_os(OsStr::new("link.txt"), 4, 12, Policy::manifest()),
+            Err(Error::Unsafe)
+        );
+
+        let err = root.read_head_and_tail_with_hooks(
+            OsStr::new("big.txt"),
+            4,
+            12,
+            Policy::manifest(),
+            || {
+                std::fs::write(f.0.join("big.txt"), b"MODIFIED\n0123456789abcdefghijkl").unwrap();
+            },
+        );
+        assert_eq!(err, Err(Error::Changed));
     }
 }

@@ -1,10 +1,17 @@
-use oms_command_autonomy::{campaign::Ledger, value};
+use oms_command_autonomy::{
+    CommandResult, Invocation, Services, campaign::Ledger, run_with_services, value,
+};
 use oms_command_plan::storage::Store;
 use oms_command_telemetry::store::usage::{self, Cost, Identity, Phase, Receipt, Usage};
 use serde_json::{Value, json};
-use std::os::unix::fs::DirBuilderExt;
+use std::ffi::OsString;
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 struct Fixture {
     repo: PathBuf,
@@ -314,8 +321,177 @@ fn physical_intents_without_receipts_stay_in_logical_admission_and_refusal() {
         "a terminal refusal cannot erase existing physical intents"
     );
 }
+#[derive(Default)]
+struct CampaignHost(Mutex<Vec<(String, Duration, Option<String>)>>);
+impl oms_command_plan::Services for CampaignHost {}
+impl Services for CampaignHost {
+    fn invoke(
+        &self,
+        call: &Invocation,
+        _: &AtomicBool,
+    ) -> oms_command_autonomy::Result<CommandResult> {
+        assert_eq!(call.tool, "agent-call");
+        let provider = call.args.windows(2).find(|pair| pair[0] == "--to").unwrap()[1]
+            .to_string_lossy()
+            .into_owned();
+        let peer_timeout = call
+            .environment
+            .iter()
+            .find_map(|(k, v)| (k == "OMS_PEER_TIMEOUT").then(|| v.to_string_lossy().into_owned()));
+        self.0
+            .lock()
+            .unwrap()
+            .push((provider.clone(), call.wall, peer_timeout));
+        let answer = if provider == "codex" {
+            b"```json\n[]\n```\n".as_slice()
+        } else {
+            b"```text\ncandidate note\n```\n".as_slice()
+        };
+        let dir = call.cwd.join(".oms/artifacts/campaign-test");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .unwrap();
+        let name = format!("answer-{}.md", self.0.lock().unwrap().len());
+        let path = dir.join(&name);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap()
+            .write_all(answer)
+            .unwrap();
+        Ok((
+            0,
+            format!("artifact: {}\n", path.display()).into_bytes(),
+            Vec::new(),
+        ))
+    }
+}
+
+fn run_campaign(deadline_s: u64, extra: &[&str]) -> Vec<(String, Duration, Option<String>)> {
+    let root = std::env::temp_dir().join(value::random("oms-campaign-wall-").unwrap());
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .unwrap();
+    let repo = root.canonicalize().unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "--local", "user.name", "Fixture"]);
+    git(&["config", "--local", "user.email", "fixture@example.invalid"]);
+    let problem = b"solve fixture\n";
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(repo.join("problem.txt"))
+        .unwrap()
+        .write_all(problem)
+        .unwrap();
+    git(&["add", "problem.txt"]);
+    git(&["commit", "--quiet", "-m", "init"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    let manifest = json!({
+        "problem": {"file": "problem.txt", "sha256": value::hash(problem)},
+        "base": base,
+        "verify": {"command": "true", "timeout_s": 30, "inputs": []},
+        "candidate_formats": ["text"],
+        "consolidator": {"provider": "codex", "model": "fixture-consolidator"},
+        "groups": [{
+            "id": "group",
+            "formulation": "fixture",
+            "k": 1,
+            "routes": [{"provider": "claude", "model": "fixture-seat"}],
+        }],
+        "budget": {
+            "max_concurrent": 2,
+            "total_calls": 4,
+            "deadline_s": deadline_s,
+            "max_waves": 2,
+            "stall_waves": 2,
+            "verifier": {"concurrency": 1, "timeout_s": 30, "max_artifact_bytes": 1024},
+        },
+    });
+    let manifest_path = repo.join("campaign.json");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&manifest_path)
+        .unwrap()
+        .write_all(&value::pretty(&manifest).unwrap())
+        .unwrap();
+    let mut argv = vec![OsString::from("--campaign"), manifest_path.into_os_string()];
+    argv.extend(extra.iter().map(OsString::from));
+    let host = CampaignHost::default();
+    let (code, out, err) =
+        run_with_services("goal-drive", &argv, &repo, &AtomicBool::new(false), &host);
+    let _ = std::fs::remove_dir_all(&repo);
+    assert_eq!(
+        code,
+        3,
+        "{}{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&err)
+    );
+    host.0.into_inner().unwrap()
+}
+
 #[test]
 fn omitted_caps_preserve_lifetime_call_caps_and_enabled_caps_require_reservations() {
+    const NAME: &str =
+        "omitted_caps_preserve_lifetime_call_caps_and_enabled_caps_require_reservations";
+    let ambient = |key: &std::ffi::OsStr| {
+        let key = key.to_string_lossy();
+        key.starts_with("OMS_") || key.starts_with("OH_MY_SETTING_")
+    };
+    if std::env::var("CAMPAIGN_PINNED_TIMEOUT_SUBTEST").as_deref() == Ok("90s") {
+        assert_eq!(std::env::var("OMS_PEER_TIMEOUT").as_deref(), Ok("90s"));
+        assert_eq!(
+            run_campaign(3600, &[]),
+            vec![
+                ("claude".into(), Duration::from_secs(90), Some("90s".into()),),
+                ("codex".into(), Duration::from_secs(90), Some("90s".into()),),
+                ("claude".into(), Duration::from_secs(90), Some("90s".into()),),
+            ]
+        );
+        return;
+    }
+    if std::env::vars_os().any(|(k, _)| ambient(&k)) {
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        for (key, _) in std::env::vars_os().filter(|(k, _)| ambient(k)) {
+            child.env_remove(key);
+        }
+        let out = child
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("1 passed;"), "{text}");
+        return;
+    }
     let fixture = Fixture::new(None);
     let stop = AtomicBool::new(false);
     let ledger = fixture.ledger(&stop);
@@ -336,4 +512,79 @@ fn omitted_caps_preserve_lifetime_call_caps_and_enabled_caps_require_reservation
         let fixture = Fixture::new(Some(bad));
         assert!(Ledger::open(&fixture.repo, &fixture.directory, &stop).is_err());
     }
+
+    let unpinned = run_campaign(3600, &[]);
+    assert_eq!(
+        unpinned
+            .iter()
+            .map(|(p, _, _)| p.as_str())
+            .collect::<Vec<_>>(),
+        vec!["claude", "codex", "claude"]
+    );
+    for (provider, wall, peer_timeout) in &unpinned {
+        assert_eq!(*peer_timeout, None, "{provider}");
+        assert!(
+            (3595..=3600).contains(&wall.as_secs()),
+            "{provider} wall={wall:?}"
+        );
+    }
+
+    assert_eq!(
+        run_campaign(3600, &["--provider-timeout", "25m"]),
+        vec![
+            (
+                "claude".into(),
+                Duration::from_secs(1500),
+                Some("1500s".into()),
+            ),
+            (
+                "codex".into(),
+                Duration::from_secs(1500),
+                Some("1500s".into()),
+            ),
+            (
+                "claude".into(),
+                Duration::from_secs(1500),
+                Some("1500s".into()),
+            ),
+        ]
+    );
+
+    let capped = run_campaign(1800, &["--provider-timeout", "2h"]);
+    assert_eq!(
+        capped
+            .iter()
+            .map(|(p, _, _)| p.as_str())
+            .collect::<Vec<_>>(),
+        vec!["claude", "codex", "claude"]
+    );
+    for (provider, wall, peer_timeout) in &capped {
+        assert!(
+            (1795..=1800).contains(&wall.as_secs()),
+            "{provider} wall={wall:?}"
+        );
+        assert_eq!(
+            peer_timeout.as_deref(),
+            Some(format!("{}s", wall.as_secs()).as_str()),
+            "{provider}"
+        );
+    }
+
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    for (key, _) in std::env::vars_os().filter(|(k, _)| ambient(k)) {
+        child.env_remove(key);
+    }
+    let out = child
+        .env("CAMPAIGN_PINNED_TIMEOUT_SUBTEST", "90s")
+        .env("OMS_PEER_TIMEOUT", "90s")
+        .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("1 passed;"), "{text}");
 }
