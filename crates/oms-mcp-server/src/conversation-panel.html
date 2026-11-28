@@ -58,7 +58,7 @@ button:disabled{opacity:.55;cursor:wait}
 :focus-visible{outline:2px solid var(--focus);outline-offset:3px}
 header button,header select{font-size:.79rem}
 #refresh{font:1.18rem/1 system-ui,sans-serif;width:var(--tap);padding:0}
-h2,h3,p{margin:0}
+h2,h3,h4,p{margin:0}
 h2,.label{font-size:.79rem;font-weight:650;color:var(--soft)}
 #view{display:flex;flex-direction:column;gap:16px;margin-top:16px}
 #goal-section{--goal-lines:3;display:flex;flex-direction:column;padding:16px clamp(16px,2.5vw,20px);background-color:var(--surface);border-radius:var(--r)}
@@ -203,7 +203,7 @@ button.person:hover .arrow,button.person:active .arrow{transform:translateX(3px)
 #usage-strip::after{content:"›";content:"›"/""}
 #usage-rows{display:flex;flex-wrap:wrap;gap:2px 12px;flex:1;min-width:0}
 .use{display:inline-flex;align-items:center;gap:5px;color:var(--ink);font-weight:650;font-variant-numeric:tabular-nums}
-.use .avatar{width:18px;height:18px;border-radius:5px;font-size:.55rem}
+.use .avatar,.inspect-card .avatar{width:18px;height:18px;border-radius:5px;font-size:.55rem}
 .use[data-tone=warn]{color:var(--warm)}.use small{font-weight:500;color:var(--soft)}
 .detail{margin:2px 0 8px;padding:10px 12px;border-radius:var(--r-xs);background-color:var(--surface);font-size:.82rem}
 .detail dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin:0}
@@ -330,23 +330,9 @@ dialog .section-head{position:sticky;top:0;z-index:1;background-color:var(--surf
 .inspect-card h3{font-size:.95rem;color:var(--ink)}
 .inspect-card dl{display:grid;grid-template-columns:minmax(7rem,1fr) minmax(0,2fr);gap:4px 12px;margin:8px 0 0}
 .inspect-card dt{color:var(--soft);font-size:.8rem}.inspect-card dd{margin:0;font-size:.85rem;white-space:pre-wrap}
-.usage-provider>h3{display:flex;align-items:center;gap:8px}
-.usage-provider .avatar{width:24px;height:24px;font-size:.65rem}
-.usage-window,.usage-block{margin-top:10px}
-.usage-block h4{margin:0}
-.usage-line{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:2px 8px}
-.usage-line h4{margin:0;font-size:.85rem;font-weight:620}
-.usage-line strong{margin-inline-start:auto;font-size:.85rem;font-variant-numeric:tabular-nums}
-.usage-window .progress-track{margin-top:4px;border:1px solid var(--line)}
-.usage-window[data-tone=warn] strong{color:var(--warm)}.usage-window[data-tone=warn] .meter-fill{background-color:var(--warm)}
-.progress-track[data-missing=true]{background-color:transparent;border:1px dashed var(--soft)}
-.inspect-card .usage-facts{display:flex;flex-wrap:wrap;gap:2px 14px;margin:2px 0 0}
-.inspect-card.usage-provider>.usage-facts{margin-top:10px}
-.usage-facts>div{display:flex;flex-wrap:wrap;gap:0 5px;min-width:0}
-.usage-facts dd{font-variant-numeric:tabular-nums}
-.usage-attempts{padding-block:4px;border-style:dashed;color:var(--soft)}
-.usage-attempts summary{min-height:var(--tap);align-content:center;cursor:pointer;font-size:.82rem;list-style-position:inside}
-.usage-attempts ul>li{padding:8px 0;border-top:1px solid var(--line);font-size:.82rem}
+.usage-block{margin-top:10px}
+.usage-window[data-tone=warn] strong{color:var(--warm)}[data-tone=warn] .meter-fill{background-color:var(--warm)}
+.progress-track[data-missing=true]{background:none;border:1px dashed var(--soft)}
 #inspect-query{flex:1;min-width:8rem;padding:6px 8px;background:var(--raised);border:1px solid var(--line);border-radius:var(--r-sm)}
 #inspect-kind{max-width:100%}.inspect-nodes{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 #inspect-graph-form{align-items:center}
@@ -2475,82 +2461,67 @@ const inspectLabels={
   estimatedCost:['추정 비용(USD)','Estimated cost (USD)'],used:['사용률','Used'],
   resets:['초기화 시각','Resets at'],input:['입력 토큰','Input tokens'],output:['출력 토큰','Output tokens'],cacheRead:['캐시 읽기 토큰','Cache read tokens']
 };
-function inspectCard(title,fields){
-  const card=node('section','','inspect-card'),list=node('dl','');card.append(node('h3',title));
+function factList(fields){
+  const list=node('dl','');
   for(const [key,value] of fields){
     list.append(node('dt',()=>choice(...inspectLabels[key])),node('dd',typeof value==='function'?value:()=>inspectedValue(value)));
   }
-  card.append(list);return card;
-}
-const usageSource=v=>v==='receipt'?choice('사용량 receipt','Usage receipt'):v==='events'?choice('기록된 event','Recorded event'):t('statusUnknown');
-function usageFacts(fields){
-  const list=node('dl','','usage-facts');
-  for(const [key,value] of fields){
-    const pair=node('div','');pair.append(node('dt',()=>choice(...inspectLabels[key])),node('dd',typeof value==='function'?value:()=>inspectedValue(value)));list.append(pair);
-  }
   return list;
 }
-function usageBlock(title,fields){
-  const block=node('div','','usage-block');block.append(node('h4',message(title),'label'),usageFacts(fields));return block;
+function inspectCard(title,fields){
+  const card=node('section','','inspect-card');card.append(node('h3',title),factList(fields));return card;
 }
-// A window with no readable percentage keeps a dashed empty meter; only a recorded 0% used draws a full one.
+const usageBlock=(card,title,fields)=>card.append(node('h4',message(title),'label usage-block'),factList(fields));
 function usageWindow(w){
-  const box=node('div','','usage-window'),line=node('div','','usage-line'),track=node('div','','progress-track'),
-    left=pct(w.used)?Math.round(100-w.used):null,reset=w.resets_at!=null;
-  line.append(node('h4',()=>w.name==='weekly'?t('use.weekly'):w.name));
+  const box=node('div','','usage-window'),line=node('div','','cluster identity'),track=node('div','','progress-track'),
+    left=pct(w.used)?Math.round(100-w.used):null;
+  line.append(node('h4',()=>windowName(w.name),'label'));
   if(w.stale===true){const badge=node('span',message('use.staleOnly'),'state');badge.setAttribute('data-tone','decision');line.append(badge);}
   line.append(node('strong',()=>left===null?t('statusUnknown'):t('usage.left',{n:inspectedNumber(left)})));
   track.setAttribute('aria-hidden','true');track.setAttribute('data-missing',String(left===null));
-  if(left!==null){const fill=node('span','','meter-fill');fill.style.width=left+'%';track.append(fill);box.setAttribute('data-tone',left<=20?'warn':'plain');}
+  if(left!==null){const fill=node('span','','meter-fill');fill.style.width=left+'%';track.append(fill);if(left<=20)box.setAttribute('data-tone','warn');}
   const fields=[['used',()=>inspectedPercent(w.used)]];
-  if(reset)fields.push(['resets',()=>inspectedDate(w.resets_at)]);
+  if(w.resets_at!=null)fields.push(['resets',()=>inspectedDate(w.resets_at)]);
   if(w.source!=null)fields.push(['source',w.source]);
   if(ago(w.age_seconds))fields.push(['observedAge',()=>ago(w.age_seconds)]);
-  box.append(line,track,usageFacts(fields));return box;
+  box.append(line,track,factList(fields));return box;
 }
 function inspectUsage(data){
   if(data?.scope!=='repository-recent-attempts' || !Array.isArray(data.providers) || data.providers.length>4 ||
     !Array.isArray(data.attempts) || data.attempts.length>16 ||
     (data.providerTotals!=null && (!Array.isArray(data.providerTotals) || data.providerTotals.length>32)))throw uiError('inspect.failed');
-  const content=el('inspect-content'),groups=new Map();let partial=Number(data.attemptsOmitted)>0 || Number(data.providerTotalsOmitted)>0;
-  const group=id=>{const key=id==='agy'?'antigravity':id;if(!groups.has(key))groups.set(key,{id:key,observed:[],totals:[]});return groups.get(key);};
-  for(const p of data.providers){
-    if(!p || !displayText(p.provider,64) || !Array.isArray(p.windows) || p.windows.length>8 ||
-      p.windows.some(w=>!w || !displayText(w.name,160)))throw uiError('inspect.failed');
-    group(p.provider).observed.push(p);partial ||= Number(p.windowsOmitted)>0;
-  }
-  for(const pt of (data.providerTotals||[])){
-    if(!pt || !displayText(pt.provider,64))throw uiError('inspect.failed');
-    group(pt.provider).totals.push(pt);
-  }
-  for(const g of groups.values()){
-    const card=node('section','','inspect-card usage-provider'),head=node('h3',''),mark=node('span','','avatar');
-    paintAvatar(mark,g.id);mark.setAttribute('aria-hidden','true');head.append(mark,node('span',()=>providerName(g.id)));card.append(head);
-    for(const p of g.observed)for(const w of p.windows)card.append(usageWindow(w));
-    if(!g.observed.some(p=>p.windows.length))card.append(node('p',message('usage.noWindow'),'note usage-block'));
-    for(const p of g.observed){
-      if(p.contextUsed!=null || p.cacheReadShare!=null)card.append(usageFacts(
+  const content=el('inspect-content'),totals=data.providerTotals||[],key=r=>r.provider==='agy'?'antigravity':r.provider;
+  if(data.providers.some(p=>!p || !displayText(p.provider,64) || !Array.isArray(p.windows) || p.windows.length>8 ||
+    p.windows.some(w=>!w || !displayText(w.name,160))) || totals.some(r=>!r || !displayText(r.provider,64)))throw uiError('inspect.failed');
+  const partial=Number(data.attemptsOmitted)>0 || Number(data.providerTotalsOmitted)>0 || data.providers.some(p=>Number(p.windowsOmitted)>0);
+  for(const id of new Set([...data.providers,...totals].map(key))){
+    const card=node('section','','inspect-card'),head=node('h3','','identity'),mark=node('span','','avatar'),
+      observed=data.providers.filter(p=>key(p)===id);
+    paintAvatar(mark,id);mark.setAttribute('aria-hidden','true');head.append(mark,node('span',()=>providerName(id)));card.append(head);
+    for(const p of observed)for(const w of p.windows)card.append(usageWindow(w));
+    if(!observed.some(p=>p.windows.length))card.append(node('p',message('usage.noWindow'),'note usage-block'));
+    for(const p of observed){
+      if(p.contextUsed!=null || p.cacheReadShare!=null)card.append(factList(
         [['contextUsed',()=>inspectedPercent(p.contextUsed)],['cacheReadShare',()=>inspectedPercent(p.cacheReadShare)]]));
-      if(p.recent7d)card.append(usageBlock('usage.recent',
-        [['calls',p.recent7d.calls],['input',p.recent7d.input],['output',p.recent7d.output],['cacheRead',p.recent7d.cacheRead]]));
+      if(p.recent7d)usageBlock(card,'usage.recent',
+        [['calls',p.recent7d.calls],['input',p.recent7d.input],['output',p.recent7d.output],['cacheRead',p.recent7d.cacheRead]]);
     }
-    for(const pt of g.totals){
+    for(const pt of totals.filter(r=>key(r)===id)){
       const fields=[['calls',pt.calls],['tokens',pt.tokens],['tokenReports',pt.tokenReports]];
       if(pt.reportedCostMicrousd!=null)fields.push(['cost',()=>inspectedUsd(pt.reportedCostMicrousd)]);
       if(pt.estimatedCostMicrousd!=null)fields.push(['estimatedCost',()=>inspectedUsd(pt.estimatedCostMicrousd)]);
-      card.append(usageBlock('usage.totals',fields));
+      usageBlock(card,'usage.totals',fields);
     }
     content.append(card);
   }
   if(data.attempts.length){
-    const details=node('details','','inspect-card usage-attempts'),list=node('ul','','plain');
-    details.append(node('summary',()=>t('usage.attempts',{n:data.attempts.length})),list);
+    const details=node('details','','inspect-card');
+    details.append(node('summary',()=>t('usage.attempts',{n:data.attempts.length})));
     for(const a of data.attempts){
       if(!a || !displayText(a.id,160))throw uiError('inspect.failed');
-      const item=node('li','');
-      item.append(node('strong',()=>providerName(a.provider)+' · '+a.id),usageFacts([['tokens',a.tokens],['source',()=>usageSource(a.source)],
+      details.append(node('h4',()=>providerName(a.provider)+' · '+a.id,'label usage-block'),factList([['tokens',a.tokens],
+        ['source',()=>a.source==='receipt'?choice('사용량 receipt','Usage receipt'):a.source==='events'?choice('기록된 event','Recorded event'):t('statusUnknown')],
         ['calls',a.reportedCalls],['cost',()=>inspectedUsd(a.costMicrousd)]]));
-      list.append(item);
     }
     content.append(details);
   }
@@ -2705,6 +2676,7 @@ async function readUsage(force=false){
   try{const data=await readShared('usage','oms_panel_usage',{},force);if(scope===scopeKey())paintUsage(data);}
   catch{if(scope===scopeKey())el('usage-rows').replaceChildren(node('span',message('use.failed'),'note'));}
 }
+const windowName=v=>v==='weekly'?t('use.weekly'):v;
 const pct=v=>typeof v==='number' && Number.isFinite(v) && v>=0 && v<=100;
 // The strip shows only recorded windows: a provider with no record is left out, never drawn as 0%.
 function paintUsage(data){
@@ -2719,7 +2691,7 @@ function paintUsage(data){
     const age=()=>{const a=ago(top.age_seconds);return stale?(a?t('use.stale',{age:a}):t('use.staleOnly')):a;};
     paintAvatar(mark,id);mark.setAttribute('aria-hidden','true');use.append(mark,left+'%');if(stale)use.append(node('small',message('use.staleOnly')));
     use.setAttribute('data-tone',left<=20?'warn':'plain');use.setAttribute('data-stale',String(stale));
-    parts.push(()=>t('use.aria',{name,win:top.name==='weekly'?t('use.weekly'):top.name,n:left,age:age()}).replace(/, $/,''));
+    parts.push(()=>t('use.aria',{name,win:windowName(top.name),n:left,age:age()}).replace(/, $/,''));
     list.append(use);
   }
   if(!parts.length)list.append(node('span',message('use.none'),'note'));
