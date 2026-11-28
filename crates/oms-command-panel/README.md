@@ -394,19 +394,23 @@ checkouts (`action: "forgotten"`), removes only an OMS block whose bytes match `
 separator flag to another Codex row in the same sidecar that still shares that exclude rule so
 the last uninstall removes it) only when OMS created them and they are now empty or unchanged,
 and drops the sidecar row. `--install-panel antigravity --project ALIAS` and
-`--uninstall-panel antigravity --project ALIAS` mirror the Codex flow for
+`--uninstall-panel antigravity --project ALIAS` manage
 `<checkout>/.agents/mcp_config.json` (`0600` when created, `.agents` `0700` if missing,
-preserving every other key, server, key order, and mode, and rewriting with 2-space pretty
-JSON only when OMS changes the file), defining `mcpServers.oms-panel` with the same launcher,
-`args`, and `env` as Codex, refusing invalid JSON, non-object `mcpServers`, symlinks,
-non-regular files, differing unmanaged `oms-panel` entries (adopting exact matches), and
-Git-tracked `.agents/mcp_config.json`, adding `/.agents/mcp_config.json` to
-`<common-git-dir>/info/exclude` when untracked and not ignored, recording `scope: "project"`,
-canonical `entry_sha256`, `created_config`, `created_agents_dir`, `created_exclude`, and
-optional separator/formatting metadata in `desktop-project-panels.json`, restoring exact
-original bytes on uninstall when OMS's only change was adding or refreshing `oms-panel` (and
-removing OMS-created empty artifacts and last-owner exclude lines, or reporting edited entries
-via `preservedFiles`), and reading `~/.gemini/trustedFolders.json` read-only without following
-symlinks, failing the install, or writing under `~/.gemini` (`"active": true`,
-`"antigravity-project-untrusted"`, or `"antigravity-trust-unknown"`). `--unregister-project`
-refuses aliases that still have any recorded panel.
+preserving every other key, server, key order, and mode), defining `mcpServers.oms-panel`
+with the same launcher, `args`, and `env` as Codex, refusing invalid JSON, non-object
+`mcpServers`, symlinks, non-regular files, differing unmanaged `oms-panel` entries
+(adopting exact matches without rewriting), and Git-tracked `.agents/mcp_config.json`,
+adding `/.agents/mcp_config.json` to `<common-git-dir>/info/exclude` when untracked and
+not ignored, and recording `scope: "project"`, canonical `entry_sha256`, `created_config`,
+`created_agents_dir`, `created_exclude`, and optional `created_mcp_servers` /
+`exclude_separator_added` flags in `desktop-project-panels.json` without reading
+`~/.gemini` or emitting trust fields (interactive `agy` can ask "Trust this folder?", and
+the panel loads only in sessions where `agy` loads that workspace's `.agents`
+customizations). Installing into an existing file rewrites it as 2-space pretty JSON
+(identical reruns and exact-match adoptions leave the file untouched); when OMS created
+the file, uninstall unlinks it (plus `.agents` if OMS created it and it is empty, and
+last-owner exclude lines), and otherwise removes only `oms-panel` (plus `mcpServers` if
+OMS created that key and it is now empty, or preserves and reports edited entries via
+`preservedFiles`) and writes 2-space pretty JSON, which is byte-exact whenever the prior
+file was already 2-space pretty JSON. `--unregister-project` refuses aliases that still
+have any recorded panel.

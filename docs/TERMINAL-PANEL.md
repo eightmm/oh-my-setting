@@ -3538,24 +3538,22 @@ refused while any panel remains installed for that alias:
   created and `.agents` `0700` if missing) with `mcpServers.oms-panel` (`command`,
   `args`, `OMS_MCP_TOOL_PROFILE`, `OMS_PANEL_REPO`, and
   `OMS_MCP_PANEL_RESOURCE_VERSION`), preserving every other key, server, key order,
-  and file mode. Because JSON has no comment markers, OMS tracks ownership via the
-  sidecar row and the SHA-256 of the canonical serialized `oms-panel` entry, and
-  rewrites `.agents/mcp_config.json` with 2-space pretty JSON only when OMS changes
-  the file (no-op reruns and exact-match adoptions leave the file untouched). It
-  refuses invalid JSON, non-object `mcpServers`, symlinks, non-regular files,
-  differing unmanaged `oms-panel` entries, and Git-tracked `.agents/mcp_config.json`
-  files, and adds `/.agents/mcp_config.json` to `<common-git-dir>/info/exclude` when
-  untracked and not ignored. Uninstall removes only `oms-panel` (preserving and
-  reporting edited entries via `preservedFiles`), deletes OMS-created files, empty
-  OMS-created `.agents` directories, and last-owner exclude lines, and restores
-  exact original bytes when OMS's only change was adding or refreshing the entry.
-  Install also reads `~/.gemini/trustedFolders.json` read-only without following
-  symlinks, failing the install, or writing under `~/.gemini`, reporting
-  `"active": true` when the checkout or an ancestor is trusted (`TRUST_FOLDER` /
-  `TRUST_PARENT` without a more specific `DO_NOT_TRUST`), or `"active": false` with
-  `"reason": "antigravity-project-untrusted"` or `"antigravity-trust-unknown"` (when
-  `HOME` is unset or the path is missing, unreadable, a symlink, non-regular,
-  foreign-owned, or invalid JSON).
+  and file mode. Ownership is tracked via the sidecar row (`entry_sha256`,
+  `created_config`, `created_agents_dir`, `created_exclude`, and optional
+  `created_mcp_servers` / `exclude_separator_added`). Installing into an existing
+  file rewrites `.agents/mcp_config.json` as 2-space pretty JSON (no-op reruns and
+  exact-match adoptions leave the file untouched). It refuses invalid JSON,
+  non-object `mcpServers`, symlinks, non-regular files, differing unmanaged
+  `oms-panel` entries, and Git-tracked `.agents/mcp_config.json` files, and adds
+  `/.agents/mcp_config.json` to `<common-git-dir>/info/exclude` when untracked and
+  not ignored. When OMS created the file, uninstall unlinks it (plus `.agents` if OMS
+  created it and it is empty, and last-owner exclude lines); otherwise uninstall
+  removes only `oms-panel` (and `mcpServers` if OMS created that key and it is now
+  empty, preserving and reporting edited entries via `preservedFiles`) and writes
+  2-space pretty JSON, which is byte-exact whenever the prior file was already
+  2-space pretty JSON. Install does not read `~/.gemini` or report trust fields;
+  interactive `agy` can ask "Trust this folder?", and the panel loads only in
+  sessions where `agy` loads that workspace's `.agents` customizations.
 
 
 ## Additional CLIs and adapters

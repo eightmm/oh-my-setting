@@ -7149,10 +7149,9 @@ fn project_panels_codex_lifecycle_parity() {
     assert!(!pose_codex_cfg.exists() && !pose_codex_dir.exists() && !panels_sidecar.exists());
     assert_eq!(std::fs::read(&pose_exclude).unwrap(), pose_exclude_before);
 
-    // 12. Antigravity project panels (`.agents/mcp_config.json` + `~/.gemini/trustedFolders.json`),
-    //     reusing the temporary HOME, git-only PATH (no `agy` binary), and checkout fixtures.
+    // 12. Antigravity project panels (`.agents/mcp_config.json`), reusing the temporary HOME,
+    //     git-only PATH (no `agy` binary), and checkout fixtures without touching `~/.gemini`.
     let gemini_dir = home_dir.join(".gemini");
-    let trusted_folders = gemini_dir.join("trustedFolders.json");
     let pose_agents_dir = pose_canon.join(".agents");
     let pose_agy_cfg = pose_agents_dir.join("mcp_config.json");
 
@@ -7184,9 +7183,11 @@ fn project_panels_codex_lifecycle_parity() {
         sorted.insert("env".into(), Value::Object(sorted_env));
         oms_panel_core::digest(&serde_json::to_vec(&Value::Object(sorted)).unwrap())
     };
+    let map_keys = |val: &Value| -> Vec<String> {
+        val.as_object().unwrap().keys().cloned().collect::<Vec<_>>()
+    };
 
-    // 12(a): Dry-run and fresh install when `~/.gemini/trustedFolders.json` is missing
-    //        (`reason: "antigravity-trust-unknown"`, without creating `~/.gemini`).
+    // 12(a): Dry-run and fresh install report like Claude (no trust fields, never touching `~/.gemini`).
     let (code, agy_dry_txt, stderr) = run_panel(
         base,
         &[
@@ -7200,11 +7201,37 @@ fn project_panels_codex_lifecycle_parity() {
         &[],
     );
     assert_eq!(code, 0, "{stderr}");
-    assert!(
-        agy_dry_txt.contains("would install antigravity panel oms-panel for PoseFixer")
-            && agy_dry_txt.contains("antigravity-trust-unknown")
-            && agy_dry_txt.contains("\nhint: "),
-        "{agy_dry_txt}"
+    assert_eq!(
+        agy_dry_txt,
+        format!(
+            "would install antigravity panel oms-panel for PoseFixer: {}\n",
+            pose_canon.display()
+        )
+    );
+    let (code, agy_dry_json_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "antigravity",
+            "--project",
+            "PoseFixer",
+            "--dry-run",
+            "--json",
+        ],
+        false,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&agy_dry_json_raw).unwrap(),
+        json!({
+            "app": "antigravity",
+            "alias": "PoseFixer",
+            "path": pose_canon,
+            "entry": "oms-panel",
+            "action": "install",
+            "changed": false,
+        })
     );
     assert!(!pose_agents_dir.exists() && !panels_sidecar.exists() && !gemini_dir.exists());
 
@@ -7221,20 +7248,18 @@ fn project_panels_codex_lifecycle_parity() {
         &[],
     );
     assert_eq!(code, 0, "{stderr}");
-    assert!(!gemini_dir.exists(), "install must never create ~/.gemini");
+    assert!(!gemini_dir.exists(), "install must never touch ~/.gemini");
     let agy_inst_json: Value = serde_json::from_str(&agy_inst_raw).unwrap();
-    assert_eq!(agy_inst_json["app"], "antigravity");
-    assert_eq!(agy_inst_json["alias"], "PoseFixer");
-    assert_eq!(agy_inst_json["path"], json!(pose_canon));
-    assert_eq!(agy_inst_json["entry"], "oms-panel");
-    assert_eq!(agy_inst_json["action"], "install");
-    assert_eq!(agy_inst_json["changed"], true);
-    assert_eq!(agy_inst_json["active"], false);
-    assert_eq!(agy_inst_json["reason"], "antigravity-trust-unknown");
-    assert!(
-        agy_inst_json["hint"]
-            .as_str()
-            .is_some_and(|h| !h.is_empty() && !h.contains('\n'))
+    assert_eq!(
+        agy_inst_json,
+        json!({
+            "app": "antigravity",
+            "alias": "PoseFixer",
+            "path": pose_canon,
+            "entry": "oms-panel",
+            "action": "install",
+            "changed": true,
+        })
     );
 
     let agy_dir_meta = std::fs::symlink_metadata(&pose_agents_dir).unwrap();
@@ -7282,16 +7307,9 @@ fn project_panels_codex_lifecycle_parity() {
     assert_eq!(std::fs::read(&pose_exclude).unwrap(), expected_agy_exclude);
     assert_eq!(git_ok(&pose_canon, &["status", "--porcelain"]), "");
 
-    // 12(b): Rerun no-op + trust transitions (`antigravity-project-untrusted`, `TRUST_FOLDER`,
-    //        ancestor `TRUST_FOLDER`, `TRUST_PARENT`, `DO_NOT_TRUST`, and `antigravity-trust-unknown`
-    //        on symlink / non-regular / invalid JSON / unreadable).
+    // 12(b): Rerun no-op leaves inodes untouched and reports no trust fields.
     let agy_cfg_ino_before = agy_cfg_meta.ino();
     let agy_sidecar_ino_before = agy_sidecar_meta.ino();
-
-    ensure_private_dir(&gemini_dir);
-    write_private_file(&trusted_folders, b"{}\n");
-    let mut trusted_ino = std::fs::symlink_metadata(&trusted_folders).unwrap().ino();
-    let mut expected_trusted_bytes = std::fs::read(&trusted_folders).unwrap();
 
     let (code, agy_noop_plain, stderr) = run_panel(
         base,
@@ -7300,11 +7318,12 @@ fn project_panels_codex_lifecycle_parity() {
         &[],
     );
     assert_eq!(code, 0, "{stderr}");
-    assert!(
-        agy_noop_plain.contains("already installed antigravity panel oms-panel for PoseFixer")
-            && agy_noop_plain.contains("antigravity-project-untrusted")
-            && agy_noop_plain.contains("\nhint: Trust "),
-        "{agy_noop_plain}"
+    assert_eq!(
+        agy_noop_plain,
+        format!(
+            "already installed antigravity panel oms-panel for PoseFixer: {}\n",
+            pose_canon.display()
+        )
     );
     let (code, agy_noop_raw, stderr) = run_panel(
         base,
@@ -7319,10 +7338,17 @@ fn project_panels_codex_lifecycle_parity() {
         &[],
     );
     assert_eq!(code, 0, "{stderr}");
-    let agy_noop_json: Value = serde_json::from_str(&agy_noop_raw).unwrap();
-    assert_eq!(agy_noop_json["changed"], false);
-    assert_eq!(agy_noop_json["active"], false);
-    assert_eq!(agy_noop_json["reason"], "antigravity-project-untrusted");
+    assert_eq!(
+        serde_json::from_str::<Value>(&agy_noop_raw).unwrap(),
+        json!({
+            "app": "antigravity",
+            "alias": "PoseFixer",
+            "path": pose_canon,
+            "entry": "oms-panel",
+            "action": "install",
+            "changed": false,
+        })
+    );
     assert_eq!(
         std::fs::symlink_metadata(&pose_agy_cfg).unwrap().ino(),
         agy_cfg_ino_before
@@ -7331,225 +7357,6 @@ fn project_panels_codex_lifecycle_parity() {
         std::fs::symlink_metadata(&panels_sidecar).unwrap().ino(),
         agy_sidecar_ino_before
     );
-    assert_eq!(
-        std::fs::symlink_metadata(&trusted_folders).unwrap().ino(),
-        trusted_ino
-    );
-    assert_eq!(
-        std::fs::read(&trusted_folders).unwrap(),
-        expected_trusted_bytes
-    );
-
-    // Exact TRUST_FOLDER, ancestor TRUST_FOLDER, and sibling TRUST_PARENT all report `active: true`.
-    let checkouts_parent = pose_canon.parent().unwrap();
-    let sibling_under_parent = checkouts_parent.join("other-sibling");
-    for trust_payload in [
-        json!({ pose_canon.to_str().unwrap(): "TRUST_FOLDER" }),
-        json!({ checkouts_parent.to_str().unwrap(): "TRUST_FOLDER" }),
-        json!({ sibling_under_parent.to_str().unwrap(): "TRUST_PARENT" }),
-    ] {
-        let bytes = serde_json::to_vec_pretty(&trust_payload).unwrap();
-        write_private_file(&trusted_folders, &bytes);
-        trusted_ino = std::fs::symlink_metadata(&trusted_folders).unwrap().ino();
-        expected_trusted_bytes = bytes;
-        let (code, raw, err) = run_panel(
-            base,
-            &[
-                "--install-panel",
-                "antigravity",
-                "--project",
-                "PoseFixer",
-                "--json",
-            ],
-            false,
-            &[],
-        );
-        assert_eq!(code, 0, "{err}");
-        let v: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(
-            v,
-            json!({
-                "app": "antigravity",
-                "alias": "PoseFixer",
-                "path": pose_canon,
-                "entry": "oms-panel",
-                "action": "install",
-                "changed": false,
-                "active": true,
-            }),
-            "payload={trust_payload}"
-        );
-        assert_eq!(
-            std::fs::symlink_metadata(&trusted_folders).unwrap().ino(),
-            trusted_ino
-        );
-        assert_eq!(
-            std::fs::read(&trusted_folders).unwrap(),
-            expected_trusted_bytes
-        );
-    }
-
-    // Explicit DO_NOT_TRUST on checkout overrides trusted ancestor.
-    let dnt_payload = serde_json::to_vec_pretty(&json!({
-        checkouts_parent.to_str().unwrap(): "TRUST_FOLDER",
-        pose_canon.to_str().unwrap(): "DO_NOT_TRUST",
-    }))
-    .unwrap();
-    write_private_file(&trusted_folders, &dnt_payload);
-    let (code, dnt_raw, err) = run_panel(
-        base,
-        &[
-            "--install-panel",
-            "antigravity",
-            "--project",
-            "PoseFixer",
-            "--dry-run",
-            "--json",
-        ],
-        false,
-        &[],
-    );
-    assert_eq!(code, 0, "{err}");
-    let dnt_val: Value = serde_json::from_str(&dnt_raw).unwrap();
-    assert_eq!(dnt_val["active"], false);
-    assert_eq!(dnt_val["reason"], "antigravity-project-untrusted");
-
-    // Symlinked `trustedFolders.json`, symlinked `.gemini`, directory `trustedFolders.json`,
-    // invalid JSON, and unreadable `0000` all report `antigravity-trust-unknown` without failing.
-    let outside_trusted_json = base.join("outside-trustedFolders.json");
-    write_private_file(
-        &outside_trusted_json,
-        serde_json::to_vec(&json!({ pose_canon.to_str().unwrap(): "TRUST_FOLDER" }))
-            .unwrap()
-            .as_slice(),
-    );
-    std::fs::remove_file(&trusted_folders).unwrap();
-    std::os::unix::fs::symlink(&outside_trusted_json, &trusted_folders).unwrap();
-    let (code, sym_tf_raw, err) = run_panel(
-        base,
-        &[
-            "--install-panel",
-            "antigravity",
-            "--project",
-            "PoseFixer",
-            "--json",
-        ],
-        false,
-        &[],
-    );
-    assert_eq!(code, 0, "{err}");
-    let sym_tf_val: Value = serde_json::from_str(&sym_tf_raw).unwrap();
-    assert_eq!(sym_tf_val["active"], false);
-    assert_eq!(sym_tf_val["reason"], "antigravity-trust-unknown");
-    assert!(
-        sym_tf_val["hint"]
-            .as_str()
-            .is_some_and(|h| h.contains("symlink"))
-    );
-    std::fs::remove_file(&trusted_folders).unwrap();
-
-    ensure_private_dir(&trusted_folders);
-    let (code, dir_tf_raw, err) = run_panel(
-        base,
-        &[
-            "--install-panel",
-            "antigravity",
-            "--project",
-            "PoseFixer",
-            "--json",
-        ],
-        false,
-        &[],
-    );
-    assert_eq!(code, 0, "{err}");
-    assert_eq!(
-        serde_json::from_str::<Value>(&dir_tf_raw).unwrap()["reason"],
-        "antigravity-trust-unknown"
-    );
-    std::fs::remove_dir(&trusted_folders).unwrap();
-
-    write_private_file(&trusted_folders, b"{broken json\n");
-    let (code, bad_tf_raw, err) = run_panel(
-        base,
-        &[
-            "--install-panel",
-            "antigravity",
-            "--project",
-            "PoseFixer",
-            "--json",
-        ],
-        false,
-        &[],
-    );
-    assert_eq!(code, 0, "{err}");
-    assert_eq!(
-        serde_json::from_str::<Value>(&bad_tf_raw).unwrap()["reason"],
-        "antigravity-trust-unknown"
-    );
-
-    if std::fs::metadata(base).unwrap().uid() != 0 {
-        std::fs::set_permissions(&trusted_folders, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let (code, unread_tf_raw, err) = run_panel(
-            base,
-            &[
-                "--install-panel",
-                "antigravity",
-                "--project",
-                "PoseFixer",
-                "--json",
-            ],
-            false,
-            &[],
-        );
-        std::fs::set_permissions(&trusted_folders, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(code, 0, "{err}");
-        assert_eq!(
-            serde_json::from_str::<Value>(&unread_tf_raw).unwrap()["reason"],
-            "antigravity-trust-unknown"
-        );
-    }
-
-    let outside_gemini_dir = base.join("outside-gemini-dir");
-    ensure_private_dir(&outside_gemini_dir);
-    write_private_file(
-        &outside_gemini_dir.join("trustedFolders.json"),
-        serde_json::to_vec(&json!({ pose_canon.to_str().unwrap(): "TRUST_FOLDER" }))
-            .unwrap()
-            .as_slice(),
-    );
-    std::fs::remove_file(&trusted_folders).unwrap();
-    std::fs::remove_dir(&gemini_dir).unwrap();
-    std::os::unix::fs::symlink(&outside_gemini_dir, &gemini_dir).unwrap();
-    let (code, sym_gem_raw, err) = run_panel(
-        base,
-        &[
-            "--install-panel",
-            "antigravity",
-            "--project",
-            "PoseFixer",
-            "--json",
-        ],
-        false,
-        &[],
-    );
-    assert_eq!(code, 0, "{err}");
-    let sym_gem_val: Value = serde_json::from_str(&sym_gem_raw).unwrap();
-    assert_eq!(sym_gem_val["active"], false);
-    assert_eq!(sym_gem_val["reason"], "antigravity-trust-unknown");
-    assert!(
-        sym_gem_val["hint"]
-            .as_str()
-            .is_some_and(|h| h.contains("symlink"))
-    );
-    std::fs::remove_file(&gemini_dir).unwrap();
-
-    // Restore owned `~/.gemini/trustedFolders.json` trusting `pose_canon`.
-    ensure_private_dir(&gemini_dir);
-    expected_trusted_bytes =
-        serde_json::to_vec_pretty(&json!({ pose_canon.to_str().unwrap(): "TRUST_FOLDER" }))
-            .unwrap();
-    write_private_file(&trusted_folders, &expected_trusted_bytes);
-    trusted_ino = std::fs::symlink_metadata(&trusted_folders).unwrap().ino();
 
     // `--unregister-project` is refused while the Antigravity panel remains installed.
     let (code, _, stderr) = run_panel(base, &["--unregister-project", "PoseFixer"], false, &[]);
@@ -7589,13 +7396,14 @@ fn project_panels_codex_lifecycle_parity() {
     assert!(!panels_sidecar.exists());
     assert_eq!(std::fs::read(&pose_exclude).unwrap(), pose_exclude_before);
 
-    // 12(c): Existing `.agents/mcp_config.json` with other servers/keys and custom formatting
-    //        (4-space CRLF, inline array, non-alphabetical key order, mode 0640, no trailing newline)
-    //        + unterminated `.git/info/exclude`:
+    // 12(c): Existing `.agents/mcp_config.json` with other servers/keys, custom formatting, mode 0640,
+    //        and unterminated `.git/info/exclude`:
     //        - install rewrites `.agents/mcp_config.json` with 2-space pretty JSON preserving all
     //          other keys/servers, key order, and mode 0640;
-    //        - version refresh rewrites `oms-panel` while preserving formatting recovery;
-    //        - uninstall restores EXACT original bytes of both `.agents/mcp_config.json` and `.git/info/exclude`.
+    //        - uninstall removes only `oms-panel` and writes 2-space pretty JSON (byte-exact whenever
+    //          the prior file was already 2-space pretty JSON) while restoring `info/exclude` bytes;
+    //        - when OMS created `mcpServers` in a pre-existing file and `oms-panel` is already gone at
+    //          uninstall, uninstall removes the empty `mcpServers` key instead of leaving `{}` behind.
     let alpha_agents_dir = alpha_canon.join(".agents");
     let alpha_agy_cfg = alpha_agents_dir.join("mcp_config.json");
     std::fs::DirBuilder::new()
@@ -7604,7 +7412,7 @@ fn project_panels_codex_lifecycle_parity() {
         .unwrap();
     std::fs::set_permissions(&alpha_agents_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let custom_agy_user_bytes = b"{\r\n    \"zetaTop\": true,\r\n    \"mcpServers\": {\r\n        \"sqlite-helper\": { \"command\": \"/usr/local/bin/sqlite-mcp\", \"args\": [\"--serve\", \"/tmp/db\"] },\r\n        \"alpha-remote\": { \"url\": \"https://mcp.example.invalid/mcp\" }\r\n    }\r\n}";
+    let custom_agy_user_bytes = b"{\r\n    \"zetaTop\": true,\r\n    \"mcpServers\": {\r\n        \"sqlite-helper\": { \"command\": \"/usr/local/bin/sqlite-mcp\", \"args\": [\"--serve\", \"/tmp/db\"] },\r\n        \"alpha-remote\": { \"url\": \"https://mcp.example.invalid/mcp\" }\r\n    },\r\n    \"alphaTail\": 7\r\n}";
     let unterm_agy_exclude = b"# Unterminated exclude\n*.local-agy";
     std::fs::write(&alpha_agy_cfg, custom_agy_user_bytes).unwrap();
     std::fs::set_permissions(&alpha_agy_cfg, std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -7623,15 +7431,31 @@ fn project_panels_codex_lifecycle_parity() {
         &[],
     );
     assert_eq!(code, 0, "{stderr}");
-    let alpha_agy_json: Value = serde_json::from_str(&alpha_agy_raw).unwrap();
-    assert_eq!(alpha_agy_json["changed"], true);
-    assert_eq!(alpha_agy_json["active"], false);
-    assert_eq!(alpha_agy_json["reason"], "antigravity-project-untrusted");
+    assert_eq!(
+        serde_json::from_str::<Value>(&alpha_agy_raw).unwrap(),
+        json!({
+            "app": "antigravity",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-panel",
+            "action": "install",
+            "changed": true,
+        })
+    );
 
     let on_disk_after_install = std::fs::read_to_string(&alpha_agy_cfg).unwrap();
     let expected_alpha_entry = render_expected_agy_entry(&alpha_canon, expected_res_ver);
     let parsed_after_install: Value = serde_json::from_str(&on_disk_after_install).unwrap();
+    assert_eq!(
+        map_keys(&parsed_after_install),
+        vec!["zetaTop", "mcpServers", "alphaTail"]
+    );
+    assert_eq!(
+        map_keys(&parsed_after_install["mcpServers"]),
+        vec!["sqlite-helper", "alpha-remote", "oms-panel"]
+    );
     assert_eq!(parsed_after_install["zetaTop"], true);
+    assert_eq!(parsed_after_install["alphaTail"], 7);
     assert_eq!(
         parsed_after_install["mcpServers"]["sqlite-helper"]["args"],
         json!(["--serve", "/tmp/db"])
@@ -7656,49 +7480,17 @@ fn project_panels_codex_lifecycle_parity() {
         std::fs::symlink_metadata(&alpha_agy_cfg).unwrap().mode() & 0o7777,
         0o640
     );
-
-    // Simulate an out-of-date `OMS_MCP_PANEL_RESOURCE_VERSION` on disk and verify reinstall
-    // refreshes `oms-panel` while keeping exact-byte restoration on subsequent uninstall.
-    let older_alpha_entry = render_expected_agy_entry(&alpha_canon, "v0-older");
-    let older_alpha_entry_sha = canonical_entry_sha(&older_alpha_entry);
-    let mut older_doc = parsed_after_install.clone();
-    older_doc["mcpServers"]["oms-panel"] = older_alpha_entry;
-    std::fs::write(
-        &alpha_agy_cfg,
-        format!("{}\n", serde_json::to_string_pretty(&older_doc).unwrap()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&alpha_agy_cfg, std::fs::Permissions::from_mode(0o640)).unwrap();
-    let mut sidecar_for_refresh: Value =
+    let sidecar_after_custom: Value =
         serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
-    sidecar_for_refresh["alpha-service"][0]["entry_sha256"] = json!(older_alpha_entry_sha);
-    write_private_file(
-        &panels_sidecar,
-        serde_json::to_string_pretty(&sidecar_for_refresh)
-            .unwrap()
-            .as_bytes(),
+    assert!(
+        sidecar_after_custom["alpha-service"][0]
+            .get("prior_ws")
+            .is_none()
     );
-
-    let (code, refreshed_raw, stderr) = run_panel(
-        base,
-        &[
-            "--install-panel",
-            "antigravity",
-            "--project",
-            "alpha-service",
-            "--json",
-        ],
-        false,
-        &[],
-    );
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(
-        serde_json::from_str::<Value>(&refreshed_raw).unwrap()["changed"],
-        true
-    );
-    assert_eq!(
-        std::fs::read_to_string(&alpha_agy_cfg).unwrap(),
-        on_disk_after_install
+    assert!(
+        sidecar_after_custom["alpha-service"][0]
+            .get("prior_sha256")
+            .is_none()
     );
 
     assert_eq!(
@@ -7716,10 +7508,26 @@ fn project_panels_codex_lifecycle_parity() {
         .0,
         0
     );
+    let expected_pretty_after_uninstall = format!(
+        "{}\n",
+        serde_json::to_string_pretty(
+            &serde_json::from_slice::<Value>(custom_agy_user_bytes).unwrap()
+        )
+        .unwrap()
+    );
     assert_eq!(
-        std::fs::read(&alpha_agy_cfg).unwrap(),
-        custom_agy_user_bytes,
-        "uninstall must restore exact original bytes when OMS's only change was adding/updating oms-panel"
+        std::fs::read_to_string(&alpha_agy_cfg).unwrap(),
+        expected_pretty_after_uninstall
+    );
+    let parsed_after_uninstall: Value =
+        serde_json::from_slice(&std::fs::read(&alpha_agy_cfg).unwrap()).unwrap();
+    assert_eq!(
+        map_keys(&parsed_after_uninstall),
+        vec!["zetaTop", "mcpServers", "alphaTail"]
+    );
+    assert_eq!(
+        map_keys(&parsed_after_uninstall["mcpServers"]),
+        vec!["sqlite-helper", "alpha-remote"]
     );
     assert_eq!(
         std::fs::symlink_metadata(&alpha_agy_cfg).unwrap().mode() & 0o7777,
@@ -7734,8 +7542,10 @@ fn project_panels_codex_lifecycle_parity() {
     assert!(!panels_sidecar.exists());
     std::fs::write(&alpha_exclude, &alpha_exclude_before).unwrap();
 
-    // When the user ALSO adds another server after OMS install, uninstall removes only `oms-panel`
-    // and preserves all other content in 2-space pretty JSON.
+    // When the prior file is already 2-space pretty JSON (including without `mcpServers`),
+    // uninstall removes `oms-panel` and the OMS-created `mcpServers` key and is byte-exact.
+    let prior_pretty_no_mcp = b"{\n  \"zetaTop\": true,\n  \"alphaTail\": 2\n}\n";
+    std::fs::write(&alpha_agy_cfg, prior_pretty_no_mcp).unwrap();
     assert_eq!(
         run_panel(
             base,
@@ -7751,77 +7561,67 @@ fn project_panels_codex_lifecycle_parity() {
         .0,
         0
     );
-    let mut with_third_server: Value =
-        serde_json::from_slice(&std::fs::read(&alpha_agy_cfg).unwrap()).unwrap();
-    with_third_server["mcpServers"]["added-later"] = json!({"command": "/usr/local/bin/later"});
+    assert_eq!(
+        run_panel(
+            base,
+            &[
+                "--uninstall-panel",
+                "antigravity",
+                "--project",
+                "alpha-service",
+            ],
+            false,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert_eq!(std::fs::read(&alpha_agy_cfg).unwrap(), prior_pretty_no_mcp);
+
+    // When OMS created `mcpServers` inside a pre-existing file and `oms-panel` is already gone at
+    // uninstall, uninstall removes the empty `mcpServers` key (preserving top-level key order via
+    // `shift_remove`) instead of returning AlreadyGone with `{}` left behind.
+    assert_eq!(
+        run_panel(
+            base,
+            &[
+                "--install-panel",
+                "antigravity",
+                "--project",
+                "alpha-service"
+            ],
+            false,
+            &[],
+        )
+        .0,
+        0
+    );
     std::fs::write(
         &alpha_agy_cfg,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&with_third_server).unwrap()
-        ),
+        b"{\n  \"zetaTop\": true,\n  \"mcpServers\": {},\n  \"betaMid\": 5,\n  \"alphaTail\": 2\n}\n",
     )
     .unwrap();
-    assert_eq!(
-        run_panel(
-            base,
-            &[
-                "--uninstall-panel",
-                "antigravity",
-                "--project",
-                "alpha-service",
-            ],
-            false,
-            &[],
-        )
-        .0,
-        0
+    let (code, un_empty_mcp_txt, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "antigravity",
+            "--project",
+            "alpha-service",
+        ],
+        false,
+        &[],
     );
-    let after_user_add: Value =
-        serde_json::from_slice(&std::fs::read(&alpha_agy_cfg).unwrap()).unwrap();
-    assert!(after_user_add["mcpServers"].get("oms-panel").is_none());
-    assert_eq!(
-        after_user_add["mcpServers"]["added-later"]["command"],
-        "/usr/local/bin/later"
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        un_empty_mcp_txt.contains("uninstalled antigravity panel oms-panel for alpha-service"),
+        "{un_empty_mcp_txt}"
     );
     assert_eq!(
-        after_user_add["mcpServers"]["sqlite-helper"]["command"],
-        "/usr/local/bin/sqlite-mcp"
+        std::fs::read_to_string(&alpha_agy_cfg).unwrap(),
+        "{\n  \"zetaTop\": true,\n  \"betaMid\": 5,\n  \"alphaTail\": 2\n}\n"
     );
-
-    // Pre-existing `{}` (no `mcpServers` key) restores exact `{}` on uninstall.
-    std::fs::write(&alpha_agy_cfg, b"{}").unwrap();
-    assert_eq!(
-        run_panel(
-            base,
-            &[
-                "--install-panel",
-                "antigravity",
-                "--project",
-                "alpha-service"
-            ],
-            false,
-            &[],
-        )
-        .0,
-        0
-    );
-    assert_eq!(
-        run_panel(
-            base,
-            &[
-                "--uninstall-panel",
-                "antigravity",
-                "--project",
-                "alpha-service",
-            ],
-            false,
-            &[],
-        )
-        .0,
-        0
-    );
-    assert_eq!(std::fs::read(&alpha_agy_cfg).unwrap(), b"{}");
+    assert!(!panels_sidecar.exists());
 
     // 12(d): Refusal on invalid JSON, non-object root, non-object `mcpServers`, unmanaged differing
     //        `oms-panel`, non-regular file, symlinks, and Git-tracked `.agents/mcp_config.json`.
@@ -7976,17 +7776,19 @@ fn project_panels_codex_lifecycle_parity() {
     git_ok(&alpha_canon, &["commit", "-m", "untrack agy mcp_config"]);
     let _ = std::fs::remove_dir(&alpha_agents_dir);
 
-    // 12(e): Exact-match adoption (without rewriting compact JSON!), edited entry refusal on
-    //        reinstall and preservation (`preservedFiles`) on uninstall, near-full sidecar rollback,
-    //        two-worktree last-owner cleanup, and deleted-checkout forget.
+    // 12(e): Adopting an exact unmanaged `oms-panel` entry in the middle (`a`, `oms-panel`, `b`, `c`)
+    //        leaves compact JSON untouched, keeps the order of `a`, `oms-panel`, `b`, `c` after refresh,
+    //        and keeps the order of `a`, `b`, `c` after uninstall (`shift_remove`); plus edited entry
+    //        refusal/preservation, near-full sidecar rollback, two-worktree handover, and forget.
     ensure_private_dir(&alpha_agents_dir);
-    let compact_exact_bytes = serde_json::to_vec(&json!({
-        "mcpServers": {
-            "oms-panel": expected_alpha_entry,
-            "other": { "command": "/bin/other" }
-        }
-    }))
-    .unwrap();
+    let mut middle_servers = serde_json::Map::new();
+    middle_servers.insert("a".into(), json!({ "command": "/bin/a" }));
+    middle_servers.insert("oms-panel".into(), expected_alpha_entry.clone());
+    middle_servers.insert("b".into(), json!({ "command": "/bin/b" }));
+    middle_servers.insert("c".into(), json!({ "command": "/bin/c" }));
+    let mut middle_root = serde_json::Map::new();
+    middle_root.insert("mcpServers".into(), Value::Object(middle_servers));
+    let compact_exact_bytes = serde_json::to_vec(&Value::Object(middle_root)).unwrap();
     write_private_file(&alpha_agy_cfg, &compact_exact_bytes);
     let (code, adopt_agy_raw, stderr) = run_panel(
         base,
@@ -8001,16 +7803,121 @@ fn project_panels_codex_lifecycle_parity() {
         &[],
     );
     assert_eq!(code, 0, "{stderr}");
-    let adopt_agy_json: Value = serde_json::from_str(&adopt_agy_raw).unwrap();
-    assert_eq!(adopt_agy_json["action"], "adopted");
-    assert_eq!(adopt_agy_json["changed"], true);
+    assert_eq!(
+        serde_json::from_str::<Value>(&adopt_agy_raw).unwrap(),
+        json!({
+            "app": "antigravity",
+            "alias": "alpha-service",
+            "path": alpha_canon,
+            "entry": "oms-panel",
+            "action": "adopted",
+            "changed": true,
+        })
+    );
     assert_eq!(
         std::fs::read(&alpha_agy_cfg).unwrap(),
         compact_exact_bytes,
         "adopting an exact match must not rewrite .agents/mcp_config.json"
     );
 
+    // Simulate an out-of-date `OMS_MCP_PANEL_RESOURCE_VERSION` on the middle `oms-panel` entry:
+    // reinstall refreshes `oms-panel` in place while keeping `a`, `oms-panel`, `b`, `c` order,
+    // and uninstall removes `oms-panel` via `shift_remove` keeping `a`, `b`, `c` order.
+    let older_alpha_entry = render_expected_agy_entry(&alpha_canon, "v0-older");
+    let older_alpha_entry_sha = canonical_entry_sha(&older_alpha_entry);
+    let mut older_middle_doc: Value = serde_json::from_slice(&compact_exact_bytes).unwrap();
+    older_middle_doc["mcpServers"]["oms-panel"] = older_alpha_entry;
+    assert_eq!(
+        map_keys(&older_middle_doc["mcpServers"]),
+        vec!["a", "oms-panel", "b", "c"]
+    );
+    write_private_file(
+        &alpha_agy_cfg,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&older_middle_doc).unwrap()
+        )
+        .as_bytes(),
+    );
+    let mut sidecar_for_refresh: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    sidecar_for_refresh["alpha-service"][0]["entry_sha256"] = json!(older_alpha_entry_sha);
+    write_private_file(
+        &panels_sidecar,
+        serde_json::to_string_pretty(&sidecar_for_refresh)
+            .unwrap()
+            .as_bytes(),
+    );
+
+    let (code, refreshed_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "antigravity",
+            "--project",
+            "alpha-service",
+            "--json",
+        ],
+        false,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&refreshed_raw).unwrap()["changed"],
+        true
+    );
+    let after_refresh_doc: Value =
+        serde_json::from_slice(&std::fs::read(&alpha_agy_cfg).unwrap()).unwrap();
+    assert_eq!(
+        map_keys(&after_refresh_doc["mcpServers"]),
+        vec!["a", "oms-panel", "b", "c"]
+    );
+    assert_eq!(
+        after_refresh_doc["mcpServers"]["oms-panel"],
+        expected_alpha_entry
+    );
+
+    assert_eq!(
+        run_panel(
+            base,
+            &[
+                "--uninstall-panel",
+                "antigravity",
+                "--project",
+                "alpha-service",
+            ],
+            false,
+            &[],
+        )
+        .0,
+        0
+    );
+    let after_middle_uninstall: Value =
+        serde_json::from_slice(&std::fs::read(&alpha_agy_cfg).unwrap()).unwrap();
+    assert_eq!(
+        map_keys(&after_middle_uninstall["mcpServers"]),
+        vec!["a", "b", "c"]
+    );
+    assert!(!panels_sidecar.exists());
+    std::fs::write(&alpha_exclude, &alpha_exclude_before).unwrap();
+
     // Edit `oms-panel` outside OMS: reinstall refuses untouched, and uninstall preserves + reports.
+    write_private_file(&alpha_agy_cfg, &compact_exact_bytes);
+    assert_eq!(
+        run_panel(
+            base,
+            &[
+                "--install-panel",
+                "antigravity",
+                "--project",
+                "alpha-service",
+            ],
+            false,
+            &[],
+        )
+        .0,
+        0
+    );
     let mut edited_agy_doc: Value = serde_json::from_slice(&compact_exact_bytes).unwrap();
     edited_agy_doc["mcpServers"]["oms-panel"]["env"]["CUSTOM_EDIT"] = json!("1");
     let edited_agy_bytes = serde_json::to_vec_pretty(&edited_agy_doc).unwrap();
@@ -8178,15 +8085,7 @@ fn project_panels_codex_lifecycle_parity() {
         run_panel(base, &["--unregister-project", "EphemeralAgy"], false, &[]).0,
         0
     );
-
-    assert_eq!(
-        std::fs::symlink_metadata(&trusted_folders).unwrap().ino(),
-        trusted_ino
-    );
-    assert_eq!(
-        std::fs::read(&trusted_folders).unwrap(),
-        expected_trusted_bytes
-    );
+    assert!(!gemini_dir.exists(), "OMS must never touch ~/.gemini");
 
     // 13. Verify temp HOME/.claude.json, HOME/.codex/config.toml, and CODEX_HOME/config.toml
     //     remained completely untouched by OMS.

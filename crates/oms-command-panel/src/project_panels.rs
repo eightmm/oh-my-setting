@@ -32,8 +32,6 @@ const CODEX_BLOCK_BEGIN: &str = "# BEGIN oh-my-setting codex-panel";
 const CODEX_BLOCK_END: &str = "# END oh-my-setting codex-panel";
 const CODEX_UNTRUSTED_REASON: &str = "codex-project-untrusted";
 const CODEX_TRUST_UNKNOWN_REASON: &str = "codex-trust-unknown";
-const ANTIGRAVITY_UNTRUSTED_REASON: &str = "antigravity-project-untrusted";
-const ANTIGRAVITY_TRUST_UNKNOWN_REASON: &str = "antigravity-trust-unknown";
 const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const VENDOR_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CAPTURE_BYTES: usize = 64 * 1024;
@@ -122,10 +120,6 @@ pub(super) struct PanelRecord {
     pub exclude_separator_added: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_mcp_servers: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prior_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prior_ws: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,11 +138,8 @@ struct AntigravityRowMeta {
     created_config: bool,
     created_agents_dir: bool,
     created_exclude: bool,
-    separator_added: bool,
     exclude_separator_added: bool,
     created_mcp_servers: bool,
-    prior_sha256: Option<String>,
-    prior_ws: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,62 +154,6 @@ fn valid_sha256_hex(raw: &str) -> bool {
         && raw
             .bytes()
             .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
-}
-
-fn decode_ws_runs(encoded: &str) -> Option<Vec<String>> {
-    if encoded.len() > MAX_BYTES {
-        return None;
-    }
-    let mut out = Vec::new();
-    let mut total_decoded = 0usize;
-    for part in encoded.split(',') {
-        let mut s = String::new();
-        let bytes = part.as_bytes();
-        let mut i = 0usize;
-        while i < bytes.len() {
-            let num_start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            let count = if i == num_start {
-                1usize
-            } else {
-                let digits = &part[num_start..i];
-                if digits.starts_with('0') {
-                    return None;
-                }
-                let n = digits.parse::<usize>().ok()?;
-                if !(2..=MAX_CONFIG_BYTES).contains(&n) {
-                    return None;
-                }
-                n
-            };
-            if i >= bytes.len() {
-                return None;
-            }
-            let ch = match bytes[i] {
-                b's' => ' ',
-                b'n' => '\n',
-                b'r' => '\r',
-                b't' => '\t',
-                _ => return None,
-            };
-            i += 1;
-            total_decoded = total_decoded.checked_add(count)?;
-            if total_decoded > MAX_CONFIG_BYTES {
-                return None;
-            }
-            for _ in 0..count {
-                s.push(ch);
-            }
-        }
-        out.push(s);
-    }
-    (out.len() >= 2).then_some(out)
-}
-
-fn valid_prior_ws(raw: &str) -> bool {
-    !raw.is_empty() && decode_ws_runs(raw).is_some()
 }
 
 pub(super) type PanelMap = BTreeMap<String, Vec<PanelRecord>>;
@@ -298,8 +233,6 @@ fn validate_panel_map(panels: &PanelMap) -> Result<()> {
                         && row.separator_added.is_none()
                         && row.exclude_separator_added.is_none()
                         && row.created_mcp_servers.is_none()
-                        && row.prior_sha256.is_none()
-                        && row.prior_ws.is_none()
                 }
                 PanelApp::Codex => {
                     row.block_sha256.as_deref().is_some_and(valid_sha256_hex)
@@ -309,8 +242,6 @@ fn validate_panel_map(panels: &PanelMap) -> Result<()> {
                         && row.created_agents_dir.is_none()
                         && row.created_exclude.is_some()
                         && row.created_mcp_servers.is_none()
-                        && row.prior_sha256.is_none()
-                        && row.prior_ws.is_none()
                         && !(row.created_codex_dir == Some(true)
                             && row.created_config == Some(false))
                         && !(row.exclude_separator_added == Some(true)
@@ -324,20 +255,15 @@ fn validate_panel_map(panels: &PanelMap) -> Result<()> {
                         && row.created_agents_dir.is_some()
                         && row.created_codex_dir.is_none()
                         && row.created_exclude.is_some()
+                        && row.separator_added.is_none()
                         && !(row.created_agents_dir == Some(true)
                             && row.created_config == Some(false))
                         && !(row.exclude_separator_added == Some(true)
                             && row.created_exclude != Some(true))
                         && row.exclude_separator_added != Some(false)
-                        && row.separator_added != Some(false)
                         && row.created_mcp_servers != Some(false)
-                        && row.prior_sha256.as_deref().is_none_or(valid_sha256_hex)
-                        && row.prior_ws.as_deref().is_none_or(valid_prior_ws)
-                        && !(row.prior_sha256.is_some() && row.created_config != Some(false))
-                        && !(row.separator_added.is_some()
-                            && (row.created_config != Some(false) || row.prior_sha256.is_none()))
-                        && !(row.prior_ws.is_some()
-                            && (row.created_config != Some(false) || row.prior_sha256.is_none()))
+                        && !(row.created_mcp_servers == Some(true)
+                            && row.created_config == Some(true))
                         && seen_antigravity_paths.insert(row.path.clone())
                 }
             };
@@ -702,11 +628,6 @@ fn canonical_json_sha256(value: &serde_json::Value) -> Result<String> {
     Ok(oms_panel_core::digest(&bytes))
 }
 
-fn ordered_json_sha256(map: &serde_json::Map<String, serde_json::Value>) -> Result<String> {
-    let bytes = serde_json::to_vec(map).map_err(Error::new)?;
-    Ok(oms_panel_core::digest(&bytes))
-}
-
 fn parse_strict_json_object_bounded(
     raw: &[u8],
     label: &str,
@@ -734,159 +655,10 @@ fn parse_strict_json_object_bounded(
     }
 }
 
-fn encode_pretty_2space_json(
-    map: &serde_json::Map<String, serde_json::Value>,
-    omit_trailing_newline: bool,
-) -> Result<Vec<u8>> {
+fn encode_pretty_2space_json(map: &serde_json::Map<String, serde_json::Value>) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec_pretty(map).map_err(Error::new)?;
-    if !omit_trailing_newline {
-        bytes.push(b'\n');
-    }
+    bytes.push(b'\n');
     Ok(bytes)
-}
-
-fn split_json_tokens_and_ws(text: &str) -> Option<(Vec<&str>, Vec<&str>)> {
-    let bytes = text.as_bytes();
-    let mut tokens = Vec::new();
-    let mut ws = Vec::new();
-    let mut pos = 0usize;
-    loop {
-        let ws_start = pos;
-        while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t' | b'\r' | b'\n') {
-            pos += 1;
-        }
-        ws.push(&text[ws_start..pos]);
-        if pos >= bytes.len() {
-            break;
-        }
-        let tok_start = pos;
-        match bytes[pos] {
-            b'{' | b'}' | b'[' | b']' | b':' | b',' => {
-                pos += 1;
-            }
-            b'"' => {
-                pos += 1;
-                let mut escaped = false;
-                let mut closed = false;
-                while pos < bytes.len() {
-                    let b = bytes[pos];
-                    pos += 1;
-                    if escaped {
-                        escaped = false;
-                    } else if b == b'\\' {
-                        escaped = true;
-                    } else if b == b'"' {
-                        closed = true;
-                        break;
-                    }
-                }
-                if !closed {
-                    return None;
-                }
-            }
-            _ => {
-                while pos < bytes.len()
-                    && !matches!(
-                        bytes[pos],
-                        b' ' | b'\t'
-                            | b'\r'
-                            | b'\n'
-                            | b'{'
-                            | b'}'
-                            | b'['
-                            | b']'
-                            | b':'
-                            | b','
-                            | b'"'
-                    )
-                {
-                    pos += 1;
-                }
-            }
-        }
-        tokens.push(&text[tok_start..pos]);
-    }
-    (!tokens.is_empty()).then_some((tokens, ws))
-}
-
-fn encode_ws_runs(ws: &[&str]) -> Option<String> {
-    let mut out = String::new();
-    for (idx, segment) in ws.iter().enumerate() {
-        if idx > 0 {
-            out.push(',');
-        }
-        let bytes = segment.as_bytes();
-        let mut i = 0usize;
-        while i < bytes.len() {
-            let b = bytes[i];
-            let code = match b {
-                b' ' => 's',
-                b'\n' => 'n',
-                b'\r' => 'r',
-                b'\t' => 't',
-                _ => return None,
-            };
-            let start = i;
-            while i < bytes.len() && bytes[i] == b {
-                i += 1;
-            }
-            let count = i - start;
-            if count > 1 {
-                use std::fmt::Write;
-                let _ = write!(&mut out, "{count}");
-            }
-            out.push(code);
-        }
-    }
-    Some(out)
-}
-
-fn reassemble_json_with_ws(
-    map: &serde_json::Map<String, serde_json::Value>,
-    encoded_ws: &str,
-) -> Option<Vec<u8>> {
-    let compact = serde_json::to_string(map).ok()?;
-    let (tokens, _) = split_json_tokens_and_ws(&compact)?;
-    let ws = decode_ws_runs(encoded_ws)?;
-    if ws.len() != tokens.len() + 1 {
-        return None;
-    }
-    let total_len =
-        tokens.iter().map(|t| t.len()).sum::<usize>() + ws.iter().map(String::len).sum::<usize>();
-    if total_len > MAX_CONFIG_BYTES {
-        return None;
-    }
-    let mut out = String::with_capacity(total_len);
-    for (tok, w) in tokens.iter().zip(ws.iter()) {
-        out.push_str(w);
-        out.push_str(tok);
-    }
-    out.push_str(ws.last()?);
-    Some(out.into_bytes())
-}
-
-fn capture_prior_json_formatting(
-    prior_bytes: &[u8],
-    prior_map: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(bool, Option<String>, Option<String>)> {
-    let pretty_with_nl = encode_pretty_2space_json(prior_map, false)?;
-    if prior_bytes == pretty_with_nl.as_slice() {
-        return Ok((false, None, None));
-    }
-    let prior_sha = ordered_json_sha256(prior_map)?;
-    let pretty_no_nl = encode_pretty_2space_json(prior_map, true)?;
-    if prior_bytes == pretty_no_nl.as_slice() {
-        return Ok((true, Some(prior_sha), None));
-    }
-    if let Ok(prior_str) = std::str::from_utf8(prior_bytes)
-        && let Some((_, ws_runs)) = split_json_tokens_and_ws(prior_str)
-        && let Some(encoded) = encode_ws_runs(&ws_runs)
-        && valid_prior_ws(&encoded)
-        && reassemble_json_with_ws(prior_map, &encoded).as_deref() == Some(prior_bytes)
-    {
-        return Ok((false, Some(prior_sha), Some(encoded)));
-    }
-    Ok((false, None, None))
 }
 
 fn open_dir_nofollow(path: &Path, label: &str) -> Result<OwnedFd> {
@@ -1621,545 +1393,6 @@ fn attach_codex_trust_fields(report: &mut serde_json::Value, trust: &CodexTrustS
             report["reason"] = json!(CODEX_TRUST_UNKNOWN_REASON);
             report["hint"] = json!(hint);
         }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum AntigravityTrustStatus {
-    Trusted,
-    Untrusted,
-    Unknown { hint: String },
-}
-
-fn resolve_antigravity_trust_in_json(
-    raw: &[u8],
-    physical_repo: &Path,
-    config_label: &Path,
-) -> AntigravityTrustStatus {
-    if raw.len() > MAX_CONFIG_BYTES {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: {} exceeds 1 MiB.",
-                config_label.display()
-            )),
-        };
-    }
-    let opts = oms_json::ParseOptions {
-        allow_duplicate_keys: true,
-        max_bytes: MAX_CONFIG_BYTES,
-        max_depth: 128,
-        ..oms_json::ParseOptions::strict()
-    };
-    if oms_json::parse_with_options(raw, &opts).is_err() {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: {} is not valid JSON.",
-                config_label.display()
-            )),
-        };
-    }
-    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(raw) else {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: {} is not valid JSON.",
-                config_label.display()
-            )),
-        };
-    };
-    let Some(entries) = parsed.as_object() else {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: {} must be a JSON object.",
-                config_label.display()
-            )),
-        };
-    };
-
-    let mut max_trusted_depth: Option<usize> = None;
-    let mut max_untrusted_depth: Option<usize> = None;
-
-    for (key, value) in entries {
-        let Some(level) = value.as_str() else {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: {} has a non-string trust entry.",
-                    config_label.display()
-                )),
-            };
-        };
-        let rule_path = Path::new(key);
-        if !rule_path.is_absolute()
-            || rule_path
-                .components()
-                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-        {
-            continue;
-        }
-        match level {
-            "TRUST_FOLDER" if physical_repo.starts_with(rule_path) => {
-                let depth = rule_path.components().count();
-                max_trusted_depth = Some(max_trusted_depth.map_or(depth, |d| d.max(depth)));
-            }
-            "TRUST_PARENT" => {
-                let eff = rule_path.parent().unwrap_or(rule_path);
-                if physical_repo.starts_with(eff) {
-                    let depth = eff.components().count();
-                    max_trusted_depth = Some(max_trusted_depth.map_or(depth, |d| d.max(depth)));
-                }
-            }
-            "DO_NOT_TRUST" if physical_repo.starts_with(rule_path) => {
-                let depth = rule_path.components().count();
-                max_untrusted_depth = Some(max_untrusted_depth.map_or(depth, |d| d.max(depth)));
-            }
-            _ => {}
-        }
-    }
-
-    match (max_trusted_depth, max_untrusted_depth) {
-        (Some(td), Some(ud)) if ud >= td => AntigravityTrustStatus::Untrusted,
-        (Some(_), _) => AntigravityTrustStatus::Trusted,
-        (None, _) => AntigravityTrustStatus::Untrusted,
-    }
-}
-
-fn check_antigravity_project_trust_at(
-    home_dir: &Path,
-    physical_repo: &Path,
-    expected_uid: u32,
-) -> AntigravityTrustStatus {
-    use std::os::unix::fs::MetadataExt;
-    let gemini_dir = home_dir.join(".gemini");
-    let config_path = gemini_dir.join("trustedFolders.json");
-
-    match std::fs::symlink_metadata(home_dir) {
-        Err(e) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: cannot inspect HOME ({}): {e}.",
-                    home_dir.display()
-                )),
-            };
-        }
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: HOME ({}) is a symlink.",
-                    home_dir.display()
-                )),
-            };
-        }
-        Ok(meta) if !meta.is_dir() => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: HOME ({}) is not a directory.",
-                    home_dir.display()
-                )),
-            };
-        }
-        Ok(meta) if meta.uid() != expected_uid => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: HOME ({}) is not owned by the current user.",
-                    home_dir.display()
-                )),
-            };
-        }
-        Ok(_) => {}
-    }
-
-    let home_fd = match fs::open(
-        home_dir,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        Err(Errno::LOOP) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: HOME ({}) is a symlink.",
-                    home_dir.display()
-                )),
-            };
-        }
-        Err(e) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: cannot open HOME ({}): {e}.",
-                    home_dir.display()
-                )),
-            };
-        }
-    };
-    let Ok(home_stat) = fs::fstat(&home_fd) else {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: cannot inspect HOME ({}).",
-                home_dir.display()
-            )),
-        };
-    };
-    if FileType::from_raw_mode(home_stat.st_mode) != FileType::Directory
-        || home_stat.st_uid != expected_uid
-    {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: HOME ({}) is not an owned directory.",
-                home_dir.display()
-            )),
-        };
-    }
-
-    match fs::statat(&home_fd, OsStr::new(".gemini"), AtFlags::SYMLINK_NOFOLLOW) {
-        Err(Errno::NOENT) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: {} does not exist.",
-                    config_path.display()
-                )),
-            };
-        }
-        Err(e) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: cannot inspect {}: {e}.",
-                    gemini_dir.display()
-                )),
-            };
-        }
-        Ok(stat) => {
-            let kind = FileType::from_raw_mode(stat.st_mode);
-            if kind == FileType::Symlink {
-                return AntigravityTrustStatus::Unknown {
-                    hint: sanitize_single_line(&format!(
-                        "Cannot verify Antigravity folder trust: {} is a symlink.",
-                        gemini_dir.display()
-                    )),
-                };
-            }
-            if kind != FileType::Directory {
-                return AntigravityTrustStatus::Unknown {
-                    hint: sanitize_single_line(&format!(
-                        "Cannot verify Antigravity folder trust: {} is not a directory.",
-                        gemini_dir.display()
-                    )),
-                };
-            }
-            if stat.st_uid != expected_uid {
-                return AntigravityTrustStatus::Unknown {
-                    hint: sanitize_single_line(&format!(
-                        "Cannot verify Antigravity folder trust: {} is not owned by the current user.",
-                        gemini_dir.display()
-                    )),
-                };
-            }
-        }
-    }
-
-    let gemini_fd = match fs::openat(
-        &home_fd,
-        OsStr::new(".gemini"),
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        Err(Errno::NOENT) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: {} does not exist.",
-                    config_path.display()
-                )),
-            };
-        }
-        Err(Errno::LOOP) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: {} is a symlink.",
-                    gemini_dir.display()
-                )),
-            };
-        }
-        Err(Errno::NOTDIR) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: {} is not a directory.",
-                    gemini_dir.display()
-                )),
-            };
-        }
-        Err(e) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: cannot open {}: {e}.",
-                    gemini_dir.display()
-                )),
-            };
-        }
-    };
-    let Ok(gemini_stat) = fs::fstat(&gemini_fd) else {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: cannot inspect {}.",
-                gemini_dir.display()
-            )),
-        };
-    };
-    if FileType::from_raw_mode(gemini_stat.st_mode) != FileType::Directory {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: {} is not a directory.",
-                gemini_dir.display()
-            )),
-        };
-    }
-    if gemini_stat.st_uid != expected_uid {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: {} is not owned by the current user.",
-                gemini_dir.display()
-            )),
-        };
-    }
-
-    let named = match fs::statat(
-        &gemini_fd,
-        OsStr::new("trustedFolders.json"),
-        AtFlags::SYMLINK_NOFOLLOW,
-    ) {
-        Err(Errno::NOENT) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: {} does not exist.",
-                    config_path.display()
-                )),
-            };
-        }
-        Err(e) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: cannot inspect {}: {e}.",
-                    config_path.display()
-                )),
-            };
-        }
-        Ok(stat) => {
-            let kind = FileType::from_raw_mode(stat.st_mode);
-            if kind == FileType::Symlink {
-                return AntigravityTrustStatus::Unknown {
-                    hint: sanitize_single_line(&format!(
-                        "Cannot verify Antigravity folder trust: {} is a symlink.",
-                        config_path.display()
-                    )),
-                };
-            }
-            if kind != FileType::RegularFile {
-                return AntigravityTrustStatus::Unknown {
-                    hint: sanitize_single_line(&format!(
-                        "Cannot verify Antigravity folder trust: {} is not a regular file.",
-                        config_path.display()
-                    )),
-                };
-            }
-            if stat.st_uid != expected_uid {
-                return AntigravityTrustStatus::Unknown {
-                    hint: sanitize_single_line(&format!(
-                        "Cannot verify Antigravity folder trust: {} is not owned by the current user.",
-                        config_path.display()
-                    )),
-                };
-            }
-            stat
-        }
-    };
-
-    let fd = match fs::openat(
-        &gemini_fd,
-        OsStr::new("trustedFolders.json"),
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        Err(Errno::NOENT) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: {} does not exist.",
-                    config_path.display()
-                )),
-            };
-        }
-        Err(Errno::LOOP) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: {} is a symlink.",
-                    config_path.display()
-                )),
-            };
-        }
-        Err(e) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: cannot read {}: {e}.",
-                    config_path.display()
-                )),
-            };
-        }
-    };
-
-    let opened = match fs::fstat(&fd) {
-        Ok(stat) => stat,
-        Err(e) => {
-            return AntigravityTrustStatus::Unknown {
-                hint: sanitize_single_line(&format!(
-                    "Cannot verify Antigravity folder trust: cannot inspect {}: {e}.",
-                    config_path.display()
-                )),
-            };
-        }
-    };
-    if FileType::from_raw_mode(opened.st_mode) != FileType::RegularFile {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: {} is not a regular file.",
-                config_path.display()
-            )),
-        };
-    }
-    if opened.st_uid != expected_uid {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: {} is not owned by the current user.",
-                config_path.display()
-            )),
-        };
-    }
-    if !same_stat(&named, &opened) {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: {} changed while opening.",
-                config_path.display()
-            )),
-        };
-    }
-
-    let mut file = std::fs::File::from(fd);
-    let mut bytes = Vec::new();
-    if let Err(e) = (&mut file)
-        .take((MAX_CONFIG_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-    {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: cannot read {}: {e}.",
-                config_path.display()
-            )),
-        };
-    }
-    if bytes.len() > MAX_CONFIG_BYTES {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: {} exceeds 1 MiB.",
-                config_path.display()
-            )),
-        };
-    }
-    let Ok(after) = fs::fstat(&file) else {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: cannot verify {} after reading.",
-                config_path.display()
-            )),
-        };
-    };
-    if !same_stat(&opened, &after) {
-        return AntigravityTrustStatus::Unknown {
-            hint: sanitize_single_line(&format!(
-                "Cannot verify Antigravity folder trust: {} changed while reading.",
-                config_path.display()
-            )),
-        };
-    }
-
-    resolve_antigravity_trust_in_json(&bytes, physical_repo, &config_path)
-}
-
-fn check_antigravity_project_trust_with_env(
-    physical_repo: &Path,
-    home_env: Option<&OsStr>,
-) -> AntigravityTrustStatus {
-    let Some(home) = home_env.filter(|v| !v.is_empty()) else {
-        return AntigravityTrustStatus::Unknown {
-            hint: "Cannot verify Antigravity folder trust: HOME is not set.".into(),
-        };
-    };
-    let home_path = PathBuf::from(home);
-    if !normalized_abs_utf8(&home_path) {
-        return AntigravityTrustStatus::Unknown {
-            hint: "Cannot verify Antigravity folder trust: HOME is not a normalized UTF-8 absolute path."
-                .into(),
-        };
-    }
-    check_antigravity_project_trust_at(
-        &home_path,
-        physical_repo,
-        rustix::process::geteuid().as_raw(),
-    )
-}
-
-fn check_antigravity_project_trust(physical_repo: &Path) -> AntigravityTrustStatus {
-    check_antigravity_project_trust_with_env(physical_repo, std::env::var_os("HOME").as_deref())
-}
-
-fn antigravity_untrusted_hint(physical_repo: &Path) -> String {
-    format!(
-        "Trust {} in Antigravity so it loads .agents/mcp_config.json.",
-        physical_repo.display()
-    )
-}
-
-fn attach_antigravity_trust_fields(
-    report: &mut serde_json::Value,
-    physical_repo: &Path,
-    trust: &AntigravityTrustStatus,
-) {
-    match trust {
-        AntigravityTrustStatus::Trusted => {
-            report["active"] = json!(true);
-        }
-        AntigravityTrustStatus::Untrusted => {
-            report["active"] = json!(false);
-            report["reason"] = json!(ANTIGRAVITY_UNTRUSTED_REASON);
-            report["hint"] = json!(antigravity_untrusted_hint(physical_repo));
-        }
-        AntigravityTrustStatus::Unknown { hint } => {
-            report["active"] = json!(false);
-            report["reason"] = json!(ANTIGRAVITY_TRUST_UNKNOWN_REASON);
-            report["hint"] = json!(hint);
-        }
-    }
-}
-
-fn format_antigravity_install_text(
-    alias: &str,
-    physical: &Path,
-    verb_prefix: &str,
-    trust: &AntigravityTrustStatus,
-) -> Vec<u8> {
-    match trust {
-        AntigravityTrustStatus::Trusted => format!(
-            "{verb_prefix} antigravity panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
-            physical.display()
-        )
-        .into_bytes(),
-        AntigravityTrustStatus::Untrusted => format!(
-            "{verb_prefix} antigravity panel {PANEL_ENTRY_NAME} for {alias}: {} (inactive: {ANTIGRAVITY_UNTRUSTED_REASON})\nhint: {}\n",
-            physical.display(),
-            antigravity_untrusted_hint(physical),
-        )
-        .into_bytes(),
-        AntigravityTrustStatus::Unknown { hint } => format!(
-            "{verb_prefix} antigravity panel {PANEL_ENTRY_NAME} for {alias}: {} (inactive: {ANTIGRAVITY_TRUST_UNKNOWN_REASON})\nhint: {hint}\n",
-            physical.display(),
-        )
-        .into_bytes(),
     }
 }
 
@@ -3576,8 +2809,6 @@ fn upsert_panel_row(
             separator_added: None,
             exclude_separator_added: None,
             created_mcp_servers: None,
-            prior_sha256: None,
-            prior_ws: None,
         },
         RowMeta::Codex(m) => PanelRecord {
             app: app.as_str().to_owned(),
@@ -3593,8 +2824,6 @@ fn upsert_panel_row(
             separator_added: m.separator_added.then_some(true),
             exclude_separator_added: m.exclude_separator_added.then_some(true),
             created_mcp_servers: None,
-            prior_sha256: None,
-            prior_ws: None,
         },
         RowMeta::Antigravity(m) => PanelRecord {
             app: app.as_str().to_owned(),
@@ -3607,11 +2836,9 @@ fn upsert_panel_row(
             created_codex_dir: None,
             created_agents_dir: Some(m.created_agents_dir),
             created_exclude: Some(m.created_exclude),
-            separator_added: m.separator_added.then_some(true),
+            separator_added: None,
             exclude_separator_added: m.exclude_separator_added.then_some(true),
             created_mcp_servers: m.created_mcp_servers.then_some(true),
-            prior_sha256: m.prior_sha256,
-            prior_ws: m.prior_ws,
         },
     };
     let rows = panels.entry(alias.to_owned()).or_default();
@@ -3935,12 +3162,7 @@ enum AntigravityInstallPlan {
     Write {
         candidate_bytes: Vec<u8>,
         entry_sha256: String,
-        replaced_existing_entry: bool,
-        outside_doc: serde_json::Map<String, serde_json::Value>,
         created_mcp_servers_now: bool,
-        added_separator_now: bool,
-        prior_sha256_now: Option<String>,
-        prior_ws_now: Option<String>,
     },
 }
 
@@ -3988,8 +3210,8 @@ fn prepare_antigravity_install(
     let expected_sha = canonical_json_sha256(&expected_entry)?;
 
     let plan = if let Some((ref prior_bytes, _)) = prior_config {
-        let prior_root = parse_strict_json_object_bounded(prior_bytes, spec.rel_path)?;
-        let (had_mcp_servers, on_disk_entry) = match prior_root.get("mcpServers") {
+        let mut updated_root = parse_strict_json_object_bounded(prior_bytes, spec.rel_path)?;
+        let (had_mcp_servers, on_disk_entry) = match updated_root.get("mcpServers") {
             None => (false, None),
             Some(serde_json::Value::Object(servers)) => {
                 (true, servers.get(PANEL_ENTRY_NAME).cloned())
@@ -4029,17 +3251,6 @@ fn prepare_antigravity_install(
                         }
                     }
                 } else {
-                    let mut outside_doc = prior_root.clone();
-                    let drop_empty = existing.created_mcp_servers == Some(true);
-                    if let Some(serde_json::Value::Object(servers)) =
-                        outside_doc.get_mut("mcpServers")
-                    {
-                        servers.remove(PANEL_ENTRY_NAME);
-                        if servers.is_empty() && drop_empty {
-                            outside_doc.remove("mcpServers");
-                        }
-                    }
-                    let mut updated_root = prior_root;
                     let servers = updated_root
                         .get_mut("mcpServers")
                         .and_then(serde_json::Value::as_object_mut)
@@ -4049,7 +3260,7 @@ fn prepare_antigravity_install(
                             )
                         })?;
                     servers.insert(PANEL_ENTRY_NAME.into(), expected_entry);
-                    let candidate_bytes = encode_pretty_2space_json(&updated_root, false)?;
+                    let candidate_bytes = encode_pretty_2space_json(&updated_root)?;
                     let verified = parse_strict_json_object_bounded(
                         &candidate_bytes,
                         "generated .agents/mcp_config.json",
@@ -4061,12 +3272,7 @@ fn prepare_antigravity_install(
                     AntigravityInstallPlan::Write {
                         candidate_bytes,
                         entry_sha256: expected_sha,
-                        replaced_existing_entry: true,
-                        outside_doc,
                         created_mcp_servers_now: false,
-                        added_separator_now: false,
-                        prior_sha256_now: None,
-                        prior_ws_now: None,
                     }
                 }
             } else if on_disk_sha == expected_sha {
@@ -4079,9 +3285,6 @@ fn prepare_antigravity_install(
                 )));
             }
         } else {
-            let (added_separator_now, prior_sha256_now, prior_ws_now) =
-                capture_prior_json_formatting(prior_bytes, &prior_root)?;
-            let mut updated_root = prior_root.clone();
             let entry = updated_root
                 .entry("mcpServers")
                 .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
@@ -4091,7 +3294,7 @@ fn prepare_antigravity_install(
                 ));
             };
             servers.insert(PANEL_ENTRY_NAME.into(), expected_entry);
-            let candidate_bytes = encode_pretty_2space_json(&updated_root, false)?;
+            let candidate_bytes = encode_pretty_2space_json(&updated_root)?;
             let verified = parse_strict_json_object_bounded(
                 &candidate_bytes,
                 "generated .agents/mcp_config.json",
@@ -4103,12 +3306,7 @@ fn prepare_antigravity_install(
             AntigravityInstallPlan::Write {
                 candidate_bytes,
                 entry_sha256: expected_sha,
-                replaced_existing_entry: false,
-                outside_doc: prior_root,
                 created_mcp_servers_now: !had_mcp_servers,
-                added_separator_now,
-                prior_sha256_now,
-                prior_ws_now,
             }
         }
     } else {
@@ -4116,7 +3314,7 @@ fn prepare_antigravity_install(
         servers.insert(PANEL_ENTRY_NAME.into(), expected_entry);
         let mut updated_root = serde_json::Map::new();
         updated_root.insert("mcpServers".into(), serde_json::Value::Object(servers));
-        let candidate_bytes = encode_pretty_2space_json(&updated_root, false)?;
+        let candidate_bytes = encode_pretty_2space_json(&updated_root)?;
         let verified = parse_strict_json_object_bounded(
             &candidate_bytes,
             "generated .agents/mcp_config.json",
@@ -4128,12 +3326,7 @@ fn prepare_antigravity_install(
         AntigravityInstallPlan::Write {
             candidate_bytes,
             entry_sha256: expected_sha,
-            replaced_existing_entry: false,
-            outside_doc: serde_json::Map::new(),
             created_mcp_servers_now: false,
-            added_separator_now: false,
-            prior_sha256_now: None,
-            prior_ws_now: None,
         }
     };
 
@@ -4277,9 +3470,8 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 }
                 let _prepared =
                     prepare_antigravity_install(&alias, &physical, &launcher, recorded_row, stop)?;
-                let trust = check_antigravity_project_trust(&physical);
                 if want_json {
-                    let mut report = panel_action_json(
+                    let report = panel_action_json(
                         app,
                         &alias,
                         &physical,
@@ -4287,12 +3479,16 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                         "install",
                         false,
                     );
-                    attach_antigravity_trust_fields(&mut report, &physical, &trust);
                     return Ok((0, json(&report)?, vec![]));
                 }
                 return Ok((
                     0,
-                    format_antigravity_install_text(&alias, &physical, "would install", &trust),
+                    format!(
+                        "would install {} panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+                        app.as_str(),
+                        physical.display()
+                    )
+                    .into_bytes(),
                     vec![],
                 ));
             }
@@ -4677,11 +3873,10 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 recorded_row.as_ref(),
                 stop,
             )?;
-            let trust = check_antigravity_project_trust(&physical);
 
             if matches!(prepared.plan, AntigravityInstallPlan::NoOp) {
                 if want_json {
-                    let mut report = panel_action_json(
+                    let report = panel_action_json(
                         app,
                         &alias,
                         &physical,
@@ -4689,12 +3884,16 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                         "install",
                         false,
                     );
-                    attach_antigravity_trust_fields(&mut report, &physical, &trust);
                     return Ok((0, json(&report)?, vec![]));
                 }
                 return Ok((
                     0,
-                    format_antigravity_install_text(&alias, &physical, "already installed", &trust),
+                    format!(
+                        "already installed {} panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+                        app.as_str(),
+                        physical.display()
+                    )
+                    .into_bytes(),
                     vec![],
                 ));
             }
@@ -4717,12 +3916,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                     entry_sha256: String,
                     created_config_now: bool,
                     created_agents_dir_now: bool,
-                    replaced_existing_entry: bool,
-                    outside_doc: serde_json::Map<String, serde_json::Value>,
                     created_mcp_servers_now: bool,
-                    added_separator_now: bool,
-                    prior_sha256_now: Option<String>,
-                    prior_ws_now: Option<String>,
                 },
             }
 
@@ -4741,12 +3935,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 AntigravityInstallPlan::Write {
                     candidate_bytes,
                     entry_sha256,
-                    replaced_existing_entry,
-                    outside_doc,
                     created_mcp_servers_now,
-                    added_separator_now,
-                    prior_sha256_now,
-                    prior_ws_now,
                 } => {
                     let (created_file, created_dir, backup) = apply_install_config_write(
                         spec,
@@ -4762,12 +3951,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                             entry_sha256,
                             created_config_now: created_file,
                             created_agents_dir_now: created_dir,
-                            replaced_existing_entry,
-                            outside_doc,
                             created_mcp_servers_now,
-                            added_separator_now,
-                            prior_sha256_now,
-                            prior_ws_now,
                         },
                     )
                 }
@@ -4809,17 +3993,14 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 (false, false)
             };
 
-            let mut agy_meta = match outcome {
+            let agy_meta = match outcome {
                 AgyWriteOutcome::Adopted(entry_sha256) => AntigravityRowMeta {
                     entry_sha256,
                     created_config: false,
                     created_agents_dir: false,
                     created_exclude,
-                    separator_added: false,
                     exclude_separator_added,
                     created_mcp_servers: false,
-                    prior_sha256: None,
-                    prior_ws: None,
                 },
                 AgyWriteOutcome::ExcludeOnly(entry_sha256) => {
                     let prev = recorded_row
@@ -4830,23 +4011,15 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                         created_config: prev.created_config == Some(true),
                         created_agents_dir: prev.created_agents_dir == Some(true),
                         created_exclude,
-                        separator_added: prev.separator_added == Some(true),
                         exclude_separator_added,
                         created_mcp_servers: prev.created_mcp_servers == Some(true),
-                        prior_sha256: prev.prior_sha256.clone(),
-                        prior_ws: prev.prior_ws.clone(),
                     }
                 }
                 AgyWriteOutcome::Written {
                     entry_sha256,
                     created_config_now,
                     created_agents_dir_now,
-                    replaced_existing_entry,
-                    outside_doc,
                     created_mcp_servers_now,
-                    added_separator_now,
-                    prior_sha256_now,
-                    prior_ws_now,
                 } => {
                     let created_config = match &recorded_row {
                         Some(prev) if !created_config_now => prev.created_config == Some(true),
@@ -4858,68 +4031,29 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                         }
                         _ => created_agents_dir_now,
                     };
-                    let (created_mcp_servers, separator_added, prior_sha256, prior_ws) =
-                        if created_config {
-                            (created_mcp_servers_now, false, None, None)
-                        } else if replaced_existing_entry {
-                            let prev = recorded_row.as_ref().expect("recorded row on refresh");
-                            let outside_sha = ordered_json_sha256(&outside_doc)?;
-                            if prev.prior_sha256.as_deref() == Some(outside_sha.as_str()) {
-                                (
-                                    prev.created_mcp_servers == Some(true),
-                                    prev.separator_added == Some(true),
-                                    prev.prior_sha256.clone(),
-                                    prev.prior_ws.clone(),
-                                )
-                            } else if outside_doc.is_empty()
-                                && prev.created_mcp_servers == Some(true)
-                            {
-                                (true, false, None, None)
-                            } else {
-                                (!outside_doc.contains_key("mcpServers"), false, None, None)
-                            }
-                        } else {
-                            (
-                                created_mcp_servers_now,
-                                added_separator_now,
-                                prior_sha256_now,
-                                prior_ws_now,
-                            )
-                        };
+                    let created_mcp_servers = !created_config
+                        && (created_mcp_servers_now
+                            || recorded_row
+                                .as_ref()
+                                .is_some_and(|prev| prev.created_mcp_servers == Some(true)));
                     AntigravityRowMeta {
                         entry_sha256,
                         created_config,
                         created_agents_dir,
                         created_exclude,
-                        separator_added,
                         exclude_separator_added,
                         created_mcp_servers,
-                        prior_sha256,
-                        prior_ws,
                     }
                 }
             };
 
-            let had_optional_fmt = agy_meta.prior_ws.is_some();
             upsert_panel_row(
                 &mut panels,
                 &alias,
                 app,
                 &physical,
-                RowMeta::Antigravity(agy_meta.clone()),
+                RowMeta::Antigravity(agy_meta),
             );
-            if had_optional_fmt && encode_panels_json(&panels).is_err() {
-                agy_meta.prior_ws = None;
-                agy_meta.prior_sha256 = None;
-                agy_meta.separator_added = false;
-                upsert_panel_row(
-                    &mut panels,
-                    &alias,
-                    app,
-                    &physical,
-                    RowMeta::Antigravity(agy_meta),
-                );
-            }
             if let Err(record_err) =
                 write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)
             {
@@ -4938,14 +4072,18 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
             }
 
             if want_json {
-                let mut report =
+                let report =
                     panel_action_json(app, &alias, &physical, PANEL_ENTRY_NAME, action_str, true);
-                attach_antigravity_trust_fields(&mut report, &physical, &trust);
                 return Ok((0, json(&report)?, vec![]));
             }
             Ok((
                 0,
-                format_antigravity_install_text(&alias, &physical, text_prefix, &trust),
+                format!(
+                    "{text_prefix} {} panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+                    app.as_str(),
+                    physical.display()
+                )
+                .into_bytes(),
                 vec![],
             ))
         }
@@ -5057,7 +4195,7 @@ fn inspect_antigravity_config_for_uninstall(
     })?;
     let created_config = row.created_config == Some(true);
     let created_mcp_servers = row.created_mcp_servers == Some(true);
-    let separator_added = row.separator_added == Some(true);
+    let drop_empty_mcp = created_config || created_mcp_servers;
 
     let repo_fd = open_dir_nofollow(target_repo, "project checkout")?;
     let Some(agents_fd) =
@@ -5071,13 +4209,13 @@ fn inspect_antigravity_config_for_uninstall(
         return Ok(CodexUninstallInspect::AlreadyGone);
     };
 
-    let Ok(root) = parse_strict_json_object_bounded(&raw_bytes, spec.rel_path) else {
+    let Ok(mut remaining_root) = parse_strict_json_object_bounded(&raw_bytes, spec.rel_path) else {
         return Ok(CodexUninstallInspect::Edited);
     };
 
-    let has_entry = match root.get("mcpServers") {
+    match remaining_root.get("mcpServers") {
         None => {
-            if root.is_empty() && created_config {
+            if remaining_root.is_empty() && created_config {
                 return Ok(CodexUninstallInspect::CleanRemove {
                     remaining_bytes: None,
                     prior_config: Some((raw_bytes, stat)),
@@ -5085,41 +4223,31 @@ fn inspect_antigravity_config_for_uninstall(
             }
             return Ok(CodexUninstallInspect::AlreadyGone);
         }
-        Some(serde_json::Value::Object(servers)) => servers.get(PANEL_ENTRY_NAME).cloned(),
+        Some(serde_json::Value::Object(servers)) => match servers.get(PANEL_ENTRY_NAME) {
+            Some(entry_val) => {
+                if !entry_val.is_object() {
+                    return Ok(CodexUninstallInspect::Edited);
+                }
+                let Ok(on_disk_sha) = canonical_json_sha256(entry_val) else {
+                    return Ok(CodexUninstallInspect::Edited);
+                };
+                if on_disk_sha != expected_sha {
+                    return Ok(CodexUninstallInspect::Edited);
+                }
+            }
+            None => {
+                if !(servers.is_empty() && drop_empty_mcp) {
+                    return Ok(CodexUninstallInspect::AlreadyGone);
+                }
+            }
+        },
         Some(_) => return Ok(CodexUninstallInspect::Edited),
-    };
-
-    let Some(entry_val) = has_entry else {
-        let empty_only_mcp = root.len() == 1
-            && root
-                .get("mcpServers")
-                .and_then(serde_json::Value::as_object)
-                .is_some_and(serde_json::Map::is_empty);
-        if empty_only_mcp && created_config {
-            return Ok(CodexUninstallInspect::CleanRemove {
-                remaining_bytes: None,
-                prior_config: Some((raw_bytes, stat)),
-            });
-        }
-        return Ok(CodexUninstallInspect::AlreadyGone);
-    };
-
-    if !entry_val.is_object() {
-        return Ok(CodexUninstallInspect::Edited);
-    }
-    let Ok(on_disk_sha) = canonical_json_sha256(&entry_val) else {
-        return Ok(CodexUninstallInspect::Edited);
-    };
-    if on_disk_sha != expected_sha {
-        return Ok(CodexUninstallInspect::Edited);
     }
 
-    let mut remaining_root = root;
-    let drop_empty_mcp = created_config || created_mcp_servers;
     if let Some(serde_json::Value::Object(servers)) = remaining_root.get_mut("mcpServers") {
-        servers.remove(PANEL_ENTRY_NAME);
+        servers.shift_remove(PANEL_ENTRY_NAME);
         if servers.is_empty() && drop_empty_mcp {
-            remaining_root.remove("mcpServers");
+            remaining_root.shift_remove("mcpServers");
         }
     }
 
@@ -5130,23 +4258,7 @@ fn inspect_antigravity_config_for_uninstall(
         });
     }
 
-    let matches_prior = if !created_config && let Some(ref p_sha) = row.prior_sha256 {
-        ordered_json_sha256(&remaining_root)? == *p_sha
-    } else {
-        false
-    };
-
-    let bytes = if matches_prior {
-        if let Some(ref ws) = row.prior_ws
-            && let Some(exact) = reassemble_json_with_ws(&remaining_root, ws)
-        {
-            exact
-        } else {
-            encode_pretty_2space_json(&remaining_root, separator_added)?
-        }
-    } else {
-        encode_pretty_2space_json(&remaining_root, false)?
-    };
+    let bytes = encode_pretty_2space_json(&remaining_root)?;
 
     let Ok(verified) = parse_strict_json_object_bounded(&bytes, spec.rel_path) else {
         return Ok(CodexUninstallInspect::Edited);
@@ -5628,19 +4740,15 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
 #[cfg(test)]
 mod tests {
     use super::{
-        AntigravityRowMeta, AntigravityTrustStatus, ClaudeScope, CmdOutput, CodexRowMeta,
-        CodexTrustStatus, OMS_PACKAGE_VERSION, PanelApp, PanelMap, PanelRecord, RowMeta,
-        attach_antigravity_trust_fields, attach_codex_trust_fields, canonical_json_sha256,
-        capture_prior_json_formatting, check_antigravity_project_trust_at,
-        check_antigravity_project_trust_with_env, check_codex_project_trust_at,
-        check_codex_project_trust_with_env, claude_panel_entry_json, codex_panel_block,
-        codex_panel_block_for_versions, codex_panel_resource_version, encode_panels_json,
+        AntigravityRowMeta, ClaudeScope, CmdOutput, CodexRowMeta, CodexTrustStatus,
+        OMS_PACKAGE_VERSION, PanelApp, PanelMap, PanelRecord, RowMeta, attach_codex_trust_fields,
+        canonical_json_sha256, check_codex_project_trust_at, check_codex_project_trust_with_env,
+        claude_panel_entry_json, codex_panel_block, codex_panel_block_for_versions,
+        codex_panel_resource_version, encode_panels_json, encode_pretty_2space_json,
         expected_antigravity_panel_entry, expected_antigravity_panel_entry_for_version,
-        expected_codex_panel_server_table, format_antigravity_install_text,
-        format_codex_install_text, is_mcp_entry_missing, parse_claude_mcp_get, parse_panels_json,
-        parse_strict_json_object_bounded, reassemble_json_with_ws,
-        resolve_antigravity_trust_in_json, resolve_codex_trust_in_toml, split_codex_panel_block,
-        upsert_panel_row,
+        expected_codex_panel_server_table, format_codex_install_text, is_mcp_entry_missing,
+        parse_claude_mcp_get, parse_panels_json, parse_strict_json_object_bounded,
+        resolve_codex_trust_in_toml, split_codex_panel_block, upsert_panel_row,
     };
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
@@ -5890,7 +4998,7 @@ trust_level = "trusted"
     }
 
     #[test]
-    fn antigravity_entry_json_canonical_sha_ws_roundtrip_and_trust_checks() {
+    fn antigravity_entry_json_canonical_sha_and_key_order() {
         let launcher = Path::new("/tmp/runtime-owner/.local/bin/oms");
         let repo = Path::new("/srv/checkouts/PoseFixer");
         let entry = expected_antigravity_panel_entry(launcher, repo).unwrap();
@@ -5924,25 +5032,26 @@ trust_level = "trusted"
             canonical_json_sha256(&older).unwrap()
         );
 
-        for sample in [
-            b"{}".as_slice(),
-            b"{\n}\n".as_slice(),
-            b"{\"mcpServers\":{\"other\":{\"command\":\"/usr/local/bin/other\",\"args\":[\"--serve\"]}}}".as_slice(),
-            b"{\r\n    \"otherTop\": true,\r\n    \"mcpServers\": {\r\n        \"sqlite\": { \"command\": \"sqlite-mcp\", \"args\": [\"/tmp/db\"] }\r\n    }\r\n}".as_slice(),
-            b"{\n  \"mcpServers\": {\n    \"z\": {\n      \"command\": \"z-bin\"\n    },\n    \"a\": {\n      \"command\": \"a-bin\"\n    }\n  }\n}".as_slice(),
-        ] {
-            let parsed = parse_strict_json_object_bounded(sample, "sample").unwrap();
-            let (sep, sha, ws) = capture_prior_json_formatting(sample, &parsed).unwrap();
-            let restored = if let Some(ref w) = ws {
-                reassemble_json_with_ws(&parsed, w).unwrap()
-            } else {
-                super::encode_pretty_2space_json(&parsed, sep).unwrap()
-            };
-            assert_eq!(restored.as_slice(), sample);
-            if ws.is_some() || sep {
-                assert!(sha.is_some());
-            }
-        }
+        // 2-space pretty JSON round-trips byte-exact and shift_remove preserves key order.
+        let pretty_sample = b"{\n  \"zetaTop\": true,\n  \"mcpServers\": {\n    \"a\": {\n      \"command\": \"a-bin\"\n    },\n    \"oms-panel\": {\n      \"command\": \"oms\"\n    },\n    \"b\": {\n      \"command\": \"b-bin\"\n    },\n    \"c\": {\n      \"command\": \"c-bin\"\n    }\n  },\n  \"alphaTail\": 1\n}\n";
+        let mut parsed = parse_strict_json_object_bounded(pretty_sample, "sample").unwrap();
+        assert_eq!(
+            encode_pretty_2space_json(&parsed).unwrap().as_slice(),
+            pretty_sample
+        );
+        parsed
+            .get_mut("mcpServers")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .shift_remove("oms-panel");
+        let server_keys: Vec<&str> = parsed["mcpServers"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(server_keys, vec!["a", "b", "c"]);
 
         // Duplicate keys in JSON config are rejected.
         assert!(
@@ -5952,118 +5061,6 @@ trust_level = "trusted"
             )
             .is_err()
         );
-
-        let trust_label = Path::new("/tmp/agy-home/.gemini/trustedFolders.json");
-        let sub = Path::new("/srv/checkouts/PoseFixer/packages/sub");
-        let sibling_prefix = Path::new("/srv/checkouts/PoseFixer-extra");
-        let other = Path::new("/srv/checkouts/other");
-
-        let folder_trusted = br#"{"/srv/checkouts/PoseFixer": "TRUST_FOLDER"}"#;
-        assert_eq!(
-            resolve_antigravity_trust_in_json(folder_trusted, repo, trust_label),
-            AntigravityTrustStatus::Trusted
-        );
-        assert_eq!(
-            resolve_antigravity_trust_in_json(folder_trusted, sub, trust_label),
-            AntigravityTrustStatus::Trusted
-        );
-        assert_eq!(
-            resolve_antigravity_trust_in_json(folder_trusted, sibling_prefix, trust_label),
-            AntigravityTrustStatus::Untrusted
-        );
-        assert_eq!(
-            resolve_antigravity_trust_in_json(folder_trusted, other, trust_label),
-            AntigravityTrustStatus::Untrusted
-        );
-
-        // Ancestor TRUST_FOLDER covers checkout, and TRUST_PARENT on a sibling covers parent's children.
-        let ancestor_trusted = br#"{"/srv/checkouts": "TRUST_FOLDER"}"#;
-        assert_eq!(
-            resolve_antigravity_trust_in_json(ancestor_trusted, repo, trust_label),
-            AntigravityTrustStatus::Trusted
-        );
-        let parent_trusted = br#"{"/srv/checkouts/other": "TRUST_PARENT"}"#;
-        assert_eq!(
-            resolve_antigravity_trust_in_json(parent_trusted, repo, trust_label),
-            AntigravityTrustStatus::Trusted
-        );
-
-        // Explicit DO_NOT_TRUST on checkout overrides trusted ancestor, while specific TRUST_FOLDER overrides DO_NOT_TRUST ancestor.
-        let blocked_child = br#"{
-            "/srv/checkouts": "TRUST_FOLDER",
-            "/srv/checkouts/PoseFixer": "DO_NOT_TRUST"
-        }"#;
-        assert_eq!(
-            resolve_antigravity_trust_in_json(blocked_child, repo, trust_label),
-            AntigravityTrustStatus::Untrusted
-        );
-        let allowed_child = br#"{
-            "/srv/checkouts": "DO_NOT_TRUST",
-            "/srv/checkouts/PoseFixer": "TRUST_FOLDER"
-        }"#;
-        assert_eq!(
-            resolve_antigravity_trust_in_json(allowed_child, repo, trust_label),
-            AntigravityTrustStatus::Trusted
-        );
-
-        for bad_json in [
-            b"{broken".as_slice(),
-            b"[]".as_slice(),
-            br#"{"/srv/checkouts/PoseFixer": true}"#.as_slice(),
-            br#"{"/srv/checkouts/PoseFixer": 1}"#.as_slice(),
-        ] {
-            assert!(matches!(
-                resolve_antigravity_trust_in_json(bad_json, repo, trust_label),
-                AntigravityTrustStatus::Unknown { .. }
-            ));
-        }
-
-        // Unset, empty, or non-normalized HOME reports antigravity-trust-unknown.
-        for bad_home in [
-            None,
-            Some(OsStr::new("")),
-            Some(OsStr::new("relative/home")),
-        ] {
-            let status = check_antigravity_project_trust_with_env(repo, bad_home);
-            assert!(matches!(status, AntigravityTrustStatus::Unknown { .. }));
-            let mut report = serde_json::json!({});
-            attach_antigravity_trust_fields(&mut report, repo, &status);
-            assert_eq!(report["active"], false);
-            assert_eq!(report["reason"], "antigravity-trust-unknown");
-            let plain = String::from_utf8(format_antigravity_install_text(
-                "PoseFixer",
-                repo,
-                "installed",
-                &status,
-            ))
-            .unwrap();
-            assert!(plain.contains("(inactive: antigravity-trust-unknown)\nhint: "));
-        }
-
-        // Missing .gemini / missing trustedFolders.json / foreign UID all report Unknown.
-        let tmp = std::env::temp_dir().join(format!("oms-agy-trust-uid-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let euid = rustix::process::geteuid().as_raw();
-        assert!(matches!(
-            check_antigravity_project_trust_at(&tmp, repo, euid),
-            AntigravityTrustStatus::Unknown { .. }
-        ));
-        std::fs::create_dir_all(tmp.join(".gemini")).unwrap();
-        assert!(matches!(
-            check_antigravity_project_trust_at(&tmp, repo, euid),
-            AntigravityTrustStatus::Unknown { .. }
-        ));
-        std::fs::write(tmp.join(".gemini/trustedFolders.json"), folder_trusted).unwrap();
-        assert_eq!(
-            check_antigravity_project_trust_at(&tmp, repo, euid),
-            AntigravityTrustStatus::Trusted
-        );
-        assert!(matches!(
-            check_antigravity_project_trust_at(&tmp, repo, euid.wrapping_add(1)),
-            AntigravityTrustStatus::Unknown { ref hint } if hint.contains("not owned by the current user")
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -6127,11 +5124,17 @@ trust_level = "trusted"
         let agy_duplicate_checkout_aliases = format!(
             r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":true,"created_agents_dir":true,"created_exclude":true}}],"beta":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":false,"created_agents_dir":false,"created_exclude":false}}]}}"#
         );
-        let agy_prior_ws_without_sha = format!(
+        let agy_removed_prior_ws = format!(
             r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":false,"created_agents_dir":false,"created_exclude":false,"prior_ws":",,"}}]}}"#
         );
-        let agy_bad_prior_ws = format!(
-            r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":false,"created_agents_dir":false,"created_exclude":false,"prior_sha256":"{sha}","prior_ws":"0s,x"}}]}}"#
+        let agy_removed_prior_sha = format!(
+            r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":false,"created_agents_dir":false,"created_exclude":false,"prior_sha256":"{sha}"}}]}}"#
+        );
+        let agy_with_separator_added = format!(
+            r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":false,"created_agents_dir":false,"created_exclude":false,"separator_added":true}}]}}"#
+        );
+        let agy_mcp_servers_with_created_config = format!(
+            r#"{{"alpha":[{{"app":"antigravity","scope":"project","name":"oms-panel","path":"/srv/alpha","entry_sha256":"{sha}","created_config":true,"created_agents_dir":true,"created_exclude":false,"created_mcp_servers":true}}]}}"#
         );
         let codex_sep_with_created_file = format!(
             r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":false,"separator_added":true}}]}}"#
@@ -6187,16 +5190,9 @@ trust_level = "trusted"
                         created_config,
                         created_agents_dir: created_codex_dir,
                         created_exclude,
-                        separator_added: !created_config && separator_added,
                         exclude_separator_added,
-                        created_mcp_servers: !created_config,
-                        prior_sha256: (!created_config && separator_added).then(|| sha.clone()),
-                        prior_ws: (!created_config && !separator_added).then(|| "n2s,s,n".into()),
+                        created_mcp_servers: !created_config && separator_added,
                     };
-                    let mut agy_meta_fixed = agy_meta;
-                    if agy_meta_fixed.prior_ws.is_some() {
-                        agy_meta_fixed.prior_sha256 = Some(sha.clone());
-                    }
                     let mut trio = PanelMap::new();
                     upsert_panel_row(
                         &mut trio,
@@ -6217,7 +5213,7 @@ trust_level = "trusted"
                         "PoseFixer",
                         PanelApp::Antigravity,
                         Path::new("/srv/PoseFixer"),
-                        RowMeta::Antigravity(agy_meta_fixed),
+                        RowMeta::Antigravity(agy_meta),
                     );
                     let trio_bytes = encode_panels_json(&trio).unwrap();
                     assert_eq!(
@@ -6248,8 +5244,10 @@ trust_level = "trusted"
             agy_dir_without_file.as_str(),
             agy_excl_sep_without_excl.as_str(),
             agy_duplicate_checkout_aliases.as_str(),
-            agy_prior_ws_without_sha.as_str(),
-            agy_bad_prior_ws.as_str(),
+            agy_removed_prior_ws.as_str(),
+            agy_removed_prior_sha.as_str(),
+            agy_with_separator_added.as_str(),
+            agy_mcp_servers_with_created_config.as_str(),
             codex_excl_sep_without_excl.as_str(),
             codex_duplicate_checkout_aliases.as_str(),
             r#"{"alpha":[{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha"}]}"#,
@@ -6284,8 +5282,6 @@ trust_level = "trusted"
             separator_added: None,
             exclude_separator_added: None,
             created_mcp_servers: None,
-            prior_sha256: None,
-            prior_ws: None,
         };
         let base_agy = || PanelRecord {
             app: "antigravity".into(),
@@ -6301,8 +5297,6 @@ trust_level = "trusted"
             separator_added: None,
             exclude_separator_added: None,
             created_mcp_servers: None,
-            prior_sha256: None,
-            prior_ws: None,
         };
         let invalid_maps: Vec<PanelMap> = vec![
             BTreeMap::new(),
