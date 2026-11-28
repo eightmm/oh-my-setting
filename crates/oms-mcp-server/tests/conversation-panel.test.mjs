@@ -1860,7 +1860,10 @@ function inspectionTools(state){
         recent7d:{calls:1,input:0,output:17,cacheRead:null}}],attempts:[
         {id:'reported-zero',provider:'codex',tokens:0,source:'receipt',reportedCalls:1,calls:1,breakdown:[],costMicrousd:1500000,costSource:'events'},
         {id:'unreported',provider:'claude',tokens:null,source:null,reportedCalls:null,calls:null,breakdown:[],costMicrousd:null,costSource:null}],
-        attemptsOmitted:0,providerTotals:[],providerTotalsOmitted:0,diagnostic:'PRIVATE DEBUG JSON'};
+        attemptsOmitted:0,providerTotals:[
+          {provider:'claude',calls:10,tokens:2048,tokenReports:9,reportedCostMicrousd:null,reportedCostCalls:0,estimatedCostMicrousd:1545000,estimatedCostCalls:9},
+          {provider:'antigravity',calls:4,tokens:512,tokenReports:3,reportedCostMicrousd:null,reportedCostCalls:0,estimatedCostMicrousd:null,estimatedCostCalls:0}
+        ],providerTotalsOmitted:0,diagnostic:'PRIVATE DEBUG JSON'};
     },
     oms_panel_tui_view:a=>{
       assert.deepEqual(Object.keys(a).sort(),['page','project','view']);assert.ok(['routes','modelcatalog'].includes(a.view));
@@ -1892,7 +1895,11 @@ test('Inspect reads only the selected view and renders usage, paged routes, cata
   assert.deepEqual(p.calls.filter(c=>inspectReads.includes(c.name)).map(c=>c.name),['oms_panel_usage']);
   const content=p.get('inspect-content');
   assert.match(content.textContent,/Observed context used0%Cache read shareStatus unknown/);
-  assert.match(content.textContent,/tokens in the last 7 days/);assert.match(content.textContent,/Reported tokens0SourceUsage receipt/);
+  assert.match(content.textContent,/tokens in the last 7 days/);
+  assert.match(content.textContent,/Left100%Used0%.*Observed agejust now/);
+  assert.match(content.textContent,/Claude · repository totals.*Reported calls10Reported tokens2,048Token-reported calls9Estimated cost \(USD\)1\.545/);
+  assert.match(content.textContent,/AGY · repository totals.*Reported calls4Reported tokens512Token-reported calls3/);
+  assert.match(content.textContent,/Reported tokens0SourceUsage receipt/);
   assert.match(content.textContent,/Reported cost \(USD\)1.5/);assert.match(content.textContent,/Reported tokensStatus unknown/);
   assert.doesNotMatch(content.textContent,/PRIVATE DEBUG JSON|"providers"|"scope"/);
   assert.match(p.get('inspect-status').textContent,/Only part/);assert.match(p.get('inspect-note').textContent,/not this Room alone/);
@@ -1948,8 +1955,11 @@ test('Inspect drops late views and private scope changes, and clears unverifiabl
   const graph=p.host.tools.oms_panel_project_graph;p.host.tools.oms_panel_project_graph=a=>({...graph(a),scope:{focusNode:'different',query:null}});
   p.get('inspect-kind').value='graph';await p.event('inspect-kind','change');
   assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Read result unconfirmed/);
+  p.host.tools.oms_panel_usage=()=>({scope:'repository-recent-attempts',providers:[],attempts:[],providerTotals:Array.from({length:33},(_,i)=>({provider:'p'+i,calls:1}))});
+  p.get('inspect-kind').value='usage';await p.event('inspect-kind','change');
+  assert.equal(p.get('inspect-content').textContent,'');assert.match(p.get('inspect-status').textContent,/Read result unconfirmed/);
   p.host.tools.oms_panel_usage=()=>({scope:'repository-recent-attempts',providers:[],attempts:[]});
-  p.get('inspect-kind').value='usage';await p.event('inspect-kind','change');assert.match(p.get('inspect-content').textContent,/No records/);
+  await p.event('inspect-refresh','click');assert.match(p.get('inspect-content').textContent,/No records/);
 });
 
 test('Inspect graph distinguishes unavailable provenance from zero cached relationships',async()=>{

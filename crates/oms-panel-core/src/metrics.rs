@@ -718,8 +718,11 @@ pub fn collect_local_with_sources(
         let cutoff = now - CODEX_WEEK_SECONDS;
         let mut calls = 0u64;
         let mut input = 0u64;
+        let mut input_reports = 0u64;
         let mut cache_read = 0u64;
+        let mut cache_read_reports = 0u64;
         let mut out = 0u64;
+        let mut output_reports = 0u64;
         for entry in rows {
             let prov = entry["provider"].as_str().unwrap_or_default();
             if prov != "antigravity" && prov != "agy" {
@@ -734,19 +737,38 @@ pub fn collect_local_with_sources(
             calls += 1;
             let u = &entry["provider_usage"];
             if u.is_object() {
-                input += u["input_tokens"].as_u64().unwrap_or(0);
-                cache_read += u["cache_read_tokens"]
+                if let Some(n) = u["input_tokens"].as_u64() {
+                    input += n;
+                    input_reports += 1;
+                }
+                if let Some(n) = u["cache_read_tokens"]
                     .as_u64()
                     .or_else(|| u["cached_tokens"].as_u64())
-                    .unwrap_or(0);
-                out += u["output_tokens"].as_u64().unwrap_or(0);
+                {
+                    cache_read += n;
+                    cache_read_reports += 1;
+                }
+                if let Some(n) = u["output_tokens"].as_u64() {
+                    out += n;
+                    output_reports += 1;
+                }
             }
         }
         if calls > 0 {
+            let opt = |reported, sum| {
+                if reported > 0 {
+                    Value::from(sum)
+                } else {
+                    Value::Null
+                }
+            };
             agy.insert("calls".into(), calls.into());
-            agy.insert("input_tokens".into(), input.into());
-            agy.insert("cache_read_tokens".into(), cache_read.into());
-            agy.insert("output_tokens".into(), out.into());
+            agy.insert("input_tokens".into(), opt(input_reports, input));
+            agy.insert(
+                "cache_read_tokens".into(),
+                opt(cache_read_reports, cache_read),
+            );
+            agy.insert("output_tokens".into(), opt(output_reports, out));
             agy.insert("source".into(), "OMS artifacts".into());
         }
     }
@@ -962,7 +984,7 @@ fn codex_readings(
     let years = scan_filtered(&sessions_root, 4, true, &mut remaining, |name| {
         name.len() == 4 && name.bytes().all(|b| b.is_ascii_digit())
     });
-    'search: for (year, _) in years {
+    for (year, _) in years {
         let months = scan_filtered(&year, 2, true, &mut remaining, |name| {
             matches!(
                 name,
@@ -982,9 +1004,6 @@ fn codex_readings(
                     let mtime = meta.mtime() as i128 * 1_000_000_000 + meta.mtime_nsec() as i128;
                     files.push((mtime, meta.ino(), meta.size(), path));
                 }
-                if files.len() >= 16 && (!fallback_older || has_week_reading(&files, now)) {
-                    break 'search;
-                }
             }
         }
     }
@@ -995,6 +1014,7 @@ fn codex_readings(
     let mut best_weekly: Option<(u8, f64, Option<f64>)> = None;
     let mut newest_shorts: Vec<Value> = Vec::new();
     let mut source_proven = crate::routing::private_home(&home);
+    let mut saw_limits = false;
     // Registered homes use one bounded pass; only ambient discovery probes tails.
     let limit = if fallback_older { 64 } else { 16 };
     for (idx, (mtime, ino, size, path)) in files.into_iter().take(limit).enumerate() {
@@ -1007,7 +1027,9 @@ fn codex_readings(
             continue;
         };
         source_proven = before && route_matches();
-        if idx == 0 {
+        let first_limits = !saw_limits;
+        saw_limits = true;
+        if first_limits {
             let mut by_min = BTreeMap::new();
             for key in ["primary", "secondary"] {
                 let w = &limits[key];
@@ -1047,7 +1069,7 @@ fn codex_readings(
                 best_weekly = Some((u, r, observed));
             }
         }
-        if best_weekly.is_some() && idx == 0 {
+        if first_limits && best_weekly.is_some() {
             break;
         }
     }
@@ -1064,24 +1086,6 @@ fn codex_readings(
         shorts: newest_shorts,
         home,
     }
-}
-
-/// True when the newest files already yield a valid weekly reading, so older
-/// day directories cannot change the result.
-fn has_week_reading(files: &[(i128, u64, u64, std::path::PathBuf)], now: f64) -> bool {
-    let mut newest: Vec<_> = files.iter().collect();
-    newest.sort_by_key(|f| std::cmp::Reverse(f.0));
-    newest.into_iter().take(16).any(|(mtime, ino, size, path)| {
-        let Some((limits, _)) = read_rate_limits(path, *ino, *size, *mtime) else {
-            return false;
-        };
-        ["primary", "secondary"].iter().any(|key| {
-            let w = &limits[*key];
-            number(&w["window_minutes"]) == Some(10080.0)
-                && percent(&w["used_percent"]).is_some()
-                && number(&w["resets_at"]).is_some_and(|r| r > now)
-        })
-    })
 }
 
 fn scan_filtered(
@@ -1392,6 +1396,99 @@ mod receipt_token_tests {
                 .weekly_used
                 .is_none()
         );
+    }
+
+    #[test]
+    fn codex_readings_discovers_older_created_active_session_and_keeps_short_window() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let repo = Repo::new();
+        let now = 2_000_000_000.0;
+        let older_day = repo.0.join("sessions/2033/05/10");
+        let newer_day = repo.0.join("sessions/2033/05/18");
+        std::fs::create_dir_all(&older_day).unwrap();
+        std::fs::create_dir_all(&newer_day).unwrap();
+
+        let write_at = |dir: &Path, name: &str, age: u64, row: Value| {
+            let file = std::fs::File::create(dir.join(format!("rollout-{name}.jsonl"))).unwrap();
+            serde_json::to_writer(&file, &row).unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_secs(now as u64 - age))
+                .unwrap();
+        };
+
+        // 20 newer-day rollouts that would have stopped directory traversal early under the old limit.
+        for i in 0..20 {
+            write_at(
+                &newer_day,
+                &format!("newer-{i:02}"),
+                100 + i,
+                json!({
+                    "timestamp": now - 100.0 - i as f64,
+                    "rate_limits": {"secondary": {
+                        "window_minutes": 10080, "used_percent": 97, "resets_at": now + 3600.0
+                    }}
+                }),
+            );
+        }
+        // Long-running session created in an earlier date directory but modified most recently.
+        write_at(
+            &older_day,
+            "active-long",
+            5,
+            json!({
+                "timestamp": now - 5.0,
+                "rate_limits": {
+                    "primary": {"window_minutes": 300, "used_percent": 12, "resets_at": now + 1800.0},
+                    "secondary": {"window_minutes": 10080, "used_percent": 41, "resets_at": now + 7200.0}
+                }
+            }),
+        );
+
+        for fallback in [false, true] {
+            let readings = codex_readings(Some(&repo.0), now, fallback);
+            assert_eq!(readings.weekly_used, Some(41), "fallback={fallback}");
+            assert_eq!(readings.shorts.len(), 1, "fallback={fallback}");
+            assert_eq!(readings.shorts[0]["used"], 12);
+        }
+
+        // A freshly touched session_meta-only rollout does not hide short windows in the next rate_limits file.
+        write_at(
+            &newer_day,
+            "touched-meta",
+            1,
+            json!({"type": "session_meta"}),
+        );
+        let readings = codex_readings(Some(&repo.0), now, false);
+        assert_eq!(readings.weekly_used, Some(41));
+        assert_eq!(readings.shorts.len(), 1);
+        assert_eq!(readings.shorts[0]["used"], 12);
+    }
+
+    #[test]
+    fn collect_local_keeps_unreported_agy_token_counters_null() {
+        let now = 2_000_000_000.0;
+        let rows = vec![
+            json!({"ts": now - 60.0, "provider": "antigravity", "kind": "ask"}),
+            json!({"ts": now - 30.0, "provider": "antigravity", "kind": "delegate"}),
+        ];
+        let status = collect_local_with(&json!({}), None, now, Some(&rows));
+        let agy = &status["antigravity"];
+        assert_eq!(agy["calls"], 2);
+        assert!(agy["input_tokens"].is_null());
+        assert!(agy["cache_read_tokens"].is_null());
+        assert!(agy["output_tokens"].is_null());
+
+        let with_usage = vec![
+            json!({"ts": now - 60.0, "provider": "antigravity", "kind": "ask"}),
+            json!({"ts": now - 30.0, "provider": "antigravity", "kind": "call",
+                "provider_usage": {"input_tokens": 120, "cache_read_tokens": 45, "output_tokens": 30}}),
+        ];
+        let status = collect_local_with(&json!({}), None, now, Some(&with_usage));
+        let agy = &status["antigravity"];
+        assert_eq!(agy["calls"], 2);
+        assert_eq!(agy["input_tokens"], 120);
+        assert_eq!(agy["cache_read_tokens"], 45);
+        assert_eq!(agy["output_tokens"], 30);
     }
 
     fn write(
