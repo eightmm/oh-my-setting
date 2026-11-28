@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicBool;
 
 const STORE: &str = ".oms/failures.jsonl";
 const MAX_PRIOR_FAILURES: usize = 128;
+const STALE_AGE_SECS: i64 = 14 * 86400;
 pub(crate) const HELP: &str = "Usage: oms fail-ledger [--repo PATH] record --cmd CMD --exit N [--kind K] [--summary TEXT] [--next TEXT]\n       oms fail-ledger [--repo PATH] check --cmd CMD [--ignore-state]\n       oms fail-ledger [--repo PATH] resolve (--fingerprint FP | --cmd CMD) [--how TEXT]\n       oms fail-ledger [--repo PATH] list [--unresolved] [--json] [--limit N]\n       oms fail-ledger [--repo PATH] list --stalls [--json]\n       oms fail-ledger [--repo PATH] show --fingerprint FP [--json]\n\nAppend-only failure memory; unchanged retries exit 3. Hook failures expire on\nread after OMS_HOOK_FAIL_TTL (default 86400s). Reads count invalid rows.\n";
 
 pub fn fingerprint(command: &str) -> String {
@@ -319,6 +320,13 @@ pub fn valid_row(row: &Value) -> bool {
                     && row.get("exit").int().is_ok_and(|n| n >= 0))))
 }
 
+fn head_stamp(row: &Value) -> &str {
+    row.text("state_fingerprint")
+        .split(['|', ':'])
+        .next()
+        .unwrap_or("")
+}
+
 pub fn project(rows: &[Value], invalid: usize, head: &str, now: i64) -> Result<Value> {
     struct Aggregate {
         row: Value,
@@ -384,11 +392,7 @@ pub fn project(rows: &[Value], invalid: usize, head: &str, now: i64) -> Result<V
             } else {
                 entry.count += 1;
                 entry.row = row.clone();
-                let stamp = row
-                    .text("state_fingerprint")
-                    .split('|')
-                    .next()
-                    .unwrap_or("");
+                let stamp = head_stamp(row);
                 entry.heads.insert(if stamp.is_empty() {
                     format!("row:{}", entry.count)
                 } else {
@@ -405,16 +409,16 @@ pub fn project(rows: &[Value], invalid: usize, head: &str, now: i64) -> Result<V
             &entry.row
         };
         let expired = !entry.resolved && entry.count == 0 && entry.expired > 0;
-        let old_head = last
-            .text("state_fingerprint")
-            .split('|')
-            .next()
-            .unwrap_or("");
+        let all_stamped =
+            !entry.heads.is_empty() && entry.heads.iter().all(|h| !h.starts_with("row:"));
+        let non_current = !head.is_empty() && all_stamped && !entry.heads.contains(head);
+        let aged = parse_timestamp(last.text("ts")).is_some_and(|t| now - t >= STALE_AGE_SECS);
+        let legacy_read_guard = last.text("failure_code") == "read_guard_changed";
         let attention = if entry.resolved || expired {
             "none"
         } else if last.text("kind") == "hook" && entry.count < 2 {
             "retiring"
-        } else if entry.heads.len() < 2 && !old_head.is_empty() && old_head != head {
+        } else if non_current && (entry.heads.len() < 2 || aged || legacy_read_guard) {
             "stale"
         } else {
             "actionable"
@@ -427,6 +431,7 @@ pub fn project(rows: &[Value], invalid: usize, head: &str, now: i64) -> Result<V
             ("attention", string(attention)),
             ("actionable", Value::Bool(attention == "actionable")),
             ("retiring", Value::Bool(attention == "retiring")),
+            ("non_current_head", Value::Bool(non_current)),
         ]);
         for key in ["exit", "ts", "kind", "cmd", "summary", "failure_code"] {
             row.set(key, last.get(key).clone())?;
