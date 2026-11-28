@@ -1242,7 +1242,15 @@ fn panel_projection_covers_unindexed_indexed_bounds_and_no_writes() {
         .parent()
         .unwrap()
         .join("oms-graph-python-helper");
-    let helper_bin = helper_bin.is_file().then_some(helper_bin.as_path());
+    // A private copy keeps the helper trusted when cargo built it under a
+    // group-writable umask.
+    let helper_dir = Fixture::empty();
+    let helper_copy = helper_dir.0.join("oms-graph-python-helper");
+    let helper_bin = helper_bin.is_file().then(|| {
+        fs::copy(&helper_bin, &helper_copy).unwrap();
+        fs::set_permissions(&helper_copy, fs::Permissions::from_mode(0o700)).unwrap();
+        helper_copy.as_path()
+    });
     if helper_bin.is_some() {
         fs::write(indexed.0.join("src/inspect.py"), "def focus():\n    pass\n").unwrap();
     }

@@ -157,6 +157,21 @@ pub(crate) fn resolve_group_membership(gid: u32) -> oms_command_plan::Result<Gro
         resolve_group_membership_with(gid, &run_clean_probe)
     })
 }
+/// Plan services that carry only the host's group-ownership proofs.
+pub(crate) struct HostGroupProof;
+impl oms_command_plan::Services for HostGroupProof {
+    fn group_membership_resolver(&self) -> Option<oms_command_plan::services::GroupResolver> {
+        Some(resolve_group_membership)
+    }
+    fn group_membership_before(
+        &self,
+        gid: u32,
+        deadline: Instant,
+        interrupted: &std::sync::atomic::AtomicBool,
+    ) -> oms_command_plan::Result<GroupMembership> {
+        resolve_group_membership_before(gid, deadline, interrupted)
+    }
+}
 pub(crate) fn resolve_group_membership_before(
     gid: u32,
     deadline: Instant,
@@ -3680,6 +3695,9 @@ impl oms_command_hooks::HostServices for RuntimeServices<'_> {
     }
     fn check_python_syntax(&self, path: &Path, source: &[u8]) -> Option<bool> {
         crate::check_python_syntax_with_companion(path, source)
+    }
+    fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+        &HostGroupProof
     }
     // `record_hook_failure` stays the no-op default on purpose: every caller
     // appends the same `hook` row to the fail-ledger itself immediately after

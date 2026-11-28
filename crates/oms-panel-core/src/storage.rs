@@ -339,7 +339,10 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&root).unwrap();
+        // An explicit mode keeps the fixture private under a group-writable umask.
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+            .create(&root)
+            .unwrap();
         let store = Store::open(&root).unwrap();
         let tx = store
             .transaction("snapshot-test", Duration::from_secs(2))

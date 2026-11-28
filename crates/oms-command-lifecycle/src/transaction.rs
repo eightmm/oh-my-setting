@@ -2083,7 +2083,10 @@ mod tests {
         assert!(!target.join(SKILL_FILE).exists());
         assert!(target.join(HIDDEN_SKILL_FILE).is_file());
         let journal_dir = paths.config.join("native-lifecycle");
-        fs::create_dir_all(&journal_dir).unwrap();
+        // An explicit mode keeps the journal private under a group-writable umask.
+        std::os::unix::fs::DirBuilderExt::mode(fs::DirBuilder::new().recursive(true), 0o700)
+            .create(&journal_dir)
+            .unwrap();
         let journal = json!({
             "schema": 1,
             "committed": false,

@@ -4181,6 +4181,7 @@ mod tests {
     use oms_command_graph::HostServices as _;
     use oms_command_landing::Services as _;
     use oms_command_plan::Services as _;
+    use std::os::unix::fs::DirBuilderExt as _;
     use std::process::Command;
     use std::sync::atomic::AtomicU32;
 
@@ -4194,7 +4195,8 @@ mod tests {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-            std::fs::create_dir_all(&dir).unwrap();
+            // An explicit mode keeps the fixture private under a group-writable umask.
+            std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
             Self(std::fs::canonicalize(dir).unwrap())
         }
         fn path(&self) -> &Path {
