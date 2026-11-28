@@ -353,49 +353,45 @@ record-write failure and reporting `uncertain: true` when rollback fails), and t
 identical reinstalls as no-ops; `--uninstall-panel claude --project ALIAS` forgets the ownership
 row without running `claude` when the recorded checkout is gone (`action: "forgotten"`), probes `claude mcp get` first to leave user-modified local entries in place while dropping the row, and
 removes only matching entries. `--install-panel codex --project ALIAS` and
-`--uninstall-panel codex --project ALIAS` are supported only for the default user-config project
-map (`oh-my-setting/desktop-projects.json` under `XDG_CONFIG_HOME` or `~/.config`; any other
-active map file is refused without modifying anything, while Claude panels remain unaffected).
-`--install-panel codex --project ALIAS` requires `ALIAS` to form a valid lowercase Codex plugin
-name `oms-ALIAS` (1 to 60 lowercase ASCII letters or digits separated by single `-`; aliases
-containing `.` are refused for Codex while Claude panels still accept them), maintains an
-OMS-marked mode `0700`/`0600` host marketplace `oms-host-panels` under
-`oh-my-setting/codex-panels/` in the user config directory (`plugins/oms-ALIAS/{plugin.json,mcp.json}`
-pinned with `OMS_PANEL_REPO`, `OMS_MCP_TOOL_PROFILE=chatgpt-panel`,
-`OMS_MCP_PANEL_RESOURCE_VERSION`, and the absolute `~/.local/bin/oms` launcher in `mcp.json`
-matching the Claude panel because GUI apps may lack the user `PATH`, without copying skills),
-builds `marketplace.json` from the aliases that own a marked bundle on disk plus the alias being
-installed, registers the marketplace once and adds `oms-ALIAS@oms-host-panels` via
-`OMS_CODEX_BIN`/`codex`, and records a `user`-scope ownership row carrying the `plugin_sha256` and
-`mcp_sha256` digests of the written bundle files (strictly required on Codex rows while Claude rows
-carry none; rolling back `codex plugin add` whenever Codex did not already list
-`oms-ALIAS@oms-host-panels` before the run, and reporting `uncertain: true` while keeping the
-bundle and marketplace entry on disk if `plugin remove` fails so a later uninstall can clean up).
-OMS identifies installed Codex plugins by `oms-ALIAS`, `oms-host-panels`, and the recorded checkout
-(never gating ownership on version or `enabled`), and reports `"disabled": true` as a separate field
-in `--json` output when the plugin is disabled in Codex.
-Reinstalling an alias with a matching row and unedited bundle refreshes `plugin.json` and
-`mcp.json` to the running OMS package and panel resource versions, re-runs `codex plugin add` so
-Codex updates its local plugin cache (which re-enables a disabled plugin in `codex` CLI; if a
-refresh `codex plugin add` or subsequent sidecar write fails, rollback restores the prior bundle
-bytes on disk, re-runs `codex plugin add`, and confirms the restored state via
-`codex plugin list --json`, reporting `uncertain` rather than `rolled back` if that fails or cannot
-be confirmed), and updates the recorded SHA-256 digests (refusing if the
-bundle on disk was modified outside OMS, while treating an already-current bundle as a no-op that
-keeps a disabled plugin disabled);
-installing with no row when `oms-ALIAS@oms-host-panels` and its marked bundle match OMS's manifest
-for that alias and checkout apart from `version` and `OMS_MCP_PANEL_RESOURCE_VERSION` adopts the
-existing registration (`action: "adopted"`, keeping any disabled choice) and records its on-disk
-digests instead of refusing as unmanaged. `--uninstall-panel codex --project ALIAS` removes a
-disabled OMS plugin like an enabled one, checks bundle edits
-against the recorded `plugin_sha256`/`mcp_sha256` digests so OMS upgrades uninstall cleanly while
-leaving genuinely user-edited `plugin.json` or `mcp.json` bundles and the marketplace in place
-(running `codex plugin remove` only when the installed plugin still matches OMS and the recorded
-checkout, never deleting the bundle directory or `marketplace.json` entry of any plugin that
-remains installed in Codex, dropping the ownership row when leaving user-modified state in place,
-and reporting any edited file), keeps `oms-host-panels` and
-the root when Codex still lists another plugin from `oms-host-panels` (reporting what remains
-installed) or another bundle remains on disk, and otherwise removes the ownership marker last after
-all other OMS-written files and directories are gone (restoring the marker and keeping the row if
-removing the root fails), while `--unregister-project` refuses aliases that still have a recorded
-panel.
+`--uninstall-panel codex --project ALIAS` work with both the default user-config project
+map and an explicit `OMS_PANEL_PROJECTS_FILE` map, and accept any valid desktop project
+alias (including uppercase letters and `.`, such as `PoseFixer` or `app.v1`).
+`--install-panel codex --project ALIAS` creates or extends `.codex/config.toml` inside the
+registered physical checkout (mode `0600` when created, preserving every other byte and mode
+of an existing file) with an OMS-marked `# BEGIN oh-my-setting codex-panel` ..
+`# END oh-my-setting codex-panel` block defining `[mcp_servers.oms-panel]` (`command` set to
+the absolute `~/.local/bin/oms` launcher and `args = ["mcp-server"]`) and
+`[mcp_servers.oms-panel.env]` (`OMS_MCP_TOOL_PROFILE = "chatgpt-panel"`, `OMS_PANEL_REPO`
+pinned to the physical checkout, and `OMS_MCP_PANEL_RESOURCE_VERSION`). It parses
+`.codex/config.toml` via `oms-toml` and verifies the resulting table, refusing invalid TOML,
+symlinks (`NOFOLLOW`), an unmanaged `mcp_servers.oms-panel` outside the OMS block, or a
+Git-tracked `.codex/config.toml`. When `.codex/config.toml` is untracked and not ignored in a
+Git checkout, OMS adds `/.codex/config.toml` to `<common-git-dir>/info/exclude` (using
+`--git-common-dir` for linked worktrees). Ownership is recorded in
+`desktop-project-panels.json` with `scope: "project"`, `name: "oms-panel"`, `block_sha256`,
+`created_config`, `created_codex_dir`, `created_exclude`, and optional `separator_added` /
+`exclude_separator_added` flags when OMS inserted a leading newline before an unterminated
+prior file, rolling back exact prior file bytes on failure; identical reinstalls are no-ops
+(`changed: false`), unedited out-of-date blocks (older OMS package or panel resource version)
+are rewritten (`changed: true`), edited blocks are refused untouched, an unowned exact OMS
+block on disk is adopted (`action: "adopted"`), and a second Codex alias in the same sidecar
+for the same physical checkout is refused naming the existing alias. Two different project map
+files pointing at one checkout cannot be detected from one sidecar. Install reads
+`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) read-only without ever writing under
+`CODEX_HOME` or following symlinks: it checks `[projects."<physical-checkout>"].trust_level`
+first (`"trusted"` is active, any other value is inactive) and falls back to
+`[projects."<repo-root>"].trust_level` (parent of canonical `--git-common-dir`, never a
+non-repository ancestor) only when that key is absent, reporting `"active": false`,
+`"reason": "codex-project-untrusted"`, and a one-line hint naming `<physical-checkout>` when
+its own `trust_level` is set (or outside Git) and `<repo-root>` otherwise, or `"active": false`,
+`"reason": "codex-trust-unknown"`, and a hint explaining why without failing the install when
+neither `CODEX_HOME` nor `HOME` is set or `CODEX_HOME` or `config.toml` is a symlink,
+non-regular, not owned by the current user, unreadable, or invalid TOML. `--uninstall-panel codex --project ALIAS` forgets deleted
+checkouts (`action: "forgotten"`), removes only an OMS block whose bytes match `block_sha256`
+(leaving edited blocks in place and reporting them via `preservedFiles`), removes
+`.codex/config.toml` (including any recorded `separator_added` byte), `.codex`, and the
+`info/exclude` line (plus `exclude_separator_added`, or hands `created_exclude` and its
+separator flag to another Codex row in the same sidecar that still shares that exclude rule so
+the last uninstall removes it) only when OMS created them and they are now empty or unchanged,
+and drops the sidecar row, while `--unregister-project` refuses aliases that still have a
+recorded panel.

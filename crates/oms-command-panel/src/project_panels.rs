@@ -9,7 +9,6 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -27,17 +26,24 @@ use super::{
 pub(crate) const PANELS_FILE_NAME: &str = "desktop-project-panels.json";
 const PANEL_ENTRY_NAME: &str = "oms-panel";
 const LIFECYCLE_OWNED_KEY: &str = "oh-my-setting";
-const LIFECYCLE_CODEX_MARKETPLACE: &str = "oh-my-setting-local";
-const LIFECYCLE_CODEX_PANEL_PLUGIN: &str = "oms";
-const CODEX_MARKETPLACE_NAME: &str = "oms-host-panels";
-const CODEX_MARKETPLACE_DISPLAY_NAME: &str = "OMS project panels";
-const CODEX_MARKETPLACE_MARKER: &str = ".oh-my-setting-codex-panels.json";
 const OMS_PACKAGE_VERSION: &str = include_str!("../../../VERSION").trim_ascii();
-const REPO_OMS_PLUGIN_JSON: &str = include_str!("../../../plugins/oms/plugin.json");
 const REPO_OMS_MCP_JSON: &str = include_str!("../../../plugins/oms/mcp.json");
+const CODEX_BLOCK_BEGIN: &str = "# BEGIN oh-my-setting codex-panel";
+const CODEX_BLOCK_END: &str = "# END oh-my-setting codex-panel";
+const CODEX_UNTRUSTED_REASON: &str = "codex-project-untrusted";
+const CODEX_TRUST_UNKNOWN_REASON: &str = "codex-trust-unknown";
+const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 const VENDOR_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CAPTURE_BYTES: usize = 64 * 1024;
 const MCP_MISSING_STATUS: i32 = 1;
+const GIT_ENV_OVERRIDES: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PanelApp {
@@ -69,108 +75,21 @@ impl PanelApp {
     const fn expected_scope(self) -> &'static str {
         match self {
             Self::Claude => "local",
-            Self::Codex => "user",
+            Self::Codex => "project",
         }
     }
-
-    const fn cli_label(self) -> &'static str {
-        match self {
-            Self::Claude => "Claude CLI",
-            Self::Codex => "Codex CLI",
-        }
-    }
-
-    const fn bin_env_and_default(self) -> (&'static str, &'static str) {
-        match self {
-            Self::Claude => ("OMS_CLAUDE_BIN", "claude"),
-            Self::Codex => ("OMS_CODEX_BIN", "codex"),
-        }
-    }
-
-    fn expected_entry_name(self, alias: &str) -> Result<String> {
-        match self {
-            Self::Claude => Ok(PANEL_ENTRY_NAME.to_owned()),
-            Self::Codex => codex_plugin_id(alias),
-        }
-    }
-}
-
-fn codex_plugin_name(alias: &str) -> Result<String> {
-    if alias.contains('.') {
-        return Err(Error::new(format!(
-            "project alias '{alias}' cannot form a valid Codex plugin name 'oms-{alias}': aliases containing '.' are not supported for Codex panels (expected 1 to 60 lowercase ASCII letters or digits separated by single '-')"
-        )));
-    }
-    let valid = (1..=60).contains(&alias.len())
-        && alias
-            .as_bytes()
-            .first()
-            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        && alias
-            .as_bytes()
-            .last()
-            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        && alias
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        && !alias.as_bytes().windows(2).any(|w| w == b"--");
-    if !valid {
-        return Err(Error::new(format!(
-            "project alias '{alias}' cannot form a valid Codex plugin name 'oms-{alias}': expected 1 to 60 lowercase ASCII letters or digits separated by single '-'"
-        )));
-    }
-    let name = format!("oms-{alias}");
-    debug_assert_ne!(name, LIFECYCLE_OWNED_KEY);
-    debug_assert_ne!(name, LIFECYCLE_CODEX_PANEL_PLUGIN);
-    Ok(name)
-}
-
-fn codex_plugin_id(alias: &str) -> Result<String> {
-    let plugin_name = codex_plugin_name(alias)?;
-    Ok(format!("{plugin_name}@{CODEX_MARKETPLACE_NAME}"))
-}
-
-struct CodexPluginTemplate {
-    plugin_schema: String,
-    description: String,
-    short_description: String,
-    mcp_schema: String,
-    panel_resource_version: String,
-}
-
-fn codex_plugin_template() -> &'static CodexPluginTemplate {
-    static TEMPLATE: OnceLock<CodexPluginTemplate> = OnceLock::new();
-    TEMPLATE.get_or_init(|| {
-        let plugin_val: serde_json::Value =
-            serde_json::from_str(REPO_OMS_PLUGIN_JSON).expect("compiled plugins/oms/plugin.json");
-        let mcp_val: serde_json::Value =
-            serde_json::from_str(REPO_OMS_MCP_JSON).expect("compiled plugins/oms/mcp.json");
-        CodexPluginTemplate {
-            plugin_schema: plugin_val["$schema"]
-                .as_str()
-                .expect("plugin $schema")
-                .to_owned(),
-            description: plugin_val["description"]
-                .as_str()
-                .expect("plugin description")
-                .to_owned(),
-            short_description:
-                plugin_val["extensions"]["com.openai"]["interface"]["shortDescription"]
-                    .as_str()
-                    .expect("plugin shortDescription")
-                    .to_owned(),
-            mcp_schema: mcp_val["$schema"].as_str().expect("mcp $schema").to_owned(),
-            panel_resource_version:
-                mcp_val["mcpServers"]["oms-panel"]["env"]["OMS_MCP_PANEL_RESOURCE_VERSION"]
-                    .as_str()
-                    .expect("OMS_MCP_PANEL_RESOURCE_VERSION in plugins/oms/mcp.json")
-                    .to_owned(),
-        }
-    })
 }
 
 fn codex_panel_resource_version() -> &'static str {
-    &codex_plugin_template().panel_resource_version
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        let mcp_val: serde_json::Value =
+            serde_json::from_str(REPO_OMS_MCP_JSON).expect("compiled plugins/oms/mcp.json");
+        mcp_val["mcpServers"]["oms-panel"]["env"]["OMS_MCP_PANEL_RESOURCE_VERSION"]
+            .as_str()
+            .expect("OMS_MCP_PANEL_RESOURCE_VERSION in plugins/oms/mcp.json")
+            .to_owned()
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -181,9 +100,27 @@ pub(super) struct PanelRecord {
     pub name: String,
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_sha256: Option<String>,
+    pub block_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_sha256: Option<String>,
+    pub created_config: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_codex_dir: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_exclude: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator_added: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude_separator_added: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexRowMeta {
+    block_sha256: String,
+    created_config: bool,
+    created_codex_dir: bool,
+    created_exclude: bool,
+    separator_added: bool,
+    exclude_separator_added: bool,
 }
 
 fn valid_sha256_hex(raw: &str) -> bool {
@@ -242,56 +179,69 @@ pub(super) fn validate_panels_stat(stat: &Stat) -> Result<()> {
     validate_private_sidecar_stat(stat, "OMS project panel map", "desktop project panel map")
 }
 
+fn validate_panel_map(panels: &PanelMap) -> Result<()> {
+    require(
+        panels.len() <= MAX_ENTRIES,
+        "Invalid OMS project panel map: exceeds 128 entries",
+    )?;
+    let mut seen_codex_paths = BTreeSet::new();
+    for (alias, rows) in panels {
+        require(
+            valid_alias(alias) && !rows.is_empty() && rows.len() <= 8,
+            "Invalid OMS project panel map: expected valid aliases with nonempty panel lists",
+        )?;
+        let mut seen = BTreeSet::new();
+        for row in rows {
+            let app = PanelApp::parse(&row.app).map_err(|_| {
+                Error::new("Invalid OMS project panel map: unsupported panel app in record")
+            })?;
+            let fields_valid = match app {
+                PanelApp::Claude => {
+                    row.block_sha256.is_none()
+                        && row.created_config.is_none()
+                        && row.created_codex_dir.is_none()
+                        && row.created_exclude.is_none()
+                        && row.separator_added.is_none()
+                        && row.exclude_separator_added.is_none()
+                }
+                PanelApp::Codex => {
+                    row.block_sha256.as_deref().is_some_and(valid_sha256_hex)
+                        && row.created_config.is_some()
+                        && row.created_codex_dir.is_some()
+                        && row.created_exclude.is_some()
+                        && !(row.created_codex_dir == Some(true)
+                            && row.created_config == Some(false))
+                        && !(row.exclude_separator_added == Some(true)
+                            && row.created_exclude != Some(true))
+                        && seen_codex_paths.insert(row.path.clone())
+                }
+            };
+            require(
+                row.scope == app.expected_scope()
+                    && row.name == PANEL_ENTRY_NAME
+                    && row.name != LIFECYCLE_OWNED_KEY
+                    && normalized_abs_utf8(&row.path)
+                    && fields_valid
+                    && seen.insert(app),
+                "Invalid OMS project panel map: invalid or duplicate panel record fields",
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn parse_panels_json(raw: &str) -> Result<PanelMap> {
     require(
         raw.len() <= MAX_BYTES,
         "Invalid OMS project panel map: exceeds 16 KiB",
     )?;
-    let StrictPanelMap(raw_map) = serde_json::from_str(raw).map_err(|_| {
+    let StrictPanelMap(panels) = serde_json::from_str(raw).map_err(|_| {
         Error::new(
             "Invalid OMS project panel map: expected an object of project aliases and strict panel records",
         )
     })?;
-    require(
-        raw_map.len() <= MAX_ENTRIES,
-        "Invalid OMS project panel map: exceeds 128 entries",
-    )?;
-    let mut out = BTreeMap::new();
-    for (alias, rows) in raw_map {
-        require(
-            valid_alias(&alias) && !rows.is_empty() && rows.len() <= 8,
-            "Invalid OMS project panel map: expected valid aliases with nonempty panel lists",
-        )?;
-        let mut seen = BTreeSet::new();
-        for row in &rows {
-            let app = PanelApp::parse(&row.app).map_err(|_| {
-                Error::new("Invalid OMS project panel map: unsupported panel app in record")
-            })?;
-            let expected_name = app.expected_entry_name(&alias).map_err(|_| {
-                Error::new(
-                    "Invalid OMS project panel map: alias cannot form a valid panel entry name",
-                )
-            })?;
-            let hashes_valid = match app {
-                PanelApp::Claude => row.plugin_sha256.is_none() && row.mcp_sha256.is_none(),
-                PanelApp::Codex => {
-                    row.plugin_sha256.as_deref().is_some_and(valid_sha256_hex)
-                        && row.mcp_sha256.as_deref().is_some_and(valid_sha256_hex)
-                }
-            };
-            require(
-                row.scope == app.expected_scope()
-                    && row.name == expected_name
-                    && row.name != LIFECYCLE_OWNED_KEY
-                    && normalized_abs_utf8(&row.path)
-                    && hashes_valid
-                    && seen.insert(app),
-                "Invalid OMS project panel map: invalid or duplicate panel record fields",
-            )?;
-        }
-        out.insert(alias, rows);
-    }
-    Ok(out)
+    validate_panel_map(&panels)?;
+    Ok(panels)
 }
 
 fn encode_panels_json(panels: &PanelMap) -> Result<Vec<u8>> {
@@ -299,6 +249,7 @@ fn encode_panels_json(panels: &PanelMap) -> Result<Vec<u8>> {
         !panels.is_empty() && panels.len() <= MAX_ENTRIES,
         "desktop project panel map must contain 1 to 128 entries",
     )?;
+    validate_panel_map(panels)?;
     let mut bytes = serde_json::to_vec_pretty(panels).map_err(Error::new)?;
     bytes.push(b'\n');
     if bytes.len() > MAX_BYTES {
@@ -366,332 +317,227 @@ fn resolve_oms_launcher_path() -> Result<PathBuf> {
     Ok(home.join(".local/bin/oms"))
 }
 
-fn resolve_codex_marketplace_paths() -> Result<(PathBuf, PathBuf)> {
-    let config_root = if let Some(xdg) =
-        std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty())
-    {
-        let p = PathBuf::from(xdg);
-        require(
-            normalized_abs_utf8(&p),
-            "XDG_CONFIG_HOME must be a normalized UTF-8 absolute path",
-        )?;
-        p
-    } else if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        let p = PathBuf::from(home);
-        require(
-            normalized_abs_utf8(&p),
-            "HOME must be a normalized UTF-8 absolute path",
-        )?;
-        p.join(".config")
-    } else {
-        return Err(Error::new(
-            "cannot determine user config directory for Codex panels: set XDG_CONFIG_HOME or HOME",
-        ));
-    };
-
-    let mut ancestor = config_root.as_path();
-    let mut missing = Vec::new();
-    loop {
-        match std::fs::symlink_metadata(ancestor) {
-            Ok(_) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                missing.push(
-                    ancestor
-                        .file_name()
-                        .ok_or_else(|| Error::new("invalid user config directory"))?
-                        .to_owned(),
-                );
-                ancestor = ancestor
-                    .parent()
-                    .ok_or_else(|| Error::new("invalid user config ancestor"))?;
+fn toml_basic_string(raw: &str) -> Result<String> {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for ch in raw.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                use std::fmt::Write;
+                let _ = write!(&mut out, "\\u{:04X}", c as u32);
             }
-            Err(e) => {
-                return Err(Error::new(format!(
-                    "cannot inspect user config directory {}: {e}",
-                    ancestor.display()
-                )));
-            }
+            c => out.push(c),
         }
     }
-    let mut physical_config = std::fs::canonicalize(ancestor).map_err(|e| {
-        Error::new(format!(
-            "cannot resolve user config directory {}: {e}",
-            ancestor.display()
-        ))
-    })?;
-    for part in missing.iter().rev() {
-        physical_config.push(part);
-    }
-    let oms_config_dir = physical_config.join("oh-my-setting");
-    if let Ok(meta) = std::fs::symlink_metadata(&oms_config_dir)
-        && meta.file_type().is_symlink()
-    {
-        return Err(Error::new("refusing symlinked OMS config directory"));
-    }
-    let marketplace_root = oms_config_dir.join("codex-panels");
-    if let Ok(meta) = std::fs::symlink_metadata(&marketplace_root)
-        && meta.file_type().is_symlink()
-    {
-        return Err(Error::new(
-            "refusing symlinked Codex panel marketplace directory",
-        ));
-    }
-    require(
-        normalized_abs_utf8(&marketplace_root),
-        "Codex panel marketplace path must be a normalized UTF-8 absolute path",
-    )?;
-    Ok((oms_config_dir, marketplace_root))
-}
-
-fn resolve_codex_paths_for_active_map(
-    target: &Path,
-    explicit: bool,
-    active_parent: &Path,
-    active_leaf: &OsStr,
-) -> Result<(PathBuf, PathBuf)> {
-    let active_file = active_parent.join(active_leaf);
-    let (oms_config_dir, marketplace_root) = match resolve_codex_marketplace_paths() {
-        Ok(paths) => paths,
-        Err(_) if explicit => {
-            return Err(Error::new(format!(
-                "Codex panels are supported only for the default user-config project map; refusing active project map {} from OMS_PANEL_PROJECTS_FILE",
-                active_file.display()
-            )));
-        }
-        Err(e) => return Err(e),
-    };
-    let default_map = oms_config_dir.join("desktop-projects.json");
-    if explicit {
-        if let Some(raw_parent) = target.parent()
-            && let Ok(meta) = std::fs::symlink_metadata(raw_parent)
-            && meta.file_type().is_symlink()
-        {
-            return Err(Error::new(
-                "refusing symlinked desktop project map directory",
-            ));
-        }
-        if active_file != default_map {
-            return Err(Error::new(format!(
-                "Codex panels are supported only for the default user-config project map ({}); refusing active project map {}",
-                default_map.display(),
-                active_file.display()
-            )));
-        }
-    }
-    debug_assert_eq!(active_file, default_map);
-    Ok((oms_config_dir, marketplace_root))
-}
-
-fn codex_marker_value() -> serde_json::Value {
-    json!({
-        "schema": 1,
-        "owner": LIFECYCLE_OWNED_KEY,
-        "kind": "codex-host-panels",
-        "marketplace": CODEX_MARKETPLACE_NAME,
-    })
-}
-
-fn codex_marker_bytes() -> Result<Vec<u8>> {
-    let mut out = serde_json::to_vec_pretty(&codex_marker_value()).map_err(Error::new)?;
-    out.push(b'\n');
+    out.push('"');
     Ok(out)
 }
 
-fn verify_codex_marker_at(mp_fd: &OwnedFd, marketplace_root: &Path) -> Result<()> {
-    let Some((raw, _)) = read_private_sidecar_at(
-        mp_fd,
-        OsStr::new(CODEX_MARKETPLACE_MARKER),
-        "Codex panel marketplace marker",
-        "Codex panel marketplace marker",
-    )?
-    else {
-        return Err(Error::new(format!(
-            "unmanaged Codex panel marketplace directory {} lacks OMS ownership marker; refusing to modify",
-            marketplace_root.display()
-        )));
-    };
-    let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
-        Error::new("Invalid Codex panel marketplace marker: expected OMS ownership JSON")
-    })?;
-    require(
-        parsed == codex_marker_value(),
-        "Invalid Codex panel marketplace marker: unexpected ownership payload",
-    )
-}
-
-fn codex_marketplace_manifest_value(aliases: &BTreeSet<String>) -> Result<serde_json::Value> {
-    let mut plugins = Vec::with_capacity(aliases.len());
-    for alias in aliases {
-        let plugin_name = codex_plugin_name(alias)?;
-        plugins.push(json!({
-            "name": plugin_name,
-            "source": {
-                "source": "local",
-                "path": format!("./plugins/{plugin_name}"),
-            },
-            "policy": {
-                "installation": "AVAILABLE",
-                "authentication": "ON_INSTALL",
-            },
-            "category": "Developer Tools",
-        }));
-    }
-    Ok(json!({
-        "name": CODEX_MARKETPLACE_NAME,
-        "interface": {
-            "displayName": CODEX_MARKETPLACE_DISPLAY_NAME,
-        },
-        "plugins": plugins,
-    }))
-}
-
-fn codex_plugin_manifest_value_for_version(
-    alias: &str,
-    package_version: &str,
-) -> Result<serde_json::Value> {
-    let plugin_name = codex_plugin_name(alias)?;
-    let tpl = codex_plugin_template();
-    Ok(json!({
-        "$schema": tpl.plugin_schema,
-        "name": plugin_name,
-        "version": package_version,
-        "description": tpl.description,
-        "extensions": {
-            "com.openai": {
-                "requires_local_executor": true,
-                "interface": {
-                    "displayName": format!("OMS · {alias}"),
-                    "shortDescription": tpl.short_description,
-                }
-            }
-        }
-    }))
-}
-
-fn codex_plugin_manifest_value(alias: &str) -> Result<serde_json::Value> {
-    codex_plugin_manifest_value_for_version(alias, OMS_PACKAGE_VERSION)
-}
-
-fn codex_mcp_manifest_value_for_version(
+fn codex_panel_block_for_versions(
     launcher: &Path,
     physical_repo: &Path,
+    package_version: &str,
     resource_version: &str,
-) -> Result<serde_json::Value> {
+) -> Result<String> {
+    require(
+        !package_version.is_empty()
+            && !package_version.chars().any(|c| c.is_control() && c != '\t'),
+        "invalid OMS package version",
+    )?;
     let launcher_str = launcher
         .to_str()
         .ok_or_else(|| Error::new("launcher path must be valid UTF-8"))?;
     let repo_str = physical_repo
         .to_str()
         .ok_or_else(|| Error::new("project path must be valid UTF-8"))?;
-    let tpl = codex_plugin_template();
-    Ok(json!({
-        "$schema": tpl.mcp_schema,
-        "mcpServers": {
-            PANEL_ENTRY_NAME: {
-                "type": "stdio",
-                "command": launcher_str,
-                "args": ["mcp-server"],
-                "env": {
-                    "OMS_MCP_TOOL_PROFILE": "chatgpt-panel",
-                    "OMS_PANEL_REPO": repo_str,
-                    "OMS_MCP_PANEL_RESOURCE_VERSION": resource_version,
+    Ok(format!(
+        "{CODEX_BLOCK_BEGIN}\n# oh-my-setting {package_version}\n[mcp_servers.{PANEL_ENTRY_NAME}]\ncommand = {}\nargs = [\"mcp-server\"]\n\n[mcp_servers.{PANEL_ENTRY_NAME}.env]\nOMS_MCP_TOOL_PROFILE = \"chatgpt-panel\"\nOMS_PANEL_REPO = {}\nOMS_MCP_PANEL_RESOURCE_VERSION = {}\n{CODEX_BLOCK_END}\n",
+        toml_basic_string(launcher_str)?,
+        toml_basic_string(repo_str)?,
+        toml_basic_string(resource_version)?,
+    ))
+}
+
+fn codex_panel_block(launcher: &Path, physical_repo: &Path) -> Result<String> {
+    codex_panel_block_for_versions(
+        launcher,
+        physical_repo,
+        OMS_PACKAGE_VERSION,
+        codex_panel_resource_version(),
+    )
+}
+
+fn expected_codex_panel_server_table(
+    launcher: &Path,
+    physical_repo: &Path,
+    resource_version: &str,
+) -> Result<oms_toml::Table> {
+    let launcher_str = launcher
+        .to_str()
+        .ok_or_else(|| Error::new("launcher path must be valid UTF-8"))?;
+    let repo_str = physical_repo
+        .to_str()
+        .ok_or_else(|| Error::new("project path must be valid UTF-8"))?;
+    let mut env_table = oms_toml::Table::new();
+    env_table.insert(
+        "OMS_MCP_TOOL_PROFILE".into(),
+        oms_toml::Value::String("chatgpt-panel".into()),
+    );
+    env_table.insert(
+        "OMS_PANEL_REPO".into(),
+        oms_toml::Value::String(repo_str.to_owned()),
+    );
+    env_table.insert(
+        "OMS_MCP_PANEL_RESOURCE_VERSION".into(),
+        oms_toml::Value::String(resource_version.to_owned()),
+    );
+
+    let mut server_table = oms_toml::Table::new();
+    server_table.insert(
+        "command".into(),
+        oms_toml::Value::String(launcher_str.to_owned()),
+    );
+    server_table.insert(
+        "args".into(),
+        oms_toml::Value::Array(vec![oms_toml::Value::String("mcp-server".into())]),
+    );
+    server_table.insert("env".into(), oms_toml::Value::Table(env_table));
+    Ok(server_table)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockSplit<'a> {
+    before: &'a str,
+    block: Option<&'a str>,
+    after: &'a str,
+}
+
+fn split_codex_panel_block(raw: &str) -> Result<BlockSplit<'_>> {
+    let mut pos = 0usize;
+    let mut state: Option<(usize, Option<usize>)> = None;
+    while pos < raw.len() {
+        let end = match raw[pos..].find('\n') {
+            Some(rel) => pos + rel + 1,
+            None => raw.len(),
+        };
+        let line = &raw[pos..end];
+        let stripped = line.strip_suffix('\n').unwrap_or(line);
+        let stripped = stripped.strip_suffix('\r').unwrap_or(stripped);
+        let trimmed = stripped.trim();
+        if trimmed == CODEX_BLOCK_BEGIN {
+            match state {
+                None => state = Some((pos, None)),
+                Some(_) => {
+                    return Err(Error::new(
+                        "malformed OMS codex-panel block in .codex/config.toml: duplicate begin marker",
+                    ));
+                }
+            }
+        } else if trimmed == CODEX_BLOCK_END {
+            match state {
+                Some((start, None)) => state = Some((start, Some(end))),
+                None => {
+                    return Err(Error::new(
+                        "malformed OMS codex-panel block in .codex/config.toml: unmatched end marker",
+                    ));
+                }
+                Some((_, Some(_))) => {
+                    return Err(Error::new(
+                        "malformed OMS codex-panel block in .codex/config.toml: duplicate end marker",
+                    ));
                 }
             }
         }
-    }))
+        pos = end;
+    }
+    match state {
+        None => Ok(BlockSplit {
+            before: raw,
+            block: None,
+            after: "",
+        }),
+        Some((_, None)) => Err(Error::new(
+            "malformed OMS codex-panel block in .codex/config.toml: missing end marker",
+        )),
+        Some((start, Some(end))) => Ok(BlockSplit {
+            before: &raw[..start],
+            block: Some(&raw[start..end]),
+            after: &raw[end..],
+        }),
+    }
 }
 
-fn codex_mcp_manifest_value(launcher: &Path, physical_repo: &Path) -> Result<serde_json::Value> {
-    codex_mcp_manifest_value_for_version(launcher, physical_repo, codex_panel_resource_version())
+fn table_without_oms_panel(
+    mut table: oms_toml::Table,
+    keep_empty_mcp_servers: bool,
+) -> Result<oms_toml::Table> {
+    let remove_mcp_servers = match table.get_mut("mcp_servers") {
+        None => false,
+        Some(oms_toml::Value::Table(servers)) => {
+            servers.remove(PANEL_ENTRY_NAME);
+            servers.is_empty() && !keep_empty_mcp_servers
+        }
+        Some(_) => {
+            return Err(Error::new(
+                "Invalid .codex/config.toml: mcp_servers must be a TOML table",
+            ));
+        }
+    };
+    if remove_mcp_servers {
+        table.remove("mcp_servers");
+    }
+    Ok(table)
 }
 
-fn codex_bundle_bytes_match_any_oms_release(
-    alias: &str,
+fn table_with_expected_oms_panel(
+    mut base: oms_toml::Table,
     launcher: &Path,
     physical_repo: &Path,
-    plugin_bytes: &[u8],
-    mcp_bytes: &[u8],
-) -> Result<bool> {
-    let Ok(plugin_val) = serde_json::from_slice::<serde_json::Value>(plugin_bytes) else {
-        return Ok(false);
+    resource_version: &str,
+) -> Result<oms_toml::Table> {
+    let server = expected_codex_panel_server_table(launcher, physical_repo, resource_version)?;
+    let entry = base
+        .entry("mcp_servers".into())
+        .or_insert_with(|| oms_toml::Value::Table(oms_toml::Table::new()));
+    let oms_toml::Value::Table(servers) = entry else {
+        return Err(Error::new(
+            "Invalid .codex/config.toml: mcp_servers must be a TOML table",
+        ));
     };
-    let Some(pkg_ver) = plugin_val
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
-        return Ok(false);
-    };
-    let expected_plugin = codex_plugin_manifest_value_for_version(alias, pkg_ver)?;
-    let expected_plugin_pretty = serde_json::to_vec_pretty(&expected_plugin).map_err(Error::new)?;
-    if plugin_bytes.strip_suffix(b"\n").unwrap_or(plugin_bytes) != expected_plugin_pretty.as_slice()
-    {
-        return Ok(false);
+    servers.insert(PANEL_ENTRY_NAME.into(), oms_toml::Value::Table(server));
+    Ok(base)
+}
+
+fn open_dir_nofollow(path: &Path, label: &str) -> Result<OwnedFd> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(Error::new(format!("refusing symlinked {label}")));
+        }
+        Ok(meta) if !meta.is_dir() => {
+            return Err(Error::new(format!("Invalid {label}: not a directory")));
+        }
+        Ok(_) => {}
+        Err(e) => return Err(Error::new(format!("cannot inspect {label}: {e}"))),
     }
-
-    let Ok(mcp_val) = serde_json::from_slice::<serde_json::Value>(mcp_bytes) else {
-        return Ok(false);
-    };
-    let Some(res_ver) = mcp_val
-        .get("mcpServers")
-        .and_then(|s| s.get(PANEL_ENTRY_NAME))
-        .and_then(|e| e.get("env"))
-        .and_then(|env| env.get("OMS_MCP_PANEL_RESOURCE_VERSION"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| !s.is_empty())
-    else {
-        return Ok(false);
-    };
-    let expected_mcp = codex_mcp_manifest_value_for_version(launcher, physical_repo, res_ver)?;
-    let expected_mcp_pretty = serde_json::to_vec_pretty(&expected_mcp).map_err(Error::new)?;
-    Ok(mcp_bytes.strip_suffix(b"\n").unwrap_or(mcp_bytes) == expected_mcp_pretty.as_slice())
-}
-
-fn mcp_bytes_pin_checkout(mcp_bytes: &[u8], expected_checkout: &Path) -> bool {
-    let Ok(mcp_val) = serde_json::from_slice::<serde_json::Value>(mcp_bytes) else {
-        return false;
-    };
-    let Some(repo_str) = mcp_val
-        .get("mcpServers")
-        .and_then(|s| s.get(PANEL_ENTRY_NAME))
-        .and_then(|e| e.get("env"))
-        .and_then(|env| env.get("OMS_PANEL_REPO"))
-        .and_then(serde_json::Value::as_str)
-    else {
-        return false;
-    };
-    let configured = Path::new(repo_str);
-    configured == expected_checkout
-        || configured.canonicalize().ok().as_deref() == Some(expected_checkout)
-}
-
-fn encode_pretty_json(value: &serde_json::Value) -> Result<Vec<u8>> {
-    let mut bytes = serde_json::to_vec_pretty(value).map_err(Error::new)?;
-    bytes.push(b'\n');
-    Ok(bytes)
-}
-
-fn validate_private_dir_stat(stat: &Stat, label: &str) -> Result<()> {
-    let kind = FileType::from_raw_mode(stat.st_mode);
-    if kind == FileType::Symlink {
-        return Err(Error::new(format!("refusing symlinked {label}")));
+    match fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => Ok(fd),
+        Err(Errno::LOOP) => Err(Error::new(format!("refusing symlinked {label}"))),
+        Err(e) => Err(Error::new(format!("cannot open {label}: {e}"))),
     }
-    require(
-        kind == FileType::Directory,
-        &format!("Invalid {label}: not a directory"),
-    )?;
-    require(
-        stat.st_uid == rustix::process::geteuid().as_raw(),
-        &format!("Invalid {label}: directory is not owned by the current user"),
-    )?;
-    require(
-        stat.st_mode & 0o077 == 0,
-        &format!("Invalid {label}: directory must be mode 0700 private to the current user"),
-    )?;
-    Ok(())
 }
 
-fn open_existing_private_subdir_at(
+fn open_existing_subdir_nofollow_at(
     parent_fd: &OwnedFd,
     name: &OsStr,
     label: &str,
@@ -706,6 +552,10 @@ fn open_existing_private_subdir_at(
             require(
                 kind == FileType::Directory,
                 &format!("Invalid {label}: not a directory"),
+            )?;
+            require(
+                stat.st_uid == rustix::process::geteuid().as_raw(),
+                &format!("Invalid {label}: directory is not owned by the current user"),
             )?;
         }
         Err(e) => return Err(Error::new(format!("cannot inspect {label}: {e}"))),
@@ -722,12 +572,24 @@ fn open_existing_private_subdir_at(
         Err(e) => return Err(Error::new(format!("cannot open {label}: {e}"))),
     };
     let stat = fs::fstat(&fd).map_err(|e| Error::new(format!("cannot stat {label}: {e}")))?;
-    validate_private_dir_stat(&stat, label)?;
+    require(
+        FileType::from_raw_mode(stat.st_mode) == FileType::Directory,
+        &format!("Invalid {label}: not a directory"),
+    )?;
+    require(
+        stat.st_uid == rustix::process::geteuid().as_raw(),
+        &format!("Invalid {label}: directory is not owned by the current user"),
+    )?;
     Ok(Some(fd))
 }
 
-fn ensure_private_subdir_at(parent_fd: &OwnedFd, name: &OsStr, label: &str) -> Result<OwnedFd> {
-    let created = match fs::mkdirat(parent_fd, name, Mode::from_raw_mode(0o700)) {
+fn ensure_subdir_nofollow_at(
+    parent_fd: &OwnedFd,
+    name: &OsStr,
+    create_mode: u32,
+    label: &str,
+) -> Result<(OwnedFd, bool)> {
+    let created = match fs::mkdirat(parent_fd, name, Mode::from_raw_mode(create_mode)) {
         Ok(()) => true,
         Err(Errno::EXIST) => false,
         Err(e) => return Err(Error::new(format!("cannot create {label}: {e}"))),
@@ -753,51 +615,117 @@ fn ensure_private_subdir_at(parent_fd: &OwnedFd, name: &OsStr, label: &str) -> R
         Err(e) => return Err(Error::new(format!("cannot open {label}: {e}"))),
     };
     if created {
-        fs::fchmod(&fd, Mode::from_raw_mode(0o700))
-            .map_err(|e| Error::new(format!("cannot set 0700 on {label}: {e}")))?;
+        fs::fchmod(&fd, Mode::from_raw_mode(create_mode))
+            .map_err(|e| Error::new(format!("cannot set permissions on {label}: {e}")))?;
         sync_dir(parent_fd)?;
     }
     let stat = fs::fstat(&fd).map_err(|e| Error::new(format!("cannot stat {label}: {e}")))?;
-    validate_private_dir_stat(&stat, label)?;
-    Ok(fd)
+    require(
+        FileType::from_raw_mode(stat.st_mode) == FileType::Directory,
+        &format!("Invalid {label}: not a directory"),
+    )?;
+    require(
+        stat.st_uid == rustix::process::geteuid().as_raw(),
+        &format!("Invalid {label}: directory is not owned by the current user"),
+    )?;
+    Ok((fd, created))
 }
 
-fn write_private_file_atomic_at(
+fn validate_regular_file_stat(stat: &Stat, label: &str) -> Result<()> {
+    let kind = FileType::from_raw_mode(stat.st_mode);
+    if kind == FileType::Symlink {
+        return Err(Error::new(format!("refusing symlinked {label}")));
+    }
+    require(
+        kind == FileType::RegularFile,
+        &format!("Invalid {label}: not a regular file"),
+    )?;
+    require(
+        stat.st_nlink == 1,
+        &format!("Invalid {label}: file must not have hard links"),
+    )?;
+    require(
+        stat.st_uid == rustix::process::geteuid().as_raw(),
+        &format!("Invalid {label}: file is not owned by the current user"),
+    )?;
+    Ok(())
+}
+
+fn read_regular_file_nofollow_at(
     dir_fd: &OwnedFd,
     name: &OsStr,
-    bytes: &[u8],
     label: &str,
-) -> Result<()> {
-    let before = match fs::statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+) -> Result<Option<(Vec<u8>, Stat)>> {
+    let named = match fs::statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) => {
-            validate_private_sidecar_stat(&stat, label, label)?;
-            Some(stat)
+            validate_regular_file_stat(&stat, label)?;
+            stat
         }
-        Err(Errno::NOENT) => None,
+        Err(Errno::NOENT) => return Ok(None),
         Err(e) => return Err(Error::new(format!("cannot inspect {label}: {e}"))),
     };
+    let fd = match fs::openat(
+        dir_fd,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::LOOP) => return Err(Error::new(format!("refusing symlinked {label}"))),
+        Err(e) => return Err(Error::new(format!("cannot open {label}: {e}"))),
+    };
+    let opened = fs::fstat(&fd).map_err(|e| Error::new(format!("cannot inspect {label}: {e}")))?;
+    validate_regular_file_stat(&opened, label)?;
+    require(
+        same_stat(&named, &opened),
+        &format!("{label} changed while opening"),
+    )?;
+    let mut file = std::fs::File::from(fd);
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take((MAX_CONFIG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Error::new(format!("cannot read {label}: {e}")))?;
+    require(
+        bytes.len() <= MAX_CONFIG_BYTES,
+        &format!("Invalid {label}: exceeds 1 MiB"),
+    )?;
+    let after = fs::fstat(&file).map_err(|e| Error::new(format!("cannot verify {label}: {e}")))?;
+    require(
+        same_stat(&opened, &after),
+        &format!("{label} changed while reading"),
+    )?;
+    Ok(Some((bytes, after)))
+}
+
+fn write_regular_file_atomic_at(
+    dir_fd: &OwnedFd,
+    name: &OsStr,
+    before: Option<&Stat>,
+    bytes: &[u8],
+    mode: u32,
+    label: &str,
+) -> Result<Stat> {
+    let clean_mode = mode & 0o777;
     let mut temp = TempMapFile::create(dir_fd, name)?;
     temp.file
         .write_all(bytes)
         .map_err(|e| Error::new(format!("cannot write {label}: {e}")))?;
-    fs::fchmod(&temp.file, Mode::from_raw_mode(0o600))
-        .map_err(|e| Error::new(format!("cannot set 0600 on {label}: {e}")))?;
+    fs::fchmod(&temp.file, Mode::from_raw_mode(clean_mode))
+        .map_err(|e| Error::new(format!("cannot set permissions on {label}: {e}")))?;
     fs::fsync(&temp.file).map_err(|e| Error::new(format!("cannot sync {label}: {e}")))?;
     let staged =
         fs::fstat(&temp.file).map_err(|e| Error::new(format!("cannot verify {label}: {e}")))?;
-    validate_private_sidecar_stat(&staged, label, label)?;
+    validate_regular_file_stat(&staged, label)?;
     require(
-        staged.st_mode & 0o7777 == 0o600,
-        &format!("staged {label} did not retain mode 0600"),
+        staged.st_mode & 0o7777 == clean_mode,
+        &format!("staged {label} did not retain expected permissions"),
     )?;
     require(
         temp.owns_entry(),
         &format!("staged {label} changed before publication"),
     )?;
-    match (
-        before.as_ref(),
-        fs::statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW),
-    ) {
+    match (before, fs::statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW)) {
         (None, Err(Errno::NOENT)) => {}
         (None, Ok(stat)) if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink => {
             return Err(Error::new(format!("refusing symlinked {label}")));
@@ -808,7 +736,7 @@ fn write_private_file_atomic_at(
             )));
         }
         (Some(prev), Ok(curr)) => {
-            validate_private_sidecar_stat(&curr, label, label)?;
+            validate_regular_file_stat(&curr, label)?;
             require(
                 same_stat(prev, &curr),
                 &format!("{label} changed concurrently; retry"),
@@ -827,749 +755,499 @@ fn write_private_file_atomic_at(
         publication_uncertain: true,
     })?;
     temp.published = true;
-    sync_dir(dir_fd)
+    sync_dir(dir_fd)?;
+    fs::statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|e| Error::new(format!("cannot stat published {label}: {e}")))
 }
 
-fn open_existing_codex_marketplace_fd(
-    oms_config_dir: &Path,
-    marketplace_root: &Path,
-) -> Result<Option<OwnedFd>> {
-    let Some(oms_fd) = open_parent_dir(oms_config_dir, false)? else {
-        return Ok(None);
-    };
-    let name = OsStr::new("codex-panels");
-    match fs::statat(&oms_fd, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Err(Errno::NOENT) => return Ok(None),
-        Ok(stat) => {
-            let kind = FileType::from_raw_mode(stat.st_mode);
-            if kind == FileType::Symlink {
-                return Err(Error::new(
-                    "refusing symlinked Codex panel marketplace directory",
-                ));
-            }
+fn unlink_regular_file_checked_at(
+    dir_fd: &OwnedFd,
+    name: &OsStr,
+    before: Option<&Stat>,
+    label: &str,
+) -> Result<()> {
+    match (before, fs::statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW)) {
+        (_, Err(Errno::NOENT)) => return Ok(()),
+        (_, Ok(stat)) if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink => {
+            return Err(Error::new(format!("refusing symlinked {label}")));
+        }
+        (Some(prev), Ok(curr)) => {
+            validate_regular_file_stat(&curr, label)?;
             require(
-                kind == FileType::Directory,
-                &format!(
-                    "Codex panel marketplace path exists and is not a directory: {}",
-                    marketplace_root.display()
-                ),
+                same_stat(prev, &curr),
+                &format!("{label} changed concurrently; retry"),
             )?;
         }
-        Err(e) => {
-            return Err(Error::new(format!(
-                "cannot inspect Codex panel marketplace directory {}: {e}",
-                marketplace_root.display()
-            )));
+        (None, Ok(curr)) => {
+            validate_regular_file_stat(&curr, label)?;
         }
+        (_, Err(e)) => return Err(Error::new(format!("cannot inspect {label}: {e}"))),
     }
-    let mp_fd = match fs::openat(
-        &oms_fd,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        Err(Errno::LOOP) => {
-            return Err(Error::new(
-                "refusing symlinked Codex panel marketplace directory",
-            ));
-        }
-        Err(Errno::NOENT) => return Ok(None),
-        Err(e) => {
-            return Err(Error::new(format!(
-                "cannot open Codex panel marketplace directory {}: {e}",
-                marketplace_root.display()
-            )));
-        }
-    };
-    let stat = fs::fstat(&mp_fd).map_err(|e| {
-        Error::new(format!(
-            "cannot inspect Codex panel marketplace directory {}: {e}",
-            marketplace_root.display()
-        ))
-    })?;
-    require(
-        stat.st_uid == rustix::process::geteuid().as_raw(),
-        "Codex panel marketplace directory is not owned by the current user",
-    )?;
-    // Verify the OMS ownership marker before mode checks so any unmarked existing directory
-    // (including 0755 user dirs) is clearly refused as unmanaged.
-    verify_codex_marker_at(&mp_fd, marketplace_root)?;
-    validate_private_dir_stat(&stat, "Codex panel marketplace directory")?;
-    Ok(Some(mp_fd))
-}
-
-enum OnDiskCodexBundle {
-    Absent,
-    ModifiedOutsideOms,
-    Present {
-        plugin_bytes: Vec<u8>,
-        mcp_bytes: Vec<u8>,
-        plugin_sha256: String,
-        mcp_sha256: String,
-        matches_current: bool,
-        matches_any_oms_release: bool,
-    },
-}
-
-struct CodexBundleSnapshot {
-    existed_before: bool,
-    prior_disk_aliases: BTreeSet<String>,
-    expected_market: serde_json::Value,
-    market_matches: bool,
-    bundle: OnDiskCodexBundle,
-}
-
-impl CodexBundleSnapshot {
-    fn prior_bundle_pair(&self) -> Option<(Vec<u8>, Vec<u8>)> {
-        match &self.bundle {
-            OnDiskCodexBundle::Present {
-                plugin_bytes,
-                mcp_bytes,
-                ..
-            } => Some((plugin_bytes.clone(), mcp_bytes.clone())),
-            OnDiskCodexBundle::Absent | OnDiskCodexBundle::ModifiedOutsideOms => None,
-        }
-    }
-}
-
-fn read_bundle_file_for_compare(
-    bundle_fd: &OwnedFd,
-    name: &OsStr,
-    label: &str,
-) -> Result<Option<(Vec<u8>, Stat)>> {
-    let named = match fs::statat(bundle_fd, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) => stat,
-        Err(Errno::NOENT) => return Ok(None),
-        Err(e) => return Err(Error::new(format!("cannot inspect {label}: {e}"))),
-    };
-    let kind = FileType::from_raw_mode(named.st_mode);
-    if kind == FileType::Symlink {
-        return Err(Error::new(format!("refusing symlinked {label}")));
-    }
-    require(
-        kind == FileType::RegularFile,
-        &format!("Invalid {label}: not a regular file"),
-    )?;
-    require(
-        named.st_nlink == 1,
-        &format!("Invalid {label}: file must not have hard links"),
-    )?;
-    require(
-        named.st_uid == rustix::process::geteuid().as_raw(),
-        &format!("Invalid {label}: file is not owned by the current user"),
-    )?;
-    let fd = match fs::openat(
-        bundle_fd,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => fd,
-        Err(Errno::LOOP) => return Err(Error::new(format!("refusing symlinked {label}"))),
-        Err(e) => return Err(Error::new(format!("cannot open {label}: {e}"))),
-    };
-    let opened = fs::fstat(&fd).map_err(|e| Error::new(format!("cannot inspect {label}: {e}")))?;
-    require(
-        same_stat(&named, &opened),
-        &format!("{label} changed while opening"),
-    )?;
-    let mut file = std::fs::File::from(fd);
-    let mut bytes = Vec::new();
-    (&mut file)
-        .take((MAX_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| Error::new(format!("cannot read {label}: {e}")))?;
-    let after = fs::fstat(&file).map_err(|e| Error::new(format!("cannot verify {label}: {e}")))?;
-    require(
-        same_stat(&opened, &after),
-        &format!("{label} changed while reading"),
-    )?;
-    Ok(Some((bytes, after)))
-}
-
-fn discover_marked_codex_bundle_aliases_at(
-    mp_fd: &OwnedFd,
-    marketplace_root: &Path,
-) -> Result<BTreeSet<String>> {
-    verify_codex_marker_at(mp_fd, marketplace_root)?;
-    let Some(plugins_fd) =
-        open_existing_private_subdir_at(mp_fd, OsStr::new("plugins"), "Codex plugins directory")?
-    else {
-        return Ok(BTreeSet::new());
-    };
-    let plugins_dir = marketplace_root.join("plugins");
-    let entries = match std::fs::read_dir(&plugins_dir) {
-        Ok(it) => it,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
-        Err(e) => {
-            return Err(Error::new(format!(
-                "cannot read Codex plugins directory {}: {e}",
-                plugins_dir.display()
-            )));
-        }
-    };
-    let mut aliases = BTreeSet::new();
-    for entry_res in entries {
-        let entry = entry_res.map_err(|e| {
-            Error::new(format!(
-                "cannot read entry in Codex plugins directory {}: {e}",
-                plugins_dir.display()
-            ))
-        })?;
-        let file_name = entry.file_name();
-        let Some(name_str) = file_name.to_str() else {
-            continue;
-        };
-        let Some(alias) = name_str.strip_prefix("oms-") else {
-            continue;
-        };
-        if !codex_plugin_name(alias).is_ok_and(|expected| expected == name_str) {
-            continue;
-        }
-        let Some(bundle_fd) = open_existing_private_subdir_at(
-            &plugins_fd,
-            &file_name,
-            "Codex plugin bundle directory",
-        )?
-        else {
-            continue;
-        };
-        let has_plugin = read_bundle_file_for_compare(
-            &bundle_fd,
-            OsStr::new("plugin.json"),
-            "Codex plugin.json",
-        )?
-        .is_some();
-        let has_mcp =
-            read_bundle_file_for_compare(&bundle_fd, OsStr::new("mcp.json"), "Codex mcp.json")?
-                .is_some();
-        if has_plugin && has_mcp {
-            aliases.insert(alias.to_owned());
-        }
-    }
-    Ok(aliases)
-}
-
-enum CodexBundleUninstallCheck {
-    Absent,
-    CleanEmptyDir,
-    MatchesOms,
-    Edited(Vec<PathBuf>),
-}
-
-fn inspect_codex_bundle_for_uninstall(
-    mp_fd: Option<&OwnedFd>,
-    marketplace_root: &Path,
-    alias: &str,
-    plugin_name: &str,
-    launcher: &Path,
-    target_repo_path: &Path,
-    recorded_hashes: Option<(&str, &str)>,
-) -> Result<(CodexBundleUninstallCheck, bool)> {
-    let Some(mp_fd) = mp_fd else {
-        return Ok((CodexBundleUninstallCheck::Absent, true));
-    };
-    let Some(plugins_fd) =
-        open_existing_private_subdir_at(mp_fd, OsStr::new("plugins"), "Codex plugins directory")?
-    else {
-        return Ok((CodexBundleUninstallCheck::Absent, true));
-    };
-    let Some(bundle_fd) = open_existing_private_subdir_at(
-        &plugins_fd,
-        OsStr::new(plugin_name),
-        "Codex plugin bundle directory",
-    )?
-    else {
-        return Ok((CodexBundleUninstallCheck::Absent, true));
-    };
-    let plugin_file =
-        read_bundle_file_for_compare(&bundle_fd, OsStr::new("plugin.json"), "Codex plugin.json")?;
-    let mcp_file =
-        read_bundle_file_for_compare(&bundle_fd, OsStr::new("mcp.json"), "Codex mcp.json")?;
-    if plugin_file.is_none() && mcp_file.is_none() {
-        return Ok((CodexBundleUninstallCheck::CleanEmptyDir, true));
-    }
-    let bundle_dir = marketplace_root.join("plugins").join(plugin_name);
-    if let Some((expected_plugin_sha, expected_mcp_sha)) = recorded_hashes {
-        let mut edited = Vec::new();
-        match &plugin_file {
-            Some((bytes, stat)) if oms_panel_core::digest(bytes) == expected_plugin_sha => {
-                validate_private_sidecar_stat(stat, "Codex plugin.json", "Codex plugin.json")?;
-            }
-            _ => edited.push(bundle_dir.join("plugin.json")),
-        }
-        match &mcp_file {
-            Some((bytes, stat))
-                if oms_panel_core::digest(bytes) == expected_mcp_sha
-                    && mcp_bytes_pin_checkout(bytes, target_repo_path) =>
-            {
-                validate_private_sidecar_stat(stat, "Codex mcp.json", "Codex mcp.json")?;
-            }
-            _ => edited.push(bundle_dir.join("mcp.json")),
-        }
-        if edited.is_empty() {
-            return Ok((CodexBundleUninstallCheck::MatchesOms, true));
-        }
-        let checkout_matches = mcp_file
-            .as_ref()
-            .is_some_and(|(bytes, _)| mcp_bytes_pin_checkout(bytes, target_repo_path));
-        return Ok((CodexBundleUninstallCheck::Edited(edited), checkout_matches));
-    }
-
-    if let (Some((p_bytes, p_stat)), Some((m_bytes, m_stat))) = (&plugin_file, &mcp_file)
-        && codex_bundle_bytes_match_any_oms_release(
-            alias,
-            launcher,
-            target_repo_path,
-            p_bytes,
-            m_bytes,
-        )?
-    {
-        validate_private_sidecar_stat(p_stat, "Codex plugin.json", "Codex plugin.json")?;
-        validate_private_sidecar_stat(m_stat, "Codex mcp.json", "Codex mcp.json")?;
-        return Ok((CodexBundleUninstallCheck::MatchesOms, true));
-    }
-    let edited = vec![bundle_dir.join("plugin.json"), bundle_dir.join("mcp.json")];
-    Ok((CodexBundleUninstallCheck::Edited(edited), false))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn inspect_codex_marketplace_state(
-    oms_config_dir: &Path,
-    marketplace_root: &Path,
-    alias: &str,
-    plugin_name: &str,
-    launcher: &Path,
-    physical_repo: &Path,
-    expected_plugin_bytes: &[u8],
-    expected_mcp_bytes: &[u8],
-) -> Result<CodexBundleSnapshot> {
-    let Some(mp_fd) = open_existing_codex_marketplace_fd(oms_config_dir, marketplace_root)? else {
-        let mut desired = BTreeSet::new();
-        desired.insert(alias.to_owned());
-        return Ok(CodexBundleSnapshot {
-            existed_before: false,
-            prior_disk_aliases: BTreeSet::new(),
-            expected_market: codex_marketplace_manifest_value(&desired)?,
-            market_matches: false,
-            bundle: OnDiskCodexBundle::Absent,
-        });
-    };
-    let prior_disk_aliases = discover_marked_codex_bundle_aliases_at(&mp_fd, marketplace_root)?;
-    let mut desired_aliases = prior_disk_aliases.clone();
-    desired_aliases.insert(alias.to_owned());
-    let expected_market = codex_marketplace_manifest_value(&desired_aliases)?;
-
-    let agents_fd =
-        open_existing_private_subdir_at(&mp_fd, OsStr::new(".agents"), "Codex .agents directory")?;
-    let agents_plugins_fd = match &agents_fd {
-        Some(afd) => open_existing_private_subdir_at(
-            afd,
-            OsStr::new("plugins"),
-            "Codex .agents/plugins directory",
-        )?,
-        None => None,
-    };
-    let market_matches = match &agents_plugins_fd {
-        Some(apfd) => read_private_sidecar_at(
-            apfd,
-            OsStr::new("marketplace.json"),
-            "Codex marketplace manifest",
-            "Codex marketplace manifest",
-        )?
-        .and_then(|(raw, _)| serde_json::from_str::<serde_json::Value>(&raw).ok())
-        .is_some_and(|v| v == expected_market),
-        None => false,
-    };
-
-    let plugins_fd =
-        open_existing_private_subdir_at(&mp_fd, OsStr::new("plugins"), "Codex plugins directory")?;
-    let bundle_fd = match &plugins_fd {
-        Some(pfd) => open_existing_private_subdir_at(
-            pfd,
-            OsStr::new(plugin_name),
-            "Codex plugin bundle directory",
-        )?,
-        None => None,
-    };
-    let bundle = if let Some(bfd) = &bundle_fd {
-        let p_raw = read_private_sidecar_at(
-            bfd,
-            OsStr::new("plugin.json"),
-            "Codex plugin.json",
-            "Codex plugin.json",
-        )?;
-        let m_raw = read_private_sidecar_at(
-            bfd,
-            OsStr::new("mcp.json"),
-            "Codex mcp.json",
-            "Codex mcp.json",
-        )?;
-        match (p_raw, m_raw) {
-            (None, None) => OnDiskCodexBundle::Absent,
-            (Some((p_str, _)), Some((m_str, _))) => {
-                let plugin_bytes = p_str.into_bytes();
-                let mcp_bytes = m_str.into_bytes();
-                let plugin_sha256 = oms_panel_core::digest(&plugin_bytes);
-                let mcp_sha256 = oms_panel_core::digest(&mcp_bytes);
-                let matches_current =
-                    plugin_bytes == expected_plugin_bytes && mcp_bytes == expected_mcp_bytes;
-                let matches_any_oms_release = codex_bundle_bytes_match_any_oms_release(
-                    alias,
-                    launcher,
-                    physical_repo,
-                    &plugin_bytes,
-                    &mcp_bytes,
-                )?;
-                OnDiskCodexBundle::Present {
-                    plugin_bytes,
-                    mcp_bytes,
-                    plugin_sha256,
-                    mcp_sha256,
-                    matches_current,
-                    matches_any_oms_release,
-                }
-            }
-            _ => OnDiskCodexBundle::ModifiedOutsideOms,
-        }
-    } else {
-        OnDiskCodexBundle::Absent
-    };
-
-    Ok(CodexBundleSnapshot {
-        existed_before: true,
-        prior_disk_aliases,
-        expected_market,
-        market_matches,
-        bundle,
-    })
-}
-
-fn write_codex_bundle_and_manifest(
-    oms_config_dir: &Path,
-    marketplace_root: &Path,
-    plugin_name: &str,
-    plugin_bytes: &[u8],
-    mcp_bytes: &[u8],
-    market_bytes: &[u8],
-) -> Result<()> {
-    if !oms_config_dir.exists() {
-        if let Ok(meta) = std::fs::symlink_metadata(oms_config_dir)
-            && meta.file_type().is_symlink()
-        {
-            return Err(Error::new("refusing symlinked OMS config directory"));
-        }
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(oms_config_dir)
-            .map_err(|e| {
-                Error::new(format!(
-                    "cannot create OMS config directory {}: {e}",
-                    oms_config_dir.display()
-                ))
-            })?;
-    }
-    let oms_fd = open_parent_dir(oms_config_dir, false)?
-        .ok_or_else(|| Error::new("OMS config directory unavailable"))?;
-
-    let mp_existed = match fs::statat(
-        &oms_fd,
-        OsStr::new("codex-panels"),
-        AtFlags::SYMLINK_NOFOLLOW,
-    ) {
-        Ok(_) => true,
-        Err(Errno::NOENT) => false,
-        Err(e) => {
-            return Err(Error::new(format!(
-                "cannot inspect Codex panel marketplace directory {}: {e}",
-                marketplace_root.display()
-            )));
-        }
-    };
-    let mp_fd = if mp_existed {
-        open_existing_codex_marketplace_fd(oms_config_dir, marketplace_root)?
-            .ok_or_else(|| Error::new("Codex panel marketplace directory disappeared"))?
-    } else {
-        let fd = ensure_private_subdir_at(
-            &oms_fd,
-            OsStr::new("codex-panels"),
-            "Codex panel marketplace directory",
-        )?;
-        let marker = codex_marker_bytes()?;
-        write_private_file_atomic_at(
-            &fd,
-            OsStr::new(CODEX_MARKETPLACE_MARKER),
-            &marker,
-            "Codex panel marketplace marker",
-        )?;
-        fd
-    };
-
-    let agents_fd =
-        ensure_private_subdir_at(&mp_fd, OsStr::new(".agents"), "Codex .agents directory")?;
-    let agents_plugins_fd = ensure_private_subdir_at(
-        &agents_fd,
-        OsStr::new("plugins"),
-        "Codex .agents/plugins directory",
-    )?;
-    let plugins_fd =
-        ensure_private_subdir_at(&mp_fd, OsStr::new("plugins"), "Codex plugins directory")?;
-    let bundle_fd = ensure_private_subdir_at(
-        &plugins_fd,
-        OsStr::new(plugin_name),
-        "Codex plugin bundle directory",
-    )?;
-
-    write_private_file_atomic_at(
-        &bundle_fd,
-        OsStr::new("plugin.json"),
-        plugin_bytes,
-        "Codex plugin.json",
-    )?;
-    write_private_file_atomic_at(
-        &bundle_fd,
-        OsStr::new("mcp.json"),
-        mcp_bytes,
-        "Codex mcp.json",
-    )?;
-    write_private_file_atomic_at(
-        &agents_plugins_fd,
-        OsStr::new("marketplace.json"),
-        market_bytes,
-        "Codex marketplace manifest",
-    )
-}
-
-fn unlink_if_exists(dir_fd: &OwnedFd, name: &OsStr, flags: AtFlags, label: &str) -> Result<()> {
-    match fs::unlinkat(dir_fd, name, flags) {
-        Ok(()) | Err(Errno::NOENT) => Ok(()),
+    match fs::unlinkat(dir_fd, name, AtFlags::empty()) {
+        Ok(()) | Err(Errno::NOENT) => sync_dir(dir_fd),
         Err(e) => Err(Error::new(format!("cannot remove {label}: {e}"))),
     }
 }
 
-fn describe_rmdir_error(err: Errno, dir_path: &Path) -> String {
-    if matches!(err, Errno::NOTEMPTY | Errno::EXIST) {
-        if let Ok(entries) = std::fs::read_dir(dir_path) {
-            let mut names: Vec<String> = entries
-                .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .filter(|name| name != CODEX_MARKETPLACE_MARKER)
-                .map(|name| render::clean(&name, 80))
-                .filter(|name| !name.is_empty())
-                .collect();
-            names.sort();
-            names.truncate(8);
-            if !names.is_empty() {
-                return format!("directory is not empty (leftover: {})", names.join(", "));
+fn try_rmdir_if_empty_at(parent_fd: &OwnedFd, name: &OsStr, label: &str) -> Result<bool> {
+    match fs::unlinkat(parent_fd, name, AtFlags::REMOVEDIR) {
+        Ok(()) => {
+            sync_dir(parent_fd)?;
+            Ok(true)
+        }
+        Err(Errno::NOENT | Errno::NOTEMPTY | Errno::EXIST) => Ok(false),
+        Err(e) => Err(Error::new(format!("cannot remove {label}: {e}"))),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CodexTrustStatus {
+    Trusted,
+    Untrusted { trust_target: PathBuf },
+    Unknown { hint: String },
+}
+
+fn sanitize_single_line(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if matches!(c, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn resolve_codex_home_dir_with_env(
+    cwd: &Path,
+    codex_home_env: Option<&OsStr>,
+    home_env: Option<&OsStr>,
+) -> std::result::Result<PathBuf, String> {
+    if let Some(raw) = codex_home_env.filter(|v| !v.is_empty()) {
+        if raw.to_str().is_none() || raw.as_bytes().contains(&0) {
+            return Err("Cannot verify Codex project trust: CODEX_HOME is not valid UTF-8.".into());
+        }
+        let candidate = PathBuf::from(raw);
+        return Ok(if candidate.is_absolute() {
+            candidate
+        } else {
+            cwd.join(candidate)
+        });
+    }
+    let Some(home) = home_env.filter(|v| !v.is_empty()) else {
+        return Err(
+            "Cannot verify Codex project trust: neither CODEX_HOME nor HOME is set.".into(),
+        );
+    };
+    let home_path = PathBuf::from(home);
+    if !normalized_abs_utf8(&home_path) {
+        return Err(
+            "Cannot verify Codex project trust: HOME is not a normalized UTF-8 absolute path."
+                .into(),
+        );
+    }
+    Ok(home_path.join(".codex"))
+}
+
+fn resolve_codex_trust_in_toml(
+    raw: &[u8],
+    physical_repo: &Path,
+    repo_root: Option<&Path>,
+    config_label: &Path,
+) -> CodexTrustStatus {
+    let trust_target = repo_root.unwrap_or(physical_repo).to_path_buf();
+    let Some(cwd_str) = physical_repo.to_str() else {
+        return CodexTrustStatus::Untrusted { trust_target };
+    };
+    let Ok(table) = oms_toml::parse_bounded(raw, MAX_CONFIG_BYTES) else {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} is not valid TOML.",
+                config_label.display()
+            )),
+        };
+    };
+    let projects = match table.get("projects") {
+        None => return CodexTrustStatus::Untrusted { trust_target },
+        Some(oms_toml::Value::Table(projects)) => projects,
+        Some(_) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: {} has an invalid 'projects' entry.",
+                    config_label.display()
+                )),
+            };
+        }
+    };
+
+    match projects.get(cwd_str) {
+        Some(oms_toml::Value::Table(cwd_proj)) => {
+            if let Some(level) = cwd_proj.get("trust_level") {
+                return if level.as_str() == Some("trusted") {
+                    CodexTrustStatus::Trusted
+                } else {
+                    CodexTrustStatus::Untrusted {
+                        trust_target: physical_repo.to_path_buf(),
+                    }
+                };
             }
         }
-        return format!("directory is not empty ({err})");
+        Some(_) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: {} has an invalid entry under [projects].",
+                    config_label.display()
+                )),
+            };
+        }
+        None => {}
     }
-    err.to_string()
+
+    if let Some(root) = repo_root
+        && root != physical_repo
+        && let Some(root_str) = root.to_str()
+    {
+        match projects.get(root_str) {
+            Some(oms_toml::Value::Table(root_proj)) => {
+                if root_proj
+                    .get("trust_level")
+                    .and_then(oms_toml::Value::as_str)
+                    == Some("trusted")
+                {
+                    return CodexTrustStatus::Trusted;
+                }
+            }
+            Some(_) => {
+                return CodexTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Codex project trust: {} has an invalid entry under [projects].",
+                        config_label.display()
+                    )),
+                };
+            }
+            None => {}
+        }
+    }
+
+    CodexTrustStatus::Untrusted { trust_target }
 }
 
-fn rmdir_reporting_leftovers(
-    parent_fd: &OwnedFd,
-    name: &OsStr,
-    full_path: &Path,
-    label: &str,
-) -> Result<()> {
-    match fs::unlinkat(parent_fd, name, AtFlags::REMOVEDIR) {
-        Ok(()) | Err(Errno::NOENT) => Ok(()),
-        Err(e) => Err(Error::new(format!(
-            "cannot remove {label} {}: {}",
-            full_path.display(),
-            describe_rmdir_error(e, full_path)
-        ))),
-    }
-}
+fn check_codex_project_trust_at(
+    codex_home: &Path,
+    physical_repo: &Path,
+    repo_root: Option<&Path>,
+    expected_uid: u32,
+) -> CodexTrustStatus {
+    use std::os::unix::fs::MetadataExt;
+    let trust_target = repo_root.unwrap_or(physical_repo).to_path_buf();
 
-fn restore_codex_marker_at(oms_fd: &OwnedFd, marker_bytes: &[u8]) -> Result<()> {
-    let mp_fd = fs::openat(
-        oms_fd,
-        OsStr::new("codex-panels"),
+    match std::fs::symlink_metadata(codex_home) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return CodexTrustStatus::Untrusted { trust_target };
+        }
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot inspect CODEX_HOME ({}): {e}.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: CODEX_HOME ({}) is a symlink.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Ok(meta) if !meta.is_dir() => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: CODEX_HOME ({}) is not a directory.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Ok(meta) if meta.uid() != expected_uid => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: CODEX_HOME ({}) is not owned by the current user.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Ok(_) => {}
+    }
+
+    let dir_fd = match fs::open(
+        codex_home,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
-    )
-    .map_err(|e| {
-        Error::new(format!(
-            "cannot reopen Codex panel marketplace directory: {e}"
-        ))
-    })?;
-    let stat = fs::fstat(&mp_fd).map_err(|e| {
-        Error::new(format!(
-            "cannot stat Codex panel marketplace directory: {e}"
-        ))
-    })?;
-    validate_private_dir_stat(&stat, "Codex panel marketplace directory")?;
-    write_private_file_atomic_at(
-        &mp_fd,
-        OsStr::new(CODEX_MARKETPLACE_MARKER),
-        marker_bytes,
-        "Codex panel marketplace marker",
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return CodexTrustStatus::Untrusted { trust_target },
+        Err(Errno::LOOP) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: CODEX_HOME ({}) is a symlink.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Err(Errno::NOTDIR) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: CODEX_HOME ({}) is not a directory.",
+                    codex_home.display()
+                )),
+            };
+        }
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot read CODEX_HOME ({}): {e}.",
+                    codex_home.display()
+                )),
+            };
+        }
+    };
+
+    let dir_stat = match fs::fstat(&dir_fd) {
+        Ok(stat) => stat,
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot inspect CODEX_HOME ({}): {e}.",
+                    codex_home.display()
+                )),
+            };
+        }
+    };
+    if FileType::from_raw_mode(dir_stat.st_mode) != FileType::Directory {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: CODEX_HOME ({}) is not a directory.",
+                codex_home.display()
+            )),
+        };
+    }
+    if dir_stat.st_uid != expected_uid {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: CODEX_HOME ({}) is not owned by the current user.",
+                codex_home.display()
+            )),
+        };
+    }
+
+    let config_path = codex_home.join("config.toml");
+    let named = match fs::statat(
+        &dir_fd,
+        OsStr::new("config.toml"),
+        AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Err(Errno::NOENT) => return CodexTrustStatus::Untrusted { trust_target },
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot inspect {}: {e}.",
+                    config_path.display()
+                )),
+            };
+        }
+        Ok(stat) => {
+            let kind = FileType::from_raw_mode(stat.st_mode);
+            if kind == FileType::Symlink {
+                return CodexTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Codex project trust: {} is a symlink.",
+                        config_path.display()
+                    )),
+                };
+            }
+            if kind != FileType::RegularFile {
+                return CodexTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Codex project trust: {} is not a regular file.",
+                        config_path.display()
+                    )),
+                };
+            }
+            if stat.st_uid != expected_uid {
+                return CodexTrustStatus::Unknown {
+                    hint: sanitize_single_line(&format!(
+                        "Cannot verify Codex project trust: {} is not owned by the current user.",
+                        config_path.display()
+                    )),
+                };
+            }
+            stat
+        }
+    };
+
+    let fd = match fs::openat(
+        &dir_fd,
+        OsStr::new("config.toml"),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return CodexTrustStatus::Untrusted { trust_target },
+        Err(Errno::LOOP) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: {} is a symlink.",
+                    config_path.display()
+                )),
+            };
+        }
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot read {}: {e}.",
+                    config_path.display()
+                )),
+            };
+        }
+    };
+
+    let opened = match fs::fstat(&fd) {
+        Ok(stat) => stat,
+        Err(e) => {
+            return CodexTrustStatus::Unknown {
+                hint: sanitize_single_line(&format!(
+                    "Cannot verify Codex project trust: cannot inspect {}: {e}.",
+                    config_path.display()
+                )),
+            };
+        }
+    };
+    if FileType::from_raw_mode(opened.st_mode) != FileType::RegularFile {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} is not a regular file.",
+                config_path.display()
+            )),
+        };
+    }
+    if opened.st_uid != expected_uid {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} is not owned by the current user.",
+                config_path.display()
+            )),
+        };
+    }
+    if !same_stat(&named, &opened) {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} changed while opening.",
+                config_path.display()
+            )),
+        };
+    }
+
+    let mut file = std::fs::File::from(fd);
+    let mut bytes = Vec::new();
+    if let Err(e) = (&mut file)
+        .take((MAX_CONFIG_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+    {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: cannot read {}: {e}.",
+                config_path.display()
+            )),
+        };
+    }
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} exceeds 1 MiB.",
+                config_path.display()
+            )),
+        };
+    }
+    let Ok(after) = fs::fstat(&file) else {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: cannot verify {} after reading.",
+                config_path.display()
+            )),
+        };
+    };
+    if !same_stat(&opened, &after) {
+        return CodexTrustStatus::Unknown {
+            hint: sanitize_single_line(&format!(
+                "Cannot verify Codex project trust: {} changed while reading.",
+                config_path.display()
+            )),
+        };
+    }
+
+    resolve_codex_trust_in_toml(&bytes, physical_repo, repo_root, &config_path)
+}
+
+fn check_codex_project_trust_with_env(
+    cwd: &Path,
+    physical_repo: &Path,
+    repo_root: Option<&Path>,
+    codex_home_env: Option<&OsStr>,
+    home_env: Option<&OsStr>,
+) -> CodexTrustStatus {
+    let codex_home = match resolve_codex_home_dir_with_env(cwd, codex_home_env, home_env) {
+        Ok(dir) => dir,
+        Err(hint) => return CodexTrustStatus::Unknown { hint },
+    };
+    check_codex_project_trust_at(
+        &codex_home,
+        physical_repo,
+        repo_root,
+        rustix::process::geteuid().as_raw(),
     )
 }
 
-fn remove_codex_bundle_dir_at(
-    mp_fd: &OwnedFd,
-    marketplace_root: &Path,
-    plugin_name: &str,
-) -> Result<bool> {
-    let Some(plugins_fd) =
-        open_existing_private_subdir_at(mp_fd, OsStr::new("plugins"), "Codex plugins directory")?
-    else {
-        return Ok(false);
-    };
-    if let Some(bundle_fd) = open_existing_private_subdir_at(
-        &plugins_fd,
-        OsStr::new(plugin_name),
-        "Codex plugin bundle directory",
-    )? {
-        unlink_if_exists(
-            &bundle_fd,
-            OsStr::new("plugin.json"),
-            AtFlags::empty(),
-            "Codex plugin.json",
-        )?;
-        unlink_if_exists(
-            &bundle_fd,
-            OsStr::new("mcp.json"),
-            AtFlags::empty(),
-            "Codex mcp.json",
-        )?;
-        sync_dir(&bundle_fd)?;
-        drop(bundle_fd);
-        rmdir_reporting_leftovers(
-            &plugins_fd,
-            OsStr::new(plugin_name),
-            &marketplace_root.join("plugins").join(plugin_name),
-            "Codex plugin bundle directory",
-        )?;
-        sync_dir(&plugins_fd)?;
-        return Ok(true);
-    }
-    Ok(false)
+fn check_codex_project_trust(
+    cwd: &Path,
+    physical_repo: &Path,
+    repo_root: Option<&Path>,
+) -> CodexTrustStatus {
+    check_codex_project_trust_with_env(
+        cwd,
+        physical_repo,
+        repo_root,
+        std::env::var_os("CODEX_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
 }
 
-fn update_or_delete_codex_marketplace_disk(
-    oms_config_dir: &Path,
-    marketplace_root: &Path,
-    remove_plugin_name: Option<&str>,
-    remaining_disk_aliases: &BTreeSet<String>,
-    keep_marketplace_root: bool,
-) -> Result<bool> {
-    let Some(mp_fd) = open_existing_codex_marketplace_fd(oms_config_dir, marketplace_root)? else {
-        return Ok(false);
-    };
-    let mut removed_any = false;
-    if let Some(plugin_name) = remove_plugin_name
-        && remove_codex_bundle_dir_at(&mp_fd, marketplace_root, plugin_name)?
-    {
-        removed_any = true;
-    }
-    if !remaining_disk_aliases.is_empty() || keep_marketplace_root {
-        let agents_fd =
-            ensure_private_subdir_at(&mp_fd, OsStr::new(".agents"), "Codex .agents directory")?;
-        let agents_plugins_fd = ensure_private_subdir_at(
-            &agents_fd,
-            OsStr::new("plugins"),
-            "Codex .agents/plugins directory",
-        )?;
-        let market_bytes =
-            encode_pretty_json(&codex_marketplace_manifest_value(remaining_disk_aliases)?)?;
-        write_private_file_atomic_at(
-            &agents_plugins_fd,
-            OsStr::new("marketplace.json"),
-            &market_bytes,
-            "Codex marketplace manifest",
-        )?;
-        return Ok(removed_any);
-    }
+fn codex_untrusted_hint(trust_target: &Path) -> String {
+    format!(
+        "Trust {} in Codex so it loads .codex/config.toml.",
+        trust_target.display()
+    )
+}
 
-    // Re-verify ownership marker before deleting marketplace files; remove the marker last so an
-    // unexpected leftover entry never leaves an unmarked directory behind.
-    verify_codex_marker_at(&mp_fd, marketplace_root)?;
-    let marker_backup = codex_marker_bytes()?;
-    if let Some(agents_fd) =
-        open_existing_private_subdir_at(&mp_fd, OsStr::new(".agents"), "Codex .agents directory")?
-    {
-        if let Some(agents_plugins_fd) = open_existing_private_subdir_at(
-            &agents_fd,
-            OsStr::new("plugins"),
-            "Codex .agents/plugins directory",
-        )? {
-            unlink_if_exists(
-                &agents_plugins_fd,
-                OsStr::new("marketplace.json"),
-                AtFlags::empty(),
-                "Codex marketplace manifest",
-            )?;
-            sync_dir(&agents_plugins_fd)?;
-            drop(agents_plugins_fd);
-            rmdir_reporting_leftovers(
-                &agents_fd,
-                OsStr::new("plugins"),
-                &marketplace_root.join(".agents/plugins"),
-                "Codex .agents/plugins directory",
-            )?;
+fn attach_codex_trust_fields(report: &mut serde_json::Value, trust: &CodexTrustStatus) {
+    match trust {
+        CodexTrustStatus::Trusted => {
+            report["active"] = json!(true);
         }
-        sync_dir(&agents_fd)?;
-        drop(agents_fd);
-        rmdir_reporting_leftovers(
-            &mp_fd,
-            OsStr::new(".agents"),
-            &marketplace_root.join(".agents"),
-            "Codex .agents directory",
-        )?;
-    }
-    if open_existing_private_subdir_at(&mp_fd, OsStr::new("plugins"), "Codex plugins directory")?
-        .is_some()
-    {
-        rmdir_reporting_leftovers(
-            &mp_fd,
-            OsStr::new("plugins"),
-            &marketplace_root.join("plugins"),
-            "Codex plugins directory",
-        )?;
-    }
-    unlink_if_exists(
-        &mp_fd,
-        OsStr::new(CODEX_MARKETPLACE_MARKER),
-        AtFlags::empty(),
-        "Codex panel marketplace marker",
-    )?;
-    sync_dir(&mp_fd)?;
-    drop(mp_fd);
-
-    if let Some(oms_fd) = open_parent_dir(oms_config_dir, false)? {
-        match fs::unlinkat(&oms_fd, OsStr::new("codex-panels"), AtFlags::REMOVEDIR) {
-            Ok(()) | Err(Errno::NOENT) => {
-                sync_dir(&oms_fd)?;
-            }
-            Err(e) => {
-                let restore_err = restore_codex_marker_at(&oms_fd, &marker_backup).err();
-                let detail = describe_rmdir_error(e, marketplace_root);
-                if let Some(re) = restore_err {
-                    return Err(Error {
-                        code: 1,
-                        message: format!(
-                            "cannot remove Codex panel marketplace directory {}: {detail}; also failed restoring ownership marker ({})",
-                            marketplace_root.display(),
-                            re.message
-                        ),
-                        publication_uncertain: true,
-                    });
-                }
-                return Err(Error::new(format!(
-                    "cannot remove Codex panel marketplace directory {}: {detail}",
-                    marketplace_root.display()
-                )));
-            }
+        CodexTrustStatus::Untrusted { trust_target } => {
+            report["active"] = json!(false);
+            report["reason"] = json!(CODEX_UNTRUSTED_REASON);
+            report["hint"] = json!(codex_untrusted_hint(trust_target));
+        }
+        CodexTrustStatus::Unknown { hint } => {
+            report["active"] = json!(false);
+            report["reason"] = json!(CODEX_TRUST_UNKNOWN_REASON);
+            report["hint"] = json!(hint);
         }
     }
-    Ok(true)
 }
 
 fn claude_panel_entry_json(launcher: &Path, physical_repo: &Path) -> Result<String> {
@@ -1617,9 +1295,10 @@ fn find_on_path(binary: &Path) -> Option<PathBuf> {
     })
 }
 
-fn resolve_vendor_program(app: PanelApp, cwd: &Path, dry_run: bool) -> Result<PathBuf> {
-    let (env_var, default_bin) = app.bin_env_and_default();
-    let label = app.cli_label();
+fn resolve_claude_program(cwd: &Path, dry_run: bool) -> Result<PathBuf> {
+    let env_var = "OMS_CLAUDE_BIN";
+    let default_bin = "claude";
+    let label = "Claude CLI";
     if let Some(raw) = std::env::var_os(env_var).filter(|v| !v.is_empty()) {
         require(
             raw.to_str().is_some() && !raw.as_bytes().contains(&0),
@@ -1710,19 +1389,13 @@ impl VendorExecError {
     }
 }
 
-fn vendor_timeout(app: PanelApp) -> Duration {
-    let keys: &[&str] = match app {
-        PanelApp::Claude => &["OMS_CLAUDE_TIMEOUT_MS"],
-        PanelApp::Codex => &["OMS_CODEX_TIMEOUT_MS", "OMS_CLAUDE_TIMEOUT_MS"],
-    };
-    for key in keys {
-        if let Some(raw) = std::env::var_os(key)
-            && let Some(s) = raw.to_str()
-            && let Ok(ms) = s.trim().parse::<u64>()
-            && (20..=300_000).contains(&ms)
-        {
-            return Duration::from_millis(ms);
-        }
+fn claude_timeout() -> Duration {
+    if let Some(raw) = std::env::var_os("OMS_CLAUDE_TIMEOUT_MS")
+        && let Some(s) = raw.to_str()
+        && let Ok(ms) = s.trim().parse::<u64>()
+        && (20..=300_000).contains(&ms)
+    {
+        return Duration::from_millis(ms);
     }
     VENDOR_TIMEOUT
 }
@@ -1827,21 +1500,27 @@ fn drain_pipe(pipe: &mut impl Read, buf: &mut Vec<u8>, label: &str) -> Result<bo
     Ok(false)
 }
 
-fn run_bounded_command(
-    app: PanelApp,
+fn run_bounded_process(
+    label: &'static str,
     program: &Path,
     args: &[&str],
     workdir: &Path,
+    clear_envs: &[&str],
+    timeout: Duration,
     stop: &AtomicBool,
 ) -> std::result::Result<CmdOutput, VendorExecError> {
-    let label = app.cli_label();
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0)
+        .process_group(0);
+    for key in clear_envs {
+        command.env_remove(key);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| VendorExecError::Spawn(Error::new(format!("cannot execute {label}: {e}"))))?;
 
@@ -1868,7 +1547,6 @@ fn run_bounded_command(
     set_nonblocking(&stdout_pipe, label).map_err(VendorExecError::Wait)?;
     set_nonblocking(&stderr_pipe, label).map_err(VendorExecError::Wait)?;
 
-    let timeout = vendor_timeout(app);
     let deadline = Instant::now() + timeout;
     let mut out_buf = Vec::new();
     let mut err_buf = Vec::new();
@@ -1953,6 +1631,448 @@ fn run_bounded_command(
     }
 }
 
+fn run_claude_command(
+    program: &Path,
+    args: &[&str],
+    workdir: &Path,
+    stop: &AtomicBool,
+) -> std::result::Result<CmdOutput, VendorExecError> {
+    run_bounded_process(
+        "Claude CLI",
+        program,
+        args,
+        workdir,
+        &[],
+        claude_timeout(),
+        stop,
+    )
+}
+
+enum GitConfigState {
+    NotGit,
+    Tracked,
+    Untracked {
+        common_git_dir: PathBuf,
+        exclude_line: String,
+        already_ignored: bool,
+    },
+}
+
+fn has_any_ancestor_git_marker(path: &Path) -> bool {
+    let mut cur = Some(path);
+    while let Some(dir) = cur {
+        if oms_safe_fs::has_git_marker(dir) || dir.join(".git").symlink_metadata().is_ok() {
+            return true;
+        }
+        cur = dir.parent();
+    }
+    false
+}
+
+fn inspect_git_codex_config(physical: &Path, stop: &AtomicBool) -> Result<GitConfigState> {
+    if !has_any_ancestor_git_marker(physical) {
+        return Ok(GitConfigState::NotGit);
+    }
+    let git_bin = find_on_path(Path::new("git")).ok_or_else(|| {
+        Error::new(
+            "git executable was not found on PATH; cannot verify whether .codex/config.toml is tracked",
+        )
+    })?;
+    let physical_str = physical
+        .to_str()
+        .ok_or_else(|| Error::new("project path must be valid UTF-8"))?;
+    let run_git = |args: &[&str]| -> Result<CmdOutput> {
+        run_bounded_process(
+            "git",
+            &git_bin,
+            args,
+            physical,
+            GIT_ENV_OVERRIDES,
+            VENDOR_TIMEOUT,
+            stop,
+        )
+        .map_err(VendorExecError::into_error)
+    };
+
+    let wt_out = run_git(&["-C", physical_str, "rev-parse", "--is-inside-work-tree"])?;
+    if wt_out.code != Some(0) || wt_out.stdout.trim() != "true" {
+        return Err(Error::new(format!(
+            "cannot inspect git worktree at {}",
+            physical.display()
+        )));
+    }
+
+    let ls_out = run_git(&[
+        "-C",
+        physical_str,
+        "--literal-pathspecs",
+        "ls-files",
+        "--error-unmatch",
+        "--",
+        ".codex/config.toml",
+    ])?;
+    match ls_out.code {
+        Some(0) => return Ok(GitConfigState::Tracked),
+        Some(1) => {}
+        _ => {
+            return Err(vendor_failure("git", "ls-files", &ls_out));
+        }
+    }
+
+    let common_out = run_git(&["-C", physical_str, "rev-parse", "--git-common-dir"])?;
+    if common_out.code != Some(0) {
+        return Err(vendor_failure(
+            "git",
+            "rev-parse --git-common-dir",
+            &common_out,
+        ));
+    }
+    let common_raw = common_out.stdout.trim();
+    require(
+        !common_raw.is_empty(),
+        "git rev-parse --git-common-dir returned empty path",
+    )?;
+    let common_git_dir = physical.join(common_raw).canonicalize().map_err(|e| {
+        Error::new(format!(
+            "cannot resolve git common directory for {}: {e}",
+            physical.display()
+        ))
+    })?;
+
+    let prefix_out = run_git(&["-C", physical_str, "rev-parse", "--show-prefix"])?;
+    if prefix_out.code != Some(0) {
+        return Err(vendor_failure(
+            "git",
+            "rev-parse --show-prefix",
+            &prefix_out,
+        ));
+    }
+    let prefix = prefix_out.stdout.trim_matches(|c| c == '\n' || c == '\r');
+    let exclude_line = if prefix.is_empty() {
+        "/.codex/config.toml".to_owned()
+    } else {
+        format!("/{prefix}.codex/config.toml")
+    };
+
+    let ign_out = run_git(&[
+        "-C",
+        physical_str,
+        "check-ignore",
+        "-q",
+        "--",
+        ".codex/config.toml",
+    ])?;
+    let already_ignored = match ign_out.code {
+        Some(0) => true,
+        Some(1) => false,
+        _ => return Err(vendor_failure("git", "check-ignore", &ign_out)),
+    };
+
+    Ok(GitConfigState::Untracked {
+        common_git_dir,
+        exclude_line,
+        already_ignored,
+    })
+}
+
+fn contains_exact_line(text: &str, target: &str) -> bool {
+    text.lines()
+        .any(|line| line.strip_suffix('\r').unwrap_or(line) == target)
+}
+
+fn append_exclude_line_bytes(prior: Option<&[u8]>, line: &str) -> Result<(Vec<u8>, bool, bool)> {
+    let prior_text = match prior {
+        Some(bytes) => std::str::from_utf8(bytes)
+            .map_err(|_| Error::new("git info/exclude file is not valid UTF-8"))?,
+        None => "",
+    };
+    if contains_exact_line(prior_text, line) {
+        return Ok((prior_text.as_bytes().to_vec(), false, false));
+    }
+    let mut out = String::with_capacity(prior_text.len() + line.len() + 2);
+    out.push_str(prior_text);
+    let separator_added = !out.is_empty() && !out.ends_with('\n');
+    if separator_added {
+        out.push('\n');
+    }
+    out.push_str(line);
+    out.push('\n');
+    Ok((out.into_bytes(), true, separator_added))
+}
+
+fn remove_exact_line_bytes(
+    raw: &[u8],
+    target_line: &str,
+    remove_preceding_separator: bool,
+) -> Result<Option<(Vec<u8>, bool)>> {
+    let text = std::str::from_utf8(raw)
+        .map_err(|_| Error::new("git info/exclude file is not valid UTF-8"))?;
+    let mut out = String::with_capacity(text.len());
+    let mut removed = false;
+    let mut separator_removed = false;
+    let mut pos = 0usize;
+    while pos < text.len() {
+        let end = match text[pos..].find('\n') {
+            Some(rel) => pos + rel + 1,
+            None => text.len(),
+        };
+        let segment = &text[pos..end];
+        let bare = segment.strip_suffix('\n').unwrap_or(segment);
+        let bare = bare.strip_suffix('\r').unwrap_or(bare);
+        if !removed && bare == target_line {
+            removed = true;
+            if remove_preceding_separator && end == text.len() && out.ends_with('\n') {
+                out.pop();
+                separator_removed = true;
+            }
+        } else {
+            out.push_str(segment);
+        }
+        pos = end;
+    }
+    Ok(removed.then(|| (out.into_bytes(), separator_removed)))
+}
+
+struct ExcludeBackup {
+    common_git_dir: PathBuf,
+    created_info_dir: bool,
+    prior_exclude: Option<(Vec<u8>, Stat)>,
+    published_stat: Option<Stat>,
+}
+
+fn restore_exclude_backup(backup: &ExcludeBackup) -> Result<()> {
+    let common_fd = open_dir_nofollow(&backup.common_git_dir, "git common directory")?;
+    match &backup.prior_exclude {
+        Some((bytes, stat)) => {
+            let (info_fd, _) = ensure_subdir_nofollow_at(
+                &common_fd,
+                OsStr::new("info"),
+                0o700,
+                "git info directory",
+            )?;
+            write_regular_file_atomic_at(
+                &info_fd,
+                OsStr::new("exclude"),
+                backup.published_stat.as_ref(),
+                bytes,
+                stat.st_mode & 0o777,
+                "git info/exclude",
+            )?;
+        }
+        None => {
+            let Some(info_fd) = open_existing_subdir_nofollow_at(
+                &common_fd,
+                OsStr::new("info"),
+                "git info directory",
+            )?
+            else {
+                return Ok(());
+            };
+            unlink_regular_file_checked_at(
+                &info_fd,
+                OsStr::new("exclude"),
+                backup.published_stat.as_ref(),
+                "git info/exclude",
+            )?;
+            drop(info_fd);
+            if backup.created_info_dir {
+                let _ =
+                    try_rmdir_if_empty_at(&common_fd, OsStr::new("info"), "git info directory")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+struct ConfigBackup {
+    physical_repo: PathBuf,
+    created_codex_dir: bool,
+    prior_config: Option<(Vec<u8>, Stat)>,
+    published_stat: Option<Stat>,
+}
+
+fn restore_config_backup(backup: &ConfigBackup) -> Result<()> {
+    let repo_fd = open_dir_nofollow(&backup.physical_repo, "project checkout")?;
+    match &backup.prior_config {
+        Some((bytes, stat)) => {
+            let (codex_fd, _) = ensure_subdir_nofollow_at(
+                &repo_fd,
+                OsStr::new(".codex"),
+                0o700,
+                ".codex directory",
+            )?;
+            write_regular_file_atomic_at(
+                &codex_fd,
+                OsStr::new("config.toml"),
+                backup.published_stat.as_ref(),
+                bytes,
+                stat.st_mode & 0o777,
+                ".codex/config.toml",
+            )?;
+        }
+        None => {
+            let Some(codex_fd) = open_existing_subdir_nofollow_at(
+                &repo_fd,
+                OsStr::new(".codex"),
+                ".codex directory",
+            )?
+            else {
+                return Ok(());
+            };
+            unlink_regular_file_checked_at(
+                &codex_fd,
+                OsStr::new("config.toml"),
+                backup.published_stat.as_ref(),
+                ".codex/config.toml",
+            )?;
+            drop(codex_fd);
+            if backup.created_codex_dir {
+                let _ = try_rmdir_if_empty_at(&repo_fd, OsStr::new(".codex"), ".codex directory")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rollback_codex_files(
+    want_json: bool,
+    alias: &str,
+    physical: &Path,
+    action: &str,
+    config_backup: Option<&ConfigBackup>,
+    exclude_backup: Option<&ExcludeBackup>,
+    primary: Error,
+) -> Result<Output> {
+    let mut rb_errors = Vec::new();
+    if let Some(ex) = exclude_backup
+        && let Err(e) = restore_exclude_backup(ex)
+    {
+        rb_errors.push(e.message);
+    }
+    if let Some(cfg) = config_backup
+        && let Err(e) = restore_config_backup(cfg)
+    {
+        rb_errors.push(e.message);
+    }
+
+    if rb_errors.is_empty() {
+        return Err(Error {
+            code: primary.code,
+            message: format!(
+                "{}; rolled back Codex panel in .codex/config.toml",
+                primary.message
+            ),
+            publication_uncertain: primary.publication_uncertain,
+        });
+    }
+
+    let code = if primary.code != 0 { primary.code } else { 1 };
+    let message = format!(
+        "{}; Codex panel rollback for {alias} failed ({}): .codex/config.toml state is uncertain",
+        primary.message,
+        rb_errors.join("; ")
+    );
+    let err = Error {
+        code,
+        message: message.clone(),
+        publication_uncertain: true,
+    };
+    if want_json {
+        let (_, _, stderr) = crate::failure(err);
+        let mut report = panel_action_json(
+            PanelApp::Codex,
+            alias,
+            physical,
+            PANEL_ENTRY_NAME,
+            action,
+            false,
+        );
+        report["uncertain"] = json!(true);
+        report["error"] = json!(message);
+        return Ok((code, json(&report)?, stderr));
+    }
+    Err(err)
+}
+
+fn find_conflicting_codex_alias<'a>(
+    panels: &'a PanelMap,
+    alias: &str,
+    physical: &Path,
+) -> Option<&'a str> {
+    for (other_alias, rows) in panels {
+        if other_alias == alias {
+            continue;
+        }
+        if rows
+            .iter()
+            .any(|r| r.app == PanelApp::Codex.as_str() && r.path == physical)
+        {
+            return Some(other_alias.as_str());
+        }
+    }
+    None
+}
+
+fn find_other_codex_panel_sharing_exclude(
+    panels: &PanelMap,
+    excluding_alias: &str,
+    common_git_dir: &Path,
+    exclude_line: &str,
+    stop: &AtomicBool,
+) -> Option<String> {
+    for (other_alias, rows) in panels {
+        if other_alias == excluding_alias {
+            continue;
+        }
+        for row in rows {
+            if row.app != PanelApp::Codex.as_str() || !row.path.is_dir() {
+                continue;
+            }
+            if let Ok(GitConfigState::Untracked {
+                common_git_dir: other_common,
+                exclude_line: other_line,
+                ..
+            }) = inspect_git_codex_config(&row.path, stop)
+                && other_common == common_git_dir
+                && other_line == exclude_line
+            {
+                return Some(other_alias.clone());
+            }
+        }
+    }
+    None
+}
+
+fn find_other_codex_panel_owning_exclude_in_common_dir(
+    panels: &PanelMap,
+    excluding_alias: &str,
+    common_git_dir: &Path,
+    stop: &AtomicBool,
+) -> Option<String> {
+    for (other_alias, rows) in panels {
+        if other_alias == excluding_alias {
+            continue;
+        }
+        for row in rows {
+            if row.app != PanelApp::Codex.as_str()
+                || row.created_exclude != Some(true)
+                || !row.path.is_dir()
+            {
+                continue;
+            }
+            if let Ok(GitConfigState::Untracked {
+                common_git_dir: other_common,
+                ..
+            }) = inspect_git_codex_config(&row.path, stop)
+                && other_common == common_git_dir
+            {
+                return Some(other_alias.clone());
+            }
+        }
+    }
+    None
+}
+
 fn sanitized_vendor_reason(out: &CmdOutput) -> Option<String> {
     let env_pairs: Vec<(Vec<u8>, Vec<u8>)> = std::env::vars_os()
         .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
@@ -2024,244 +2144,6 @@ fn is_mcp_entry_missing(out: &CmdOutput) -> bool {
     }
     (combined.contains("server") || combined.contains("entry"))
         && (combined.contains("not found") || combined.contains("does not exist"))
-}
-
-fn is_codex_plugin_missing(plugin_id: &str, plugin_name: &str, out: &CmdOutput) -> bool {
-    if out.code != Some(1) {
-        return false;
-    }
-    let combined = format!("{}\n{}", out.stderr, out.stdout).to_ascii_lowercase();
-    if combined.contains("command not found") {
-        return false;
-    }
-    let id_lower = plugin_id.to_ascii_lowercase();
-    let name_lower = plugin_name.to_ascii_lowercase();
-    (combined.contains(&id_lower) || combined.contains(&name_lower))
-        && (combined.contains("not installed")
-            || combined.contains("not found")
-            || combined.contains("does not exist")
-            || combined.contains("not configured"))
-}
-
-fn is_codex_marketplace_missing(out: &CmdOutput) -> bool {
-    if out.code != Some(1) {
-        return false;
-    }
-    let combined = format!("{}\n{}", out.stderr, out.stdout).to_ascii_lowercase();
-    !combined.contains("command not found")
-        && combined.contains(CODEX_MARKETPLACE_NAME)
-        && (combined.contains("not configured")
-            || combined.contains("not installed")
-            || combined.contains("not found")
-            || combined.contains("does not exist"))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CodexInstalledPlugin {
-    plugin_id: String,
-    name: Option<String>,
-    marketplace_name: Option<String>,
-    version: Option<String>,
-    installed: bool,
-    enabled: Option<bool>,
-    source_path: Option<PathBuf>,
-}
-
-impl CodexInstalledPlugin {
-    fn matches_expected(&self, marketplace_root: &Path, plugin_name: &str) -> bool {
-        let expected_id = format!("{plugin_name}@{CODEX_MARKETPLACE_NAME}");
-        let expected_source = marketplace_root.join("plugins").join(plugin_name);
-        self.installed
-            && self.plugin_id == expected_id
-            && self.name.as_deref().is_none_or(|n| n == plugin_name)
-            && self
-                .marketplace_name
-                .as_deref()
-                .is_none_or(|m| m == CODEX_MARKETPLACE_NAME)
-            && self.source_path.as_ref().is_none_or(|p| {
-                p == &expected_source || p.canonicalize().ok().as_ref() == Some(&expected_source)
-            })
-    }
-}
-
-struct CodexInventory {
-    plugins: BTreeMap<String, CodexInstalledPlugin>,
-    marketplaces: BTreeMap<String, PathBuf>,
-}
-
-fn parse_codex_plugin_list(stdout: &str) -> Option<BTreeMap<String, CodexInstalledPlugin>> {
-    let trimmed = stdout.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let val: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    let obj = val.as_object()?;
-    let installed_arr = obj.get("installed")?.as_array()?;
-    if !obj.get("available").is_none_or(serde_json::Value::is_array) {
-        return None;
-    }
-    let mut plugins = BTreeMap::new();
-    for item in installed_arr {
-        let row = item.as_object()?;
-        let plugin_id = row.get("pluginId")?.as_str()?;
-        if plugin_id.is_empty() {
-            return None;
-        }
-        let name = match row.get("name") {
-            None | Some(serde_json::Value::Null) => None,
-            Some(v) => Some(v.as_str()?.to_owned()),
-        };
-        let marketplace_name = match row.get("marketplaceName") {
-            None | Some(serde_json::Value::Null) => None,
-            Some(v) => Some(v.as_str()?.to_owned()),
-        };
-        let installed = row.get("installed")?.as_bool()?;
-        let enabled = match row.get("enabled") {
-            None | Some(serde_json::Value::Null) => None,
-            Some(v) => Some(v.as_bool()?),
-        };
-        let version = match row.get("version") {
-            None | Some(serde_json::Value::Null) => None,
-            Some(v) => Some(v.as_str()?.to_owned()),
-        };
-        let source_path = match row.get("source") {
-            None | Some(serde_json::Value::Null) => None,
-            Some(src) => match src.as_object()?.get("path") {
-                None | Some(serde_json::Value::Null) => None,
-                Some(p) => Some(PathBuf::from(p.as_str()?)),
-            },
-        };
-        if plugins
-            .insert(
-                plugin_id.to_owned(),
-                CodexInstalledPlugin {
-                    plugin_id: plugin_id.to_owned(),
-                    name,
-                    marketplace_name,
-                    version,
-                    installed,
-                    enabled,
-                    source_path,
-                },
-            )
-            .is_some()
-        {
-            return None;
-        }
-    }
-    Some(plugins)
-}
-
-fn valid_marketplace_token(raw: &str) -> bool {
-    !raw.is_empty()
-        && raw
-            .as_bytes()
-            .first()
-            .is_some_and(|b| b.is_ascii_alphanumeric())
-        && raw
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-}
-
-fn valid_marketplace_root_spec(raw: &str) -> bool {
-    raw.starts_with('/')
-        || raw.starts_with("https://")
-        || raw.starts_with("http://")
-        || raw.starts_with("ssh://")
-        || raw.starts_with("file://")
-        || raw.starts_with("git@")
-}
-
-fn parse_codex_marketplace_list(stdout: &str) -> Option<BTreeMap<String, PathBuf>> {
-    let trimmed = stdout.trim();
-    if trimmed.is_empty()
-        || trimmed.eq_ignore_ascii_case("no plugin marketplaces in scope.")
-        || trimmed.eq_ignore_ascii_case("no plugin marketplaces configured.")
-        || trimmed.eq_ignore_ascii_case("no marketplaces configured.")
-    {
-        return Some(BTreeMap::new());
-    }
-    let mut marketplaces = BTreeMap::new();
-    let mut saw_first = false;
-    for raw_line in stdout.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let end = line.find(char::is_whitespace)?;
-        let name = &line[..end];
-        let rest = line[end..].trim();
-        if !saw_first {
-            saw_first = true;
-            if name.eq_ignore_ascii_case("marketplace") && rest.eq_ignore_ascii_case("root") {
-                continue;
-            }
-        }
-        if !valid_marketplace_token(name) || rest.is_empty() || !valid_marketplace_root_spec(rest) {
-            return None;
-        }
-        if name == CODEX_MARKETPLACE_NAME && !rest.starts_with('/') {
-            return None;
-        }
-        if let Some(prev) = marketplaces.insert(name.to_owned(), PathBuf::from(rest))
-            && prev != Path::new(rest)
-        {
-            return None;
-        }
-    }
-    Some(marketplaces)
-}
-
-fn probe_codex_inventory(
-    codex_bin: &Path,
-    workdir: &Path,
-    stop: &AtomicBool,
-) -> Result<CodexInventory> {
-    let list_out = run_bounded_command(
-        PanelApp::Codex,
-        codex_bin,
-        &["plugin", "list", "--json"],
-        workdir,
-        stop,
-    )
-    .map_err(VendorExecError::into_error)?;
-    if list_out.code != Some(0) {
-        return Err(vendor_failure("codex plugin", "list", &list_out));
-    }
-    let plugins = parse_codex_plugin_list(&list_out.stdout)
-        .ok_or_else(|| Error::new("cannot parse `codex plugin list --json` output"))?;
-
-    let mp_out = run_bounded_command(
-        PanelApp::Codex,
-        codex_bin,
-        &["plugin", "marketplace", "list"],
-        workdir,
-        stop,
-    )
-    .map_err(VendorExecError::into_error)?;
-    if mp_out.code != Some(0) {
-        return Err(vendor_failure("codex plugin", "marketplace list", &mp_out));
-    }
-    let marketplaces = parse_codex_marketplace_list(&mp_out.stdout)
-        .ok_or_else(|| Error::new("cannot parse `codex plugin marketplace list` output"))?;
-
-    Ok(CodexInventory {
-        plugins,
-        marketplaces,
-    })
-}
-
-fn recorded_codex_aliases(panels: &PanelMap) -> BTreeSet<String> {
-    panels
-        .iter()
-        .filter(|(_, rows)| rows.iter().any(|r| r.app == PanelApp::Codex.as_str()))
-        .map(|(alias, _)| alias.clone())
-        .collect()
-}
-
-fn same_marketplace_root(configured: &Path, expected_physical: &Path) -> bool {
-    configured == expected_physical
-        || configured.canonicalize().ok().as_deref() == Some(expected_physical)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2462,14 +2344,8 @@ fn probe_claude_entry(
     workdir: &Path,
     stop: &AtomicBool,
 ) -> Result<Option<ClaudeMcpEntry>> {
-    let out = run_bounded_command(
-        PanelApp::Claude,
-        claude_bin,
-        &["mcp", "get", PANEL_ENTRY_NAME],
-        workdir,
-        stop,
-    )
-    .map_err(VendorExecError::into_error)?;
+    let out = run_claude_command(claude_bin, &["mcp", "get", PANEL_ENTRY_NAME], workdir, stop)
+        .map_err(VendorExecError::into_error)?;
     if out.code == Some(0) {
         return parse_claude_mcp_get(&out.stdout)
             .map(Some)
@@ -2503,28 +2379,50 @@ fn upsert_panel_row(
     panels: &mut PanelMap,
     alias: &str,
     app: PanelApp,
-    entry_name: &str,
     physical: &Path,
-    codex_hashes: Option<(String, String)>,
+    codex_meta: Option<CodexRowMeta>,
 ) {
-    let (plugin_sha256, mcp_sha256) = match codex_hashes {
-        Some((p, m)) => (Some(p), Some(m)),
-        None => (None, None),
+    let (
+        block_sha256,
+        created_config,
+        created_codex_dir,
+        created_exclude,
+        separator_added,
+        exclude_separator_added,
+    ) = match codex_meta {
+        Some(m) => (
+            Some(m.block_sha256),
+            Some(m.created_config),
+            Some(m.created_codex_dir),
+            Some(m.created_exclude),
+            m.separator_added.then_some(true),
+            m.exclude_separator_added.then_some(true),
+        ),
+        None => (None, None, None, None, None, None),
     };
     let rows = panels.entry(alias.to_owned()).or_default();
     if let Some(slot) = rows.iter_mut().find(|r| r.app == app.as_str()) {
-        slot.name = entry_name.to_owned();
+        slot.scope = app.expected_scope().to_owned();
+        slot.name = PANEL_ENTRY_NAME.to_owned();
         slot.path = physical.to_path_buf();
-        slot.plugin_sha256 = plugin_sha256;
-        slot.mcp_sha256 = mcp_sha256;
+        slot.block_sha256 = block_sha256;
+        slot.created_config = created_config;
+        slot.created_codex_dir = created_codex_dir;
+        slot.created_exclude = created_exclude;
+        slot.separator_added = separator_added;
+        slot.exclude_separator_added = exclude_separator_added;
     } else {
         rows.push(PanelRecord {
             app: app.as_str().to_owned(),
             scope: app.expected_scope().to_owned(),
-            name: entry_name.to_owned(),
+            name: PANEL_ENTRY_NAME.to_owned(),
             path: physical.to_path_buf(),
-            plugin_sha256,
-            mcp_sha256,
+            block_sha256,
+            created_config,
+            created_codex_dir,
+            created_exclude,
+            separator_added,
+            exclude_separator_added,
         });
     }
 }
@@ -2547,8 +2445,7 @@ fn rollback_after_claude_add(
     primary: Error,
 ) -> Result<Output> {
     let rollback_stop = AtomicBool::new(false);
-    let rollback = run_bounded_command(
-        PanelApp::Claude,
+    let rollback = run_claude_command(
         claude_bin,
         &["mcp", "remove", "--scope", "local", PANEL_ENTRY_NAME],
         physical,
@@ -2589,215 +2486,247 @@ fn rollback_after_claude_add(
     Err(err)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn rollback_codex_install(
-    want_json: bool,
-    alias: &str,
-    plugin_name: &str,
-    plugin_id: &str,
-    physical: &Path,
-    codex_bin: &Path,
-    oms_config_dir: &Path,
-    marketplace_root: &Path,
-    prior_disk_aliases: &BTreeSet<String>,
-    prior_bundle_files: Option<&(Vec<u8>, Vec<u8>)>,
-    plugin_was_installed_before: bool,
-    attempted_plugin_add: bool,
-    market_was_configured_before: bool,
-    added_market_now: bool,
-    other_installed_in_market: bool,
-    announce_rollback: bool,
-    primary: Error,
-) -> Result<Output> {
-    let rollback_stop = AtomicBool::new(false);
-    let mut rb_errors = Vec::new();
+enum CodexInstallPlan {
+    NoOp,
+    Adopt {
+        block_sha256: String,
+    },
+    Write {
+        candidate_bytes: Vec<u8>,
+        block_sha256: String,
+        replaced_existing_block: bool,
+        added_separator: bool,
+    },
+}
 
-    if plugin_was_installed_before {
-        match prior_bundle_files {
-            Some((prev_plugin, prev_mcp)) => {
-                let mut restore_aliases = prior_disk_aliases.clone();
-                restore_aliases.insert(alias.to_owned());
-                let disk_res =
-                    encode_pretty_json(&codex_marketplace_manifest_value(&restore_aliases)?)
-                        .and_then(|market_bytes| {
-                            write_codex_bundle_and_manifest(
-                                oms_config_dir,
-                                marketplace_root,
-                                plugin_name,
-                                prev_plugin,
-                                prev_mcp,
-                                &market_bytes,
-                            )
-                        });
-                if let Err(e) = disk_res {
-                    rb_errors.push(e.message);
-                } else if attempted_plugin_add {
-                    match run_bounded_command(
-                        PanelApp::Codex,
-                        codex_bin,
-                        &["plugin", "add", plugin_id],
-                        physical,
-                        &rollback_stop,
-                    ) {
-                        Ok(rb) if rb.code == Some(0) => {
-                            let expected_prev_ver =
-                                serde_json::from_slice::<serde_json::Value>(prev_plugin)
-                                    .ok()
-                                    .and_then(|v| {
-                                        v.get("version")
-                                            .and_then(serde_json::Value::as_str)
-                                            .map(str::to_owned)
-                                    });
-                            match run_bounded_command(
-                                PanelApp::Codex,
-                                codex_bin,
-                                &["plugin", "list", "--json"],
-                                physical,
-                                &rollback_stop,
-                            ) {
-                                Ok(list_out) if list_out.code == Some(0) => {
-                                    match parse_codex_plugin_list(&list_out.stdout) {
-                                        Some(plugins) => {
-                                            let confirmed =
-                                                plugins.get(plugin_id).is_some_and(|p| {
-                                                    p.matches_expected(
-                                                        marketplace_root,
-                                                        plugin_name,
-                                                    ) && match (
-                                                        &expected_prev_ver,
-                                                        p.version.as_deref(),
-                                                    ) {
-                                                        (Some(exp), Some(actual))
-                                                            if actual != "local" =>
-                                                        {
-                                                            actual == exp
-                                                        }
-                                                        _ => true,
-                                                    }
-                                                });
-                                            if !confirmed {
-                                                rb_errors.push(format!(
-                                                    "cannot confirm restored Codex plugin state for {plugin_id}"
-                                                ));
-                                            }
-                                        }
-                                        None => rb_errors.push(
-                                            "cannot confirm restored Codex plugin state: unparseable `codex plugin list --json` output".into(),
-                                        ),
-                                    }
-                                }
-                                Ok(list_out) => rb_errors
-                                    .push(vendor_failure("codex plugin", "list", &list_out).message),
-                                Err(e) => rb_errors.push(e.into_error().message),
-                            }
-                        }
-                        Ok(rb) => {
-                            rb_errors.push(vendor_failure("codex plugin", "add", &rb).message)
-                        }
-                        Err(e) => rb_errors.push(e.into_error().message),
-                    }
+struct PreparedCodexInstall {
+    plan: CodexInstallPlan,
+    codex_dir_existed: bool,
+    prior_config: Option<(Vec<u8>, Stat)>,
+    repo_root: Option<PathBuf>,
+    exclude_target: Option<(PathBuf, String)>,
+}
+
+fn prepare_codex_install(
+    alias: &str,
+    physical: &Path,
+    launcher: &Path,
+    recorded_row: Option<&PanelRecord>,
+    stop: &AtomicBool,
+) -> Result<PreparedCodexInstall> {
+    let repo_fd = open_dir_nofollow(physical, "project checkout")?;
+    let codex_fd =
+        open_existing_subdir_nofollow_at(&repo_fd, OsStr::new(".codex"), ".codex directory")?;
+    let codex_dir_existed = codex_fd.is_some();
+    let prior_config = match &codex_fd {
+        Some(fd) => {
+            read_regular_file_nofollow_at(fd, OsStr::new("config.toml"), ".codex/config.toml")?
+        }
+        None => None,
+    };
+
+    let (repo_root, exclude_target) = match inspect_git_codex_config(physical, stop)? {
+        GitConfigState::NotGit => (None, None),
+        GitConfigState::Tracked => {
+            return Err(Error::new(format!(
+                "refusing to modify tracked file .codex/config.toml in {}; untrack it first",
+                physical.display()
+            )));
+        }
+        GitConfigState::Untracked {
+            common_git_dir,
+            exclude_line,
+            already_ignored,
+        } => {
+            let root = common_git_dir.parent().map(Path::to_path_buf);
+            let target = (!already_ignored).then_some((common_git_dir, exclude_line));
+            (root, target)
+        }
+    };
+
+    let resource_version = codex_panel_resource_version();
+    let expected_block = codex_panel_block(launcher, physical)?;
+    let expected_sha = oms_panel_core::digest(expected_block.as_bytes());
+
+    let (plan, outside_table) = if let Some((ref prior_bytes, _)) = prior_config {
+        let prior_str = std::str::from_utf8(prior_bytes)
+            .map_err(|_| Error::new("Invalid .codex/config.toml: file is not valid UTF-8"))?;
+        let parsed_prior = oms_toml::parse_bounded(prior_bytes, MAX_CONFIG_BYTES)
+            .map_err(|e| Error::new(format!("Invalid .codex/config.toml: {e}")))?;
+        let split = split_codex_panel_block(prior_str)?;
+        let outside = format!("{}{}", split.before, split.after);
+        let outside_table =
+            oms_toml::parse_bounded(outside.as_bytes(), MAX_CONFIG_BYTES).map_err(|e| {
+                Error::new(format!("Invalid .codex/config.toml outside OMS block: {e}"))
+            })?;
+
+        match outside_table.get("mcp_servers") {
+            None => {}
+            Some(oms_toml::Value::Table(servers)) => {
+                if servers.contains_key(PANEL_ENTRY_NAME) {
+                    return Err(Error::new(format!(
+                        "an unmanaged mcp_servers.{PANEL_ENTRY_NAME} entry exists in .codex/config.toml; remove it first"
+                    )));
                 }
             }
-            None => {
-                rb_errors.push(format!(
-                    "cannot restore previous Codex plugin bundle for {plugin_id}: prior bundle files were absent"
+            Some(_) => {
+                return Err(Error::new(
+                    "Invalid .codex/config.toml: mcp_servers must be a TOML table",
                 ));
             }
         }
-    } else {
-        if attempted_plugin_add {
-            match run_bounded_command(
-                PanelApp::Codex,
-                codex_bin,
-                &["plugin", "remove", plugin_id],
-                physical,
-                &rollback_stop,
-            ) {
-                Ok(rb)
-                    if rb.code == Some(0)
-                        || is_codex_plugin_missing(plugin_id, plugin_name, &rb) => {}
-                Ok(rb) => rb_errors.push(vendor_failure("codex plugin", "remove", &rb).message),
-                Err(e) => rb_errors.push(e.into_error().message),
-            }
+
+        let keep_empty_mcp = outside_table.contains_key("mcp_servers");
+        let stripped_prior = table_without_oms_panel(parsed_prior.clone(), keep_empty_mcp)?;
+        if split.block.is_none() && parsed_prior != outside_table {
+            return Err(Error::new(format!(
+                "an unmanaged mcp_servers.{PANEL_ENTRY_NAME} entry exists in .codex/config.toml; remove it first"
+            )));
         }
+        require(
+            stripped_prior == outside_table,
+            "OMS block in .codex/config.toml interacts with surrounding TOML statements; refusing to modify",
+        )?;
 
-        let mut remaining_disk = prior_disk_aliases.clone();
-        remaining_disk.remove(alias);
-
-        if rb_errors.is_empty()
-            && added_market_now
-            && remaining_disk.is_empty()
-            && !other_installed_in_market
-        {
-            match run_bounded_command(
-                PanelApp::Codex,
-                codex_bin,
-                &["plugin", "marketplace", "remove", CODEX_MARKETPLACE_NAME],
-                physical,
-                &rollback_stop,
-            ) {
-                Ok(rb) if rb.code == Some(0) || is_codex_marketplace_missing(&rb) => {}
-                Ok(rb) => rb_errors
-                    .push(vendor_failure("codex plugin", "marketplace remove", &rb).message),
-                Err(e) => rb_errors.push(e.into_error().message),
+        if let Some(on_disk_block) = split.block {
+            let on_disk_sha = oms_panel_core::digest(on_disk_block.as_bytes());
+            if let Some(existing) = recorded_row {
+                if existing.block_sha256.as_deref() != Some(on_disk_sha.as_str()) {
+                    return Err(Error::new(format!(
+                        "OMS block in .codex/config.toml for '{alias}' was modified outside OMS; restore it or run `oms panel --uninstall-panel codex --project {alias}` first"
+                    )));
+                }
+                if on_disk_block == expected_block && exclude_target.is_none() {
+                    let verified = oms_toml::parse_bounded(prior_bytes, MAX_CONFIG_BYTES)
+                        .map_err(|e| Error::new(format!("Invalid .codex/config.toml: {e}")))?;
+                    let expected_full = table_with_expected_oms_panel(
+                        outside_table.clone(),
+                        launcher,
+                        physical,
+                        resource_version,
+                    )?;
+                    require(
+                        verified == expected_full,
+                        "existing .codex/config.toml did not parse to the expected mcp_servers.oms-panel table",
+                    )?;
+                    (CodexInstallPlan::NoOp, outside_table)
+                } else {
+                    let candidate = format!("{}{expected_block}{}", split.before, split.after);
+                    (
+                        CodexInstallPlan::Write {
+                            candidate_bytes: candidate.into_bytes(),
+                            block_sha256: expected_sha,
+                            replaced_existing_block: true,
+                            added_separator: false,
+                        },
+                        outside_table,
+                    )
+                }
+            } else if on_disk_block == expected_block {
+                let verified = oms_toml::parse_bounded(prior_bytes, MAX_CONFIG_BYTES)
+                    .map_err(|e| Error::new(format!("Invalid .codex/config.toml: {e}")))?;
+                let expected_full = table_with_expected_oms_panel(
+                    outside_table.clone(),
+                    launcher,
+                    physical,
+                    resource_version,
+                )?;
+                require(
+                    verified == expected_full,
+                    "existing .codex/config.toml did not parse to the expected mcp_servers.oms-panel table",
+                )?;
+                (
+                    CodexInstallPlan::Adopt {
+                        block_sha256: expected_sha,
+                    },
+                    outside_table,
+                )
+            } else {
+                return Err(Error::new(format!(
+                    "an unrecorded or edited OMS block in .codex/config.toml exists for '{alias}'; remove or restore it first"
+                )));
             }
-        }
-
-        // If `codex plugin remove` (or `marketplace remove`) failed or was uncertain, keep the
-        // bundle and marketplace entry on disk so a later uninstall can clean up.
-        if rb_errors.is_empty() {
-            let keep_root = market_was_configured_before || other_installed_in_market;
-            if let Err(e) = update_or_delete_codex_marketplace_disk(
-                oms_config_dir,
-                marketplace_root,
-                Some(plugin_name),
-                &remaining_disk,
-                keep_root,
-            ) {
-                rb_errors.push(e.message);
-            }
-        }
-    }
-
-    if rb_errors.is_empty() {
-        let message = if announce_rollback {
-            format!("{}; rolled back Codex panel {plugin_id}", primary.message)
         } else {
-            primary.message
-        };
-        return Err(Error {
-            code: primary.code,
-            message,
-            publication_uncertain: primary.publication_uncertain,
-        });
+            let needs_separator = !prior_str.is_empty() && !prior_str.ends_with('\n');
+            let candidate = if needs_separator {
+                format!("{prior_str}\n{expected_block}")
+            } else {
+                format!("{prior_str}{expected_block}")
+            };
+            (
+                CodexInstallPlan::Write {
+                    candidate_bytes: candidate.into_bytes(),
+                    block_sha256: expected_sha,
+                    replaced_existing_block: false,
+                    added_separator: needs_separator,
+                },
+                outside_table,
+            )
+        }
+    } else {
+        (
+            CodexInstallPlan::Write {
+                candidate_bytes: expected_block.into_bytes(),
+                block_sha256: expected_sha,
+                replaced_existing_block: false,
+                added_separator: false,
+            },
+            oms_toml::Table::new(),
+        )
+    };
+
+    if let CodexInstallPlan::Write {
+        ref candidate_bytes,
+        ..
+    } = plan
+    {
+        let parsed_candidate =
+            oms_toml::parse_bounded(candidate_bytes, MAX_CONFIG_BYTES).map_err(|e| {
+                Error::new(format!(
+                    "generated .codex/config.toml failed TOML parse: {e}"
+                ))
+            })?;
+        let expected_full =
+            table_with_expected_oms_panel(outside_table, launcher, physical, resource_version)?;
+        require(
+            parsed_candidate == expected_full,
+            "generated .codex/config.toml did not parse to the expected mcp_servers.oms-panel table",
+        )?;
     }
 
-    let code = if primary.code != 0 { primary.code } else { 1 };
-    let message = format!(
-        "{}; Codex panel rollback for {plugin_id} failed ({}): Codex panel state is uncertain",
-        primary.message,
-        rb_errors.join("; ")
-    );
-    let err = Error {
-        code,
-        message: message.clone(),
-        publication_uncertain: true,
-    };
-    if want_json {
-        let (_, _, stderr) = crate::failure(err);
-        let mut report = panel_action_json(
-            PanelApp::Codex,
-            alias,
-            physical,
-            plugin_id,
-            "install",
-            false,
-        );
-        report["uncertain"] = json!(true);
-        report["error"] = json!(message);
-        return Ok((code, json(&report)?, stderr));
+    Ok(PreparedCodexInstall {
+        plan,
+        codex_dir_existed,
+        prior_config,
+        repo_root,
+        exclude_target,
+    })
+}
+
+fn format_codex_install_text(
+    alias: &str,
+    physical: &Path,
+    verb_prefix: &str,
+    trust: &CodexTrustStatus,
+) -> Vec<u8> {
+    match trust {
+        CodexTrustStatus::Trusted => format!(
+            "{verb_prefix} codex panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+            physical.display()
+        )
+        .into_bytes(),
+        CodexTrustStatus::Untrusted { trust_target } => format!(
+            "{verb_prefix} codex panel {PANEL_ENTRY_NAME} for {alias}: {} (inactive: {CODEX_UNTRUSTED_REASON})\nhint: {}\n",
+            physical.display(),
+            codex_untrusted_hint(trust_target)
+        )
+        .into_bytes(),
+        CodexTrustStatus::Unknown { hint } => format!(
+            "{verb_prefix} codex panel {PANEL_ENTRY_NAME} for {alias}: {} (inactive: {CODEX_TRUST_UNKNOWN_REASON})\nhint: {hint}\n",
+            physical.display(),
+        )
+        .into_bytes(),
     }
-    Err(err)
 }
 
 pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) -> Result<Output> {
@@ -2805,19 +2734,11 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
     let app = PanelApp::parse(&options.required("install-panel")?)?;
     let alias = options.required("project")?;
     check_alias(&alias)?;
-    let entry_name = app.expected_entry_name(&alias)?;
     let dry_run = options.has("dry-run");
     let want_json = options.has("json");
 
     let (target, explicit) = resolve_writer_path()?;
     let (parent, leaf_name) = physical_parent_and_leaf(&target, explicit)?;
-    let codex_paths = if app == PanelApp::Codex {
-        Some(resolve_codex_paths_for_active_map(
-            &target, explicit, &parent, &leaf_name,
-        )?)
-    } else {
-        None
-    };
     let launcher = resolve_oms_launcher_path()?;
     let Some(dir_fd) = open_parent_dir(&parent, false)? else {
         return Err(if explicit {
@@ -2845,19 +2766,38 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 unknown_alias_error(&alias)
             });
         };
-        let _ = read_panels_at(&dir_fd)?;
+        let panels = read_panels_at(&dir_fd)?.map(|(p, _)| p).unwrap_or_default();
         let configured = map.get(&alias).ok_or_else(|| unknown_alias_error(&alias))?;
         let configured_str = configured
             .to_str()
             .ok_or_else(|| Error::new("project path must be valid UTF-8"))?;
         let physical = validate_checkout(Some(configured_str), cwd)?;
+        let recorded_row = panels
+            .get(&alias)
+            .and_then(|rows| rows.iter().find(|r| r.app == app.as_str()));
+        if let Some(existing) = recorded_row
+            && existing.path != physical
+        {
+            return Err(Error::new(format!(
+                "project alias '{alias}' already has a recorded {} panel at {}; run `oms panel --uninstall-panel {} --project {alias}` first",
+                app.as_str(),
+                existing.path.display(),
+                app.as_str(),
+            )));
+        }
         match app {
             PanelApp::Claude => {
-                let claude_bin = resolve_vendor_program(app, cwd, true)?;
+                let claude_bin = resolve_claude_program(cwd, true)?;
                 let entry_json = claude_panel_entry_json(&launcher, &physical)?;
                 if want_json {
-                    let report =
-                        panel_action_json(app, &alias, &physical, &entry_name, "install", false);
+                    let report = panel_action_json(
+                        app,
+                        &alias,
+                        &physical,
+                        PANEL_ENTRY_NAME,
+                        "install",
+                        false,
+                    );
                     return Ok((0, json(&report)?, vec![]));
                 }
                 let mut text = format_vendor_command(
@@ -2880,40 +2820,35 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 return Ok((0, text.into_bytes(), vec![]));
             }
             PanelApp::Codex => {
-                let (oms_config_dir, marketplace_root) = codex_paths.as_ref().unwrap();
-                require(
-                    !marketplace_root.starts_with(&physical)
-                        && !physical.starts_with(marketplace_root),
-                    "Codex panel marketplace directory must remain outside the project checkout",
-                )?;
-                let _ = open_existing_codex_marketplace_fd(oms_config_dir, marketplace_root)?;
-                let codex_bin = resolve_vendor_program(app, cwd, true)?;
+                if let Some(existing_alias) =
+                    find_conflicting_codex_alias(&panels, &alias, &physical)
+                {
+                    return Err(Error::new(format!(
+                        "checkout {} already has a recorded codex panel under project alias '{existing_alias}'; use '{existing_alias}' or run `oms panel --uninstall-panel codex --project {existing_alias}` first",
+                        physical.display()
+                    )));
+                }
+                let prepared =
+                    prepare_codex_install(&alias, &physical, &launcher, recorded_row, stop)?;
+                let trust =
+                    check_codex_project_trust(cwd, &physical, prepared.repo_root.as_deref());
                 if want_json {
-                    let report =
-                        panel_action_json(app, &alias, &physical, &entry_name, "install", false);
+                    let mut report = panel_action_json(
+                        app,
+                        &alias,
+                        &physical,
+                        PANEL_ENTRY_NAME,
+                        "install",
+                        false,
+                    );
+                    attach_codex_trust_fields(&mut report, &trust);
                     return Ok((0, json(&report)?, vec![]));
                 }
-                let mp_str = marketplace_root
-                    .to_str()
-                    .ok_or_else(|| Error::new("marketplace path must be valid UTF-8"))?;
-                let mut text =
-                    format_vendor_command(&physical, &codex_bin, &["plugin", "list", "--json"])?;
-                text.push_str(&format_vendor_command(
-                    &physical,
-                    &codex_bin,
-                    &["plugin", "marketplace", "list"],
-                )?);
-                text.push_str(&format_vendor_command(
-                    &physical,
-                    &codex_bin,
-                    &["plugin", "marketplace", "add", mp_str],
-                )?);
-                text.push_str(&format_vendor_command(
-                    &physical,
-                    &codex_bin,
-                    &["plugin", "add", &entry_name],
-                )?);
-                return Ok((0, text.into_bytes(), vec![]));
+                return Ok((
+                    0,
+                    format_codex_install_text(&alias, &physical, "would install", &trust),
+                    vec![],
+                ));
             }
         }
     }
@@ -2955,7 +2890,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
 
     match app {
         PanelApp::Claude => {
-            let claude_bin = resolve_vendor_program(app, cwd, false)?;
+            let claude_bin = resolve_claude_program(cwd, false)?;
             let entry_json = claude_panel_entry_json(&launcher, &physical)?;
             if let Some(found) = probe_claude_entry(&claude_bin, &physical, stop)?
                 && found.scope == Some(ClaudeScope::Local)
@@ -2971,7 +2906,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                             app,
                             &alias,
                             &physical,
-                            &entry_name,
+                            PANEL_ENTRY_NAME,
                             "install",
                             false,
                         );
@@ -2988,11 +2923,17 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                         vec![],
                     ));
                 }
-                upsert_panel_row(&mut panels, &alias, app, &entry_name, &physical, None);
+                upsert_panel_row(&mut panels, &alias, app, &physical, None);
                 write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)?;
                 if want_json {
-                    let report =
-                        panel_action_json(app, &alias, &physical, &entry_name, "adopted", true);
+                    let report = panel_action_json(
+                        app,
+                        &alias,
+                        &physical,
+                        PANEL_ENTRY_NAME,
+                        "adopted",
+                        true,
+                    );
                     return Ok((0, json(&report)?, vec![]));
                 }
                 return Ok((
@@ -3015,8 +2956,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 });
             }
 
-            let add_res = run_bounded_command(
-                app,
+            let add_res = run_claude_command(
                 &claude_bin,
                 &[
                     "mcp",
@@ -3061,7 +3001,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
                 }
             }
 
-            upsert_panel_row(&mut panels, &alias, app, &entry_name, &physical, None);
+            upsert_panel_row(&mut panels, &alias, app, &physical, None);
             if let Err(record_err) =
                 write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)
             {
@@ -3077,7 +3017,7 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
 
             if want_json {
                 let report =
-                    panel_action_json(app, &alias, &physical, &entry_name, "install", true);
+                    panel_action_json(app, &alias, &physical, PANEL_ENTRY_NAME, "install", true);
                 return Ok((0, json(&report)?, vec![]));
             }
             Ok((
@@ -3092,497 +3032,355 @@ pub(super) fn install_panel(options: &Options, cwd: &Path, stop: &AtomicBool) ->
             ))
         }
         PanelApp::Codex => {
-            let (oms_config_dir, marketplace_root) = codex_paths.as_ref().unwrap();
-            require(
-                !marketplace_root.starts_with(&physical) && !physical.starts_with(marketplace_root),
-                "Codex panel marketplace directory must remain outside the project checkout",
-            )?;
-            let plugin_name = codex_plugin_name(&alias)?;
-            debug_assert_ne!(CODEX_MARKETPLACE_NAME, LIFECYCLE_CODEX_MARKETPLACE);
-
-            let expected_plugin = codex_plugin_manifest_value(&alias)?;
-            let expected_mcp = codex_mcp_manifest_value(&launcher, &physical)?;
-            let plugin_bytes = encode_pretty_json(&expected_plugin)?;
-            let mcp_bytes = encode_pretty_json(&expected_mcp)?;
-
-            // Check on-disk marketplace directory ownership and marked bundles before calling Codex CLI.
-            let disk_state = inspect_codex_marketplace_state(
-                oms_config_dir,
-                marketplace_root,
-                &alias,
-                &plugin_name,
-                &launcher,
-                &physical,
-                &plugin_bytes,
-                &mcp_bytes,
-            )?;
-            let prior_bundle_files = disk_state.prior_bundle_pair();
-
-            if let Some(existing) = &recorded_row {
-                match &disk_state.bundle {
-                    OnDiskCodexBundle::ModifiedOutsideOms => {
-                        return Err(Error::new(format!(
-                            "Codex panel bundle for '{alias}' was modified outside OMS; restore it or run `oms panel --uninstall-panel codex --project {alias}` first"
-                        )));
-                    }
-                    OnDiskCodexBundle::Present {
-                        mcp_bytes,
-                        plugin_sha256,
-                        mcp_sha256,
-                        ..
-                    } if existing.plugin_sha256.as_deref() != Some(plugin_sha256.as_str())
-                        || existing.mcp_sha256.as_deref() != Some(mcp_sha256.as_str())
-                        || !mcp_bytes_pin_checkout(mcp_bytes, &physical) =>
-                    {
-                        return Err(Error::new(format!(
-                            "Codex panel bundle for '{alias}' was modified outside OMS; restore it or run `oms panel --uninstall-panel codex --project {alias}` first"
-                        )));
-                    }
-                    OnDiskCodexBundle::Absent | OnDiskCodexBundle::Present { .. } => {}
-                }
+            if let Some(existing_alias) = find_conflicting_codex_alias(&panels, &alias, &physical) {
+                return Err(Error::new(format!(
+                    "checkout {} already has a recorded codex panel under project alias '{existing_alias}'; use '{existing_alias}' or run `oms panel --uninstall-panel codex --project {existing_alias}` first",
+                    physical.display()
+                )));
             }
+            let prepared =
+                prepare_codex_install(&alias, &physical, &launcher, recorded_row.as_ref(), stop)?;
+            let trust = check_codex_project_trust(cwd, &physical, prepared.repo_root.as_deref());
 
-            let codex_bin = resolve_vendor_program(app, cwd, false)?;
-            let inventory = probe_codex_inventory(&codex_bin, &physical, stop)?;
-            let market_was_configured = if let Some(configured_root) =
-                inventory.marketplaces.get(CODEX_MARKETPLACE_NAME)
-            {
-                if !same_marketplace_root(configured_root, marketplace_root) {
-                    return Err(Error::new(format!(
-                        "an unmanaged Codex marketplace '{CODEX_MARKETPLACE_NAME}' is configured at {}; remove it first",
-                        configured_root.display()
-                    )));
-                }
-                true
-            } else {
-                false
-            };
-
-            let existing_installed_plugin =
-                inventory.plugins.get(&entry_name).filter(|p| p.installed);
-            let plugin_was_installed_before = existing_installed_plugin.is_some();
-            let plugin_was_disabled_before =
-                existing_installed_plugin.is_some_and(|p| p.enabled == Some(false));
-            let other_installed_in_market = inventory.plugins.values().any(|p| {
-                p.installed
-                    && p.plugin_id != entry_name
-                    && p.plugin_id
-                        .rsplit_once('@')
-                        .is_some_and(|(_, market)| market == CODEX_MARKETPLACE_NAME)
-            });
-
-            let market_bytes = encode_pretty_json(&disk_state.expected_market)?;
-
-            if recorded_row.is_some() {
-                if let Some(found_plugin) = existing_installed_plugin {
-                    if !found_plugin.matches_expected(marketplace_root, &plugin_name) {
-                        return Err(Error::new(format!(
-                            "an unmanaged Codex plugin {entry_name} exists; remove it first"
-                        )));
-                    }
-                    if market_was_configured
-                        && disk_state.existed_before
-                        && disk_state.market_matches
-                        && matches!(
-                            disk_state.bundle,
-                            OnDiskCodexBundle::Present {
-                                matches_current: true,
-                                ..
-                            }
-                        )
-                    {
-                        let is_disabled = found_plugin.enabled == Some(false);
-                        if want_json {
-                            let mut report = panel_action_json(
-                                app,
-                                &alias,
-                                &physical,
-                                &entry_name,
-                                "install",
-                                false,
-                            );
-                            if is_disabled {
-                                report["disabled"] = json!(true);
-                            }
-                            return Ok((0, json(&report)?, vec![]));
-                        }
-                        let disabled_note = if is_disabled {
-                            " (disabled in Codex)"
-                        } else {
-                            ""
-                        };
-                        return Ok((
-                            0,
-                            format!(
-                                "already installed {} panel {entry_name} for {alias}: {}{disabled_note}\n",
-                                app.as_str(),
-                                physical.display()
-                            )
-                            .into_bytes(),
-                            vec![],
-                        ));
-                    }
-                }
-            } else if let Some(found_plugin) = existing_installed_plugin {
-                if market_was_configured
-                    && disk_state.existed_before
-                    && found_plugin.matches_expected(marketplace_root, &plugin_name)
-                    && let OnDiskCodexBundle::Present {
-                        ref plugin_bytes,
-                        ref mcp_bytes,
-                        ref plugin_sha256,
-                        ref mcp_sha256,
-                        matches_any_oms_release: true,
-                        ..
-                    } = disk_state.bundle
-                {
-                    if !disk_state.market_matches {
-                        write_codex_bundle_and_manifest(
-                            oms_config_dir,
-                            marketplace_root,
-                            &plugin_name,
-                            plugin_bytes,
-                            mcp_bytes,
-                            &market_bytes,
-                        )?;
-                    }
-                    upsert_panel_row(
-                        &mut panels,
-                        &alias,
+            if matches!(prepared.plan, CodexInstallPlan::NoOp) {
+                if want_json {
+                    let mut report = panel_action_json(
                         app,
-                        &entry_name,
+                        &alias,
                         &physical,
-                        Some((plugin_sha256.clone(), mcp_sha256.clone())),
+                        PANEL_ENTRY_NAME,
+                        "install",
+                        false,
                     );
-                    write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)?;
-                    let is_disabled = found_plugin.enabled == Some(false);
-                    if want_json {
-                        let mut report =
-                            panel_action_json(app, &alias, &physical, &entry_name, "adopted", true);
-                        if is_disabled {
-                            report["disabled"] = json!(true);
-                        }
-                        return Ok((0, json(&report)?, vec![]));
-                    }
-                    let disabled_note = if is_disabled {
-                        " (disabled in Codex)"
-                    } else {
-                        ""
-                    };
-                    return Ok((
-                        0,
-                        format!(
-                            "adopted existing {} panel {entry_name} for {alias}: {}{disabled_note}\n",
-                            app.as_str(),
-                            physical.display()
-                        )
-                        .into_bytes(),
-                        vec![],
-                    ));
+                    attach_codex_trust_fields(&mut report, &trust);
+                    return Ok((0, json(&report)?, vec![]));
                 }
-                return Err(Error::new(format!(
-                    "an unmanaged Codex plugin {entry_name} exists; remove it first"
-                )));
-            } else if matches!(
-                disk_state.bundle,
-                OnDiskCodexBundle::ModifiedOutsideOms
-                    | OnDiskCodexBundle::Present {
-                        matches_any_oms_release: false,
-                        ..
-                    }
-            ) {
-                return Err(Error::new(format!(
-                    "an unmanaged Codex plugin bundle for '{alias}' exists at {}; remove it first",
-                    marketplace_root
-                        .join("plugins")
-                        .join(&plugin_name)
-                        .display()
-                )));
+                return Ok((
+                    0,
+                    format_codex_install_text(&alias, &physical, "already installed", &trust),
+                    vec![],
+                ));
             }
 
             if stop.load(Ordering::Acquire) {
                 return Err(Error {
                     code: 130,
-                    message: "interrupted before running Codex CLI".into(),
+                    message: "interrupted before writing .codex/config.toml".into(),
                     publication_uncertain: false,
                 });
             }
 
-            // 1. Write or refresh the bundle for ALIAS and the marketplace manifest.
-            write_codex_bundle_and_manifest(
-                oms_config_dir,
-                marketplace_root,
-                &plugin_name,
-                &plugin_bytes,
-                &mcp_bytes,
-                &market_bytes,
-            )?;
+            let mut config_backup: Option<ConfigBackup> = None;
+            let mut exclude_backup: Option<ExcludeBackup> = None;
 
-            // 2. If the marketplace is not yet configured, run `codex plugin marketplace add <root>`.
-            let mut added_market_now = false;
-            if !market_was_configured {
-                let mp_str = marketplace_root
-                    .to_str()
-                    .ok_or_else(|| Error::new("marketplace path must be valid UTF-8"))?;
-                let mp_res = run_bounded_command(
-                    app,
-                    &codex_bin,
-                    &["plugin", "marketplace", "add", mp_str],
-                    &physical,
-                    stop,
-                );
-                match mp_res {
-                    Ok(out) if out.code == Some(0) => {
-                        added_market_now = true;
+            let (
+                action_str,
+                text_prefix,
+                block_sha256,
+                created_config_now,
+                created_codex_dir_now,
+                replaced_existing_block,
+                added_separator_now,
+            ) = match prepared.plan {
+                CodexInstallPlan::NoOp => unreachable!(),
+                CodexInstallPlan::Adopt { block_sha256 } => (
+                    "adopted",
+                    "adopted existing",
+                    block_sha256,
+                    false,
+                    false,
+                    false,
+                    false,
+                ),
+                CodexInstallPlan::Write {
+                    candidate_bytes,
+                    block_sha256,
+                    replaced_existing_block,
+                    added_separator,
+                } => {
+                    let repo_fd = open_dir_nofollow(&physical, "project checkout")?;
+                    let (codex_fd, created_dir) = ensure_subdir_nofollow_at(
+                        &repo_fd,
+                        OsStr::new(".codex"),
+                        0o700,
+                        ".codex directory",
+                    )?;
+                    let before_stat = prepared.prior_config.as_ref().map(|(_, st)| st);
+                    let target_mode = match before_stat {
+                        Some(st) => st.st_mode & 0o777,
+                        None => 0o600,
+                    };
+                    let created_file = before_stat.is_none();
+                    let published_cfg_stat = match write_regular_file_atomic_at(
+                        &codex_fd,
+                        OsStr::new("config.toml"),
+                        before_stat,
+                        &candidate_bytes,
+                        target_mode,
+                        ".codex/config.toml",
+                    ) {
+                        Ok(st) => st,
+                        Err(write_err) => {
+                            drop(codex_fd);
+                            if created_dir {
+                                let _ = try_rmdir_if_empty_at(
+                                    &repo_fd,
+                                    OsStr::new(".codex"),
+                                    ".codex directory",
+                                );
+                            }
+                            return Err(write_err);
+                        }
+                    };
+                    config_backup = Some(ConfigBackup {
+                        physical_repo: physical.clone(),
+                        created_codex_dir: created_dir,
+                        prior_config: prepared.prior_config,
+                        published_stat: Some(published_cfg_stat),
+                    });
+                    (
+                        "install",
+                        "installed",
+                        block_sha256,
+                        created_file,
+                        created_dir,
+                        replaced_existing_block,
+                        added_separator,
+                    )
+                }
+            };
+
+            let mut added_exclude_now = false;
+            let mut added_exclude_sep_now = false;
+            if let Some((common_git_dir, exclude_line)) = prepared.exclude_target {
+                let exclude_step: Result<()> = (|| {
+                    let common_fd = open_dir_nofollow(&common_git_dir, "git common directory")?;
+                    let (info_fd, created_info_dir) = ensure_subdir_nofollow_at(
+                        &common_fd,
+                        OsStr::new("info"),
+                        0o700,
+                        "git info directory",
+                    )?;
+                    let prior_exclude = read_regular_file_nofollow_at(
+                        &info_fd,
+                        OsStr::new("exclude"),
+                        "git info/exclude",
+                    )?;
+                    let (next_bytes, added, sep_added) = append_exclude_line_bytes(
+                        prior_exclude.as_ref().map(|(b, _)| b.as_slice()),
+                        &exclude_line,
+                    )?;
+                    if added {
+                        let before_stat = prior_exclude.as_ref().map(|(_, st)| st);
+                        let mode = match before_stat {
+                            Some(st) => st.st_mode & 0o777,
+                            None => 0o600,
+                        };
+                        let published_excl_stat = write_regular_file_atomic_at(
+                            &info_fd,
+                            OsStr::new("exclude"),
+                            before_stat,
+                            &next_bytes,
+                            mode,
+                            "git info/exclude",
+                        )?;
+                        added_exclude_now = true;
+                        added_exclude_sep_now = sep_added;
+                        exclude_backup = Some(ExcludeBackup {
+                            common_git_dir,
+                            created_info_dir,
+                            prior_exclude,
+                            published_stat: Some(published_excl_stat),
+                        });
+                    } else if created_info_dir {
+                        drop(info_fd);
+                        let _ = try_rmdir_if_empty_at(
+                            &common_fd,
+                            OsStr::new("info"),
+                            "git info directory",
+                        )?;
                     }
-                    Ok(out) if out.code.is_some() => {
-                        return rollback_codex_install(
+                    Ok(())
+                })();
+
+                if let Err(ex_err) = exclude_step {
+                    if config_backup.is_some() {
+                        return rollback_codex_files(
                             want_json,
                             &alias,
-                            &plugin_name,
-                            &entry_name,
                             &physical,
-                            &codex_bin,
-                            oms_config_dir,
-                            marketplace_root,
-                            &disk_state.prior_disk_aliases,
-                            prior_bundle_files.as_ref(),
-                            plugin_was_installed_before,
-                            false,
-                            market_was_configured,
-                            false,
-                            other_installed_in_market,
-                            false,
-                            vendor_failure("codex plugin", "marketplace add", &out),
+                            action_str,
+                            config_backup.as_ref(),
+                            None,
+                            ex_err,
                         );
                     }
-                    Ok(sig_out) => {
-                        return rollback_codex_install(
-                            want_json,
-                            &alias,
-                            &plugin_name,
-                            &entry_name,
-                            &physical,
-                            &codex_bin,
-                            oms_config_dir,
-                            marketplace_root,
-                            &disk_state.prior_disk_aliases,
-                            prior_bundle_files.as_ref(),
-                            plugin_was_installed_before,
-                            false,
-                            market_was_configured,
-                            true,
-                            other_installed_in_market,
-                            true,
-                            vendor_failure("codex plugin", "marketplace add", &sig_out),
-                        );
-                    }
-                    Err(VendorExecError::Spawn(e)) => {
-                        return rollback_codex_install(
-                            want_json,
-                            &alias,
-                            &plugin_name,
-                            &entry_name,
-                            &physical,
-                            &codex_bin,
-                            oms_config_dir,
-                            marketplace_root,
-                            &disk_state.prior_disk_aliases,
-                            prior_bundle_files.as_ref(),
-                            plugin_was_installed_before,
-                            false,
-                            market_was_configured,
-                            false,
-                            other_installed_in_market,
-                            false,
-                            e,
-                        );
-                    }
-                    Err(
-                        VendorExecError::TimedOut(primary)
-                        | VendorExecError::Interrupted(primary)
-                        | VendorExecError::Wait(primary),
-                    ) => {
-                        return rollback_codex_install(
-                            want_json,
-                            &alias,
-                            &plugin_name,
-                            &entry_name,
-                            &physical,
-                            &codex_bin,
-                            oms_config_dir,
-                            marketplace_root,
-                            &disk_state.prior_disk_aliases,
-                            prior_bundle_files.as_ref(),
-                            plugin_was_installed_before,
-                            false,
-                            market_was_configured,
-                            true,
-                            other_installed_in_market,
-                            true,
-                            primary,
-                        );
-                    }
+                    return Err(ex_err);
                 }
             }
 
-            // 3. Run `codex plugin add oms-<alias>@oms-host-panels` (also required on refresh so
-            //    Codex updates its cached bundle copy under `$CODEX_HOME/plugins/cache/...`).
-            let add_res = run_bounded_command(
-                app,
-                &codex_bin,
-                &["plugin", "add", &entry_name],
-                &physical,
-                stop,
-            );
-            match add_res {
-                Ok(out) if out.code == Some(0) => {}
-                Ok(out) => {
-                    return rollback_codex_install(
-                        want_json,
-                        &alias,
-                        &plugin_name,
-                        &entry_name,
-                        &physical,
-                        &codex_bin,
-                        oms_config_dir,
-                        marketplace_root,
-                        &disk_state.prior_disk_aliases,
-                        prior_bundle_files.as_ref(),
-                        plugin_was_installed_before,
-                        true,
-                        market_was_configured,
-                        added_market_now,
-                        other_installed_in_market,
-                        true,
-                        vendor_failure("codex plugin", "add", &out),
-                    );
-                }
-                Err(VendorExecError::Spawn(e)) => {
-                    return rollback_codex_install(
-                        want_json,
-                        &alias,
-                        &plugin_name,
-                        &entry_name,
-                        &physical,
-                        &codex_bin,
-                        oms_config_dir,
-                        marketplace_root,
-                        &disk_state.prior_disk_aliases,
-                        prior_bundle_files.as_ref(),
-                        plugin_was_installed_before,
-                        false,
-                        market_was_configured,
-                        added_market_now,
-                        other_installed_in_market,
-                        added_market_now,
-                        e,
-                    );
-                }
-                Err(
-                    VendorExecError::TimedOut(primary)
-                    | VendorExecError::Interrupted(primary)
-                    | VendorExecError::Wait(primary),
-                ) => {
-                    return rollback_codex_install(
-                        want_json,
-                        &alias,
-                        &plugin_name,
-                        &entry_name,
-                        &physical,
-                        &codex_bin,
-                        oms_config_dir,
-                        marketplace_root,
-                        &disk_state.prior_disk_aliases,
-                        prior_bundle_files.as_ref(),
-                        plugin_was_installed_before,
-                        true,
-                        market_was_configured,
-                        added_market_now,
-                        other_installed_in_market,
-                        true,
-                        primary,
-                    );
-                }
-            }
+            let created_config = match &recorded_row {
+                Some(prev) if !created_config_now => prev.created_config == Some(true),
+                _ => created_config_now,
+            };
+            let created_codex_dir = match &recorded_row {
+                Some(prev) if prepared.codex_dir_existed => prev.created_codex_dir == Some(true),
+                _ => created_codex_dir_now,
+            };
+            let separator_added = if replaced_existing_block {
+                recorded_row
+                    .as_ref()
+                    .is_some_and(|prev| prev.separator_added == Some(true))
+            } else {
+                added_separator_now
+            };
+            let (created_exclude, exclude_separator_added) = if added_exclude_now {
+                (true, added_exclude_sep_now)
+            } else if let Some(prev) = &recorded_row
+                && prev.created_exclude == Some(true)
+            {
+                (true, prev.exclude_separator_added == Some(true))
+            } else {
+                (false, false)
+            };
 
-            // 4. Record or update the row and written bundle digests after success.
-            let new_hashes = (
-                oms_panel_core::digest(&plugin_bytes),
-                oms_panel_core::digest(&mcp_bytes),
-            );
             upsert_panel_row(
                 &mut panels,
                 &alias,
                 app,
-                &entry_name,
                 &physical,
-                Some(new_hashes),
+                Some(CodexRowMeta {
+                    block_sha256,
+                    created_config,
+                    created_codex_dir,
+                    created_exclude,
+                    separator_added,
+                    exclude_separator_added,
+                }),
             );
             if let Err(record_err) =
                 write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)
             {
-                return rollback_codex_install(
-                    want_json,
-                    &alias,
-                    &plugin_name,
-                    &entry_name,
-                    &physical,
-                    &codex_bin,
-                    oms_config_dir,
-                    marketplace_root,
-                    &disk_state.prior_disk_aliases,
-                    prior_bundle_files.as_ref(),
-                    plugin_was_installed_before,
-                    true,
-                    market_was_configured,
-                    added_market_now,
-                    other_installed_in_market,
-                    true,
-                    record_err,
-                );
+                if config_backup.is_some() || exclude_backup.is_some() {
+                    return rollback_codex_files(
+                        want_json,
+                        &alias,
+                        &physical,
+                        action_str,
+                        config_backup.as_ref(),
+                        exclude_backup.as_ref(),
+                        record_err,
+                    );
+                }
+                return Err(record_err);
             }
-
-            let still_disabled = if plugin_was_disabled_before {
-                run_bounded_command(
-                    app,
-                    &codex_bin,
-                    &["plugin", "list", "--json"],
-                    &physical,
-                    stop,
-                )
-                .ok()
-                .filter(|o| o.code == Some(0))
-                .and_then(|o| parse_codex_plugin_list(&o.stdout))
-                .and_then(|plugins| plugins.get(&entry_name).and_then(|p| p.enabled))
-                    == Some(false)
-            } else {
-                false
-            };
 
             if want_json {
                 let mut report =
-                    panel_action_json(app, &alias, &physical, &entry_name, "install", true);
-                if still_disabled {
-                    report["disabled"] = json!(true);
-                }
+                    panel_action_json(app, &alias, &physical, PANEL_ENTRY_NAME, action_str, true);
+                attach_codex_trust_fields(&mut report, &trust);
                 return Ok((0, json(&report)?, vec![]));
             }
-            let disabled_note = if still_disabled {
-                " (disabled in Codex)"
-            } else {
-                ""
-            };
             Ok((
                 0,
-                format!(
-                    "installed {} panel {entry_name} for {alias}: {}{disabled_note}\n",
-                    app.as_str(),
-                    physical.display()
-                )
-                .into_bytes(),
+                format_codex_install_text(&alias, &physical, text_prefix, &trust),
                 vec![],
             ))
+        }
+    }
+}
+
+enum CodexUninstallInspect {
+    AlreadyGone,
+    Edited,
+    CleanRemove {
+        remaining_bytes: Option<Vec<u8>>,
+        prior_config: Option<(Vec<u8>, Stat)>,
+    },
+}
+
+fn inspect_codex_config_for_uninstall(
+    target_repo: &Path,
+    expected_sha: &str,
+    created_config: bool,
+    separator_added: bool,
+) -> Result<CodexUninstallInspect> {
+    let repo_fd = open_dir_nofollow(target_repo, "project checkout")?;
+    let Some(codex_fd) =
+        open_existing_subdir_nofollow_at(&repo_fd, OsStr::new(".codex"), ".codex directory")?
+    else {
+        return Ok(CodexUninstallInspect::AlreadyGone);
+    };
+    let Some((raw_bytes, stat)) =
+        read_regular_file_nofollow_at(&codex_fd, OsStr::new("config.toml"), ".codex/config.toml")?
+    else {
+        return Ok(CodexUninstallInspect::AlreadyGone);
+    };
+
+    let Ok(raw_str) = std::str::from_utf8(&raw_bytes) else {
+        return Ok(CodexUninstallInspect::Edited);
+    };
+    let Ok(parsed_raw) = oms_toml::parse_bounded(&raw_bytes, MAX_CONFIG_BYTES) else {
+        return Ok(CodexUninstallInspect::Edited);
+    };
+    let Ok(split) = split_codex_panel_block(raw_str) else {
+        return Ok(CodexUninstallInspect::Edited);
+    };
+
+    match split.block {
+        Some(on_disk_block) => {
+            if oms_panel_core::digest(on_disk_block.as_bytes()) != expected_sha {
+                return Ok(CodexUninstallInspect::Edited);
+            }
+            let before_trimmed = if separator_added
+                && split.before.ends_with('\n')
+                && (split.after.is_empty()
+                    || split.after.starts_with('\n')
+                    || split.after.starts_with("\r\n"))
+            {
+                &split.before[..split.before.len() - 1]
+            } else {
+                split.before
+            };
+            let remaining = format!("{before_trimmed}{}", split.after);
+            let Ok(parsed_remaining) =
+                oms_toml::parse_bounded(remaining.as_bytes(), MAX_CONFIG_BYTES)
+            else {
+                return Ok(CodexUninstallInspect::Edited);
+            };
+            let keep_empty_mcp = parsed_remaining.contains_key("mcp_servers");
+            let Ok(stripped_raw) = table_without_oms_panel(parsed_raw, keep_empty_mcp) else {
+                return Ok(CodexUninstallInspect::Edited);
+            };
+            if stripped_raw != parsed_remaining {
+                return Ok(CodexUninstallInspect::Edited);
+            }
+            let remaining_bytes = if remaining.is_empty() && created_config {
+                None
+            } else {
+                Some(remaining.into_bytes())
+            };
+            Ok(CodexUninstallInspect::CleanRemove {
+                remaining_bytes,
+                prior_config: Some((raw_bytes, stat)),
+            })
+        }
+        None => {
+            let has_panel_table = parsed_raw
+                .get("mcp_servers")
+                .and_then(oms_toml::Value::as_table)
+                .is_some_and(|s| s.contains_key(PANEL_ENTRY_NAME));
+            if has_panel_table {
+                return Ok(CodexUninstallInspect::Edited);
+            }
+            if raw_bytes.is_empty() && created_config {
+                Ok(CodexUninstallInspect::CleanRemove {
+                    remaining_bytes: None,
+                    prior_config: Some((raw_bytes, stat)),
+                })
+            } else {
+                Ok(CodexUninstallInspect::AlreadyGone)
+            }
         }
     }
 }
@@ -3592,19 +3390,11 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
     let app = PanelApp::parse(&options.required("uninstall-panel")?)?;
     let alias = options.required("project")?;
     check_alias(&alias)?;
-    let entry_name = app.expected_entry_name(&alias)?;
     let dry_run = options.has("dry-run");
     let want_json = options.has("json");
 
     let (target, explicit) = resolve_writer_path()?;
     let (parent, leaf_name) = physical_parent_and_leaf(&target, explicit)?;
-    let codex_paths = if app == PanelApp::Codex {
-        Some(resolve_codex_paths_for_active_map(
-            &target, explicit, &parent, &leaf_name,
-        )?)
-    } else {
-        None
-    };
     let Some(dir_fd) = open_parent_dir(&parent, false)? else {
         return Err(if explicit {
             Error::new(INVALID_MAP_MSG)
@@ -3637,24 +3427,18 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
             .get(&alias)
             .and_then(|rows| rows.iter().find(|r| r.app == app.as_str()))
             .cloned();
-        let codex_disk_aliases = if let Some((oms_config_dir, marketplace_root)) = &codex_paths {
-            match open_existing_codex_marketplace_fd(oms_config_dir, marketplace_root)? {
-                Some(mp_fd) => discover_marked_codex_bundle_aliases_at(&mp_fd, marketplace_root)?,
-                None => BTreeSet::new(),
-            }
-        } else {
-            BTreeSet::new()
-        };
-        let target_path = if let Some(row) = &recorded {
-            row.path.clone()
-        } else if app == PanelApp::Codex && codex_disk_aliases.contains(&alias) {
-            std::fs::canonicalize(configured).unwrap_or_else(|_| configured.clone())
-        } else {
+        let Some(row) = recorded else {
             let report_path =
                 std::fs::canonicalize(configured).unwrap_or_else(|_| configured.clone());
             if want_json {
-                let report =
-                    panel_action_json(app, &alias, &report_path, &entry_name, "uninstall", false);
+                let report = panel_action_json(
+                    app,
+                    &alias,
+                    &report_path,
+                    PANEL_ENTRY_NAME,
+                    "uninstall",
+                    false,
+                );
                 return Ok((0, json(&report)?, vec![]));
             }
             return Ok((
@@ -3663,7 +3447,7 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                 vec![],
             ));
         };
-        let checkout_exists = std::fs::metadata(&target_path).is_ok_and(|m| m.is_dir());
+        let checkout_exists = std::fs::metadata(&row.path).is_ok_and(|m| m.is_dir());
         match app {
             PanelApp::Claude => {
                 if !checkout_exists {
@@ -3671,8 +3455,8 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                         let report = panel_action_json(
                             app,
                             &alias,
-                            &target_path,
-                            &entry_name,
+                            &row.path,
+                            PANEL_ENTRY_NAME,
                             "forgotten",
                             false,
                         );
@@ -3683,69 +3467,79 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                         format!(
                             "{} panel {PANEL_ENTRY_NAME} for {alias} ({}): checkout is gone; would drop the record (the Claude entry stored for that path is inert)\n",
                             app.as_str(),
-                            target_path.display()
+                            row.path.display()
                         )
                         .into_bytes(),
                         vec![],
                     ));
                 }
-                let claude_bin = resolve_vendor_program(app, cwd, true)?;
+                let claude_bin = resolve_claude_program(cwd, true)?;
                 if want_json {
                     let report = panel_action_json(
                         app,
                         &alias,
-                        &target_path,
-                        &entry_name,
+                        &row.path,
+                        PANEL_ENTRY_NAME,
                         "uninstall",
                         false,
                     );
                     return Ok((0, json(&report)?, vec![]));
                 }
                 let mut text = format_vendor_command(
-                    &target_path,
+                    &row.path,
                     &claude_bin,
                     &["mcp", "get", PANEL_ENTRY_NAME],
                 )?;
                 text.push_str(&format_vendor_command(
-                    &target_path,
+                    &row.path,
                     &claude_bin,
                     &["mcp", "remove", "--scope", "local", PANEL_ENTRY_NAME],
                 )?);
                 return Ok((0, text.into_bytes(), vec![]));
             }
             PanelApp::Codex => {
-                let codex_bin = resolve_vendor_program(app, cwd, true)?;
                 let action = if checkout_exists {
                     "uninstall"
                 } else {
                     "forgotten"
                 };
+                if checkout_exists {
+                    let repo_fd = open_dir_nofollow(&row.path, "project checkout")?;
+                    if let Some(codex_fd) = open_existing_subdir_nofollow_at(
+                        &repo_fd,
+                        OsStr::new(".codex"),
+                        ".codex directory",
+                    )? {
+                        let _ = read_regular_file_nofollow_at(
+                            &codex_fd,
+                            OsStr::new("config.toml"),
+                            ".codex/config.toml",
+                        )?;
+                    }
+                    if let GitConfigState::Tracked = inspect_git_codex_config(&row.path, stop)? {
+                        return Err(Error::new(format!(
+                            "refusing to modify tracked file .codex/config.toml in {}; untrack it first",
+                            row.path.display()
+                        )));
+                    }
+                }
                 if want_json {
                     let report =
-                        panel_action_json(app, &alias, &target_path, &entry_name, action, false);
+                        panel_action_json(app, &alias, &row.path, PANEL_ENTRY_NAME, action, false);
                     return Ok((0, json(&report)?, vec![]));
                 }
-                let exec_dir = if checkout_exists {
-                    &target_path
+                let msg = if checkout_exists {
+                    format!(
+                        "would uninstall codex panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+                        row.path.display()
+                    )
                 } else {
-                    &parent
+                    format!(
+                        "codex panel {PANEL_ENTRY_NAME} for {alias} ({}): checkout is gone; would drop the record\n",
+                        row.path.display()
+                    )
                 };
-                let mut remaining = recorded_codex_aliases(&panels);
-                remaining.extend(codex_disk_aliases);
-                remaining.remove(&alias);
-                let mut text = format_vendor_command(
-                    exec_dir,
-                    &codex_bin,
-                    &["plugin", "remove", &entry_name],
-                )?;
-                if remaining.is_empty() {
-                    text.push_str(&format_vendor_command(
-                        exec_dir,
-                        &codex_bin,
-                        &["plugin", "marketplace", "remove", CODEX_MARKETPLACE_NAME],
-                    )?);
-                }
-                return Ok((0, text.into_bytes(), vec![]));
+                return Ok((0, msg.into_bytes(), vec![]));
             }
         }
     }
@@ -3771,71 +3565,71 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
         .cloned();
     if let Some(row) = &recorded {
         require(
-            row.scope == app.expected_scope() && row.name == entry_name,
+            row.scope == app.expected_scope() && row.name == PANEL_ENTRY_NAME,
             "Invalid OMS project panel map: unexpected scope or entry name",
         )?;
     }
 
-    enum UninstallDisposition {
-        Removed,
-        AlreadyGone,
-        LeftModifiedClaude,
-        LeftInstalledCodex,
-        LeftModifiedCodex {
-            edited_files: Vec<PathBuf>,
-            removed_plugin: bool,
-        },
+    let Some(row) = recorded else {
+        let report_path = std::fs::canonicalize(configured).unwrap_or_else(|_| configured.clone());
+        if want_json {
+            let report = panel_action_json(
+                app,
+                &alias,
+                &report_path,
+                PANEL_ENTRY_NAME,
+                "uninstall",
+                false,
+            );
+            return Ok((0, json(&report)?, vec![]));
+        }
+        return Ok((
+            0,
+            format!("no recorded {} panel for {alias}\n", app.as_str()).into_bytes(),
+            vec![],
+        ));
+    };
+
+    let checkout_exists = std::fs::metadata(&row.path).is_ok_and(|m| m.is_dir());
+    if !checkout_exists {
+        drop_panel_row(&mut panels, &alias, app);
+        write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)?;
+        if want_json {
+            let report =
+                panel_action_json(app, &alias, &row.path, PANEL_ENTRY_NAME, "forgotten", true);
+            return Ok((0, json(&report)?, vec![]));
+        }
+        let detail = match app {
+            PanelApp::Claude => {
+                "dropped the record (the Claude entry stored for that path is inert)"
+            }
+            PanelApp::Codex => "dropped the record",
+        };
+        return Ok((
+            0,
+            format!(
+                "{} panel {PANEL_ENTRY_NAME} for {alias} ({}): checkout is gone; {detail}\n",
+                app.as_str(),
+                row.path.display()
+            )
+            .into_bytes(),
+            vec![],
+        ));
     }
 
     match app {
         PanelApp::Claude => {
-            let Some(row) = recorded else {
-                let report_path =
-                    std::fs::canonicalize(configured).unwrap_or_else(|_| configured.clone());
-                if want_json {
-                    let report = panel_action_json(
-                        app,
-                        &alias,
-                        &report_path,
-                        &entry_name,
-                        "uninstall",
-                        false,
-                    );
-                    return Ok((0, json(&report)?, vec![]));
-                }
-                return Ok((
-                    0,
-                    format!("no recorded {} panel for {alias}\n", app.as_str()).into_bytes(),
-                    vec![],
-                ));
-            };
-            let checkout_exists = std::fs::metadata(&row.path).is_ok_and(|m| m.is_dir());
-            if !checkout_exists {
-                drop_panel_row(&mut panels, &alias, app);
-                write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)?;
-                if want_json {
-                    let report =
-                        panel_action_json(app, &alias, &row.path, &entry_name, "forgotten", true);
-                    return Ok((0, json(&report)?, vec![]));
-                }
-                return Ok((
-                    0,
-                    format!(
-                        "{} panel {PANEL_ENTRY_NAME} for {alias} ({}): checkout is gone; dropped the record (the Claude entry stored for that path is inert)\n",
-                        app.as_str(),
-                        row.path.display()
-                    )
-                    .into_bytes(),
-                    vec![],
-                ));
+            enum ClaudeUninstallDisposition {
+                Removed,
+                AlreadyGone,
+                LeftModified,
             }
             let launcher = resolve_oms_launcher_path()?;
-            let claude_bin = resolve_vendor_program(app, cwd, false)?;
+            let claude_bin = resolve_claude_program(cwd, false)?;
             let disposition = match probe_claude_entry(&claude_bin, &row.path, stop)? {
                 Some(found) if found.scope == Some(ClaudeScope::Local) => {
                     if found.matches_expected(&launcher, &row.path) {
-                        let out = run_bounded_command(
-                            app,
+                        let out = run_claude_command(
                             &claude_bin,
                             &["mcp", "remove", "--scope", "local", PANEL_ENTRY_NAME],
                             &row.path,
@@ -3843,397 +3637,306 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
                         )
                         .map_err(VendorExecError::into_error)?;
                         if out.code == Some(0) {
-                            UninstallDisposition::Removed
+                            ClaudeUninstallDisposition::Removed
                         } else if is_mcp_entry_missing(&out) {
-                            UninstallDisposition::AlreadyGone
+                            ClaudeUninstallDisposition::AlreadyGone
                         } else {
                             return Err(vendor_failure("claude mcp", "remove", &out));
                         }
                     } else {
-                        UninstallDisposition::LeftModifiedClaude
+                        ClaudeUninstallDisposition::LeftModified
                     }
                 }
-                Some(_) | None => UninstallDisposition::AlreadyGone,
+                Some(_) | None => ClaudeUninstallDisposition::AlreadyGone,
             };
             drop_panel_row(&mut panels, &alias, app);
             write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)?;
             if want_json {
                 let report =
-                    panel_action_json(app, &alias, &row.path, &entry_name, "uninstall", true);
+                    panel_action_json(app, &alias, &row.path, PANEL_ENTRY_NAME, "uninstall", true);
                 return Ok((0, json(&report)?, vec![]));
             }
             let msg = match disposition {
-                UninstallDisposition::Removed => format!(
-                    "uninstalled {} panel {entry_name} for {alias}: {}\n",
+                ClaudeUninstallDisposition::Removed => format!(
+                    "uninstalled {} panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
                     app.as_str(),
                     row.path.display()
                 ),
-                UninstallDisposition::AlreadyGone => format!(
-                    "{} panel {entry_name} for {alias} was already gone; dropped ownership record ({})\n",
+                ClaudeUninstallDisposition::AlreadyGone => format!(
+                    "{} panel {PANEL_ENTRY_NAME} for {alias} was already gone; dropped ownership record ({})\n",
                     app.as_str(),
                     row.path.display()
                 ),
-                UninstallDisposition::LeftModifiedClaude => format!(
+                ClaudeUninstallDisposition::LeftModified => format!(
                     "the local {PANEL_ENTRY_NAME} entry was changed outside OMS; left it in place and dropped ownership record for {alias} ({})\n",
                     row.path.display()
                 ),
-                UninstallDisposition::LeftInstalledCodex
-                | UninstallDisposition::LeftModifiedCodex { .. } => unreachable!(),
             };
             Ok((0, msg.into_bytes(), vec![]))
         }
         PanelApp::Codex => {
-            let (oms_config_dir, marketplace_root) = codex_paths.as_ref().unwrap();
-            let plugin_name = codex_plugin_name(&alias)?;
-            // If no row is recorded and `codex-panels` does not exist on disk, exit cleanly as a
-            // no-op; if `codex-panels` exists, verify its marker and check for a leftover bundle
-            // kept after an earlier uncertain rollback.
-            if recorded.is_none()
-                && std::fs::symlink_metadata(marketplace_root)
-                    .err()
-                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-            {
-                let report_path =
-                    std::fs::canonicalize(configured).unwrap_or_else(|_| configured.clone());
-                if want_json {
-                    let report = panel_action_json(
-                        app,
-                        &alias,
-                        &report_path,
-                        &entry_name,
-                        "uninstall",
-                        false,
-                    );
-                    return Ok((0, json(&report)?, vec![]));
-                }
-                return Ok((
-                    0,
-                    format!("no recorded {} panel for {alias}\n", app.as_str()).into_bytes(),
-                    vec![],
-                ));
-            }
+            let expected_sha = row.block_sha256.as_deref().ok_or_else(|| {
+                Error::new("Invalid OMS project panel map: missing Codex block_sha256")
+            })?;
+            let created_config = row.created_config == Some(true);
+            let created_codex_dir = row.created_codex_dir == Some(true);
+            let created_exclude = row.created_exclude == Some(true);
+            let separator_added = row.separator_added == Some(true);
+            let exclude_separator_added = row.exclude_separator_added == Some(true);
 
-            let mp_fd = open_existing_codex_marketplace_fd(oms_config_dir, marketplace_root)?;
-            let disk_aliases = match &mp_fd {
-                Some(fd) => discover_marked_codex_bundle_aliases_at(fd, marketplace_root)?,
-                None => BTreeSet::new(),
-            };
-            let had_recorded_row = recorded.is_some();
-            let target_repo_path = match &recorded {
-                Some(row) => row.path.clone(),
-                None if disk_aliases.contains(&alias) => {
-                    std::fs::canonicalize(configured).unwrap_or_else(|_| configured.clone())
-                }
-                None => {
-                    let report_path =
-                        std::fs::canonicalize(configured).unwrap_or_else(|_| configured.clone());
-                    if want_json {
-                        let report = panel_action_json(
-                            app,
-                            &alias,
-                            &report_path,
-                            &entry_name,
-                            "uninstall",
-                            false,
-                        );
-                        return Ok((0, json(&report)?, vec![]));
-                    }
-                    return Ok((
-                        0,
-                        format!("no recorded {} panel for {alias}\n", app.as_str()).into_bytes(),
-                        vec![],
-                    ));
-                }
-            };
-
-            let launcher = resolve_oms_launcher_path()?;
-            let recorded_hashes = match &recorded {
-                Some(row) => {
-                    let p_sha = row.plugin_sha256.as_deref().ok_or_else(|| {
-                        Error::new("Invalid OMS project panel map: missing Codex plugin_sha256")
-                    })?;
-                    let m_sha = row.mcp_sha256.as_deref().ok_or_else(|| {
-                        Error::new("Invalid OMS project panel map: missing Codex mcp_sha256")
-                    })?;
-                    Some((p_sha, m_sha))
-                }
-                None => None,
-            };
-            let (bundle_check, bundle_checkout_matches) = inspect_codex_bundle_for_uninstall(
-                mp_fd.as_ref(),
-                marketplace_root,
-                &alias,
-                &plugin_name,
-                &launcher,
-                &target_repo_path,
-                recorded_hashes,
+            let inspect = inspect_codex_config_for_uninstall(
+                &row.path,
+                expected_sha,
+                created_config,
+                separator_added,
             )?;
-            drop(mp_fd);
-
-            if !had_recorded_row && matches!(bundle_check, CodexBundleUninstallCheck::Edited(_)) {
-                if want_json {
-                    let report = panel_action_json(
-                        app,
-                        &alias,
-                        &target_repo_path,
-                        &entry_name,
-                        "uninstall",
-                        false,
-                    );
-                    return Ok((0, json(&report)?, vec![]));
-                }
-                return Ok((
-                    0,
-                    format!("no recorded {} panel for {alias}\n", app.as_str()).into_bytes(),
-                    vec![],
-                ));
+            let git_state = inspect_git_codex_config(&row.path, stop)?;
+            if matches!(git_state, GitConfigState::Tracked) {
+                return Err(Error::new(format!(
+                    "refusing to modify tracked file .codex/config.toml in {}; untrack it first",
+                    row.path.display()
+                )));
             }
+            let config_path = row.path.join(".codex/config.toml");
 
-            let checkout_exists = std::fs::metadata(&target_repo_path).is_ok_and(|m| m.is_dir());
-            let exec_dir = if checkout_exists {
-                &target_repo_path
-            } else {
-                &parent
-            };
-            let codex_bin = resolve_vendor_program(app, cwd, false)?;
-            let inventory = probe_codex_inventory(&codex_bin, exec_dir, stop)?;
-            let market_configured = if let Some(configured_root) =
-                inventory.marketplaces.get(CODEX_MARKETPLACE_NAME)
-            {
-                if !same_marketplace_root(configured_root, marketplace_root) {
-                    return Err(Error::new(format!(
-                        "an unmanaged Codex marketplace '{CODEX_MARKETPLACE_NAME}' is configured at {}; remove it first",
-                        configured_root.display()
-                    )));
-                }
-                true
-            } else {
-                false
-            };
-
-            let installed_plugin = inventory.plugins.get(&entry_name).filter(|p| p.installed);
-            let was_disabled = installed_plugin.is_some_and(|p| p.enabled == Some(false));
-            let plugin_matches_oms = bundle_checkout_matches
-                && installed_plugin
-                    .is_some_and(|p| p.matches_expected(marketplace_root, &plugin_name));
-
-            let mut removed_plugin = false;
-            let mut plugin_still_installed = installed_plugin.is_some();
-            if plugin_matches_oms {
-                let out = run_bounded_command(
-                    app,
-                    &codex_bin,
-                    &["plugin", "remove", &entry_name],
-                    exec_dir,
-                    stop,
-                )
-                .map_err(VendorExecError::into_error)?;
-                if out.code == Some(0) {
-                    removed_plugin = true;
-                    plugin_still_installed = false;
-                } else if is_codex_plugin_missing(&entry_name, &plugin_name, &out) {
-                    plugin_still_installed = false;
-                } else {
-                    return Err(vendor_failure("codex plugin", "remove", &out));
-                }
-            }
-
-            let expected_bundle_dir = marketplace_root.join("plugins").join(&plugin_name);
-            let other_plugin_uses_bundle = inventory.plugins.values().any(|p| {
-                p.installed
-                    && p.plugin_id != entry_name
-                    && p.source_path.as_ref().is_some_and(|sp| {
-                        sp == &expected_bundle_dir
-                            || sp.canonicalize().ok().as_ref() == Some(&expected_bundle_dir)
-                    })
-            });
-            let keep_this_bundle_and_entry = plugin_still_installed || other_plugin_uses_bundle;
-
-            let mut retained_market_plugins = Vec::new();
-            let disposition = match bundle_check {
-                CodexBundleUninstallCheck::Edited(edited_files) => {
-                    // Leave the user-edited bundle, marketplace manifest, marketplace registration
-                    // and root directory untouched; drop only the OMS ownership row.
-                    UninstallDisposition::LeftModifiedCodex {
-                        edited_files,
-                        removed_plugin,
-                    }
-                }
-                CodexBundleUninstallCheck::Absent
-                | CodexBundleUninstallCheck::CleanEmptyDir
-                | CodexBundleUninstallCheck::MatchesOms => {
-                    let mut remaining_recorded = recorded_codex_aliases(&panels);
-                    remaining_recorded.remove(&alias);
-                    let mut remaining_disk = disk_aliases;
-                    if !keep_this_bundle_and_entry {
-                        remaining_disk.remove(&alias);
-                    }
-
-                    let mut other_installed_in_market = Vec::new();
-                    for p in inventory.plugins.values() {
-                        if !p.installed {
-                            continue;
-                        }
-                        if p.plugin_id == entry_name {
-                            if plugin_still_installed {
-                                other_installed_in_market.push(p.plugin_id.clone());
-                            }
-                            continue;
-                        }
-                        if p.plugin_id
-                            .rsplit_once('@')
-                            .is_some_and(|(_, market)| market == CODEX_MARKETPLACE_NAME)
-                            || p.marketplace_name.as_deref() == Some(CODEX_MARKETPLACE_NAME)
-                            || p.source_path.as_ref().is_some_and(|sp| {
-                                sp.starts_with(marketplace_root)
-                                    || sp
-                                        .canonicalize()
-                                        .ok()
-                                        .is_some_and(|cp| cp.starts_with(marketplace_root))
-                            })
-                        {
-                            other_installed_in_market.push(p.plugin_id.clone());
-                        }
-                    }
-
-                    let mut removed_any = removed_plugin;
-                    let can_remove_market_and_root = !keep_this_bundle_and_entry
-                        && remaining_recorded.is_empty()
-                        && remaining_disk.is_empty()
-                        && other_installed_in_market.is_empty();
-                    if remaining_recorded.is_empty() || keep_this_bundle_and_entry {
-                        retained_market_plugins = other_installed_in_market;
-                    }
-
-                    if can_remove_market_and_root && market_configured {
-                        let mp_out = run_bounded_command(
-                            app,
-                            &codex_bin,
-                            &["plugin", "marketplace", "remove", CODEX_MARKETPLACE_NAME],
-                            exec_dir,
-                            stop,
-                        )
-                        .map_err(VendorExecError::into_error)?;
-                        if mp_out.code == Some(0) {
-                            removed_any = true;
-                        } else if !is_codex_marketplace_missing(&mp_out) {
-                            return Err(vendor_failure(
-                                "codex plugin",
-                                "marketplace remove",
-                                &mp_out,
-                            ));
-                        }
-                    }
-
-                    if !keep_this_bundle_and_entry {
-                        let keep_root = !can_remove_market_and_root;
-                        if update_or_delete_codex_marketplace_disk(
-                            oms_config_dir,
-                            marketplace_root,
-                            Some(&plugin_name),
-                            &remaining_disk,
-                            keep_root,
-                        )? {
-                            removed_any = true;
-                        }
-                    }
-
-                    if keep_this_bundle_and_entry {
-                        UninstallDisposition::LeftInstalledCodex
-                    } else if removed_any {
-                        UninstallDisposition::Removed
-                    } else {
-                        UninstallDisposition::AlreadyGone
-                    }
-                }
-            };
-
-            if had_recorded_row {
+            if matches!(inspect, CodexUninstallInspect::Edited) {
                 drop_panel_row(&mut panels, &alias, app);
                 write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)?;
+                if want_json {
+                    let mut report = panel_action_json(
+                        app,
+                        &alias,
+                        &row.path,
+                        PANEL_ENTRY_NAME,
+                        "uninstall",
+                        true,
+                    );
+                    report["preservedFiles"] = json!([config_path]);
+                    return Ok((0, json(&report)?, vec![]));
+                }
+                return Ok((
+                    0,
+                    format!(
+                        "the OMS block in {} was edited outside OMS; left it in place and dropped ownership record for {alias}\n",
+                        config_path.display()
+                    )
+                    .into_bytes(),
+                    vec![],
+                ));
             }
 
-            let action = if checkout_exists {
-                "uninstall"
-            } else {
-                "forgotten"
-            };
-            let changed = had_recorded_row
-                || matches!(disposition, UninstallDisposition::Removed)
-                || matches!(
-                    disposition,
-                    UninstallDisposition::LeftModifiedCodex {
-                        removed_plugin: true,
-                        ..
+            let mut config_backup: Option<ConfigBackup> = None;
+            let mut exclude_backup: Option<ExcludeBackup> = None;
+            let mut removed_config_or_block = false;
+
+            if let CodexUninstallInspect::CleanRemove {
+                remaining_bytes,
+                prior_config,
+            } = inspect
+            {
+                let repo_fd = open_dir_nofollow(&row.path, "project checkout")?;
+                if let Some(codex_fd) = open_existing_subdir_nofollow_at(
+                    &repo_fd,
+                    OsStr::new(".codex"),
+                    ".codex directory",
+                )? {
+                    let before_stat = prior_config.as_ref().map(|(_, st)| st);
+                    let published_cfg_stat = match remaining_bytes {
+                        Some(bytes) => {
+                            let mode = before_stat.map_or(0o600, |st| st.st_mode & 0o777);
+                            Some(write_regular_file_atomic_at(
+                                &codex_fd,
+                                OsStr::new("config.toml"),
+                                before_stat,
+                                &bytes,
+                                mode,
+                                ".codex/config.toml",
+                            )?)
+                        }
+                        None => {
+                            unlink_regular_file_checked_at(
+                                &codex_fd,
+                                OsStr::new("config.toml"),
+                                before_stat,
+                                ".codex/config.toml",
+                            )?;
+                            None
+                        }
+                    };
+                    removed_config_or_block = true;
+                    config_backup = Some(ConfigBackup {
+                        physical_repo: row.path.clone(),
+                        created_codex_dir: false,
+                        prior_config,
+                        published_stat: published_cfg_stat,
+                    });
+                }
+            }
+
+            if created_codex_dir {
+                let repo_fd = open_dir_nofollow(&row.path, "project checkout")?;
+                if let Err(e) =
+                    try_rmdir_if_empty_at(&repo_fd, OsStr::new(".codex"), ".codex directory")
+                {
+                    if config_backup.is_some() {
+                        return rollback_codex_files(
+                            want_json,
+                            &alias,
+                            &row.path,
+                            "uninstall",
+                            config_backup.as_ref(),
+                            None,
+                            e,
+                        );
                     }
-                );
+                    return Err(e);
+                }
+            }
+
+            if created_exclude
+                && let GitConfigState::Untracked {
+                    common_git_dir,
+                    exclude_line,
+                    ..
+                } = git_state
+            {
+                if let Some(handover_alias) = find_other_codex_panel_sharing_exclude(
+                    &panels,
+                    &alias,
+                    &common_git_dir,
+                    &exclude_line,
+                    stop,
+                ) {
+                    if let Some(other_rows) = panels.get_mut(&handover_alias)
+                        && let Some(other_codex) = other_rows
+                            .iter_mut()
+                            .find(|r| r.app == PanelApp::Codex.as_str())
+                    {
+                        other_codex.created_exclude = Some(true);
+                        if exclude_separator_added {
+                            other_codex.exclude_separator_added = Some(true);
+                        }
+                    }
+                } else {
+                    let mut separator_removed = false;
+                    let exclude_step: Result<()> = (|| {
+                        let common_fd = open_dir_nofollow(&common_git_dir, "git common directory")?;
+                        let Some(info_fd) = open_existing_subdir_nofollow_at(
+                            &common_fd,
+                            OsStr::new("info"),
+                            "git info directory",
+                        )?
+                        else {
+                            return Ok(());
+                        };
+                        let Some((prior_bytes, prior_stat)) = read_regular_file_nofollow_at(
+                            &info_fd,
+                            OsStr::new("exclude"),
+                            "git info/exclude",
+                        )?
+                        else {
+                            return Ok(());
+                        };
+                        if let Some((next_bytes, sep_removed)) = remove_exact_line_bytes(
+                            &prior_bytes,
+                            &exclude_line,
+                            exclude_separator_added,
+                        )? {
+                            separator_removed = sep_removed;
+                            let published_excl_stat = if next_bytes.is_empty() {
+                                unlink_regular_file_checked_at(
+                                    &info_fd,
+                                    OsStr::new("exclude"),
+                                    Some(&prior_stat),
+                                    "git info/exclude",
+                                )?;
+                                None
+                            } else {
+                                Some(write_regular_file_atomic_at(
+                                    &info_fd,
+                                    OsStr::new("exclude"),
+                                    Some(&prior_stat),
+                                    &next_bytes,
+                                    prior_stat.st_mode & 0o777,
+                                    "git info/exclude",
+                                )?)
+                            };
+                            exclude_backup = Some(ExcludeBackup {
+                                common_git_dir: common_git_dir.clone(),
+                                created_info_dir: false,
+                                prior_exclude: Some((prior_bytes, prior_stat)),
+                                published_stat: published_excl_stat,
+                            });
+                        }
+                        Ok(())
+                    })();
+
+                    if let Err(ex_err) = exclude_step {
+                        if config_backup.is_some() {
+                            return rollback_codex_files(
+                                want_json,
+                                &alias,
+                                &row.path,
+                                "uninstall",
+                                config_backup.as_ref(),
+                                None,
+                                ex_err,
+                            );
+                        }
+                        return Err(ex_err);
+                    }
+
+                    if exclude_separator_added
+                        && !separator_removed
+                        && let Some(sep_alias) = find_other_codex_panel_owning_exclude_in_common_dir(
+                            &panels,
+                            &alias,
+                            &common_git_dir,
+                            stop,
+                        )
+                        && let Some(other_rows) = panels.get_mut(&sep_alias)
+                        && let Some(other_codex) = other_rows
+                            .iter_mut()
+                            .find(|r| r.app == PanelApp::Codex.as_str())
+                    {
+                        other_codex.exclude_separator_added = Some(true);
+                    }
+                }
+            }
+
+            drop_panel_row(&mut panels, &alias, app);
+            if let Err(record_err) =
+                write_or_unlink_panels(&dir_fd, before_panels_stat.as_ref(), &panels)
+            {
+                if config_backup.is_some() || exclude_backup.is_some() {
+                    return rollback_codex_files(
+                        want_json,
+                        &alias,
+                        &row.path,
+                        "uninstall",
+                        config_backup.as_ref(),
+                        exclude_backup.as_ref(),
+                        record_err,
+                    );
+                }
+                return Err(record_err);
+            }
+
             if want_json {
-                let mut report =
-                    panel_action_json(app, &alias, &target_repo_path, &entry_name, action, changed);
-                if was_disabled {
-                    report["disabled"] = json!(true);
-                }
-                if let UninstallDisposition::LeftModifiedCodex { edited_files, .. } = &disposition {
-                    report["preservedFiles"] = json!(edited_files);
-                }
-                if !retained_market_plugins.is_empty() {
-                    report["retainedMarketplacePlugins"] = json!(retained_market_plugins);
-                }
+                let report =
+                    panel_action_json(app, &alias, &row.path, PANEL_ENTRY_NAME, "uninstall", true);
                 return Ok((0, json(&report)?, vec![]));
             }
-
-            let retained_suffix = if retained_market_plugins.is_empty() {
-                String::new()
+            let msg = if removed_config_or_block {
+                format!(
+                    "uninstalled codex panel {PANEL_ENTRY_NAME} for {alias}: {}\n",
+                    row.path.display()
+                )
             } else {
                 format!(
-                    " (kept marketplace {CODEX_MARKETPLACE_NAME} and {} because Codex still lists installed plugin(s): {})",
-                    marketplace_root.display(),
-                    retained_market_plugins.join(", ")
+                    "codex panel {PANEL_ENTRY_NAME} for {alias} was already gone; dropped ownership record ({})\n",
+                    row.path.display()
                 )
-            };
-
-            let msg = match disposition {
-                UninstallDisposition::LeftModifiedCodex {
-                    edited_files,
-                    removed_plugin,
-                } => {
-                    let files_str = edited_files
-                        .iter()
-                        .map(|p| p.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    if removed_plugin {
-                        format!(
-                            "Codex panel bundle file(s) {files_str} were changed outside OMS; removed {entry_name} from Codex, left the bundle and marketplace in place, and dropped ownership record for {alias} ({})\n",
-                            target_repo_path.display()
-                        )
-                    } else {
-                        format!(
-                            "Codex panel bundle file(s) {files_str} were changed outside OMS; left the bundle and marketplace in place and dropped ownership record for {alias} ({})\n",
-                            target_repo_path.display()
-                        )
-                    }
-                }
-                UninstallDisposition::LeftInstalledCodex => format!(
-                    "Codex plugin {entry_name} remains installed outside OMS; kept its bundle and marketplace entry in place and dropped ownership record for {alias} ({}){retained_suffix}\n",
-                    target_repo_path.display()
-                ),
-                _ if !checkout_exists => format!(
-                    "{} panel {entry_name} for {alias} ({}): checkout is gone; cleaned up panel and dropped the record{retained_suffix}\n",
-                    app.as_str(),
-                    target_repo_path.display()
-                ),
-                UninstallDisposition::Removed => format!(
-                    "uninstalled {} panel {entry_name} for {alias}: {}{retained_suffix}\n",
-                    app.as_str(),
-                    target_repo_path.display()
-                ),
-                UninstallDisposition::AlreadyGone => format!(
-                    "{} panel {entry_name} for {alias} was already gone; dropped ownership record ({}){retained_suffix}\n",
-                    app.as_str(),
-                    target_repo_path.display()
-                ),
-                UninstallDisposition::LeftModifiedClaude => unreachable!(),
             };
             Ok((0, msg.into_bytes(), vec![]))
         }
@@ -4243,12 +3946,17 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeScope, CmdOutput, OMS_PACKAGE_VERSION, PanelApp, REPO_OMS_PLUGIN_JSON,
-        claude_panel_entry_json, codex_mcp_manifest_value, codex_panel_resource_version,
-        codex_plugin_manifest_value, codex_plugin_name, is_mcp_entry_missing, parse_claude_mcp_get,
-        parse_codex_marketplace_list, parse_codex_plugin_list, parse_panels_json,
+        ClaudeScope, CmdOutput, CodexRowMeta, CodexTrustStatus, OMS_PACKAGE_VERSION, PanelApp,
+        PanelMap, PanelRecord, attach_codex_trust_fields, check_codex_project_trust_at,
+        check_codex_project_trust_with_env, claude_panel_entry_json, codex_panel_block,
+        codex_panel_block_for_versions, codex_panel_resource_version, encode_panels_json,
+        expected_codex_panel_server_table, format_codex_install_text, is_mcp_entry_missing,
+        parse_claude_mcp_get, parse_panels_json, resolve_codex_trust_in_toml,
+        split_codex_panel_block, upsert_panel_row,
     };
-    use std::path::Path;
+    use std::collections::BTreeMap;
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn claude_mcp_get_parses_text_and_json_scopes() {
@@ -4324,165 +4032,173 @@ mod tests {
     }
 
     #[test]
-    fn codex_plugin_naming_manifest_and_inventory_parsers_fail_closed() {
-        let repo_plugin: serde_json::Value = serde_json::from_str(REPO_OMS_PLUGIN_JSON).unwrap();
-        assert_eq!(OMS_PACKAGE_VERSION, repo_plugin["version"]);
+    fn codex_block_rendering_toml_parsing_and_trust_checks() {
+        assert!(!OMS_PACKAGE_VERSION.is_empty());
         assert!(!codex_panel_resource_version().is_empty());
 
-        for ok_alias in ["a", "alpha-service", "v1-2-3-rc1", &"a".repeat(60)] {
-            assert_eq!(
-                codex_plugin_name(ok_alias).unwrap(),
-                format!("oms-{ok_alias}")
-            );
-        }
-        for bad_alias in [
-            "",
-            "Alpha",
-            "alpha_service",
-            "alpha.service",
-            "v1.2.3-rc1",
-            "alpha--service",
-            "alpha..service",
-            "alpha.-service",
-            "alpha-",
-            "alpha.",
-            "-alpha",
-            ".alpha",
-            &"a".repeat(61),
-        ] {
-            let err = codex_plugin_name(bad_alias).unwrap_err();
-            assert!(
-                err.message.contains("valid Codex plugin name"),
-                "unexpected error for {bad_alias:?}: {}",
-                err.message
-            );
-        }
-
-        let p_manifest = codex_plugin_manifest_value("alpha-service").unwrap();
-        assert_eq!(p_manifest["name"], "oms-alpha-service");
-        assert_eq!(p_manifest["version"], OMS_PACKAGE_VERSION);
-        assert_eq!(
-            p_manifest["extensions"]["com.openai"]["interface"]["displayName"],
-            "OMS · alpha-service"
-        );
-
-        let mcp_manifest = codex_mcp_manifest_value(
-            Path::new("/tmp/runtime-owner/.local/bin/oms"),
-            Path::new("/srv/checkouts/alpha-service"),
-        )
-        .unwrap();
-        let srv = &mcp_manifest["mcpServers"]["oms-panel"];
-        assert_eq!(srv["type"], "stdio");
-        assert_eq!(srv["command"], "/tmp/runtime-owner/.local/bin/oms");
-        assert_eq!(srv["args"], serde_json::json!(["mcp-server"]));
-        assert_eq!(srv["env"]["OMS_MCP_TOOL_PROFILE"], "chatgpt-panel");
-        assert_eq!(srv["env"]["OMS_PANEL_REPO"], "/srv/checkouts/alpha-service");
-        assert_eq!(
-            srv["env"]["OMS_MCP_PANEL_RESOURCE_VERSION"],
-            codex_panel_resource_version()
-        );
-
-        let valid_list = r#"{"installed":[{"pluginId":"oms-alpha@oms-host-panels","name":"oms-alpha","marketplaceName":"oms-host-panels","installed":true,"enabled":true,"version":"0.7.0-older","source":{"source":"local","path":"/tmp/cfg/oh-my-setting/codex-panels/plugins/oms-alpha"}}],"available":[]}"#;
-        let plugins = parse_codex_plugin_list(valid_list).unwrap();
-        let mp_root = Path::new("/tmp/cfg/oh-my-setting/codex-panels");
-        assert!(plugins["oms-alpha@oms-host-panels"].installed);
-        assert!(plugins["oms-alpha@oms-host-panels"].matches_expected(mp_root, "oms-alpha"));
-        let local_ver_list = r#"{"installed":[{"pluginId":"oms-alpha@oms-host-panels","installed":true,"enabled":true,"version":"local"}],"available":[]}"#;
-        let local_plugins = parse_codex_plugin_list(local_ver_list).unwrap();
-        assert!(local_plugins["oms-alpha@oms-host-panels"].matches_expected(mp_root, "oms-alpha"));
-        let disabled_list = r#"{"installed":[{"pluginId":"oms-alpha@oms-host-panels","name":"oms-alpha","marketplaceName":"oms-host-panels","installed":true,"enabled":false,"version":"0.7.0-older","source":{"source":"local","path":"/tmp/cfg/oh-my-setting/codex-panels/plugins/oms-alpha"}}],"available":[]}"#;
-        let disabled_plugins = parse_codex_plugin_list(disabled_list).unwrap();
-        assert_eq!(
-            disabled_plugins["oms-alpha@oms-host-panels"].enabled,
-            Some(false)
-        );
-        assert!(
-            disabled_plugins["oms-alpha@oms-host-panels"].matches_expected(mp_root, "oms-alpha")
-        );
-        let foreign_src_list = r#"{"installed":[{"pluginId":"oms-alpha@oms-host-panels","installed":true,"enabled":true,"source":{"source":"local","path":"/tmp/foreign/oms-alpha"}}],"available":[]}"#;
-        let foreign_plugins = parse_codex_plugin_list(foreign_src_list).unwrap();
-        assert!(
-            !foreign_plugins["oms-alpha@oms-host-panels"].matches_expected(mp_root, "oms-alpha")
-        );
-
         let launcher = Path::new("/tmp/runtime-owner/.local/bin/oms");
-        let repo = Path::new("/srv/checkouts/alpha-service");
-        let old_p = super::encode_pretty_json(
-            &super::codex_plugin_manifest_value_for_version("alpha-service", "0.7.0").unwrap(),
-        )
-        .unwrap();
-        let old_m = super::encode_pretty_json(
-            &super::codex_mcp_manifest_value_for_version(launcher, repo, "panel-res-v0").unwrap(),
-        )
-        .unwrap();
-        assert!(
-            super::codex_bundle_bytes_match_any_oms_release(
-                "alpha-service",
-                launcher,
-                repo,
-                &old_p,
-                &old_m,
-            )
-            .unwrap()
+        let repo = Path::new("/srv/checkouts/PoseFixer");
+        let block = codex_panel_block(launcher, repo).unwrap();
+        let split = split_codex_panel_block(&block).unwrap();
+        assert_eq!(split.before, "");
+        assert_eq!(split.block, Some(block.as_str()));
+        assert_eq!(split.after, "");
+
+        let parsed = oms_toml::parse_str(&block).unwrap();
+        let expected =
+            expected_codex_panel_server_table(launcher, repo, codex_panel_resource_version())
+                .unwrap();
+        assert_eq!(
+            parsed
+                .get("mcp_servers")
+                .and_then(oms_toml::Value::as_table)
+                .and_then(|s| s.get("oms-panel")),
+            Some(&oms_toml::Value::Table(expected))
         );
-        assert!(
-            !super::codex_bundle_bytes_match_any_oms_release(
-                "beta-service",
-                launcher,
-                repo,
-                &old_p,
-                &old_m,
-            )
-            .unwrap()
-        );
-        assert!(
-            !super::codex_bundle_bytes_match_any_oms_release(
-                "alpha-service",
-                launcher,
-                Path::new("/srv/checkouts/other"),
-                &old_p,
-                &old_m,
-            )
-            .unwrap()
-        );
-        for bad_list in [
-            "",
-            "{}",
-            "{broken",
-            r#"{"installed":"nope"}"#,
-            r#"{"installed":[{"pluginId":"","installed":true}]}"#,
-            r#"{"installed":[{"pluginId":"oms-alpha@oms-host-panels"}]}"#,
-            r#"{"installed":[{"pluginId":"oms-alpha@oms-host-panels","installed":true,"version":123}]}"#,
+
+        let older = codex_panel_block_for_versions(launcher, repo, "0.7.0-old", "v0").unwrap();
+        assert_ne!(older, block);
+        assert!(oms_toml::parse_str(&older).is_ok());
+
+        for bad_framing in [
+            "# BEGIN oh-my-setting codex-panel\n[mcp_servers.oms-panel]\n",
+            "# END oh-my-setting codex-panel\n",
+            "# BEGIN oh-my-setting codex-panel\n# END oh-my-setting codex-panel\n# BEGIN oh-my-setting codex-panel\n# END oh-my-setting codex-panel\n",
         ] {
             assert!(
-                parse_codex_plugin_list(bad_list).is_none(),
-                "accepted {bad_list:?}"
+                split_codex_panel_block(bad_framing).is_err(),
+                "accepted broken framing: {bad_framing:?}"
             );
         }
 
-        assert!(parse_codex_marketplace_list("").unwrap().is_empty());
-        assert!(
-            parse_codex_marketplace_list("No plugin marketplaces in scope.\n")
-                .unwrap()
-                .is_empty()
-        );
-        let table = "MARKETPLACE          ROOT\noms-host-panels      /tmp/cfg/oh-my-setting/codex-panels\noh-my-setting-local  /srv/oms\n";
-        let mps = parse_codex_marketplace_list(table).unwrap();
+        let cfg_label = Path::new("/tmp/codex-home/config.toml");
+        let sub = Path::new("/srv/checkouts/PoseFixer/sub");
+        let wt = Path::new("/srv/worktrees/PoseFixer-wt");
+        let trusted_toml = br#"[projects."/srv/checkouts/PoseFixer"]
+trust_level = "trusted"
+"#;
         assert_eq!(
-            mps["oms-host-panels"],
-            Path::new("/tmp/cfg/oh-my-setting/codex-panels")
+            resolve_codex_trust_in_toml(trusted_toml, repo, Some(repo), cfg_label),
+            CodexTrustStatus::Trusted
         );
-        for bad_mp in [
-            "unexpected output without root path",
-            "Error: failed to load",
-            "oms-host-panels relative/path",
-            "MARKETPLACE ONLY",
+        assert_eq!(
+            resolve_codex_trust_in_toml(trusted_toml, sub, Some(repo), cfg_label),
+            CodexTrustStatus::Trusted
+        );
+        assert_eq!(
+            resolve_codex_trust_in_toml(trusted_toml, wt, Some(repo), cfg_label),
+            CodexTrustStatus::Trusted
+        );
+        assert_eq!(
+            resolve_codex_trust_in_toml(
+                trusted_toml,
+                Path::new("/srv/checkouts/other"),
+                Some(Path::new("/srv/checkouts/other")),
+                cfg_label,
+            ),
+            CodexTrustStatus::Untrusted {
+                trust_target: Path::new("/srv/checkouts/other").to_path_buf(),
+            }
+        );
+
+        // Explicit non-trusted value on worktree wins over trusted repo root, and hint names worktree.
+        let wt_untrusted = br#"[projects."/srv/checkouts/PoseFixer"]
+trust_level = "trusted"
+
+[projects."/srv/worktrees/PoseFixer-wt"]
+trust_level = "untrusted"
+"#;
+        assert_eq!(
+            resolve_codex_trust_in_toml(wt_untrusted, wt, Some(repo), cfg_label),
+            CodexTrustStatus::Untrusted {
+                trust_target: wt.to_path_buf(),
+            }
+        );
+
+        // Worktree table without `trust_level` falls back to trusted repo root.
+        let wt_without_trust_level = br#"[projects."/srv/checkouts/PoseFixer"]
+trust_level = "trusted"
+
+[projects."/srv/worktrees/PoseFixer-wt"]
+note = "no trust_level"
+"#;
+        assert_eq!(
+            resolve_codex_trust_in_toml(wt_without_trust_level, wt, Some(repo), cfg_label),
+            CodexTrustStatus::Trusted
+        );
+
+        // Missing both CODEX_HOME and HOME reports codex-trust-unknown, not codex-project-untrusted.
+        for (codex_env, home_env) in [
+            (None, None),
+            (Some(OsStr::new("")), None),
+            (None, Some(OsStr::new(""))),
+            (Some(OsStr::new("")), Some(OsStr::new(""))),
         ] {
+            let status =
+                check_codex_project_trust_with_env(repo, repo, Some(repo), codex_env, home_env);
             assert!(
-                parse_codex_marketplace_list(bad_mp).is_none(),
-                "accepted {bad_mp:?}"
+                matches!(
+                    status,
+                    CodexTrustStatus::Unknown { ref hint } if !hint.is_empty() && !hint.contains('\n')
+                ),
+                "expected Unknown for ({codex_env:?}, {home_env:?}), got {status:?}"
+            );
+            let mut report = serde_json::json!({});
+            attach_codex_trust_fields(&mut report, &status);
+            assert_eq!(report["active"], false);
+            assert_eq!(report["reason"], "codex-trust-unknown");
+            let plain = String::from_utf8(format_codex_install_text(
+                "PoseFixer",
+                repo,
+                "installed",
+                &status,
+            ))
+            .unwrap();
+            assert!(
+                plain.contains("(inactive: codex-trust-unknown)\nhint: ")
+                    && !plain.contains("codex-project-untrusted"),
+                "{plain}"
             );
         }
+
+        // Non-repo ancestor never counts.
+        let parent_trusted = br#"[projects."/srv/checkouts"]
+trust_level = "trusted"
+"#;
+        assert_eq!(
+            resolve_codex_trust_in_toml(parent_trusted, repo, Some(repo), cfg_label),
+            CodexTrustStatus::Untrusted {
+                trust_target: repo.to_path_buf(),
+            }
+        );
+        assert_eq!(
+            resolve_codex_trust_in_toml(parent_trusted, repo, None, cfg_label),
+            CodexTrustStatus::Untrusted {
+                trust_target: repo.to_path_buf(),
+            }
+        );
+
+        // Invalid TOML reports Unknown rather than Untrusted.
+        assert!(matches!(
+            resolve_codex_trust_in_toml(b"[broken\n", repo, Some(repo), cfg_label),
+            CodexTrustStatus::Unknown { .. }
+        ));
+
+        // Foreign UID on CODEX_HOME or config.toml reports Unknown rather than failing.
+        let tmp = std::env::temp_dir().join(format!("oms-trust-uid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("config.toml"), trusted_toml).unwrap();
+        let euid = rustix::process::geteuid().as_raw();
+        assert_eq!(
+            check_codex_project_trust_at(&tmp, repo, Some(repo), euid),
+            CodexTrustStatus::Trusted
+        );
+        assert!(matches!(
+            check_codex_project_trust_at(&tmp, repo, Some(repo), euid.wrapping_add(1)),
+            CodexTrustStatus::Unknown { ref hint } if hint.contains("not owned by the current user")
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -4500,34 +4216,121 @@ mod tests {
             err.message
         );
 
-        let sha_a = "a".repeat(64);
-        let sha_b = "b".repeat(64);
+        let sha = "a".repeat(64);
         let ok = format!(
-            r#"{{"alpha":[{{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha"}},{{"app":"codex","scope":"user","name":"oms-alpha@oms-host-panels","path":"/srv/alpha","plugin_sha256":"{sha_a}","mcp_sha256":"{sha_b}"}}]}}"#
+            r#"{{"PoseFixer":[{{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/PoseFixer"}},{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/PoseFixer","block_sha256":"{sha}","created_config":false,"created_codex_dir":false,"created_exclude":true,"separator_added":true,"exclude_separator_added":true}}]}}"#
         );
-        assert_eq!(parse_panels_json(&ok).unwrap()["alpha"].len(), 2);
+        assert_eq!(parse_panels_json(&ok).unwrap()["PoseFixer"].len(), 2);
 
-        let claude_with_hashes = format!(
-            r#"{{"alpha":[{{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha","plugin_sha256":"{sha_a}","mcp_sha256":"{sha_b}"}}]}}"#
+        let claude_with_codex_fields = format!(
+            r#"{{"alpha":[{{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":false,"created_codex_dir":false,"created_exclude":false}}]}}"#
         );
-        let codex_one_hash = format!(
-            r#"{{"alpha":[{{"app":"codex","scope":"user","name":"oms-alpha@oms-host-panels","path":"/srv/alpha","plugin_sha256":"{sha_a}"}}]}}"#
+        let claude_with_sep_field = r#"{"alpha":[{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha","separator_added":true}]}"#;
+        let codex_old_plugin_shape = format!(
+            r#"{{"alpha":[{{"app":"codex","scope":"user","name":"oms-alpha@oms-host-panels","path":"/srv/alpha","plugin_sha256":"{sha}","mcp_sha256":"{sha}"}}]}}"#
         );
         let codex_upper_hash = format!(
-            r#"{{"alpha":[{{"app":"codex","scope":"user","name":"oms-alpha@oms-host-panels","path":"/srv/alpha","plugin_sha256":"{}","mcp_sha256":"{sha_b}"}}]}}"#,
+            r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{}","created_config":true,"created_codex_dir":true,"created_exclude":true}}]}}"#,
             "A".repeat(64)
+        );
+        let codex_missing_flags = format!(
+            r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}"}}]}}"#
+        );
+        let codex_dir_without_file = format!(
+            r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":false,"created_codex_dir":true,"created_exclude":false}}]}}"#
+        );
+        let codex_sep_with_created_file = format!(
+            r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":false,"separator_added":true}}]}}"#
+        );
+        assert_eq!(
+            parse_panels_json(&codex_sep_with_created_file).unwrap()["alpha"].len(),
+            1
+        );
+
+        // Every row shape the install paths can produce round-trips through encode then parse.
+        let mut claude_only = PanelMap::new();
+        upsert_panel_row(
+            &mut claude_only,
+            "alpha",
+            PanelApp::Claude,
+            Path::new("/srv/alpha"),
+            None,
+        );
+        let claude_bytes = encode_panels_json(&claude_only).unwrap();
+        assert_eq!(
+            parse_panels_json(std::str::from_utf8(&claude_bytes).unwrap()).unwrap(),
+            claude_only
+        );
+
+        for (created_config, created_codex_dir) in [(true, true), (true, false), (false, false)] {
+            for separator_added in [false, true] {
+                for (created_exclude, exclude_separator_added) in
+                    [(false, false), (true, false), (true, true)]
+                {
+                    let meta = CodexRowMeta {
+                        block_sha256: sha.clone(),
+                        created_config,
+                        created_codex_dir,
+                        created_exclude,
+                        separator_added,
+                        exclude_separator_added,
+                    };
+                    let mut single = PanelMap::new();
+                    upsert_panel_row(
+                        &mut single,
+                        "PoseFixer",
+                        PanelApp::Codex,
+                        Path::new("/srv/PoseFixer"),
+                        Some(meta.clone()),
+                    );
+                    let encoded = encode_panels_json(&single).unwrap();
+                    let round_tripped =
+                        parse_panels_json(std::str::from_utf8(&encoded).unwrap()).unwrap();
+                    assert_eq!(round_tripped, single, "round-trip mismatch for {meta:?}");
+
+                    let mut paired = PanelMap::new();
+                    upsert_panel_row(
+                        &mut paired,
+                        "PoseFixer",
+                        PanelApp::Claude,
+                        Path::new("/srv/PoseFixer"),
+                        None,
+                    );
+                    upsert_panel_row(
+                        &mut paired,
+                        "PoseFixer",
+                        PanelApp::Codex,
+                        Path::new("/srv/PoseFixer"),
+                        Some(meta),
+                    );
+                    let paired_bytes = encode_panels_json(&paired).unwrap();
+                    assert_eq!(
+                        parse_panels_json(std::str::from_utf8(&paired_bytes).unwrap()).unwrap(),
+                        paired
+                    );
+                }
+            }
+        }
+
+        let codex_excl_sep_without_excl = format!(
+            r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":false,"exclude_separator_added":true}}]}}"#
+        );
+        let codex_duplicate_checkout_aliases = format!(
+            r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":true}}],"beta":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":false,"created_codex_dir":false,"created_exclude":false}}]}}"#
         );
         for bad in [
             r#"{"alpha":[]}"#,
-            r#"{"alpha":[{"app":"codex","scope":"user","name":"oms-alpha@oms-host-panels","path":"/srv/alpha"}]}"#,
-            claude_with_hashes.as_str(),
-            codex_one_hash.as_str(),
+            claude_with_codex_fields.as_str(),
+            claude_with_sep_field,
+            codex_old_plugin_shape.as_str(),
             codex_upper_hash.as_str(),
-            r#"{"alpha":[{"app":"codex","scope":"user","name":"oms-alpha@oms-host-panels","path":"/srv/alpha","plugin_sha256":"short","mcp_sha256":"short"}]}"#,
-            r#"{"alpha":[{"app":"codex","scope":"local","name":"oms-panel","path":"/srv/alpha"}]}"#,
+            codex_missing_flags.as_str(),
+            codex_dir_without_file.as_str(),
+            codex_excl_sep_without_excl.as_str(),
+            codex_duplicate_checkout_aliases.as_str(),
+            r#"{"alpha":[{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha"}]}"#,
             r#"{"alpha":[{"app":"codex","scope":"user","name":"oms-panel","path":"/srv/alpha"}]}"#,
-            r#"{"alpha":[{"app":"codex","scope":"user","name":"oms-beta@oms-host-panels","path":"/srv/alpha"}]}"#,
-            r#"{"Alpha":[{"app":"codex","scope":"user","name":"oms-Alpha@oms-host-panels","path":"/srv/alpha"}]}"#,
+            r#"{"alpha":[{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"short","created_config":true,"created_codex_dir":true,"created_exclude":true}]}"#,
             r#"{"alpha":[{"app":"claude","scope":"user","name":"oms-panel","path":"/srv/alpha"}]}"#,
             r#"{"alpha":[{"app":"claude","scope":"local","name":"oh-my-setting","path":"/srv/alpha"}]}"#,
             r#"{"alpha":[{"app":"claude","scope":"local","name":"oms-panel","path":"relative/alpha"}]}"#,
@@ -4537,6 +4340,66 @@ mod tests {
             r#"{"alpha":[{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha"}],"alpha":[{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha"}]}"#,
         ] {
             assert!(parse_panels_json(bad).is_err(), "accepted {bad}");
+        }
+
+        // Defense in depth: encode_panels_json refuses invalid maps before writing.
+        let base_codex = || PanelRecord {
+            app: "codex".into(),
+            scope: "project".into(),
+            name: "oms-panel".into(),
+            path: PathBuf::from("/srv/alpha"),
+            block_sha256: Some(sha.clone()),
+            created_config: Some(true),
+            created_codex_dir: Some(true),
+            created_exclude: Some(false),
+            separator_added: None,
+            exclude_separator_added: None,
+        };
+        let invalid_maps: Vec<PanelMap> = vec![
+            BTreeMap::new(),
+            BTreeMap::from([("alpha".into(), vec![])]),
+            BTreeMap::from([("-bad-alias".into(), vec![base_codex()])]),
+            BTreeMap::from([(
+                "alpha".into(),
+                vec![PanelRecord {
+                    created_config: Some(false),
+                    created_codex_dir: Some(true),
+                    ..base_codex()
+                }],
+            )]),
+            BTreeMap::from([(
+                "alpha".into(),
+                vec![PanelRecord {
+                    created_exclude: Some(false),
+                    exclude_separator_added: Some(true),
+                    ..base_codex()
+                }],
+            )]),
+            BTreeMap::from([(
+                "alpha".into(),
+                vec![PanelRecord {
+                    block_sha256: Some("short".into()),
+                    ..base_codex()
+                }],
+            )]),
+            BTreeMap::from([(
+                "alpha".into(),
+                vec![PanelRecord {
+                    app: "claude".into(),
+                    scope: "local".into(),
+                    ..base_codex()
+                }],
+            )]),
+            BTreeMap::from([
+                ("alpha".into(), vec![base_codex()]),
+                ("beta".into(), vec![base_codex()]),
+            ]),
+        ];
+        for bad_map in &invalid_maps {
+            assert!(
+                encode_panels_json(bad_map).is_err(),
+                "encode_panels_json accepted invalid map: {bad_map:?}"
+            );
         }
     }
 }
