@@ -505,12 +505,15 @@ fn route_timeouts_with(
     }
 }
 pub(crate) const LARGE_DIFF_BYTES: usize = 16 * 1024;
-pub(crate) fn diff_budget() -> usize {
-    std::env::var("OMS_PROMPT_DIFF_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
+/// A blocking gate must see the whole diff, so its default is larger than the
+/// advisory prompt budget; `OMS_PROMPT_DIFF_BYTES` overrides both.
+pub(crate) fn diff_budget(gate: bool) -> usize {
+    budget_from(std::env::var("OMS_PROMPT_DIFF_BYTES").ok().as_deref(), gate)
+}
+fn budget_from(raw: Option<&str>, gate: bool) -> usize {
+    raw.and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(65536)
+        .unwrap_or(if gate { 192 * 1024 } else { 64 * 1024 })
 }
 pub(crate) fn format_duration(secs: u64) -> String {
     if secs > 0 && secs.is_multiple_of(3600) {
@@ -710,7 +713,7 @@ pub(crate) fn prompt(
             )?;
             captured.as_slice()
         };
-        let budget = diff_budget();
+        let budget = diff_budget(args.has("gate"));
         if args.has("gate") && diff.len() > budget {
             return fail(
                 "blocking gate requires the complete diff within OMS_PROMPT_DIFF_BYTES; split the change or raise the budget",
@@ -1872,7 +1875,7 @@ pub(crate) fn council(tool: &str, args: &Args, context: &Context<'_>) -> Result<
         let diff_bytes = if resolved.has("no-diff") {
             0
         } else {
-            scoped.1.len().min(diff_budget())
+            scoped.1.len().min(diff_budget(resolved.has("gate")))
         };
         resolved.set_value("_review-diff-bytes", diff_bytes.to_string());
         Some(scoped)
@@ -2238,6 +2241,16 @@ fn agree(seats: &[Seat]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gate_diff_budget_defaults_to_192_kib_and_the_override_wins() {
+        assert_eq!(super::budget_from(None, true), 196608);
+        assert_eq!(super::budget_from(None, false), 65536);
+        assert_eq!(super::budget_from(Some("4096"), true), 4096);
+        assert_eq!(super::budget_from(Some("300000"), false), 300000);
+        for bad in ["0", "", "x"] {
+            assert_eq!(super::budget_from(Some(bad), true), 196608);
+        }
+    }
     use super::{
         DEFAULT_ASK_WALL_SECS, DEFAULT_STALL_SECS, DEFAULT_WALL_SECS, MAX_WALL_SECS, Timeouts,
         mcp_operation_id, parse, route_timeouts_with,

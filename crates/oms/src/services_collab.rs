@@ -2332,6 +2332,9 @@ impl HookHostServices for HookHost {
     fn check_python_syntax(&self, path: &Path, source: &[u8]) -> Option<bool> {
         crate::check_python_syntax_with_companion(path, source)
     }
+    fn plan_services(&self) -> &(dyn oms_command_plan::Services + Sync) {
+        &crate::services_runtime::HostGroupProof
+    }
 }
 
 // ------------------------------------------------------------------ lifecycle

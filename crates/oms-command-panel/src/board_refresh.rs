@@ -669,7 +669,7 @@ mod tests {
     use super::*;
     use oms_panel_core::Value;
     use serde_json::json;
-    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     use std::time::{Duration, Instant};
 
     const WAIT: Duration = Duration::from_secs(5);
@@ -787,8 +787,22 @@ mod tests {
             "held":{"id":"held","title":"Held task","state":"running","depends":[],
                 "claimed_at":"2026-11-24T11:59:00Z","ttl":"3600","lease_id":lease},
         }});
-        std::fs::create_dir_all(context.plan_file.parent().unwrap()).unwrap();
-        std::fs::write(&context.plan_file, plan.to_string()).unwrap();
+        // Explicit modes keep the fixture private under a group-writable umask.
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(context.plan_file.parent().unwrap())
+            .unwrap();
+        std::io::Write::write_all(
+            &mut std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&context.plan_file)
+                .unwrap(),
+            plan.to_string().as_bytes(),
+        )
+        .unwrap();
         let projected = Plan::open(context, &UnavailableServices, &stop)
             .unwrap()
             .execute(&request)

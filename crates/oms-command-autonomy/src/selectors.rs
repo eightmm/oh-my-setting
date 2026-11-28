@@ -74,13 +74,15 @@ fn case_names(source: &str) -> Vec<String> {
         })
         .collect()
 }
-pub fn validate(repo: &Path, command: &str) -> Result<()> {
-    validate_with_continuation(repo, command, None)
+/// `store` is the repository source store; it carries the caller's group
+/// proof, so suites under a group-writable umask stay readable.
+pub fn validate(store: &Store, command: &str) -> Result<()> {
+    validate_with_continuation(store, command, None)
 }
 /// The parent supplies raw continuation bytes and their reviewed digest. Only
 /// added function definitions in the corresponding suite extend selector data.
 pub fn validate_with_continuation(
-    repo: &Path,
+    store: &Store,
     command: &str,
     continuation: Option<(&[u8], &str)>,
 ) -> Result<()> {
@@ -90,7 +92,6 @@ pub fn validate_with_continuation(
     let Ok(words) = oms_command_plan::floor::split(command, true) else {
         return Ok(());
     };
-    let store = Store::open(repo)?;
     let mut added: BTreeMap<String, Vec<String>> = BTreeMap::new();
     if let Some((patch, expected)) = continuation {
         require(
@@ -125,7 +126,7 @@ pub fn validate_with_continuation(
             continue;
         }
         let suite = &words[index + 1];
-        let source = read(&store, suite)?;
+        let source = read(store, suite)?;
         let end = (index + 2..words.len())
             .find(|i| separators.contains(&words[*i].as_str()))
             .unwrap_or(words.len());
@@ -150,19 +151,19 @@ pub fn validate_with_continuation(
                     .map(|c| c[1].replace('_', "-"))
                     .filter(|s| !["core", "shared-cache"].contains(&s.as_str()))
                     .collect::<Vec<_>>();
-                for name in operator_manifest(&store, &source)?.keys() {
+                for name in operator_manifest(store, &source)?.keys() {
                     if !names.contains(name) {
                         names.push(name.clone());
                     }
                 }
                 Some(names)
             } else if option == "--case" && suite == "tests/operator-tools-smoke.sh" {
-                let manifest = operator_manifest(&store, &source)?;
+                let manifest = operator_manifest(store, &source)?;
                 if sections.len() != 1 {
                     None
                 } else if let Some(file) = manifest.get(&sections[0]) {
                     let body = if let Some(file) = file {
-                        read(&store, &format!("tests/operator/{file}"))?
+                        read(store, &format!("tests/operator/{file}"))?
                     } else {
                         inline_section(&source, &sections[0])
                     };
@@ -178,7 +179,7 @@ pub fn validate_with_continuation(
                 } else {
                     suite.as_str()
                 };
-                let mut names = smoke_cases(&read(&store, file)?);
+                let mut names = smoke_cases(&read(store, file)?);
                 if let Some(more) = added.get(file) {
                     names.extend(more.clone());
                 }

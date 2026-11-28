@@ -2158,6 +2158,18 @@ fn plan_delegate_uses_exact_issued_lease_and_native_verified_result() {
                 calls: AtomicU64,
                 alias_during_start: Mutex<Option<PathBuf>>,
             }
+            // A default user's private group: Git metadata a group-writable umask
+            // creates stays trusted, as the host account proof allows.
+            fn private_group(
+                gid: u32,
+            ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+                let uid = rustix::process::getuid().as_raw();
+                Ok(oms_command_plan::services::GroupMembership {
+                    gid,
+                    explicit_member_uids: vec![uid],
+                    primary_member_uids: vec![uid],
+                })
+            }
             impl oms_command_plan::Services for Host {
                 fn group_membership_resolver(
                     &self,
@@ -2185,7 +2197,16 @@ fn plan_delegate_uses_exact_issued_lease_and_native_verified_result() {
                             Err(error) => panic!("cannot sample canonical Start lock: {error}"),
                         }
                     }
-                    None
+                    Some(private_group)
+                }
+                fn group_membership_before(
+                    &self,
+                    gid: u32,
+                    _deadline: std::time::Instant,
+                    _interrupted: &AtomicBool,
+                ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership>
+                {
+                    private_group(gid)
                 }
             }
             impl Host {
