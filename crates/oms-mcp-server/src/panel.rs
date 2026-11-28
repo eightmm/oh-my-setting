@@ -18,8 +18,11 @@ mod lead_plan_context;
 mod lead_turns;
 pub(crate) use lead_turns::LeadTurnCache;
 
-const URI: &str = "ui://oms/conversation-panel/v41.html";
+const URI: &str = "ui://oms/conversation-panel/v42.html";
 const HOME_URI: &str = "ui://oms/home/v1.html";
+const V41: &str = "ui://oms/conversation-panel/v41.html";
+const V40: &str = "ui://oms/conversation-panel/v40.html";
+const V39: &str = "ui://oms/conversation-panel/v39.html";
 const V38: &str = "ui://oms/conversation-panel/v38.html";
 const V37: &str = "ui://oms/conversation-panel/v37.html";
 const V33: &str = "ui://oms/conversation-panel/v33.html";
@@ -1644,6 +1647,9 @@ impl Server<'_> {
                             | V36
                             | V37
                             | V38
+                            | V39
+                            | V40
+                            | V41
                     )
                 ) =>
             {
@@ -4874,6 +4880,7 @@ fn normalize_card_provider(raw: Option<&str>) -> Option<&'static str> {
         Some("codex") => Some("codex"),
         Some("claude") => Some("claude"),
         Some("antigravity" | "agy") => Some("antigravity"),
+        Some("pi") => Some("pi"),
         _ => None,
     }
 }
@@ -5000,7 +5007,15 @@ impl StoredProjectCard {
         }
         let raw_main_provider = latest_panel_main
             .map(|row| row["provider"].as_str())
-            .unwrap_or_else(|| dashboard["conversationMain"]["provider"].as_str());
+            .unwrap_or_else(|| {
+                // A Room-bound Pi Main reports its dispatch owner as provider; the harness names it.
+                let main = &dashboard["conversationMain"];
+                if main["harness"] == "pi" {
+                    Some("pi")
+                } else {
+                    main["provider"].as_str()
+                }
+            });
         let source_withheld = role_withheld
             || [raw_branch.unwrap_or(""), raw_goal, raw_next]
                 .into_iter()
@@ -5378,6 +5393,11 @@ fn card_is_stale(
         ".git/index",
         ".oms/plan",
         ".oms/plan/tasks.json",
+        ".oms/lifecycle",
+        ".oms/lifecycle/events.jsonl",
+        ".oms/threads",
+        ".oms/approvals.jsonl",
+        ".oms/failures.jsonl",
     ] {
         if physical_repo
             .join(marker)
@@ -6533,7 +6553,7 @@ mod work_items_tests {
         assert_eq!(stored.crew.len(), 3);
         assert_eq!(stored.crew[0].provider.as_deref(), Some("codex"));
         assert_eq!(stored.crew[0].role.as_deref(), Some("architect"));
-        assert_eq!(stored.crew[1].provider, None);
+        assert_eq!(stored.crew[1].provider.as_deref(), Some("pi"));
         assert_eq!(stored.crew[1].role, None);
         assert_eq!(stored.crew[2].provider.as_deref(), Some("antigravity"));
         assert!(
@@ -6567,9 +6587,20 @@ mod work_items_tests {
             "degraded": false,
         }));
         assert_eq!(conv_agy.main.as_deref(), Some("antigravity"));
-        let unknown_panel_main = StoredProjectCard::from_dashboard(&json!({
+        let pi_panel_main = StoredProjectCard::from_dashboard(&json!({
             "conversationMain": {"provider": "codex"},
             "activeAttempts": [{"id": "m1", "tool": "panel-main", "provider": "pi", "updated": "2026-11-27T06:00:00Z"}],
+            "degraded": false,
+        }));
+        assert_eq!(pi_panel_main.main.as_deref(), Some("pi"));
+        let pi_room_main = StoredProjectCard::from_dashboard(&json!({
+            "conversationMain": {"provider": "codex", "harness": "pi"},
+            "degraded": false,
+        }));
+        assert_eq!(pi_room_main.main.as_deref(), Some("pi"));
+        let unknown_panel_main = StoredProjectCard::from_dashboard(&json!({
+            "conversationMain": {"provider": "codex"},
+            "activeAttempts": [{"id": "m1", "tool": "panel-main", "provider": "grok", "updated": "2026-11-27T06:00:00Z"}],
             "degraded": false,
         }));
         assert_eq!(unknown_panel_main.main, None);

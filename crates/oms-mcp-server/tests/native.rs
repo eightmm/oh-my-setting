@@ -365,7 +365,7 @@ fn cross_host_project_reads() {
             json!([{"type":"aux_pane","title":"OMS"},{"type":"global","title":"OMS"}])
         );
         let uri = &opener["_meta"]["ui"]["resourceUri"];
-        assert_eq!(uri, "ui://oms/conversation-panel/v41.html");
+        assert_eq!(uri, "ui://oms/conversation-panel/v42.html");
         assert_eq!(opener["_meta"]["openai/outputTemplate"], *uri);
         let view = c.call("resources/read", json!({"uri":uri}));
         let html = view["result"]["contents"][0]["text"].as_str().unwrap();
@@ -1544,6 +1544,47 @@ fn project_cards_catalog() {
     });
     let _ = std::fs::remove_file(source.join("snapshot-release"));
     let _ = std::fs::remove_file(source.join("snapshot-ready"));
+    drop(trapped);
+
+    // Lifecycle and approval changes also invalidate stale project cards.
+    let mut trapped = spawn_trapped("mcp-app", false);
+    let oms_base = std::time::SystemTime::now();
+    for file in &cached_files {
+        set_mtime(file, oms_base - Duration::from_secs(30));
+    }
+    for p in [
+        alpha.join(".git/HEAD"),
+        alpha.join(".git/index"),
+        alpha.join(".oms/plan"),
+        alpha.join(".oms/plan/tasks.json"),
+        beta.join(".git/HEAD"),
+        beta.join(".git/index"),
+        beta.join(".oms/plan"),
+        beta.join(".oms/plan/tasks.json"),
+    ] {
+        set_mtime(&p, oms_base - Duration::from_secs(40));
+    }
+    std::fs::create_dir_all(alpha.join(".oms/lifecycle")).unwrap();
+    set_mtime(
+        &alpha.join(".oms/lifecycle"),
+        oms_base - Duration::from_secs(10),
+    );
+    std::fs::write(beta.join(".oms/approvals.jsonl"), "{}\n").unwrap();
+    set_mtime(
+        &beta.join(".oms/approvals.jsonl"),
+        oms_base - Duration::from_secs(10),
+    );
+    let oms_stale = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+    assert_eq!(oms_stale["cards"][0]["state"], "stale");
+    assert_eq!(oms_stale["cards"][1]["state"], "stale");
+    assert!(!trap_marker.exists());
+    std::fs::write(source.join("snapshot-release"), "").unwrap();
+    until(|| {
+        let cur = payload(&trapped.tool("oms_list_projects", json!({"cards": true})));
+        cur["cards"][0]["state"] == "fresh" && cur["cards"][1]["state"] == "fresh"
+    });
+    let _ = std::fs::remove_file(source.join("snapshot-release"));
+    let _ = std::fs::remove_file(source.join("snapshot-ready"));
 
     // Old cache record without main, crew, or crewTotal still loads cleanly.
     let legacy_cache = json!({
@@ -1599,7 +1640,7 @@ fn project_cards_catalog() {
             "scope": "repository",
             "updated": "2026-11-27T06:08:00Z",
             "goal": "Unknown main",
-            "conversationMain": {"provider": "pi"},
+            "conversationMain": {"provider": "grok"},
             "degraded": false
         }
     });
@@ -1620,7 +1661,7 @@ fn project_cards_catalog() {
     assert_eq!(capped_crew[1]["provider"], "antigravity");
     assert_eq!(capped_crew[1]["role"], "rev");
     assert_eq!(capped_crew[1]["id"], alpha_crew[1]["id"]);
-    assert_eq!(capped_crew[2]["provider"], Value::Null);
+    assert_eq!(capped_crew[2]["provider"], "pi");
     assert_eq!(capped_crew[2]["role"], Value::Null);
     assert_eq!(cap_cards[1]["main"], Value::Null);
     assert_eq!(cap_cards[1]["crew"], json!([]));
@@ -4726,7 +4767,7 @@ fn conversation_panel() {
         json!([{"type":"thread"}])
     );
     let uri = &tools[0]["_meta"]["ui"]["resourceUri"];
-    assert_eq!(uri, "ui://oms/conversation-panel/v41.html");
+    assert_eq!(uri, "ui://oms/conversation-panel/v42.html");
     for name in [
         "oms_panel_usage",
         "oms_panel_project_graph",
@@ -4817,6 +4858,10 @@ fn conversation_panel() {
         json!("ui://oms/conversation-panel/v35.html"),
         json!("ui://oms/conversation-panel/v36.html"),
         json!("ui://oms/conversation-panel/v37.html"),
+        json!("ui://oms/conversation-panel/v38.html"),
+        json!("ui://oms/conversation-panel/v39.html"),
+        json!("ui://oms/conversation-panel/v40.html"),
+        json!("ui://oms/conversation-panel/v41.html"),
     ] {
         let historical = read(&mut c, &historical_uri);
         assert_eq!(historical["uri"], historical_uri);

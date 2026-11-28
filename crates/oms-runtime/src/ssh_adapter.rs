@@ -2630,7 +2630,9 @@ fn new_frame_nonce() -> String {
     sha256(&seed)[..16].to_owned()
 }
 
-const REMOTE_SH_HELPERS: &str = r#"
+/// Shell liveness helpers shared by exec, reconcile and cancel, and by target
+/// sync, so every reader judges an op directory the same way.
+pub const REMOTE_SH_HELPERS: &str = r#"
 norm() { printf '%s' "$1" | awk '{$1=$1;print}'; }
 pid_live() {
   p="$1"
