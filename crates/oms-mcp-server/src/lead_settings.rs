@@ -99,10 +99,7 @@ fn catalog_for(server: &Server<'_>, repo: &Path, raw_provider: &str) -> (Vec<Val
         provider.into(),
         "--json".into(),
     ];
-    let report = server
-        .panel_exec(repo, args, false)
-        .ok()
-        .map(|(v, _)| v);
+    let report = server.panel_exec(repo, args, false).ok().map(|(v, _)| v);
     let report = report
         .as_ref()
         .filter(|r| r["schema"] == 1)
@@ -193,9 +190,7 @@ fn catalog_for(server: &Server<'_>, repo: &Path, raw_provider: &str) -> (Vec<Val
                 option(model, "catalog", &efforts, fixed, false),
             );
         }
-    } else if provider == "claude"
-        && report.is_some_and(|r| r["catalog_probe"] == "unsupported")
-    {
+    } else if provider == "claude" && report.is_some_and(|r| r["catalog_probe"] == "unsupported") {
         for (model, efforts) in policy_aliases(server) {
             options.insert(
                 model.clone(),
@@ -232,7 +227,12 @@ pub(in crate::panel) fn default_settings(
     thread: &str,
 ) -> Value {
     let (options, age) = catalog_for(server, repo, provider);
-    let saved = stored_settings(scope, thread, 0, &json!({"model":Value::Null,"effort":Value::Null}));
+    let saved = stored_settings(
+        scope,
+        thread,
+        0,
+        &json!({"model":Value::Null,"effort":Value::Null}),
+    );
     json!({"revision":saved["revision"],"selection":saved["selection"],"options":options,
         "catalogAgeSeconds":age,"lastServed":Value::Null,"nativeSession":Value::Null,"nativeTitle":Value::Null,
         "scope":{"target":"lead-conversation","appliesTo":"next-message","inheritsToWorkers":false,

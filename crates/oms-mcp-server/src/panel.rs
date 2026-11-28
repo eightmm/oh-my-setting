@@ -534,13 +534,7 @@ pub(super) fn definitions(profile: ToolProfile) -> Value {
         SEND_LEAD,
         "Send a user's explicit message to this Lead's existing OMS conversation. Repeated submissions with the same turn ID never start another call.",
         json!({"project":project,"projectKey":{"type":"string","pattern":"^[0-9a-f]{64}$"},"room":ident,"provider":{"type":"string","enum":LEAD_PROVIDERS},"leadRequestId":{"type":"string","format":"uuid"},"turnId":turn_id,"text":{"type":"string","minLength":1,"maxLength":4000}}),
-        &[
-            "projectKey",
-            "provider",
-            "leadRequestId",
-            "turnId",
-            "text",
-        ],
+        &["projectKey", "provider", "leadRequestId", "turnId", "text"],
         true,
     );
     send["annotations"] = json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":true});
@@ -3497,11 +3491,7 @@ impl Server<'_> {
         )
     }
 
-    fn expected_project_anchor(
-        anchor_op: &str,
-        binding: &str,
-        canonical: &str,
-    ) -> (Value, Value) {
+    fn expected_project_anchor(anchor_op: &str, binding: &str, canonical: &str) -> (Value, Value) {
         let targets = json!([canonical]);
         let context = json!({"include_memory":false,"include_task":false});
         let meta = json!({
@@ -3550,7 +3540,8 @@ impl Server<'_> {
         let Ok(meta_bytes) = crate::storage::read_run(&dir.path, "meta.json", 256 * 1024) else {
             return Ok(false);
         };
-        let Ok(launch_bytes) = crate::storage::read_run(&dir.path, "launch.json", 256 * 1024) else {
+        let Ok(launch_bytes) = crate::storage::read_run(&dir.path, "launch.json", 256 * 1024)
+        else {
             return Ok(false);
         };
         if oms_context::parse_json_bounded(&meta_bytes, 256 * 1024).is_err()
@@ -3596,9 +3587,9 @@ impl Server<'_> {
         let _ = rustix::fs::fsync(&parent.fd);
         let dir = crate::storage::Directory::run(repo, anchor_op, true)
             .map_err(|_| "Lead conversation directory unavailable.")?;
-        let _lock = dir
-            .lock()
-            .map_err(|_| "Another Lead message is being checked. Read the original request status.")?;
+        let _lock = dir.lock().map_err(
+            |_| "Another Lead message is being checked. Read the original request status.",
+        )?;
         let (expected_meta, expected_launch) =
             Self::expected_project_anchor(anchor_op, binding, canonical);
         dir.publish_new("meta.json", expected_meta.to_string().as_bytes())
@@ -3698,7 +3689,8 @@ impl Server<'_> {
             {
                 return Err("The selected Lead changed. Reopen its conversation.".into());
             }
-            let binding = crate::storage::hash(json!(["project-lead-v1", key, request]).to_string());
+            let binding =
+                crate::storage::hash(json!(["project-lead-v1", key, request]).to_string());
             let lead = json!({
                 "request": request,
                 "room": Value::Null,
@@ -3710,20 +3702,15 @@ impl Server<'_> {
                 "assignedAt": PROJECT_LEAD_STAMP,
                 "status": "started",
             });
-            let anchor_op = assignment_address(&lead, &binding)
-                .ok_or("Missing Lead operation address.")?;
+            let anchor_op =
+                assignment_address(&lead, &binding).ok_or("Missing Lead operation address.")?;
             let exists = repo.join(crate::RUN_ROOT).join(&anchor_op).exists();
             if !exists {
                 if matches!(name, SEND_LEAD | UPDATE_SETTINGS) {
                     self.ensure_project_lead_anchor(repo, &anchor_op, &binding, canonical)?;
                 } else if settings {
-                    let mut detail = lead_turns::default_settings(
-                        self,
-                        repo,
-                        provider,
-                        &binding,
-                        &anchor_op,
-                    );
+                    let mut detail =
+                        lead_turns::default_settings(self, repo, provider, &binding, &anchor_op);
                     let mut summary = json!({
                         "projectKey": key,
                         "room": Value::Null,
@@ -3740,10 +3727,10 @@ impl Server<'_> {
                 } else if matches!(name, STOP_LEAD | READ_STREAM) || full_answer {
                     return Err("The original Lead conversation could not be verified.".into());
                 } else {
-                    if let Some(before) = args.get("before") {
-                        if before.is_string() {
-                            return Err("Invalid Lead conversation page.".into());
-                        }
+                    if let Some(before) = args.get("before")
+                        && before.is_string()
+                    {
+                        return Err("Invalid Lead conversation page.".into());
                     }
                     if let Some(id) = args["turnId"].as_str() {
                         turn = Some(json!({"turnId": id, "status": "not_found"}));
@@ -3771,7 +3758,9 @@ impl Server<'_> {
                 .valid_project_lead_anchor(repo, &anchor_op, &binding, canonical)
                 .unwrap_or(false);
             if !valid {
-                if settings || matches!(name, SEND_LEAD | STOP_LEAD) || full_answer
+                if settings
+                    || matches!(name, SEND_LEAD | STOP_LEAD)
+                    || full_answer
                     || args.get("turnId").is_some()
                     || args.get("before").is_some()
                 {

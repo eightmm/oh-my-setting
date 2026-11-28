@@ -737,7 +737,8 @@ mod tests {
     fn codex_observation_requires_thread_id_agent_message_and_turn_completed() {
         let id = "12345678-1234-7234-8234-123456789abc";
         let start = json!({"type":"thread.started","thread_id":id});
-        let msg = json!({"type":"item.completed","item":{"type":"agent_message","text":"Codex answer"}});
+        let msg =
+            json!({"type":"item.completed","item":{"type":"agent_message","text":"Codex answer"}});
         let done = json!({"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}});
         let run = |rows: &[&serde_json::Value]| {
             observe(

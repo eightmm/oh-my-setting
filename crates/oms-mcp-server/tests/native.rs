@@ -3551,10 +3551,9 @@ fn desktop_lead_conversations() {
         let observed = &restored["result"]["_meta"]["leadSettings"]["nativeSession"];
         assert_eq!(observed["id"], "a2000000-0000-4000-8000-000000000002");
         let parent: Value = serde_json::from_slice(
-            &std::fs::read(source.join(format!(
-                "lead-fixture-{}",
-                ["codex", "claude", "agy"][seat]
-            )))
+            &std::fs::read(
+                source.join(format!("lead-fixture-{}", ["codex", "claude", "agy"][seat])),
+            )
             .unwrap(),
         )
         .unwrap();
@@ -3937,15 +3936,15 @@ fn project_scoped_lead_conversations() {
     });
     assert_eq!(runs(), 2, "must create only anchor + turn 1 (no kickoff)");
 
-    let reply1 = app.tool(
-        read,
-        json!({"project":"approved","provider":"codex"}),
-    );
+    let reply1 = app.tool(read, json!({"project":"approved","provider":"codex"}));
     good(&reply1);
     let priv1 = &reply1["result"]["_meta"]["leadConversation"];
     assert_eq!(priv1["room"], Value::Null);
     assert_eq!(priv1["provider"], "codex");
-    assert_eq!(priv1["transcript"]["turns"][0]["text"], "Direct Codex question");
+    assert_eq!(
+        priv1["transcript"]["turns"][0]["text"],
+        "Direct Codex question"
+    );
     assert_eq!(
         priv1["transcript"]["turns"][1]["text"],
         "codex received Direct Codex question"
@@ -3993,7 +3992,12 @@ fn project_scoped_lead_conversations() {
         }),
     );
     good(&second);
-    until(|| runs() == 3 && std::fs::read_dir(repo.join(".oms/artifacts/mcp")).unwrap().all(|e| e.unwrap().path().join("status").exists()));
+    until(|| {
+        runs() == 3
+            && std::fs::read_dir(repo.join(".oms/artifacts/mcp"))
+                .unwrap()
+                .all(|e| e.unwrap().path().join("status").exists())
+    });
     assert_eq!(
         std::fs::read_to_string(source.join("resumed-session")).unwrap(),
         "a2000000-0000-4000-8000-000000000002"
