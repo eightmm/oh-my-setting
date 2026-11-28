@@ -6,7 +6,7 @@
 mod atomic_bytes;
 pub use atomic_bytes::{
     ByteError, ByteReadOptions, MutationDisposition, MutationError, MutationOptions,
-    MutationOutcome, MutationPhase,
+    MutationOutcome, MutationPhase, unfinished_jsonl,
 };
 
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags, Stat};

@@ -35,12 +35,6 @@ pub fn relative(path: &Path) -> Result<()> {
 pub fn root(path: &Path) -> Result<Root> {
     Root::open(path).map_err(|_| Error::new(2, "unsafe or unavailable repository"))
 }
-const READ_RACE_RETRIES: usize = 32;
-const READ_RACE_SLEEP: Duration = Duration::from_millis(3);
-
-fn unfinished_jsonl(bytes: &[u8]) -> bool {
-    !bytes.is_empty() && !bytes.ends_with(b"\n")
-}
 
 /// Bytes plus the (device, inode) of the descriptor they were read from.
 pub(crate) type Snapshot = (Vec<u8>, Option<(u64, u64)>);
@@ -52,31 +46,22 @@ pub(crate) fn read_snapshot(
     missing: bool,
     jsonl: bool,
 ) -> Result<Snapshot> {
-    let anchor = root(repo)?;
-    let options = ByteReadOptions {
-        missing_ok: missing,
-        max_bytes: MAX_FILE,
-    };
-    for attempt in 0..=READ_RACE_RETRIES {
-        match anchor.read_no_follow_checked::<oms_safe_fs::ByteError>(path, options, |_| Ok(())) {
-            Ok((bytes, _)) if jsonl && unfinished_jsonl(&bytes) && attempt < READ_RACE_RETRIES => {
-                std::thread::sleep(READ_RACE_SLEEP);
-            }
-            Ok((bytes, stat)) => {
-                return Ok((bytes, stat.map(|s| (s.st_dev as u64, s.st_ino as u64))));
-            }
-            Err(oms_safe_fs::ByteError::Changed) if attempt < READ_RACE_RETRIES => {
-                std::thread::sleep(READ_RACE_SLEEP);
-            }
-            Err(e) => {
-                return Err(Error::new(
-                    2,
-                    format!("unsafe, changed, oversized or unavailable file: {e:?}"),
-                ));
-            }
-        }
-    }
-    unreachable!()
+    root(repo)?
+        .read_no_follow_retrying_stat(
+            path,
+            ByteReadOptions {
+                missing_ok: missing,
+                max_bytes: MAX_FILE,
+            },
+            jsonl,
+        )
+        .map(|(bytes, stat)| (bytes, stat.map(|s| (s.st_dev as u64, s.st_ino as u64))))
+        .map_err(|e| {
+            Error::new(
+                2,
+                format!("unsafe, changed, oversized or unavailable file: {e:?}"),
+            )
+        })
 }
 
 pub fn read(repo: &Path, path: &Path, missing: bool) -> Result<Vec<u8>> {
@@ -96,7 +81,7 @@ pub fn file(path: &Path) -> Result<Vec<u8>> {
     read(parent, Path::new(name), false)
 }
 pub fn rows(bytes: &[u8]) -> Result<Vec<V>> {
-    if unfinished_jsonl(bytes) {
+    if oms_safe_fs::unfinished_jsonl(bytes) {
         return fail("unfinished JSONL record; reconcile the writer before retrying");
     }
     bytes

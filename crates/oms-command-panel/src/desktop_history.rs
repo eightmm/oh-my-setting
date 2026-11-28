@@ -134,7 +134,7 @@ fn council_metadata(repo: &Path, thread: &str) -> Option<(usize, String, Option<
     }
     let store = oms_panel_core::Store::open(repo).ok()?;
     let bytes = store
-        .read(
+        .read_jsonl(
             Path::new(&format!(".oms/threads/{thread}.jsonl")),
             2 * 1024 * 1024,
             true,
@@ -344,5 +344,115 @@ mod tests {
                 .to_string()
                 .contains("unprojected")
         );
+
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "oms-desktop-history-race-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let thread = "panel-council-0123456789abcdef01234567";
+        let log_path = root.join(format!(".oms/threads/{thread}.jsonl"));
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            use std::io::Write;
+            use std::sync::atomic::Ordering;
+            use std::time::Duration;
+            std::fs::write(
+                &log_path,
+                format!(
+                    "{{\"thread\":\"{thread}\",\"role\":\"answer\",\"model\":\"sonnet-4\",\"text\":\"pos-0\"}}\n"
+                ),
+            )
+            .unwrap();
+            let debate_report = json!({
+                "collection": {"ok": true},
+                "room": {"id": "room-a", "closed": false, "owner": "main", "messages": []},
+                "room_attempts": {
+                    "finished": {
+                        "attempt_id": "finished",
+                        "tool": "panel-council",
+                        "state": "working",
+                        "terminal": false,
+                        "refs": {"panel_room_id": "room-a", "panel_thread": thread}
+                    }
+                }
+            });
+            let done = AtomicBool::new(false);
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    let mut file = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&log_path)
+                        .unwrap();
+                    barrier.wait();
+                    for seq in 1..=24 {
+                        file.write_all(
+                            format!(
+                                "{{\"thread\":\"{thread}\",\"role\":\"answer\",\"model\":\"gpt-5\",\"text\":\""
+                            )
+                            .as_bytes(),
+                        )
+                        .unwrap();
+                        file.flush().unwrap();
+                        if seq == 1 {
+                            std::thread::sleep(Duration::from_millis(12));
+                        }
+                        file.write_all(format!("pos-{seq}\"}}\n").as_bytes())
+                            .unwrap();
+                        file.flush().unwrap();
+                    }
+                    file.write_all(
+                        format!(
+                            "{{\"thread\":\"{thread}\",\"role\":\"synthesis\",\"text\":\"settled\"}}\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                    file.flush().unwrap();
+                    done.store(true, Ordering::Release);
+                });
+                scope.spawn(|| {
+                    barrier.wait();
+                    let stop = AtomicBool::new(false);
+                    let mut prev = 1u64;
+                    let mut reads = 0usize;
+                    while !done.load(Ordering::Acquire) || reads < 24 {
+                        let out = page(&root, &debate_report, Some("room-a"), "debate", 1, &stop)
+                            .unwrap();
+                        let row = &out["rows"][0];
+                        let positions = row["positions"].as_u64().expect("positions retained");
+                        assert!(positions >= prev, "{positions} < {prev}");
+                        prev = positions;
+                        reads += 1;
+                    }
+                    let final_page =
+                        page(&root, &debate_report, Some("room-a"), "debate", 1, &stop).unwrap();
+                    assert_eq!(final_page["rows"][0]["positions"], 25);
+                    assert_eq!(final_page["rows"][0]["models"], "gpt-5, sonnet-4");
+                    assert_eq!(final_page["rows"][0]["synthesis"], true);
+                });
+            });
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .unwrap();
+            file.write_all(format!("{{\"thread\":\"{thread}\"").as_bytes())
+                .unwrap();
+            file.flush().unwrap();
+            let crashed = page(
+                &root,
+                &debate_report,
+                Some("room-a"),
+                "debate",
+                1,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert!(crashed["rows"][0]["positions"].is_null());
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        result.unwrap();
     }
 }

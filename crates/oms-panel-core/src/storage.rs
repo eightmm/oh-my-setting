@@ -110,6 +110,18 @@ impl Store {
             )
             .map_err(|e| Error::new(format!("panel read refused: {e:?}")))
     }
+    pub fn read_jsonl(&self, relative: &Path, maximum: usize, missing: bool) -> Result<Vec<u8>> {
+        path(relative)?;
+        self.root
+            .read_no_follow_jsonl(
+                relative,
+                ByteReadOptions {
+                    max_bytes: maximum,
+                    missing_ok: missing,
+                },
+            )
+            .map_err(|e| Error::new(format!("panel read refused: {e:?}")))
+    }
     pub fn json(&self, relative: &Path, maximum: usize, missing: bool) -> Result<Option<Value>> {
         let bytes = self.read(relative, maximum, missing)?;
         if missing && bytes.is_empty() {
@@ -403,6 +415,53 @@ mod tests {
         std::thread::sleep(Duration::from_millis(25));
         assert_eq!(expired_hold.check().unwrap_err().code, 75);
         drop(expired_hold);
+
+        let thread_rel = Path::new(".oms/threads/panel-council-0123456789abcdef01234567.jsonl");
+        let thread_abs = root.join(thread_rel);
+        std::fs::create_dir_all(thread_abs.parent().unwrap()).unwrap();
+        std::fs::write(&thread_abs, b"{\"seq\":0}\n").unwrap();
+        let done = AtomicBool::new(false);
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&thread_abs)
+                    .unwrap();
+                barrier.wait();
+                for seq in 1..=24 {
+                    file.write_all(format!("{{\"seq\":{seq},\"text\":\"").as_bytes())
+                        .unwrap();
+                    file.flush().unwrap();
+                    if seq == 1 {
+                        std::thread::sleep(Duration::from_millis(12));
+                    }
+                    file.write_all(b"ok\"}\n").unwrap();
+                    file.flush().unwrap();
+                }
+                done.store(true, Ordering::Release);
+            });
+            scope.spawn(|| {
+                barrier.wait();
+                let mut prev = 1usize;
+                let mut reads = 0usize;
+                while !done.load(Ordering::Acquire) || reads < 24 {
+                    let raw = store.read_jsonl(thread_rel, MAX_STATE, true).unwrap();
+                    assert!(raw.ends_with(b"\n"));
+                    let lines = raw.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count();
+                    assert!(lines >= prev);
+                    prev = lines;
+                    reads += 1;
+                }
+                assert_eq!(prev, 25);
+            });
+        });
+        assert!(
+            store
+                .read_jsonl(Path::new("../escape"), MAX_STATE, true)
+                .is_err()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }
