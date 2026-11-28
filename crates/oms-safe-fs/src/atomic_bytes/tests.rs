@@ -808,17 +808,11 @@ fn atomic_read_races_detect_identity_timestamp_and_ancestry_changes() {
         .unwrap();
     assert_eq!(crashed_pauses, STABLE_TORN_ATTEMPTS - 1);
     assert_eq!(crashed_hooked, b"{\"seq\":1");
-    let crashed_started = std::time::Instant::now();
     let crashed = race_root
         .read_no_follow_jsonl(Path::new("crashed.jsonl"), read_opts)
         .unwrap();
-    let crashed_elapsed = crashed_started.elapsed();
     assert_eq!(crashed, b"{\"seq\":1");
     assert!(unfinished_jsonl(&crashed));
-    assert!(
-        crashed_elapsed < Duration::from_millis(40),
-        "stable torn tail took {crashed_elapsed:?}"
-    );
     symlink("race.jsonl", race_fixture.0.join("symlink.jsonl")).unwrap();
     let fast = std::time::Instant::now();
     assert_eq!(

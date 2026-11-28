@@ -11,10 +11,11 @@ use std::time::Duration;
 
 const READ_RACE_RETRIES: usize = 32;
 const READ_RACE_SLEEP: Duration = Duration::from_millis(3);
-// `write_all` short writes normally finish within microseconds; three
-// consecutive identical snapshots (two 3 ms sleeps) detect a crashed writer
-// quickly while keeping the 32 x 3 ms bound while the file keeps changing.
-const STABLE_TORN_ATTEMPTS: usize = 3;
+// Ten consecutive identical snapshots (nine 3 ms sleeps, about 27 ms) outlast
+// a writer paused inside one multi-page append yet cut a crashed writer's
+// torn tail from the full 32 x 3 ms bound, which still applies while the file
+// keeps changing.
+const STABLE_TORN_ATTEMPTS: usize = 10;
 
 /// True when non-empty JSONL bytes lack a terminating newline.
 pub fn unfinished_jsonl(bytes: &[u8]) -> bool {
