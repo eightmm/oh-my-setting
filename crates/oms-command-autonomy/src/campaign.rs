@@ -52,10 +52,13 @@ fn pinned(store: &Store, name: &str, expected: &str) -> Result<()> {
         "pinned campaign input digest mismatch",
     )
 }
+/// `groups` is the host's group-membership proof; without it a group-writable
+/// problem or input file (a checkout made under umask 002) is refused.
 pub fn validate_manifest(
     repo: &Path,
     manifest: &Value,
     providers: &[String],
+    groups: Option<oms_command_plan::services::GroupResolver>,
     interrupted: &AtomicBool,
 ) -> Result<Value> {
     value::keys(
@@ -70,7 +73,7 @@ pub fn validate_manifest(
         ],
         &["public_data", "consolidator"],
     )?;
-    let source = Store::open(repo)?;
+    let source = Store::open(repo)?.with_group_resolver(groups);
     value::keys(&manifest["problem"], &["file", "sha256"], &[])?;
     pinned(
         &source,
@@ -82,7 +85,7 @@ pub fn validate_manifest(
         deadline: None,
         repo,
         interrupted,
-        group_resolver: None,
+        group_resolver: groups,
     };
     require(
         value::commit(value::text(manifest, "base"))
@@ -830,6 +833,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         &ctx.repo,
         &manifest,
         &ctx.services.provider_names()?,
+        ctx.services.group_membership_resolver(),
         ctx.interrupted,
     )?;
     if args.flag("dry-run") {

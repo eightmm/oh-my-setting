@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use oms_command_autonomy::{
-    CommandResult, Invocation, Services, contract, owns, planning, receipt, run_with_services,
-    selectors, value,
+    CommandResult, Invocation, Services, campaign, contract, owns, planning, receipt,
+    run_with_services, selectors, value,
 };
 use oms_command_plan::storage::Store;
 use serde_json::json;
@@ -2076,6 +2076,47 @@ fn selectors_read_group_writable_suites_through_the_callers_proof() {
     let store = Store::open(&repo.0).unwrap();
     assert!(selectors::validate(&store, command).is_err());
     selectors::validate(&store.with_group_resolver(Some(private_group)), command).unwrap();
+}
+
+#[test]
+fn campaign_manifest_reads_group_writable_pinned_files_through_the_callers_proof() {
+    let repo = Repo::new();
+    repo.write("problem/statement.md", "prove it\n");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+    for (path, mode) in [("problem", 0o775), ("problem/statement.md", 0o664)] {
+        fs::set_permissions(repo.0.join(path), fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let head = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo.0)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    // An invalid later field shows the pinned reads passed when the proof is given.
+    let manifest = json!({
+        "problem": {"file": "problem/statement.md", "sha256": value::hash("prove it\n")},
+        "base": head.trim(),
+        "verify": {"command": "true", "timeout_s": 60, "inputs": [
+            {"path": "problem/statement.md", "sha256": value::hash("prove it\n")}
+        ]},
+        "candidate_formats": [],
+        "groups": [],
+        "budget": {},
+    });
+    let stop = AtomicBool::new(false);
+    let refuse = campaign::validate_manifest(&repo.0, &manifest, &[], None, &stop)
+        .unwrap_err()
+        .to_string();
+    assert!(!refuse.contains("candidate_formats"), "{refuse}");
+    let proved = campaign::validate_manifest(&repo.0, &manifest, &[], Some(private_group), &stop)
+        .unwrap_err()
+        .to_string();
+    assert!(proved.contains("candidate_formats must be"), "{proved}");
 }
 
 #[test]
