@@ -1640,7 +1640,7 @@ fn project_cards_catalog() {
             "scope": "repository",
             "updated": "2026-11-27T06:08:00Z",
             "goal": "Unknown main",
-            "conversationMain": {"provider": "pi"},
+            "conversationMain": {"provider": "grok"},
             "degraded": false
         }
     });
@@ -1661,7 +1661,7 @@ fn project_cards_catalog() {
     assert_eq!(capped_crew[1]["provider"], "antigravity");
     assert_eq!(capped_crew[1]["role"], "rev");
     assert_eq!(capped_crew[1]["id"], alpha_crew[1]["id"]);
-    assert_eq!(capped_crew[2]["provider"], Value::Null);
+    assert_eq!(capped_crew[2]["provider"], "pi");
     assert_eq!(capped_crew[2]["role"], Value::Null);
     assert_eq!(cap_cards[1]["main"], Value::Null);
     assert_eq!(cap_cards[1]["crew"], json!([]));
