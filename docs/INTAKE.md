@@ -97,6 +97,45 @@ under `POST /intake/<source>` without adding new top-level verbs or aliases.
 | Inbound (Room unavailable) | Room open, read, or lock/I/O failure | No Room message appended | — | Returns HTTP `503` with no acknowledgement activity so Linear retries. |
 | Outbound | `oms intake reply --source linear --kind thought\|response\|elicitation\|error` | `status` message from `--participant` to `all` | `linear-delivery-<delivery uuid>` (`linear-delivery-<delivery uuid>-unknown` on exit `75`) | Scans `--text-file` with `oms-scrub` first (exit `3` on hit or oversized environment). Queries `agentActivity(id)` before `agentActivityCreate` using deterministic UUID v4 `delivery_id` derived from `(source, session, room, caller_key)` with `--kind`, optional `--reply-to`, and SHA-256 of the scanned reply text. |
 
+### One connection, many projects (`--routes`)
+
+One Linear app has one webhook URL, so one `serve` can feed several repositories through the
+route table instead of `--repo/--room/--participant/--to`:
+
+```bash
+oms intake route add --source linear --team JAE --repo ~/git/project-a --room intake \
+  --participant linear-bridge --to main
+oms intake route add --source linear --team '*' --repo ~/git/triage --room intake \
+  --participant linear-bridge --to main   # optional fallback for every other team
+oms intake route list [--json]
+oms intake route remove --source linear --team JAE
+oms intake serve --source linear --routes --organization "$LINEAR_ORG_ID" \
+  --app-user "$LINEAR_APP_USER_ID"
+```
+
+- **Table**: `$XDG_CONFIG_HOME/oh-my-setting/intake-routes.json` (or
+  `~/.config/oh-my-setting/intake-routes.json`, or the absolute `OMS_INTAKE_ROUTES_FILE`), a
+  `0600` single-link regular file owned by you in a directory nobody else can write (anything else
+  is refused). Edits hold an adjacent lock and publish atomically; at most 64 routes, one per
+  source and team. `route add` checks that the Room exists, is open and enrolls both participants,
+  stores the physical `--repo` path, and replaces an existing route for the same team.
+- **Matching**: `TEAM` is a Linear team key (`JAE`), a team id, or `*`. Each `AgentSessionEvent`
+  carries `agentSession.issue` with `team.key`, `teamId` and `team.id` (the published Linear webhook
+  schema, `IssueWithDescriptionChildWebhookPayload`); the first route matching the key, then the id,
+  wins, else the `*` route. A key route stops matching after the team key is renamed; route by id to
+  survive renames.
+- **Order**: signature, timestamp and `--organization`/`--app-user` checks run before any route
+  lookup, unchanged.
+- **Unrouted sessions** (no matching route, or a session without an issue): HTTP `200`, no Room
+  message, and an `error` activity `This Linear team is not connected to an OMS project.` with a
+  delivery id that names no Room (stop signals get no reply). The serve log line names the matched
+  `route=TEAM` or `route=unrouted`.
+- **Binding**: `serve --routes` reads the table once at start and refuses to start when it holds no
+  route for the source or any route's Room fails the same checks as `route add`; restart it after
+  editing routes. A route whose Room later fails returns `503` for that route only, so Linear
+  retries. Replies need no route: `oms intake reply --repo PATH --room ROOM` already names the
+  target. The single-target `--repo` form is one `*` route and behaves as before.
+
 ### Non-goals
 
 - No automatic worker delegation, plan mutation, or process cancellation from webhook events.

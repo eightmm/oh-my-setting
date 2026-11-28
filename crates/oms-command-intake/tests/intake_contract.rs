@@ -5,11 +5,11 @@ use oms_command_intake::{
     ENV_ACCESS_CRED, ENV_LINEAR_API_URL, ENV_WEBHOOK_CRED, EndpointUrl, EnvVarSpec,
     FIRST_THOUGHT_BODY, LINEAR_INTAKE_PATH, LinearSource, OutboundAck, OutboundReply,
     PayloadDecision, REFUSED_CONTENT_ERROR_BODY, ROOM_TEXT_LIMIT, ReplyConfig, RequestHeaders,
-    RoomDelivery, SOURCE_LINEAR, SecretStore, SecretValue, ServeConfig, ServerHandle,
-    SignatureInput, Source, TIMESTAMP_WINDOW_MS, TransportError, UNTRUSTED_HEADER, WorkRequest,
-    WorkRequestKind, created_message_id, derive_delivery_id, hmac_sha256_hex, intake_path,
-    prompted_message_id, receipt_message_id, reply_caller_key, verify_hmac_sha256_hex,
-    verify_linear_signature, within_timestamp_window_ms,
+    RoomDelivery, Route, SOURCE_LINEAR, SecretStore, SecretValue, ServeConfig, ServerHandle,
+    SignatureInput, Source, TIMESTAMP_WINDOW_MS, TransportError, UNROUTED_ERROR_BODY,
+    UNTRUSTED_HEADER, WorkRequest, WorkRequestKind, created_message_id, derive_delivery_id,
+    hmac_sha256_hex, intake_path, prompted_message_id, receipt_message_id, reply_caller_key,
+    verify_hmac_sha256_hex, verify_linear_signature, within_timestamp_window_ms,
 };
 use oms_command_room::{Join, LocalServices, Room, Send as RoomSend, Session};
 use serde_json::{Map, Value, json};
@@ -826,10 +826,13 @@ fn serve_webhook_contract_inner(ws: &TempWorkspace) {
     ));
     let server = ServerHandle::spawn(ServeConfig {
         source,
-        repo: ws.repo.clone(),
-        room: "r1".into(),
-        participant: "linear".into(),
-        to: "main".into(),
+        routes: vec![Route::any(
+            "linear",
+            ws.repo.clone(),
+            "r1".into(),
+            "linear".into(),
+            "main".into(),
+        )],
         binding_flags,
         listen: "127.0.0.1:0".parse().unwrap(),
         secrets,
@@ -1455,6 +1458,180 @@ fn serve_cli_subhelper() {
     let _ = oms_command_intake::run_streaming(&args, &repo, &stop, &mut out, &mut err);
 }
 
+#[test]
+fn routed_serve_delivers_by_team_and_answers_unrouted_sessions() {
+    isolated_with(
+        "routed_serve_delivers_by_team_and_answers_unrouted_sessions",
+        true,
+        &[],
+        routed_serve_inner,
+    );
+}
+
+fn routed_serve_inner(ws: &TempWorkspace) {
+    ws.setup_room("r-jae", "main", "linear");
+    ws.setup_room("r-ops", "main", "linear");
+    let stop = AtomicBool::new(false);
+    let run = |spec: &str, extra: &[&str]| {
+        let mut args = split_args(spec);
+        args.extend(os_args(extra));
+        oms_command_intake::run(&args, &ws.repo, &stop)
+    };
+    let repo = ws.repo.to_str().unwrap();
+    let add = "route add --source linear --participant linear --to main";
+
+    // Route edits validate the Room target and are idempotent; the table stays private.
+    let (code, out, err) = run(add, &["--team", "JAE", "--repo", repo, "--room", "r-jae"]);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
+    assert!(String::from_utf8_lossy(&out).starts_with("routed linear JAE -> "));
+    let (code, out, _) = run(add, &["--team", "JAE", "--repo", repo, "--room", "r-jae"]);
+    assert_eq!(code, 0);
+    assert!(String::from_utf8_lossy(&out).starts_with("already routed "));
+    let ops_id = "3ab2f60d-ops";
+    assert_eq!(
+        run(add, &["--team", ops_id, "--repo", repo, "--room", "r-ops"]).0,
+        0
+    );
+    let (code, _, err) = run(
+        add,
+        &["--team", "BAD", "--repo", repo, "--room", "r-missing"],
+    );
+    assert_eq!(code, 2);
+    assert!(String::from_utf8_lossy(&err).contains("r-missing"));
+    assert_eq!(
+        run(
+            add,
+            &["--team", "bad team", "--repo", repo, "--room", "r-jae"]
+        )
+        .0,
+        2
+    );
+    let table = oms_command_intake::routes::routes_path().unwrap();
+    assert_eq!(
+        fs::metadata(&table).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let (code, out, _) = run("route list --json", &[]);
+    assert_eq!(code, 0);
+    let listed: Value = serde_json::from_slice(&out).unwrap();
+    let teams: Vec<_> = listed["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["team"].as_str().unwrap(), r["room"].as_str().unwrap()))
+        .collect();
+    assert_eq!(teams, [("JAE", "r-jae"), (ops_id, "r-ops")]);
+    let (code, _, err) = run(
+        "serve --source linear --routes --room r-jae --organization o --app-user a",
+        &[],
+    );
+    assert_eq!(code, 2);
+    assert!(String::from_utf8_lossy(&err).contains("--routes cannot be combined with --room"));
+
+    let api = FakeGraphqlServer::start();
+    let sig_val = runtime_sig_val();
+    let secrets = make_secrets(&[
+        (ENV_WEBHOOK_CRED, &sig_val),
+        (ENV_ACCESS_CRED, &runtime_acc_val()),
+    ]);
+    let server = ServerHandle::spawn(ServeConfig {
+        source: Arc::new(LinearSource::with_endpoint(
+            EndpointUrl::parse(&api.url()).unwrap(),
+        )),
+        routes: oms_command_intake::routes::load(&table).unwrap(),
+        binding_flags: BTreeMap::from([
+            ("--organization".into(), "org-r".into()),
+            ("--app-user".into(), "app-r".into()),
+        ]),
+        listen: "127.0.0.1:0".parse().unwrap(),
+        secrets,
+    })
+    .expect("spawn routed server");
+    let addr = server.local_addr();
+    let event = |action: &str, session: &str, team: Value, activity: Option<&str>| {
+        let mut payload = json!({
+            "type": "AgentSessionEvent",
+            "action": action,
+            "organizationId": "org-r",
+            "appUserId": "app-r",
+            "webhookTimestamp": now_ms(),
+            "agentSession": { "id": session, "issue": team },
+            "promptContext": "route me",
+        });
+        if let Some(id) = activity {
+            payload["agentActivity"] = json!({
+                "id": id, "agentSessionId": session,
+                "content": { "type": "prompt", "body": "follow-up" }
+            });
+        }
+        post_signed_linear_webhook(addr, &sig_val, &payload)
+    };
+    let issue = |key: &str, id: &str| json!({ "identifier": format!("{key}-1"), "teamId": id, "team": { "id": id, "key": key } });
+
+    // The team key routes first; a team id routes when its key is unknown.
+    assert_eq!(event("created", "s-jae", issue("JAE", "id-jae"), None), 200);
+    assert_eq!(event("created", "s-ops", issue("OPS", ops_id), None), 200);
+    assert_eq!(
+        event("prompted", "s-jae", issue("JAE", "id-jae"), Some("act-1")),
+        200
+    );
+    let ids = |room: &str| -> Vec<String> {
+        ws.room_messages(room)
+            .iter()
+            .map(|m| m.text("id").to_owned())
+            .collect()
+    };
+    assert_eq!(
+        ids("r-jae"),
+        [
+            created_message_id(SOURCE_LINEAR, "s-jae"),
+            prompted_message_id(SOURCE_LINEAR, "act-1")
+        ]
+    );
+    assert_eq!(ids("r-ops"), [created_message_id(SOURCE_LINEAR, "s-ops")]);
+
+    // An unrouted team, or a session without an issue, gets the fixed error and no Room message.
+    assert_eq!(event("created", "s-zzz", issue("ZZZ", "id-zzz"), None), 200);
+    assert_eq!(event("created", "s-none", Value::Null, None), 200);
+    assert_eq!(ids("r-jae").len() + ids("r-ops").len(), 3);
+    let calls = api.wait_for_calls(4, Duration::from_secs(5));
+    let input = |session: &str| {
+        calls
+            .iter()
+            .map(|c| &c.body["variables"]["input"])
+            .find(|i| i["agentSessionId"] == session)
+            .unwrap_or_else(|| panic!("no ack for {session}"))
+            .clone()
+    };
+    assert_eq!(
+        input("s-jae")["id"].as_str(),
+        Some(
+            derive_delivery_id(SOURCE_LINEAR, "s-jae", "r-jae", CREATED_THOUGHT_CALLER_KEY)
+                .as_str()
+        )
+    );
+    for session in ["s-zzz", "s-none"] {
+        let unrouted = input(session);
+        assert_eq!(unrouted["content"]["type"], "error");
+        assert_eq!(unrouted["content"]["body"], UNROUTED_ERROR_BODY);
+        let key = format!(
+            "error:unrouted:{}",
+            created_message_id(SOURCE_LINEAR, session)
+        );
+        assert_eq!(
+            unrouted["id"].as_str(),
+            Some(derive_delivery_id(SOURCE_LINEAR, session, "", &key).as_str())
+        );
+    }
+    let logs = String::from_utf8(server.shutdown()).unwrap();
+    assert!(logs.contains("session=s-ops route=3ab2f60d-ops"), "{logs}");
+    assert!(logs.contains("session=s-zzz route=unrouted"), "{logs}");
+
+    assert_eq!(run("route remove --source linear --team JAE", &[]).0, 0);
+    assert_eq!(run("route remove --source linear --team JAE", &[]).0, 1);
+    assert_eq!(oms_command_intake::routes::load(&table).unwrap().len(), 1);
+}
+
 // --- Test-only second fake adapter proving core reuse without Linear code ---
 
 const FAKE_SOURCE_NAME: &str = "fake";
@@ -1744,10 +1921,13 @@ fn second_fake_adapter_reuses_listener_idempotency_and_receipt_without_linear_co
 
             let server = ServerHandle::spawn(ServeConfig {
                 source: Arc::new(fake.clone()),
-                repo: ws.repo.clone(),
-                room: "r-fake".into(),
-                participant: "fake-bridge".into(),
-                to: "main".into(),
+                routes: vec![Route::any(
+                    FAKE_SOURCE_NAME,
+                    ws.repo.clone(),
+                    "r-fake".into(),
+                    "fake-bridge".into(),
+                    "main".into(),
+                )],
                 binding_flags,
                 listen: "127.0.0.1:0".parse().unwrap(),
                 secrets: secrets.clone(),
@@ -2028,10 +2208,13 @@ fn stub_ack_retry_inside_window_and_no_retry_when_window_expired() {
             }
             let server_ok = ServerHandle::spawn(ServeConfig {
                 source: Arc::new(fake_ok.clone()),
-                repo: ws.repo.clone(),
-                room: "r-ack".into(),
-                participant: "fake-bridge".into(),
-                to: "main".into(),
+                routes: vec![Route::any(
+                    FAKE_SOURCE_NAME,
+                    ws.repo.clone(),
+                    "r-ack".into(),
+                    "fake-bridge".into(),
+                    "main".into(),
+                )],
                 binding_flags: binding_flags.clone(),
                 listen: "127.0.0.1:0".parse().unwrap(),
                 secrets: secrets.clone(),
@@ -2102,10 +2285,13 @@ fn stub_ack_retry_inside_window_and_no_retry_when_window_expired() {
             let server_exp = ServerHandle::spawn_with_ack_window(
                 ServeConfig {
                     source: Arc::new(fake_exp.clone()),
-                    repo: ws.repo.clone(),
-                    room: "r-ack".into(),
-                    participant: "fake-bridge".into(),
-                    to: "main".into(),
+                    routes: vec![Route::any(
+                        FAKE_SOURCE_NAME,
+                        ws.repo.clone(),
+                        "r-ack".into(),
+                        "fake-bridge".into(),
+                        "main".into(),
+                    )],
                     binding_flags,
                     listen: "127.0.0.1:0".parse().unwrap(),
                     secrets,
