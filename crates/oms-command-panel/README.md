@@ -382,11 +382,11 @@ files pointing at one checkout cannot be detected from one sidecar. Install read
 first (`"trusted"` is active, any other value is inactive) and falls back to
 `[projects."<repo-root>"].trust_level` (parent of canonical `--git-common-dir`, never a
 non-repository ancestor) only when that key is absent, reporting `"active": false`,
-`"reason": "codex-project-untrusted"`, and a one-line hint naming `<repo-root>` (or
-`<physical-checkout>` outside Git) when untrusted, or `"active": false`,
+`"reason": "codex-project-untrusted"`, and a one-line hint naming `<physical-checkout>` when
+its own `trust_level` is set (or outside Git) and `<repo-root>` otherwise, or `"active": false`,
 `"reason": "codex-trust-unknown"`, and a hint explaining why without failing the install when
-`CODEX_HOME` or `config.toml` is a symlink, non-regular, not owned by the current user,
-unreadable, or invalid TOML. `--uninstall-panel codex --project ALIAS` forgets deleted
+neither `CODEX_HOME` nor `HOME` is set or `CODEX_HOME` or `config.toml` is a symlink,
+non-regular, not owned by the current user, unreadable, or invalid TOML. `--uninstall-panel codex --project ALIAS` forgets deleted
 checkouts (`action: "forgotten"`), removes only an OMS block whose bytes match `block_sha256`
 (leaving edited blocks in place and reporting them via `preservedFiles`), removes
 `.codex/config.toml` (including any recorded `separator_added` byte), `.codex`, and the

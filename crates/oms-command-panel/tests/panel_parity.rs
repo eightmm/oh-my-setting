@@ -5803,6 +5803,252 @@ fn project_panels_codex_lifecycle_parity() {
     assert!(!panels_sidecar.exists());
     std::fs::write(&alpha_exclude, &alpha_exclude_before).unwrap();
 
+    // 2c. OMS-created `.codex/config.toml` (`created_config: true`) where the user deletes the OMS
+    //     block and leaves user text without a trailing newline, then reinstalls (`separator_added:
+    //     true` alongside `created_config: true`):
+    //     - subsequent panel commands (Codex, Claude, `--unregister-project`) still parse the sidecar;
+    //     - uninstall removes the OMS block and separator while keeping exact user text;
+    //     - when nothing else remains in `.codex/config.toml`, uninstall deletes the file and
+    //       OMS-created `.codex` dir.
+    let beta_unterm = base.join("checkouts/beta-unterm");
+    std::fs::create_dir_all(&beta_unterm).unwrap();
+    init_git_repo(&beta_unterm);
+    let beta_unterm_canon = beta_unterm.canonicalize().unwrap();
+    let beta_unterm_before_tree = snapshot_tree(&beta_unterm_canon);
+    let beta_unterm_exclude = beta_unterm_canon.join(".git/info/exclude");
+    let beta_unterm_exclude_before = std::fs::read(&beta_unterm_exclude).unwrap();
+    let beta_unterm_codex_dir = beta_unterm_canon.join(".codex");
+    let beta_unterm_codex_cfg = beta_unterm_codex_dir.join("config.toml");
+
+    let temp_sibling = base.join("checkouts/temp-sibling");
+    std::fs::create_dir_all(temp_sibling.join(".oms")).unwrap();
+    assert_eq!(
+        run_panel(
+            &beta_unterm_canon,
+            &["--register-project", "--alias", "beta-unterm"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    assert_eq!(
+        run_panel(
+            &temp_sibling,
+            &["--register-project", "--alias", "temp-sibling"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+
+    // Step 1: initial install creates `.codex/` and `.codex/config.toml` (`created_config: true`).
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "beta-unterm"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    let step1_sidecar: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert_eq!(step1_sidecar["beta-unterm"][0]["created_config"], true);
+    assert_eq!(step1_sidecar["beta-unterm"][0]["created_codex_dir"], true);
+
+    // Step 2: user deletes the OMS block and leaves user text without a trailing newline.
+    let user_unterm_text = b"model = \"gpt-5\"\n[features]\nfast_mode = true";
+    assert!(!user_unterm_text.ends_with(b"\n"));
+    std::fs::write(&beta_unterm_codex_cfg, user_unterm_text).unwrap();
+
+    // Step 3: reinstall appends the block with a separator and keeps `created_config: true`.
+    let (code, step3_raw, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "beta-unterm",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let step3_json: Value = serde_json::from_str(&step3_raw).unwrap();
+    assert_eq!(step3_json["changed"], true);
+
+    let step3_sidecar: Value =
+        serde_json::from_slice(&std::fs::read(&panels_sidecar).unwrap()).unwrap();
+    assert_eq!(step3_sidecar["beta-unterm"][0]["created_config"], true);
+    assert_eq!(step3_sidecar["beta-unterm"][0]["created_codex_dir"], true);
+    assert_eq!(step3_sidecar["beta-unterm"][0]["separator_added"], true);
+
+    let expected_beta_unterm_block =
+        render_expected_block(&beta_unterm_canon, expected_version, expected_res_ver);
+    let mut expected_step3_cfg = user_unterm_text.to_vec();
+    expected_step3_cfg.push(b'\n');
+    expected_step3_cfg.extend_from_slice(expected_beta_unterm_block.as_bytes());
+    assert_eq!(
+        std::fs::read(&beta_unterm_codex_cfg).unwrap(),
+        expected_step3_cfg
+    );
+
+    // Step 4: subsequent panel commands parse and re-encode the sidecar cleanly (Codex rerun,
+    // real Claude install/uninstall on the same and sibling aliases, and `--unregister-project`).
+    let (code, noop_after_sep, stderr) = run_panel(
+        base,
+        &[
+            "--install-panel",
+            "codex",
+            "--project",
+            "beta-unterm",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&noop_after_sep).unwrap()["changed"],
+        false
+    );
+
+    let claude_coexist_state = base.join("claude-coexist-stub");
+    ensure_private_dir(&claude_coexist_state);
+    write_private_file(
+        &claude_coexist_state.join("control.json"),
+        br#"{"userEntry":true}"#,
+    );
+    let claude_coexist_bin = claude_coexist_state.join("claude-stub");
+    std::os::unix::fs::symlink(&exe, &claude_coexist_bin).unwrap();
+    let claude_coexist_env = [
+        (
+            "OMS_PANEL_PARITY_CLAUDE_STUB",
+            claude_coexist_state.to_str().unwrap(),
+        ),
+        ("OMS_CLAUDE_BIN", claude_coexist_bin.to_str().unwrap()),
+    ];
+
+    for alias in ["beta-unterm", "alpha-service"] {
+        let (code, inst_raw, stderr) = run_panel(
+            base,
+            &["--install-panel", "claude", "--project", alias, "--json"],
+            true,
+            &claude_coexist_env,
+        );
+        assert_eq!(
+            code, 0,
+            "claude install ({alias}) must parse and write sidecar: {stderr}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&inst_raw).unwrap()["changed"],
+            true
+        );
+    }
+    for alias in ["alpha-service", "beta-unterm"] {
+        let (code, uninst_raw, stderr) = run_panel(
+            base,
+            &["--uninstall-panel", "claude", "--project", alias, "--json"],
+            true,
+            &claude_coexist_env,
+        );
+        assert_eq!(
+            code, 0,
+            "claude uninstall ({alias}) must parse and write sidecar: {stderr}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&uninst_raw).unwrap()["changed"],
+            true
+        );
+    }
+
+    let (code, _, stderr) = run_panel(base, &["--unregister-project", "temp-sibling"], true, &[]);
+    assert_eq!(code, 0, "unregister-project must parse sidecar: {stderr}");
+
+    let (code, _, stderr) = run_panel(base, &["--unregister-project", "beta-unterm"], true, &[]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("--uninstall-panel codex --project beta-unterm")
+            && !stderr.contains("Invalid OMS project panel map"),
+        "{stderr}"
+    );
+
+    // Step 5: uninstall leaves exact unterminated user text (without deleting the file or `.codex`).
+    let (code, _, stderr) = run_panel(
+        base,
+        &[
+            "--uninstall-panel",
+            "codex",
+            "--project",
+            "beta-unterm",
+            "--json",
+        ],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        std::fs::read(&beta_unterm_codex_cfg).unwrap(),
+        user_unterm_text,
+        "uninstall must remove block and separator while keeping exact user text"
+    );
+    assert!(beta_unterm_codex_dir.exists());
+    assert_eq!(
+        std::fs::read(&beta_unterm_exclude).unwrap(),
+        beta_unterm_exclude_before
+    );
+    assert!(!panels_sidecar.exists());
+
+    // Step 6: when nothing else remains in `.codex/config.toml` for a `created_config: true,
+    // separator_added: true` row, uninstall deletes both the file and the empty OMS-created `.codex`.
+    std::fs::remove_file(&beta_unterm_codex_cfg).unwrap();
+    std::fs::remove_dir(&beta_unterm_codex_dir).unwrap();
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "beta-unterm"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    std::fs::write(&beta_unterm_codex_cfg, user_unterm_text).unwrap();
+    assert_eq!(
+        run_panel(
+            base,
+            &["--install-panel", "codex", "--project", "beta-unterm"],
+            true,
+            &[],
+        )
+        .0,
+        0
+    );
+    // User deletes their text, leaving only the separator newline and OMS block.
+    let mut sep_plus_block = vec![b'\n'];
+    sep_plus_block.extend_from_slice(expected_beta_unterm_block.as_bytes());
+    std::fs::write(&beta_unterm_codex_cfg, &sep_plus_block).unwrap();
+
+    let (code, _, stderr) = run_panel(
+        base,
+        &["--uninstall-panel", "codex", "--project", "beta-unterm"],
+        true,
+        &[],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!beta_unterm_codex_cfg.exists());
+    assert!(!beta_unterm_codex_dir.exists());
+    assert_eq!(snapshot_tree(&beta_unterm_canon), beta_unterm_before_tree);
+    assert!(!panels_sidecar.exists());
+    assert_eq!(
+        run_panel(base, &["--unregister-project", "beta-unterm"], true, &[]).0,
+        0
+    );
+
     // 3. Refusal on unmanaged `mcp_servers.oms-panel`, invalid TOML, symlinks, and tracked file.
     for (label, bad_toml, expected_err) in [
         (
@@ -6521,7 +6767,7 @@ fn project_panels_codex_lifecycle_parity() {
     //     - falls back to `[projects."<repo-root>"]` (parent of canonical `--git-common-dir`);
     //     - explicit `untrusted` on worktree overrides trusted main root;
     //     - non-repository parent never counts;
-    //     - untrusted hint names repo root when inside Git and checkout path otherwise.
+    //     - untrusted hint names checkout path when its own trust_level is set (or outside Git), else repo root.
     let nonrepo_parent = base.join("trust-matrix/nonrepo-parent");
     ensure_private_dir(&nonrepo_parent);
     let nonrepo_parent_canon = nonrepo_parent.canonicalize().unwrap();
@@ -6648,7 +6894,7 @@ fn project_panels_codex_lifecycle_parity() {
     }
 
     // 10(c): Explicit `untrusted` on linked worktree wins over trusted main repo root,
-    //        and its hint still names the repo root.
+    //        and its hint names the worktree checkout path itself rather than the repo root.
     write_private_file(
         &trust_codex_cfg,
         format!(
@@ -6663,7 +6909,38 @@ fn project_panels_codex_lifecycle_parity() {
     let wt_override = probe_trust("tm-wt");
     assert_eq!(wt_override["active"], false);
     assert_eq!(wt_override["reason"], "codex-project-untrusted");
-    assert_eq!(wt_override["hint"], expected_repo_root_hint);
+    assert_eq!(
+        wt_override["hint"],
+        format!(
+            "Trust {} in Codex so it loads .codex/config.toml.",
+            tm_wt_canon.display()
+        )
+    );
+
+    // 10(c2): A `[projects."<worktree>"]` table with no `trust_level` key falls back to the
+    //         trusted main repo root (`active: true`).
+    write_private_file(
+        &trust_codex_cfg,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"trusted\"\n\n[projects.\"{}\"]\n",
+            tm_main_canon.display(),
+            tm_wt_canon.display()
+        )
+        .as_bytes(),
+    );
+    let wt_fallback = probe_trust("tm-wt");
+    assert_eq!(wt_fallback["active"], true, "{wt_fallback}");
+    assert!(wt_fallback.get("reason").is_none() && wt_fallback.get("hint").is_none());
+    let (code, wt_real_raw, err) = run_panel(
+        base,
+        &["--install-panel", "codex", "--project", "tm-wt", "--json"],
+        false,
+        &[("CODEX_HOME", trust_codex_str)],
+    );
+    assert_eq!(code, 0, "{err}");
+    let wt_real: Value = serde_json::from_str(&wt_real_raw).unwrap();
+    assert_eq!(wt_real["active"], true, "{wt_real}");
+    assert!(wt_real.get("reason").is_none() && wt_real.get("hint").is_none());
 
     // 10(d): Linked worktree path only trusted -> only linked worktree is active.
     write_private_file(

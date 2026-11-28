@@ -179,29 +179,19 @@ pub(super) fn validate_panels_stat(stat: &Stat) -> Result<()> {
     validate_private_sidecar_stat(stat, "OMS project panel map", "desktop project panel map")
 }
 
-fn parse_panels_json(raw: &str) -> Result<PanelMap> {
+fn validate_panel_map(panels: &PanelMap) -> Result<()> {
     require(
-        raw.len() <= MAX_BYTES,
-        "Invalid OMS project panel map: exceeds 16 KiB",
-    )?;
-    let StrictPanelMap(raw_map) = serde_json::from_str(raw).map_err(|_| {
-        Error::new(
-            "Invalid OMS project panel map: expected an object of project aliases and strict panel records",
-        )
-    })?;
-    require(
-        raw_map.len() <= MAX_ENTRIES,
+        panels.len() <= MAX_ENTRIES,
         "Invalid OMS project panel map: exceeds 128 entries",
     )?;
-    let mut out = BTreeMap::new();
     let mut seen_codex_paths = BTreeSet::new();
-    for (alias, rows) in raw_map {
+    for (alias, rows) in panels {
         require(
-            valid_alias(&alias) && !rows.is_empty() && rows.len() <= 8,
+            valid_alias(alias) && !rows.is_empty() && rows.len() <= 8,
             "Invalid OMS project panel map: expected valid aliases with nonempty panel lists",
         )?;
         let mut seen = BTreeSet::new();
-        for row in &rows {
+        for row in rows {
             let app = PanelApp::parse(&row.app).map_err(|_| {
                 Error::new("Invalid OMS project panel map: unsupported panel app in record")
             })?;
@@ -221,7 +211,6 @@ fn parse_panels_json(raw: &str) -> Result<PanelMap> {
                         && row.created_exclude.is_some()
                         && !(row.created_codex_dir == Some(true)
                             && row.created_config == Some(false))
-                        && !(row.separator_added == Some(true) && row.created_config == Some(true))
                         && !(row.exclude_separator_added == Some(true)
                             && row.created_exclude != Some(true))
                         && seen_codex_paths.insert(row.path.clone())
@@ -237,9 +226,22 @@ fn parse_panels_json(raw: &str) -> Result<PanelMap> {
                 "Invalid OMS project panel map: invalid or duplicate panel record fields",
             )?;
         }
-        out.insert(alias, rows);
     }
-    Ok(out)
+    Ok(())
+}
+
+fn parse_panels_json(raw: &str) -> Result<PanelMap> {
+    require(
+        raw.len() <= MAX_BYTES,
+        "Invalid OMS project panel map: exceeds 16 KiB",
+    )?;
+    let StrictPanelMap(panels) = serde_json::from_str(raw).map_err(|_| {
+        Error::new(
+            "Invalid OMS project panel map: expected an object of project aliases and strict panel records",
+        )
+    })?;
+    validate_panel_map(&panels)?;
+    Ok(panels)
 }
 
 fn encode_panels_json(panels: &PanelMap) -> Result<Vec<u8>> {
@@ -247,6 +249,7 @@ fn encode_panels_json(panels: &PanelMap) -> Result<Vec<u8>> {
         !panels.is_empty() && panels.len() <= MAX_ENTRIES,
         "desktop project panel map must contain 1 to 128 entries",
     )?;
+    validate_panel_map(panels)?;
     let mut bytes = serde_json::to_vec_pretty(panels).map_err(Error::new)?;
     bytes.push(b'\n');
     if bytes.len() > MAX_BYTES {
@@ -818,20 +821,26 @@ fn sanitize_single_line(raw: &str) -> String {
         .to_owned()
 }
 
-fn resolve_codex_home_dir_for_trust(cwd: &Path) -> std::result::Result<Option<PathBuf>, String> {
-    if let Some(raw) = std::env::var_os("CODEX_HOME").filter(|v| !v.is_empty()) {
+fn resolve_codex_home_dir_with_env(
+    cwd: &Path,
+    codex_home_env: Option<&OsStr>,
+    home_env: Option<&OsStr>,
+) -> std::result::Result<PathBuf, String> {
+    if let Some(raw) = codex_home_env.filter(|v| !v.is_empty()) {
         if raw.to_str().is_none() || raw.as_bytes().contains(&0) {
             return Err("Cannot verify Codex project trust: CODEX_HOME is not valid UTF-8.".into());
         }
         let candidate = PathBuf::from(raw);
-        return Ok(Some(if candidate.is_absolute() {
+        return Ok(if candidate.is_absolute() {
             candidate
         } else {
             cwd.join(candidate)
-        }));
+        });
     }
-    let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) else {
-        return Ok(None);
+    let Some(home) = home_env.filter(|v| !v.is_empty()) else {
+        return Err(
+            "Cannot verify Codex project trust: neither CODEX_HOME nor HOME is set.".into(),
+        );
     };
     let home_path = PathBuf::from(home);
     if !normalized_abs_utf8(&home_path) {
@@ -840,7 +849,7 @@ fn resolve_codex_home_dir_for_trust(cwd: &Path) -> std::result::Result<Option<Pa
                 .into(),
         );
     }
-    Ok(Some(home_path.join(".codex")))
+    Ok(home_path.join(".codex"))
 }
 
 fn resolve_codex_trust_in_toml(
@@ -880,7 +889,9 @@ fn resolve_codex_trust_in_toml(
                 return if level.as_str() == Some("trusted") {
                     CodexTrustStatus::Trusted
                 } else {
-                    CodexTrustStatus::Untrusted { trust_target }
+                    CodexTrustStatus::Untrusted {
+                        trust_target: physical_repo.to_path_buf(),
+                    }
                 };
             }
         }
@@ -1181,15 +1192,15 @@ fn check_codex_project_trust_at(
     resolve_codex_trust_in_toml(&bytes, physical_repo, repo_root, &config_path)
 }
 
-fn check_codex_project_trust(
+fn check_codex_project_trust_with_env(
     cwd: &Path,
     physical_repo: &Path,
     repo_root: Option<&Path>,
+    codex_home_env: Option<&OsStr>,
+    home_env: Option<&OsStr>,
 ) -> CodexTrustStatus {
-    let trust_target = repo_root.unwrap_or(physical_repo).to_path_buf();
-    let codex_home = match resolve_codex_home_dir_for_trust(cwd) {
-        Ok(Some(dir)) => dir,
-        Ok(None) => return CodexTrustStatus::Untrusted { trust_target },
+    let codex_home = match resolve_codex_home_dir_with_env(cwd, codex_home_env, home_env) {
+        Ok(dir) => dir,
         Err(hint) => return CodexTrustStatus::Unknown { hint },
     };
     check_codex_project_trust_at(
@@ -1197,6 +1208,20 @@ fn check_codex_project_trust(
         physical_repo,
         repo_root,
         rustix::process::geteuid().as_raw(),
+    )
+}
+
+fn check_codex_project_trust(
+    cwd: &Path,
+    physical_repo: &Path,
+    repo_root: Option<&Path>,
+) -> CodexTrustStatus {
+    check_codex_project_trust_with_env(
+        cwd,
+        physical_repo,
+        repo_root,
+        std::env::var_os("CODEX_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
     )
 }
 
@@ -3921,13 +3946,17 @@ pub(super) fn uninstall_panel(options: &Options, cwd: &Path, stop: &AtomicBool) 
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeScope, CmdOutput, CodexTrustStatus, OMS_PACKAGE_VERSION, PanelApp,
-        check_codex_project_trust_at, claude_panel_entry_json, codex_panel_block,
-        codex_panel_block_for_versions, codex_panel_resource_version,
-        expected_codex_panel_server_table, is_mcp_entry_missing, parse_claude_mcp_get,
-        parse_panels_json, resolve_codex_trust_in_toml, split_codex_panel_block,
+        ClaudeScope, CmdOutput, CodexRowMeta, CodexTrustStatus, OMS_PACKAGE_VERSION, PanelApp,
+        PanelMap, PanelRecord, attach_codex_trust_fields, check_codex_project_trust_at,
+        check_codex_project_trust_with_env, claude_panel_entry_json, codex_panel_block,
+        codex_panel_block_for_versions, codex_panel_resource_version, encode_panels_json,
+        expected_codex_panel_server_table, format_codex_install_text, is_mcp_entry_missing,
+        parse_claude_mcp_get, parse_panels_json, resolve_codex_trust_in_toml,
+        split_codex_panel_block, upsert_panel_row,
     };
-    use std::path::Path;
+    use std::collections::BTreeMap;
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn claude_mcp_get_parses_text_and_json_scopes() {
@@ -4072,7 +4101,7 @@ trust_level = "trusted"
             }
         );
 
-        // Explicit untrusted on worktree wins over trusted repo root, and hint names repo root.
+        // Explicit non-trusted value on worktree wins over trusted repo root, and hint names worktree.
         let wt_untrusted = br#"[projects."/srv/checkouts/PoseFixer"]
 trust_level = "trusted"
 
@@ -4082,9 +4111,55 @@ trust_level = "untrusted"
         assert_eq!(
             resolve_codex_trust_in_toml(wt_untrusted, wt, Some(repo), cfg_label),
             CodexTrustStatus::Untrusted {
-                trust_target: repo.to_path_buf(),
+                trust_target: wt.to_path_buf(),
             }
         );
+
+        // Worktree table without `trust_level` falls back to trusted repo root.
+        let wt_without_trust_level = br#"[projects."/srv/checkouts/PoseFixer"]
+trust_level = "trusted"
+
+[projects."/srv/worktrees/PoseFixer-wt"]
+note = "no trust_level"
+"#;
+        assert_eq!(
+            resolve_codex_trust_in_toml(wt_without_trust_level, wt, Some(repo), cfg_label),
+            CodexTrustStatus::Trusted
+        );
+
+        // Missing both CODEX_HOME and HOME reports codex-trust-unknown, not codex-project-untrusted.
+        for (codex_env, home_env) in [
+            (None, None),
+            (Some(OsStr::new("")), None),
+            (None, Some(OsStr::new(""))),
+            (Some(OsStr::new("")), Some(OsStr::new(""))),
+        ] {
+            let status =
+                check_codex_project_trust_with_env(repo, repo, Some(repo), codex_env, home_env);
+            assert!(
+                matches!(
+                    status,
+                    CodexTrustStatus::Unknown { ref hint } if !hint.is_empty() && !hint.contains('\n')
+                ),
+                "expected Unknown for ({codex_env:?}, {home_env:?}), got {status:?}"
+            );
+            let mut report = serde_json::json!({});
+            attach_codex_trust_fields(&mut report, &status);
+            assert_eq!(report["active"], false);
+            assert_eq!(report["reason"], "codex-trust-unknown");
+            let plain = String::from_utf8(format_codex_install_text(
+                "PoseFixer",
+                repo,
+                "installed",
+                &status,
+            ))
+            .unwrap();
+            assert!(
+                plain.contains("(inactive: codex-trust-unknown)\nhint: ")
+                    && !plain.contains("codex-project-untrusted"),
+                "{plain}"
+            );
+        }
 
         // Non-repo ancestor never counts.
         let parent_trusted = br#"[projects."/srv/checkouts"]
@@ -4167,6 +4242,76 @@ trust_level = "trusted"
         let codex_sep_with_created_file = format!(
             r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":false,"separator_added":true}}]}}"#
         );
+        assert_eq!(
+            parse_panels_json(&codex_sep_with_created_file).unwrap()["alpha"].len(),
+            1
+        );
+
+        // Every row shape the install paths can produce round-trips through encode then parse.
+        let mut claude_only = PanelMap::new();
+        upsert_panel_row(
+            &mut claude_only,
+            "alpha",
+            PanelApp::Claude,
+            Path::new("/srv/alpha"),
+            None,
+        );
+        let claude_bytes = encode_panels_json(&claude_only).unwrap();
+        assert_eq!(
+            parse_panels_json(std::str::from_utf8(&claude_bytes).unwrap()).unwrap(),
+            claude_only
+        );
+
+        for (created_config, created_codex_dir) in [(true, true), (true, false), (false, false)] {
+            for separator_added in [false, true] {
+                for (created_exclude, exclude_separator_added) in
+                    [(false, false), (true, false), (true, true)]
+                {
+                    let meta = CodexRowMeta {
+                        block_sha256: sha.clone(),
+                        created_config,
+                        created_codex_dir,
+                        created_exclude,
+                        separator_added,
+                        exclude_separator_added,
+                    };
+                    let mut single = PanelMap::new();
+                    upsert_panel_row(
+                        &mut single,
+                        "PoseFixer",
+                        PanelApp::Codex,
+                        Path::new("/srv/PoseFixer"),
+                        Some(meta.clone()),
+                    );
+                    let encoded = encode_panels_json(&single).unwrap();
+                    let round_tripped =
+                        parse_panels_json(std::str::from_utf8(&encoded).unwrap()).unwrap();
+                    assert_eq!(round_tripped, single, "round-trip mismatch for {meta:?}");
+
+                    let mut paired = PanelMap::new();
+                    upsert_panel_row(
+                        &mut paired,
+                        "PoseFixer",
+                        PanelApp::Claude,
+                        Path::new("/srv/PoseFixer"),
+                        None,
+                    );
+                    upsert_panel_row(
+                        &mut paired,
+                        "PoseFixer",
+                        PanelApp::Codex,
+                        Path::new("/srv/PoseFixer"),
+                        Some(meta),
+                    );
+                    let paired_bytes = encode_panels_json(&paired).unwrap();
+                    assert_eq!(
+                        parse_panels_json(std::str::from_utf8(&paired_bytes).unwrap()).unwrap(),
+                        paired
+                    );
+                }
+            }
+        }
+
         let codex_excl_sep_without_excl = format!(
             r#"{{"alpha":[{{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha","block_sha256":"{sha}","created_config":true,"created_codex_dir":true,"created_exclude":false,"exclude_separator_added":true}}]}}"#
         );
@@ -4181,7 +4326,6 @@ trust_level = "trusted"
             codex_upper_hash.as_str(),
             codex_missing_flags.as_str(),
             codex_dir_without_file.as_str(),
-            codex_sep_with_created_file.as_str(),
             codex_excl_sep_without_excl.as_str(),
             codex_duplicate_checkout_aliases.as_str(),
             r#"{"alpha":[{"app":"codex","scope":"project","name":"oms-panel","path":"/srv/alpha"}]}"#,
@@ -4196,6 +4340,66 @@ trust_level = "trusted"
             r#"{"alpha":[{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha"}],"alpha":[{"app":"claude","scope":"local","name":"oms-panel","path":"/srv/alpha"}]}"#,
         ] {
             assert!(parse_panels_json(bad).is_err(), "accepted {bad}");
+        }
+
+        // Defense in depth: encode_panels_json refuses invalid maps before writing.
+        let base_codex = || PanelRecord {
+            app: "codex".into(),
+            scope: "project".into(),
+            name: "oms-panel".into(),
+            path: PathBuf::from("/srv/alpha"),
+            block_sha256: Some(sha.clone()),
+            created_config: Some(true),
+            created_codex_dir: Some(true),
+            created_exclude: Some(false),
+            separator_added: None,
+            exclude_separator_added: None,
+        };
+        let invalid_maps: Vec<PanelMap> = vec![
+            BTreeMap::new(),
+            BTreeMap::from([("alpha".into(), vec![])]),
+            BTreeMap::from([("-bad-alias".into(), vec![base_codex()])]),
+            BTreeMap::from([(
+                "alpha".into(),
+                vec![PanelRecord {
+                    created_config: Some(false),
+                    created_codex_dir: Some(true),
+                    ..base_codex()
+                }],
+            )]),
+            BTreeMap::from([(
+                "alpha".into(),
+                vec![PanelRecord {
+                    created_exclude: Some(false),
+                    exclude_separator_added: Some(true),
+                    ..base_codex()
+                }],
+            )]),
+            BTreeMap::from([(
+                "alpha".into(),
+                vec![PanelRecord {
+                    block_sha256: Some("short".into()),
+                    ..base_codex()
+                }],
+            )]),
+            BTreeMap::from([(
+                "alpha".into(),
+                vec![PanelRecord {
+                    app: "claude".into(),
+                    scope: "local".into(),
+                    ..base_codex()
+                }],
+            )]),
+            BTreeMap::from([
+                ("alpha".into(), vec![base_codex()]),
+                ("beta".into(), vec![base_codex()]),
+            ]),
+        ];
+        for bad_map in &invalid_maps {
+            assert!(
+                encode_panels_json(bad_map).is_err(),
+                "encode_panels_json accepted invalid map: {bad_map:?}"
+            );
         }
     }
 }
