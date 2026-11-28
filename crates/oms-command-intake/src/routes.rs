@@ -2,14 +2,12 @@
 //!
 //! One `serve` can then feed many repositories from a single tracker connection. The table is
 //! `$XDG_CONFIG_HOME/oh-my-setting/intake-routes.json` (or `~/.config/...`, or the absolute
-//! `OMS_INTAKE_ROUTES_FILE`); it must be a private regular file of the current user in a
-//! directory no one else can write, and edits are serialized by an adjacent lock file.
+//! `OMS_INTAKE_ROUTES_FILE`); it must be a private regular file of the current user below
+//! directories no one else can write, and edits are serialized by the OMS state lock.
 
 use crate::model::validate_source_name;
-use rustix::fs::{FlockOperation, Mode, OFlags};
+use oms_safe_fs::{ByteError, ByteReadOptions, MutationError, MutationOptions, MutationPhase};
 use serde_json::{Value, json};
-use std::io::{Read as _, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 pub const ENV_ROUTES_FILE: &str = "OMS_INTAKE_ROUTES_FILE";
@@ -17,7 +15,7 @@ pub const DEFAULT_ROUTES_REL: &str = "oh-my-setting/intake-routes.json";
 /// Team value of the fallback route used when no other route matches.
 pub const ANY_TEAM: &str = "*";
 const MAX_ROUTES: usize = 64;
-const MAX_BYTES: u64 = 64 * 1024;
+const MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Route {
@@ -45,9 +43,9 @@ impl Route {
     fn validate(&self) -> Result<(), String> {
         validate_source_name(&self.source)?;
         validate_team(&self.team)?;
-        if !self.repo.is_absolute() {
+        if !self.repo.is_absolute() || self.repo.to_str().is_none() {
             return Err(format!(
-                "route {}: repo must be an absolute path",
+                "route {}: repo must be an absolute UTF-8 path",
                 self.team
             ));
         }
@@ -66,7 +64,7 @@ impl Route {
         json!({
             "source": self.source,
             "team": self.team,
-            "repo": self.repo.to_string_lossy(),
+            "repo": self.repo.to_str(),
             "room": self.room,
             "participant": self.participant,
             "to": self.to,
@@ -169,60 +167,68 @@ fn normalized(path: &Path) -> bool {
         && !raw.windows(3).any(|w| w == b"/./")
 }
 
-fn uid() -> u32 {
-    rustix::process::getuid().as_raw()
-}
-
-fn check_dir(dir: &Path) -> Result<(), String> {
-    let meta = std::fs::symlink_metadata(dir)
+/// Root byte operations at the nearest existing ancestor of the table's directory, in its
+/// physical spelling. Every held directory from `/` down must be owned by root or you and not
+/// group/world-writable (a root-owned sticky directory such as `/tmp` may sit above it), and
+/// the remaining components are walked without following symlinks. A symlink in the
+/// configured spelling is resolved once here, so it can only lead to such a directory.
+fn anchored(path: &Path) -> Result<(oms_safe_fs::Root, PathBuf), String> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| "route table path has no parent directory".to_owned())?;
+    let mut anchor = dir;
+    while std::fs::symlink_metadata(anchor).is_err() {
+        anchor = anchor
+            .parent()
+            .ok_or_else(|| "route table directory has no existing ancestor".to_owned())?;
+    }
+    let rest = path
+        .strip_prefix(anchor)
+        .map_err(|_| "route table path is not under its ancestor".to_owned())?
+        .to_path_buf();
+    let physical = std::fs::canonicalize(anchor)
         .map_err(|e| format!("route table directory unavailable: {e}"))?;
-    if !meta.is_dir() || meta.uid() != uid() || meta.mode() & 0o022 != 0 {
-        return Err(format!(
-            "route table directory {} must be a directory owned by you and not group/world-writable",
-            dir.display()
-        ));
-    }
-    Ok(())
+    let root = oms_safe_fs::Root::open_private_workspace(&physical, |_| false)
+        .map_err(|_| UNSAFE.to_owned())?;
+    Ok((root, rest))
 }
 
-/// Read the table; a missing file is an empty table.
+const UNSAFE: &str = "route table or a directory above it is not private to you: every directory must be owned by you or root and not group/world-writable, and the table must be a single-link regular file owned by you with mode 0600";
+
+fn storage(error: ByteError) -> String {
+    match error {
+        ByteError::InputTooLarge | ByteError::OutputTooLarge => {
+            "route table is larger than 64 KiB".into()
+        }
+        ByteError::InvalidPath | ByteError::Unsafe => UNSAFE.into(),
+        ByteError::Changed => "route table changed while it was read; retry".into(),
+        other => format!("route table unavailable: {other:?}"),
+    }
+}
+
+fn read(root: &oms_safe_fs::Root, rel: &Path) -> Result<Vec<u8>, String> {
+    root.read_no_follow_retrying(
+        rel,
+        ByteReadOptions {
+            missing_ok: true,
+            max_bytes: MAX_BYTES,
+        },
+    )
+    .map_err(storage)
+}
+
+fn decode(bytes: &[u8]) -> Result<Vec<Route>, String> {
+    if bytes.is_empty() {
+        Ok(Vec::new())
+    } else {
+        parse(bytes)
+    }
+}
+
+/// Read the table; a missing file (or directory) is an empty table.
 pub fn load(path: &Path) -> Result<Vec<Route>, String> {
-    let Some(dir) = path.parent() else {
-        return Err("route table path has no parent directory".into());
-    };
-    match std::fs::symlink_metadata(dir) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        _ => check_dir(dir)?,
-    }
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits() as i32)
-        .open(path)
-    {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("route table {} unreadable: {e}", path.display())),
-    };
-    let meta = file
-        .metadata()
-        .map_err(|e| format!("route table unreadable: {e}"))?;
-    if !meta.is_file() || meta.uid() != uid() || meta.mode() & 0o077 != 0 || meta.nlink() != 1 {
-        return Err(format!(
-            "route table {} must be a single-link regular file owned by you with mode 0600",
-            path.display()
-        ));
-    }
-    if meta.len() > MAX_BYTES {
-        return Err("route table is larger than 64 KiB".into());
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("route table unreadable: {e}"))?;
-    if bytes.len() as u64 > MAX_BYTES {
-        return Err("route table is larger than 64 KiB".into());
-    }
-    parse(&bytes)
+    let (root, rel) = anchored(path)?;
+    decode(&read(&root, &rel)?)
 }
 
 fn parse(bytes: &[u8]) -> Result<Vec<Route>, String> {
@@ -263,40 +269,21 @@ fn encode(routes: &[Route]) -> Vec<u8> {
     out
 }
 
-/// Run `edit` on the current table under the adjacent lock and publish the result atomically.
-/// `edit` returns whether the table changed; an unchanged table is not rewritten.
+/// Run `edit` on the current table under the OMS state lock for this file and publish the
+/// result atomically. `edit` returns whether the table changed; an unchanged table is not
+/// rewritten.
 pub fn update(
     path: &Path,
     edit: impl FnOnce(&mut Vec<Route>) -> Result<bool, String>,
 ) -> Result<bool, String> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| "route table path has no parent directory".to_owned())?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| "route table path has no file name".to_owned())?
-        .to_string_lossy()
-        .into_owned();
-    if std::fs::symlink_metadata(dir).is_err() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(|e| format!("cannot create route table directory: {e}"))?;
-    }
-    check_dir(dir)?;
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(OFlags::NOFOLLOW.bits() as i32)
-        .open(dir.join(format!(".{name}.lock")))
-        .map_err(|e| format!("route table lock unavailable: {e}"))?;
-    rustix::fs::flock(&lock, FlockOperation::LockExclusive)
-        .map_err(|e| format!("route table lock unavailable: {e}"))?;
-
-    let mut routes = load(path)?;
+    let settings =
+        oms_lock::Settings::from_env().map_err(|_| "invalid OMS lock environment".to_owned())?;
+    let _guard = oms_lock::Lock::for_file(path, settings)
+        .and_then(|lock| lock.acquire(None))
+        .map_err(|e| format!("route table lock unavailable ({e})"))?;
+    let (root, rel) = anchored(path)?;
+    let current = read(&root, &rel)?;
+    let mut routes = decode(&current)?;
     if !edit(&mut routes)? {
         return Ok(false);
     }
@@ -304,29 +291,38 @@ pub fn update(
         return Err(format!("route table holds at most {MAX_ROUTES} routes"));
     }
     let encoded = encode(&routes);
-    if encoded.len() as u64 > MAX_BYTES {
+    if encoded.len() > MAX_BYTES {
         return Err("route table would exceed 64 KiB".into());
     }
-    let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
-    let written = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(OFlags::NOFOLLOW.bits() as i32)
-            .open(&tmp)?;
-        file.write_all(&encoded)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("cannot write route table: {e}"));
-    }
-    if let Ok(d) = rustix::fs::open(dir, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty()) {
-        let _ = rustix::fs::fsync(&d);
-    }
+    root.atomic_mutate(
+        &rel,
+        MutationOptions {
+            read: ByteReadOptions {
+                missing_ok: true,
+                max_bytes: MAX_BYTES,
+            },
+            create_parent: true,
+            max_output: MAX_BYTES,
+            ..Default::default()
+        },
+        |now| {
+            if now == current.as_slice() {
+                Ok(encoded)
+            } else {
+                Err("route table changed during the edit; retry".to_owned())
+            }
+        },
+    )
+    .map_err(|e| match e {
+        MutationError::Transform(message) => message,
+        MutationError::Storage {
+            phase: MutationPhase::BeforePublication,
+            error,
+        } => storage(error),
+        MutationError::Storage { .. } => {
+            "route table may have been written but its durability is unconfirmed; check it with `oms intake route list`".into()
+        }
+    })?;
     Ok(true)
 }
 
@@ -376,6 +372,78 @@ mod tests {
         assert!(parse(&encode(&[bad])).is_err());
         assert!(validate_team("-x").is_err());
         assert!(validate_team("3ab2f60d-b9bc-44c3-ae45-33d562c43ce9").is_ok());
+    }
+
+    #[test]
+    fn table_storage_refuses_unsafe_files_and_ancestors_and_serializes_edits() {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _, symlink};
+        let base = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "oms-intake-routes-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&base)
+            .unwrap();
+        let mode = |p: &Path, m: u32| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap()
+        };
+        let add = |path: &Path, team: &str| {
+            update(path, |routes| {
+                routes.push(route(team, "r"));
+                Ok(true)
+            })
+        };
+
+        // A missing directory reads as empty; the first edit creates it privately.
+        let good = base.join("cfg/oh-my-setting/intake-routes.json");
+        assert_eq!(load(&good), Ok(Vec::new()));
+        assert_eq!(add(&good, "JAE"), Ok(true));
+        let meta = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!((meta(good.parent().unwrap()), meta(&good)), (0o700, 0o600));
+
+        // Concurrent edits under the lock lose nothing.
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let good = &good;
+                scope.spawn(move || add(good, &format!("T{i}")).unwrap());
+            }
+        });
+        assert_eq!(load(&good).unwrap().len(), 9);
+
+        // Leaf: wider mode, a second link, a symlink.
+        mode(&good, 0o640);
+        assert_eq!(load(&good), Err(UNSAFE.into()));
+        assert!(add(&good, "X").is_err());
+        mode(&good, 0o600);
+        let linked = base.join("cfg/oh-my-setting/second-link");
+        std::fs::hard_link(&good, &linked).unwrap();
+        assert_eq!(load(&good), Err(UNSAFE.into()));
+        std::fs::remove_file(&linked).unwrap();
+        let alias = base.join("cfg/oh-my-setting/alias.json");
+        symlink(&good, &alias).unwrap();
+        assert_eq!(load(&alias), Err(UNSAFE.into()));
+        assert!(add(&alias, "X").is_err());
+
+        // Ancestors: a group-writable directory, a symlink to a shared one, a dangling one.
+        mode(&base.join("cfg"), 0o770);
+        assert_eq!(load(&good), Err(UNSAFE.into()));
+        assert!(add(&good, "X").is_err());
+        mode(&base.join("cfg"), 0o700);
+        assert_eq!(load(&good).unwrap().len(), 9);
+        let shared = base.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        mode(&shared, 0o777);
+        symlink(&shared, base.join("via")).unwrap();
+        let via = base.join("via/oh-my-setting/intake-routes.json");
+        assert_eq!(load(&via), Err(UNSAFE.into()));
+        assert!(add(&via, "X").is_err());
+        assert!(!shared.join("oh-my-setting").exists());
+        symlink(base.join("nowhere"), base.join("dangling")).unwrap();
+        assert!(load(&base.join("dangling/oh-my-setting/intake-routes.json")).is_err());
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

@@ -115,11 +115,15 @@ oms intake serve --source linear --routes --organization "$LINEAR_ORG_ID" \
 
 - **Table**: `$XDG_CONFIG_HOME/oh-my-setting/intake-routes.json` (or
   `~/.config/oh-my-setting/intake-routes.json`, or the absolute `OMS_INTAKE_ROUTES_FILE`), a
-  `0600` single-link regular file owned by you in a directory nobody else can write (anything else
-  is refused). A relative `XDG_CONFIG_HOME` is ignored, and an empty or relative `HOME` is an
-  error rather than a path under the working directory. Edits hold an adjacent lock and publish
-  atomically; at most 64 routes and 64 KiB, one route per source and team. `route add` checks that the Room exists, is open and enrolls both participants,
-  stores the physical `--repo` path, and replaces an existing route for the same team.
+  `0600` single-link regular file owned by you. Every directory above it, from `/` down, must be
+  owned by you or root and not group/world-writable (a root-owned sticky directory such as `/tmp`
+  may sit above it); reads and writes hold those directories open and never follow a symlink below
+  the physical spelling, and anything else is refused. A relative `XDG_CONFIG_HOME` is ignored, and
+  an empty or relative `HOME` is an error rather than a path under the working directory. Edits hold
+  the OMS state lock for the table and publish atomically; at most 64 routes and 64 KiB, one route
+  per source and team, and `--repo` must be UTF-8. `route add` checks that the Room exists, is open
+  and enrolls both participants, stores the physical `--repo` path, and replaces an existing route
+  for the same team.
 - **Matching**: `TEAM` is a Linear team key (`JAE`), a team id, or `*`. Each `AgentSessionEvent`
   carries `agentSession.issue` with `team.key`, `teamId` and `team.id` (the published Linear webhook
   schema, `IssueWithDescriptionChildWebhookPayload`); the first route matching the key, then the id,
@@ -127,8 +131,8 @@ oms intake serve --source linear --routes --organization "$LINEAR_ORG_ID" \
   survive renames.
 - **Order**: signature, timestamp and `--organization`/`--app-user` checks run before any route
   lookup, unchanged.
-- **Unrouted sessions** (no matching route, or a session without an issue): HTTP `200`, no Room
-  message, and an `error` activity `This Linear team is not connected to an OMS project.` with a
+- **Unrouted sessions** (no route matches the team key or id and there is no `*` route; a session
+  without an issue matches only the `*` route): HTTP `200`, no Room message, and an `error` activity `This Linear team is not connected to an OMS project.` with a
   delivery id that names no Room (stop signals get no reply). The serve log line names the matched
   `route=TEAM` or `route=unrouted`.
 - **Binding**: `serve --routes` reads the table once at start and refuses to start when it holds no
