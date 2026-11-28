@@ -65,6 +65,7 @@ trusted host integrations; no CLI argument selects an alternate backend.
 | `discovery` | Bounded evidence packets and candidate filtering. Speculative, duplicate, rejected-hypothesis and unresolved findings cannot become tasks. Current tracked source citations are checked without executing target code. |
 | `selectors`, `verify` | Static suite selectors, verifier-base preconditions, existing native floor lint, acceptance reuse identity and receipt freshness. |
 | `runner` | One task, reviewed assignment, exact lease, failure-ledger preflight, isolated delegation, explicit patch landing and one durable same-lease repair. |
+| `parallel` | Bounded non-overlapping worker slots; goal windows retain review scopes/resources until serial integration and share the goal's lifetime attempt reservations. |
 | `goal` | Fresh acceptance, vacuity/stall checks, lifetime cycle reservations, serial landing and exact-tree Git publication with restartable commit intents. |
 | `receipt` | Schema-1 frozen autopilot receipts, exact proposal approval, parked/exhausted refusal, reentry/shadow evidence, one durable remainder reservation, semantic review and optional Draft PR producer calls. |
 | `adaptive` | Checked next actions, retained review sources, meaningful criterion/result progress across restarts, explicit external-result consumption and authorized milestone observation. No alternate Plan or acceptance authority. |
@@ -83,6 +84,23 @@ Exact-tree commits from `goal-drive` and `autopilot` require repository-local
 identity configured with `git config --local user.name ...` and
 `git config --local user.email ...`. The native Plan Git environment ignores
 global/system configuration and inherited Git identity overrides.
+
+## Bounded goal execution
+
+`goal-drive` and `autopilot` accept `--max-writers 1..16`, defaulting to 1.
+Autopilot freezes it in the run contract; legacy receipts without the field stay
+serial. Independent workers may execute together, but reviewed outputs keep
+their scope/resource occupancy until the goal serially admits and commits them
+against the current integration HEAD. A failed worker stops new claims while
+preserving healthy results and unresolved leases.
+
+Each task attempt reserves one lifetime cycle before its worker call, including
+parallel calls; interrupted reservations remain spent. Standalone `--run-id`
+binds the Plan, immutable task contracts, acceptance, work ref, route and limits
+across restarts. Acceptance passing cannot close a goal with pending canonical
+tasks. Draining an existing review does not spend another worker attempt.
+See the [project acceptance matrix](../../docs/AUTONOMOUS-PROJECT-ENGINE.md) for
+fixture evidence and live-provider boundaries.
 
 ## Discussion before decomposition
 
@@ -250,6 +268,12 @@ reservations, admission commitments and provider estimate counts. Missing
 measured cost is `null`. Client-reported costs may be estimates and are not
 authoritative billing. The existing provider hard-budget refusal remains
 unchanged.
+
+The saved campaign deadline also bounds candidate scratch creation and every
+verifier, including the final fresh check. The smaller configured wall and
+remaining lifetime applies; expiry cannot yield a solved handoff. Bounded
+scratch cleanup remains allowed after expiry. Ordinary autopilot cycle limits
+do not implement a total token/cost hard cap.
 
 ## Durable effects and interruption
 

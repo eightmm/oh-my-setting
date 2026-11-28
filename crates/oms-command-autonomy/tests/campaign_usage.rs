@@ -372,7 +372,7 @@ impl Services for CampaignHost {
     }
 }
 
-fn run_campaign(deadline_s: u64, extra: &[&str]) -> Vec<(String, Duration, Option<String>)> {
+fn campaign_fixture(deadline_s: u64) -> (PathBuf, PathBuf, Value) {
     let root = std::env::temp_dir().join(value::random("oms-campaign-wall-").unwrap());
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -438,6 +438,11 @@ fn run_campaign(deadline_s: u64, extra: &[&str]) -> Vec<(String, Duration, Optio
         .unwrap()
         .write_all(&value::pretty(&manifest).unwrap())
         .unwrap();
+    (repo, manifest_path, manifest)
+}
+
+fn run_campaign(deadline_s: u64, extra: &[&str]) -> Vec<(String, Duration, Option<String>)> {
+    let (repo, manifest_path, _) = campaign_fixture(deadline_s);
     let mut argv = vec![OsString::from("--campaign"), manifest_path.into_os_string()];
     argv.extend(extra.iter().map(OsString::from));
     let host = CampaignHost::default();
@@ -452,6 +457,224 @@ fn run_campaign(deadline_s: u64, extra: &[&str]) -> Vec<(String, Duration, Optio
         String::from_utf8_lossy(&err)
     );
     host.0.into_inner().unwrap()
+}
+
+struct DeadlineHost {
+    deadline: i64,
+    expire_stage: &'static str,
+    calls: Mutex<Vec<(String, Duration)>>,
+}
+impl DeadlineHost {
+    fn expire(&self) {
+        while chrono::DateTime::parse_from_rfc3339(&value::now())
+            .unwrap()
+            .timestamp()
+            < self.deadline
+        {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+impl oms_command_plan::Services for DeadlineHost {
+    fn supervise(
+        &self,
+        command: &oms_command_plan::services::SupervisedCommand,
+    ) -> oms_command_plan::Result<oms_command_plan::services::Execution> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("verify".into(), command.wall));
+        if self.expire_stage == "verify" {
+            self.expire();
+        }
+        Ok(oms_command_plan::services::Execution {
+            exit: 0,
+            runner_exit: 0,
+            timed_out: false,
+            output_limited: false,
+            launch_error: false,
+            supervision_error: false,
+            output: vec![],
+            duration_s: 0,
+        })
+    }
+}
+impl Services for DeadlineHost {
+    fn invoke(
+        &self,
+        call: &Invocation,
+        _: &AtomicBool,
+    ) -> oms_command_autonomy::Result<CommandResult> {
+        if call.tool == "agent-call" {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("provider".into(), call.wall));
+            let relative = ".oms/artifacts/campaign-deadline-answer.md";
+            Store::open(&call.cwd).unwrap().publish_once(relative,
+                b"```patch\ndiff --git a/solution.txt b/solution.txt\nnew file mode 100644\n--- /dev/null\n+++ b/solution.txt\n@@ -0,0 +1 @@\n+solution\n```\n", 4096).unwrap();
+            return Ok((
+                0,
+                format!("artifact: {}\n", call.cwd.join(relative).display()).into_bytes(),
+                vec![],
+            ));
+        }
+        assert_eq!(call.tool, "scratch-worktree");
+        let scratch = call.cwd.join(".git/campaign-deadline-check");
+        let adding = call.args.first().is_some_and(|arg| arg == "add");
+        self.calls
+            .lock()
+            .unwrap()
+            .push((if adding { "scratch" } else { "cleanup" }.into(), call.wall));
+        let mut git = Command::new("git");
+        git.arg("-C").arg(&call.cwd).arg("worktree");
+        if adding {
+            let base = &call
+                .args
+                .windows(2)
+                .find(|pair| pair[0] == "--base")
+                .unwrap()[1];
+            git.args(["add", "--detach"]).arg(&scratch).arg(base);
+        } else {
+            git.args(["remove", "--force"]).arg(&scratch);
+        }
+        let result = git.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        if adding && self.expire_stage == "scratch"
+            || !adding
+                && self.expire_stage == "final-cleanup"
+                && self
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(kind, _)| kind == "cleanup")
+                    .count()
+                    == 2
+        {
+            self.expire();
+        }
+        Ok((
+            0,
+            if adding {
+                format!("{}\n", scratch.display()).into_bytes()
+            } else {
+                vec![]
+            },
+            vec![],
+        ))
+    }
+}
+
+#[test]
+fn campaign_deadline_bounds_verifiers_and_keeps_cleanup_after_expiry() {
+    const NAME: &str = "campaign_deadline_bounds_verifiers_and_keeps_cleanup_after_expiry";
+    let ambient = |key: &std::ffi::OsStr| {
+        let key = key.to_string_lossy();
+        key.starts_with("OMS_") || key.starts_with("OH_MY_SETTING_")
+    };
+    if std::env::vars_os().any(|(key, _)| ambient(&key)) {
+        let mut child = Command::new(std::env::current_exe().unwrap());
+        for (key, _) in std::env::vars_os().filter(|(key, _)| ambient(key)) {
+            child.env_remove(key);
+        }
+        assert!(
+            child
+                .args(["--exact", NAME, "--nocapture"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        return;
+    }
+    for expire_stage in ["scratch", "verify", "final-cleanup"] {
+        let (repo, path, mut manifest) = campaign_fixture(60);
+        manifest["candidate_formats"] = json!(["patch"]);
+        manifest["budget"]["max_waves"] = 1.into();
+        manifest["budget"]["stall_waves"] = 1.into();
+        let raw = value::canonical(&manifest).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        let directory = format!(".oms/plan/campaigns/{}", &value::hash(&raw)[..16]);
+        let store = Store::open(&repo).unwrap();
+        store
+            .publish_once(format!("{directory}/manifest.json"), &raw, 1024 * 1024)
+            .unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339(&value::now()).unwrap()
+            - chrono::Duration::seconds(57);
+        store.append(format!("{directory}/events.jsonl"), &value::plan(&json!({
+            "type":"campaign_started", "base":manifest["base"], "problem":manifest["problem"],
+            "verify":manifest["verify"], "budget":manifest["budget"], "started_at":start.to_rfc3339(), "ts":start.to_rfc3339()
+        })).unwrap()).unwrap();
+        let host = DeadlineHost {
+            deadline: start.timestamp() + 60,
+            expire_stage,
+            calls: Mutex::new(vec![]),
+        };
+        let argv = [OsString::from("--campaign"), path.into_os_string()];
+        let (code, out, err) =
+            run_with_services("goal-drive", &argv, &repo, &AtomicBool::new(false), &host);
+        assert_eq!(
+            code,
+            3,
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
+        );
+        let summary: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(summary["reason"], "deadline");
+        let calls = host.calls.lock().unwrap();
+        assert_eq!(
+            calls.iter().filter(|(kind, _)| kind == "provider").count(),
+            1
+        );
+        assert_eq!(
+            calls.iter().filter(|(kind, _)| kind == "scratch").count(),
+            if expire_stage == "final-cleanup" {
+                2
+            } else {
+                1
+            }
+        );
+        assert_eq!(
+            calls.iter().filter(|(kind, _)| kind == "verify").count(),
+            match expire_stage {
+                "scratch" => 0,
+                "verify" => 1,
+                _ => 2,
+            }
+        );
+        assert_eq!(
+            calls.iter().filter(|(kind, _)| kind == "cleanup").count(),
+            if expire_stage == "final-cleanup" {
+                2
+            } else {
+                1
+            }
+        );
+        assert!(
+            calls
+                .iter()
+                .filter(|(kind, _)| kind != "cleanup")
+                .all(|(_, wall)| *wall > Duration::ZERO && *wall <= Duration::from_secs(3)),
+            "{calls:?}"
+        );
+        assert!(!repo.join(".git/campaign-deadline-check").exists());
+        assert!(!repo.join(&directory).join("handoff.json").exists());
+        let stop = AtomicBool::new(false);
+        assert!(
+            !Ledger::open(&repo, &directory, &stop)
+                .unwrap()
+                .events()
+                .unwrap()
+                .iter()
+                .any(|row| row["type"] == "campaign_solved")
+        );
+        std::fs::remove_dir_all(repo).unwrap();
+    }
 }
 
 #[test]

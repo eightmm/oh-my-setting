@@ -12,6 +12,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc;
 use std::time::Duration;
 
+#[derive(Clone)]
 struct Flight {
     paths: Vec<String>,
     resources: Vec<String>,
@@ -146,6 +147,34 @@ fn pick(
     Ok(Pick::Idle)
 }
 pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
+    execute_with(ctx, args, None)
+}
+
+struct GoalDispatch<'a> {
+    max: u64,
+    facts: &'a Value,
+    tranche: &'a Value,
+}
+
+pub(crate) fn execute_goal(
+    ctx: &Context<'_>,
+    args: &Args,
+    max: u64,
+    facts: &Value,
+    tranche: &Value,
+) -> Result<Output> {
+    execute_with(
+        ctx,
+        args,
+        Some(GoalDispatch {
+            max,
+            facts,
+            tranche,
+        }),
+    )
+}
+
+fn execute_with(ctx: &Context<'_>, args: &Args, goal: Option<GoalDispatch<'_>>) -> Result<Output> {
     ctx.parent()?;
     let provider = ctx.services.normalize_provider(args.required("to")?)?;
     require(
@@ -199,6 +228,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
 
     let mut output = Output::default();
     let mut flights: BTreeMap<String, Flight> = BTreeMap::new();
+    let mut reviewed: BTreeMap<String, Flight> = BTreeMap::new();
     let mut attempted = BTreeSet::new();
     let (mut failed, mut started) = (0usize, 0usize);
     let (mut backpressure, mut interrupted, mut halted) = (false, false, false);
@@ -209,9 +239,45 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                 interrupted = true;
             }
             while !interrupted && !backpressure && !halted && flights.len() < writers {
-                match pick(controller, &provider, &flights, &attempted, backlog) {
+                if let Some(budget) = &goal
+                    && crate::goal::spent_attempts(controller)? >= budget.max
+                {
+                    break;
+                }
+                // Reviewed patches still target this window's base. Their
+                // scopes stay occupied until goal-drive integrates the window.
+                let mut occupied = reviewed.clone();
+                occupied.extend(
+                    flights
+                        .iter()
+                        .map(|(id, flight)| (id.clone(), flight.clone())),
+                );
+                match pick(controller, &provider, &occupied, &attempted, backlog) {
                     Ok(Pick::Task(task, base)) => {
                         let id = value::text(&task, "id").to_owned();
+                        let cycle = if let Some(budget) = &goal {
+                            match crate::goal::reserve_attempt(
+                                controller,
+                                &task,
+                                budget.max,
+                                budget.facts,
+                                budget.tranche,
+                            ) {
+                                Ok(Some(cycle)) => Some(cycle),
+                                result => {
+                                    release_unstarted(
+                                        controller,
+                                        &id,
+                                        value::text(&task, "lease_id"),
+                                        value::text(&task, "task_sha256"),
+                                    );
+                                    result?;
+                                    break;
+                                }
+                            }
+                        } else {
+                            ctx.cycle
+                        };
                         attempted.insert(id.clone());
                         flights.insert(
                             id.clone(),
@@ -226,8 +292,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                         let tx = tx.clone();
                         let worker_args = worker_args.clone();
                         let (repo, state) = (ctx.repo.clone(), ctx.state.clone());
-                        let (owner, run, cycle) =
-                            (ctx.owner_id.clone(), ctx.run_id.clone(), ctx.cycle);
+                        let (owner, run) = (ctx.owner_id.clone(), ctx.run_id.clone());
                         let (services, stop, gates) = (ctx.services, ctx.interrupted, &gates);
                         scope.spawn(move || {
                             let result = catch_unwind(AssertUnwindSafe(|| {
@@ -270,12 +335,20 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                         Some(Ok(task)) => {
                             let code = task.code;
                             failed += usize::from(code != 0);
+                            if goal.is_some() {
+                                if code != 0 {
+                                    halted = true;
+                                } else if let Some(flight) = flight {
+                                    reviewed.insert(done.id.clone(), flight);
+                                }
+                            }
                             output.stdout.extend(task.stdout);
                             output.stderr.extend(task.stderr);
                             format!("plan-run: parallel task={} exit={code}\n", done.id)
                         }
                         Some(Err(error)) => {
                             failed += 1;
+                            halted |= goal.is_some();
                             format!(
                                 "plan-run: parallel task={} exit={} error={}\n",
                                 done.id, error.code, error.message
@@ -283,6 +356,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                         }
                         None => {
                             failed += 1;
+                            halted |= goal.is_some();
                             let released = flight.as_ref().is_some_and(|flight| {
                                 release_unstarted(
                                     controller,

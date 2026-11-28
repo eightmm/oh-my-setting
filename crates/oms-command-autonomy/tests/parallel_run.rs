@@ -191,6 +191,13 @@ fn group_with_review_race(gid: u32) -> oms_command_plan::Result<GroupMembership>
 
 #[derive(Default)]
 struct Mock {
+    goal: bool,
+    mutate_ready: bool,
+    switch_ref: bool,
+    mutation_done: AtomicBool,
+    acceptance_after: usize,
+    acceptances: AtomicUsize,
+    landed: Mutex<Vec<(String, String)>>,
     /// Task ids whose worker panics / reports failure.
     panics: BTreeSet<&'static str>,
     /// Task ids that wait here until the named task's worker has started.
@@ -209,6 +216,30 @@ struct Mock {
     selection_race: Option<Arc<SelectionRace>>,
 }
 impl oms_command_plan::Services for Mock {
+    fn supervise(
+        &self,
+        command: &oms_command_plan::services::SupervisedCommand,
+    ) -> oms_command_plan::Result<oms_command_plan::services::Execution> {
+        assert!(self.goal);
+        self.acceptances.fetch_add(1, Ordering::SeqCst);
+        let exit = u8::from(self.landed.lock().unwrap().len() < self.acceptance_after);
+        Ok(oms_command_plan::services::Execution {
+            exit,
+            runner_exit: exit,
+            timed_out: false,
+            output_limited: false,
+            launch_error: false,
+            supervision_error: false,
+            output: command
+                .argv
+                .last()
+                .unwrap()
+                .to_string_lossy()
+                .as_bytes()
+                .to_vec(),
+            duration_s: 0,
+        })
+    }
     fn group_membership_resolver(&self) -> Option<GroupResolver> {
         Some(
             if self.review_race.is_some() || self.selection_race.is_some() {
@@ -272,7 +303,20 @@ impl Mock {
         let artifact = format!(".oms/artifacts/artifact-{id}.md");
         let patch = format!(".oms/artifacts/patch-{id}.patch");
         let report = b"fixture native review report\n";
-        let changes = b"fixture native review patch\n";
+        let changes = if self.goal {
+            let task = plan.load().unwrap().task(id).unwrap().clone();
+            let path = format!(
+                "{}/{}.txt",
+                task.get("allowed_paths").array().unwrap()[0]
+                    .str()
+                    .unwrap()
+                    .trim_end_matches('/'),
+                id
+            );
+            format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+{id}\n").into_bytes()
+        } else {
+            b"fixture native review patch\n".to_vec()
+        };
         for (file, bytes) in [(&artifact, report.as_slice()), (&patch, changes.as_slice())] {
             let file = call.cwd.join(file);
             fs::write(&file, bytes).unwrap();
@@ -286,7 +330,7 @@ impl Mock {
             "exit": 0, "verify_exit": 0, "verification": "passed", "state": "review",
             "no_change": false, "plan_binding": binding, "artifact": artifact,
             "artifact_sha256": plan_json::sha(report), "patch": patch,
-            "patch_sha256": plan_json::sha(changes),
+            "patch_sha256": plan_json::sha(&changes),
         });
         let raw = serde_json::to_vec(&index).unwrap();
         let index_path = dir.join("index.jsonl");
@@ -330,6 +374,7 @@ impl Mock {
             let _one = self.plan.lock().unwrap();
             plan.execute_bound_task(&start, &issued, None).unwrap()
         });
+
         {
             let mut running = self.running.lock().unwrap();
             for other in running.iter() {
@@ -346,6 +391,36 @@ impl Mock {
         self.wake.notify_all();
         if self.rendezvous > 0 {
             self.wait_for(|s| s.len() >= self.rendezvous);
+        }
+        if self.mutate_ready && id == "a" {
+            let (_, raw) = self.plan(&call.cwd, &["evidence-snapshot", "--id", "c"]);
+            let selected: Value = serde_json::from_str(&raw).unwrap();
+            self.plan(
+                &call.cwd,
+                &[
+                    "amend",
+                    "--id",
+                    "c",
+                    "--expected-plan-sha256",
+                    &plan_json::sha(fs::read(call.cwd.join(ACTIVE)).unwrap()),
+                    "--expected-task-sha256",
+                    selected["task_sha256"].as_str().unwrap(),
+                    "--allowed",
+                    "widened/",
+                    "--reason",
+                    "parent changed the pending task scope",
+                ],
+            );
+            self.mutation_done.store(true, Ordering::SeqCst);
+            self.wake.notify_all();
+        }
+        if self.switch_ref && id == "a" {
+            git(&call.cwd, &["switch", "-q", "-c", "other-work"]);
+            self.mutation_done.store(true, Ordering::SeqCst);
+            self.wake.notify_all();
+        }
+        if (self.mutate_ready || self.switch_ref) && id == "b" {
+            self.wait_for(|_| self.mutation_done.load(Ordering::SeqCst));
         }
         for (waiter, awaited) in &self.waits {
             if *waiter == id {
@@ -398,6 +473,92 @@ impl Mock {
         self.live.fetch_sub(1, Ordering::SeqCst);
         self.running.lock().unwrap().remove(&id);
     }
+    fn land(&self, call: &Invocation) -> CommandResult {
+        let _one = self.plan.lock().unwrap();
+        let encoded = call
+            .args
+            .windows(2)
+            .find(|args| args[0] == "--expected-plan-review")
+            .unwrap()[1]
+            .to_str()
+            .unwrap();
+        let proof: Value = serde_json::from_str(encoded).unwrap();
+        let binding = &proof["binding"];
+        let id = binding["task_id"].as_str().unwrap();
+        let lease = binding["lease_id"].as_str().unwrap();
+        let patch_sha = proof["patch_sha256"].as_str().unwrap();
+        let stop = AtomicBool::new(false);
+        let req = Request::new(Action::Show).with("id", id);
+        let plan = Plan::open(
+            Context::from_environment(&req, &call.cwd).unwrap(),
+            self,
+            &stop,
+        )
+        .unwrap();
+        let snapshot = plan.load().unwrap();
+        let task = snapshot.task(id).unwrap();
+        let patch = task.text("patch").to_owned();
+        let land = Request::new(Action::Land)
+            .with("id", id)
+            .with("lease-id", lease)
+            .with("expected-review-lease-id", lease)
+            .with("expected-review-patch", patch.as_str())
+            .with("expected-review-patch-sha256", patch_sha)
+            .with("expected-review-verify", task.text("verify"))
+            .with("expected-review-executor-id", "")
+            .with("expected-review-executor-soul-sha256", "")
+            .with("expected-review-binding", encoded);
+        assert_eq!(plan.execute(&land).unwrap().code, 0);
+        git(&call.cwd, &["apply", &patch]);
+        let snapshot = plan.load().unwrap();
+        let landing_task = snapshot.task(id).unwrap();
+        let frozen = call
+            .cwd
+            .join(format!(".oms/landing-patches/land-{id}.patch"));
+        fs::create_dir_all(frozen.parent().unwrap()).unwrap();
+        fs::write(&frozen, fs::read(&patch).unwrap()).unwrap();
+        fs::set_permissions(&frozen, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut done_task = landing_task.clone();
+        done_task
+            .set("patch", plan_json::string(frozen.to_str().unwrap()))
+            .unwrap();
+        let receipt_sha = plan_json::receipt_digest(landing_task).unwrap();
+        let done_sha = plan_json::receipt_digest(&done_task).unwrap();
+        let finish = Request::new(Action::Finish)
+            .with("id", id)
+            .with("lease-id", lease)
+            .with("patch", frozen.as_os_str())
+            .with("expected-landing-receipt-sha256", &receipt_sha)
+            .with("expected-review-binding", encoded)
+            .with("expected-landing-done-receipt-sha256", &done_sha);
+        assert_eq!(plan.execute(&finish).unwrap().code, 0);
+        let mut intent = json!({"schema":1,"ts":"2026-11-28T00:00:00Z","landing_id":format!("land-{id}"),
+            "event":"intent","patch":frozen,"patch_sha":patch_sha,"base_sha":binding["base_sha"],
+            "task":id,"lease":lease,"plan_id":snapshot.plan.get("plan_id").str().unwrap(),
+            "plan_receipt_sha":receipt_sha,"plan_done_receipt_sha":done_sha,
+            "approval":"","approval_version":"","receipt_sha":"","worktree":call.cwd,"plan_review_binding":proof});
+        intent["receipt_sha"] = json!(
+            oms_command_plan::patch_landing_receipt_digest(
+                &plan_json::parse(&serde_json::to_vec(&intent).unwrap()).unwrap()
+            )
+            .unwrap()
+        );
+        let mut complete = intent.clone();
+        complete["event"] = json!("complete");
+        let path = call.cwd.join(".oms/landings.jsonl");
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        writeln!(file, "{intent}\n{complete}").unwrap();
+        self.landed.lock().unwrap().push((
+            id.to_owned(),
+            binding["base_sha"].as_str().unwrap().to_owned(),
+        ));
+        (0, b"fixture patch admitted\n".to_vec(), Vec::new())
+    }
 }
 impl Services for Mock {
     fn state_repository(
@@ -446,6 +607,9 @@ impl Services for Mock {
         } else if command.tool == "patch-land" {
             assert!(peer_timeout.is_none(), "{:?}", command.environment);
             assert_eq!(command.wall, Duration::from_secs(1200));
+            if self.goal {
+                return Ok(self.land(command));
+            }
             return Ok((1, Vec::new(), b"fixture admission hold".to_vec()));
         }
         Ok((0, Vec::new(), Vec::new()))
@@ -453,6 +617,10 @@ impl Services for Mock {
 }
 
 fn fixture(tasks: &[(&str, &str)]) -> Repo {
+    fixture_with_acceptance(tasks, None)
+}
+
+fn fixture_with_acceptance(tasks: &[(&str, &str)], acceptance: Option<&str>) -> Repo {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "oms-parallel-{}-{}-{}",
@@ -470,7 +638,11 @@ fn fixture(tasks: &[(&str, &str)]) -> Repo {
     git(&repo.0, &["add", "."]);
     git(&repo.0, &["commit", "-qm", "seed"]);
     let mock = Mock::default();
-    mock.plan(&repo.0, &["init", "--goal", "parallel"]);
+    let mut init = vec!["init", "--goal", "parallel"];
+    if let Some(command) = acceptance {
+        init.extend(["--accept", command]);
+    }
+    mock.plan(&repo.0, &init);
     fs::write(
         repo.0.join(".oms/fixture-brief"),
         "Implement the scoped task.",
@@ -517,6 +689,230 @@ fn state(repo: &Repo, id: &str) -> Value {
     let mock = Mock::default();
     let (_, shown) = mock.plan(&repo.0, &["show", "--id", id]);
     serde_json::from_str(&shown).unwrap()
+}
+
+fn goal_fixture(tasks: &[(&str, &str)]) -> Repo {
+    let repo = fixture_with_acceptance(tasks, Some("fixture acceptance"));
+    git(&repo.0, &["branch", "-M", "main"]);
+    git(&repo.0, &["config", "--local", "user.name", "fixture"]);
+    git(
+        &repo.0,
+        &["config", "--local", "user.email", "fixture@example.invalid"],
+    );
+    fs::write(repo.0.join(".git/info/exclude"), ".oms/\n").unwrap();
+    repo
+}
+
+fn drive(repo: &Repo, mock: &Mock, run_id: &str, max: &str, writers: &str) -> (i32, String) {
+    let (code, out, err) = run_with_services(
+        "goal-drive",
+        &[
+            "--run-id",
+            run_id,
+            "--max-cycles",
+            max,
+            "--max-writers",
+            writers,
+        ]
+        .map(OsString::from),
+        &repo.0,
+        &AtomicBool::new(false),
+        mock,
+    );
+    (
+        code,
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
+        ),
+    )
+}
+
+fn reservations(repo: &Repo) -> Vec<Value> {
+    fs::read_to_string(repo.0.join(".oms/plan/progress.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|row| row["kind"] == "goal-cycle")
+        .collect()
+}
+
+#[test]
+fn goal_drive_closes_reviewed_work_before_success_and_preserves_lifetime_budget() {
+    if scrubbed_child(
+        "goal_drive_closes_reviewed_work_before_success_and_preserves_lifetime_budget",
+    ) {
+        return;
+    }
+    let repo = goal_fixture(&[("a", "a/"), ("b", "b/"), ("c", "c/")]);
+    let mock = Mock {
+        goal: true,
+        acceptance_after: 1,
+        rendezvous: 2,
+        ..Mock::default()
+    };
+    let (code, out) = drive(&repo, &mock, "bounded", "2", "2");
+    assert_eq!(code, 3, "{out}");
+    assert!(out.contains("cycles-exhausted"), "{out}");
+    assert_eq!(mock.started.lock().unwrap().len(), 2);
+    assert_eq!(mock.landed.lock().unwrap().len(), 2);
+    assert_eq!(state(&repo, "a")["state"], "done");
+    assert_eq!(state(&repo, "b")["state"], "done");
+    assert_eq!(state(&repo, "c")["state"], "ready");
+    assert_eq!(reservations(&repo).len(), 2);
+    let (code, out) = drive(&repo, &mock, "bounded", "2", "2");
+    assert_eq!(code, 3, "{out}");
+    assert!(out.contains("cycles-exhausted"), "{out}");
+    for (max, writers) in [("3", "2"), ("2", "3")] {
+        let (code, out) = drive(&repo, &mock, "bounded", max, writers);
+        assert_ne!(code, 0, "{out}");
+        assert!(out.contains("frozen goal run"), "{out}");
+    }
+    assert_eq!(mock.started.lock().unwrap().len(), 2);
+    assert_eq!(reservations(&repo).len(), 2);
+}
+
+#[test]
+fn goal_drive_parallel_windows_hold_review_scopes_until_serial_integration() {
+    if scrubbed_child("goal_drive_parallel_windows_hold_review_scopes_until_serial_integration") {
+        return;
+    }
+    let repo = goal_fixture(&[("a", "src/"), ("b", "src/"), ("c", "docs/")]);
+    let mock = Mock {
+        goal: true,
+        acceptance_after: 1,
+        rendezvous: 2,
+        ..Mock::default()
+    };
+    let (code, out) = drive(&repo, &mock, "complete", "3", "2");
+    assert_eq!(code, 0, "{out}");
+    for id in ["a", "b", "c"] {
+        assert_eq!(state(&repo, id)["state"], "done", "{out}");
+    }
+    assert_eq!(mock.peak.load(Ordering::SeqCst), 2);
+    let landed = mock.landed.lock().unwrap();
+    assert_eq!(
+        landed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+        ["a", "c", "b"]
+    );
+    assert!(landed.windows(2).all(|pair| pair[0].1 != pair[1].1));
+    assert!(
+        !mock
+            .together
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(a, b)| a == "a" && b == "b" || a == "b" && b == "a")
+    );
+    assert_eq!(reservations(&repo).len(), 3);
+    assert!(mock.acceptances.load(Ordering::SeqCst) >= 4);
+}
+
+#[test]
+fn goal_drive_drains_external_reviews_without_spending_new_worker_attempts() {
+    if scrubbed_child("goal_drive_drains_external_reviews_without_spending_new_worker_attempts") {
+        return;
+    }
+    let repo = goal_fixture(&[("a", "a/"), ("b", "b/")]);
+    let mock = Mock {
+        goal: true,
+        acceptance_after: 1,
+        rendezvous: 2,
+        ..Mock::default()
+    };
+    let (code, out, err) = run(&repo, &mock, &["--parallel", "--max-writers", "2"]);
+    assert_eq!(code, 0, "{out}{err}");
+    let (code, out) = drive(&repo, &mock, "drain", "1", "1");
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(mock.started.lock().unwrap().len(), 2);
+    assert_eq!(mock.landed.lock().unwrap().len(), 2);
+    assert!(reservations(&repo).is_empty());
+}
+
+#[test]
+fn goal_drive_failed_parallel_call_keeps_spent_reservations_and_healthy_results() {
+    if scrubbed_child(
+        "goal_drive_failed_parallel_call_keeps_spent_reservations_and_healthy_results",
+    ) {
+        return;
+    }
+    let repo = goal_fixture(&[("a", "a/"), ("b", "b/"), ("c", "c/")]);
+    let mock = Mock {
+        goal: true,
+        acceptance_after: 1,
+        rendezvous: 2,
+        panics: BTreeSet::from(["a"]),
+        ..Mock::default()
+    };
+    let (code, out) = drive(&repo, &mock, "failed", "2", "2");
+    assert_eq!(code, 3, "{out}");
+    assert_eq!(state(&repo, "b")["state"], "done", "{out}");
+    assert_eq!(state(&repo, "a")["state"], "ready");
+    assert_eq!(state(&repo, "c")["state"], "ready");
+    assert_eq!(reservations(&repo).len(), 2);
+    let (code, out) = drive(&repo, &mock, "failed", "2", "2");
+    assert_eq!(code, 3, "{out}");
+    assert_eq!(mock.started.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn goal_drive_refill_refuses_scope_changed_during_the_frozen_run() {
+    if scrubbed_child("goal_drive_refill_refuses_scope_changed_during_the_frozen_run") {
+        return;
+    }
+    let repo = goal_fixture(&[("a", "a/"), ("b", "b/"), ("c", "c/")]);
+    let mock = Mock {
+        goal: true,
+        mutate_ready: true,
+        acceptance_after: 3,
+        rendezvous: 2,
+        ..Mock::default()
+    };
+    let (code, out) = drive(&repo, &mock, "frozen", "3", "2");
+    assert_ne!(code, 0, "{out}");
+    assert!(out.contains("frozen goal run task"), "{out}");
+    assert_eq!(mock.started.lock().unwrap().len(), 2);
+    assert_eq!(state(&repo, "c")["state"], "ready");
+    assert_eq!(reservations(&repo).len(), 2);
+    for id in ["a", "b"] {
+        assert_eq!(state(&repo, id)["state"], "review");
+    }
+}
+
+#[test]
+fn goal_drive_refuses_same_head_branch_switch_without_an_explicit_ref_flag() {
+    if scrubbed_child("goal_drive_refuses_same_head_branch_switch_without_an_explicit_ref_flag") {
+        return;
+    }
+    for tasks in [
+        vec![("a", "a/"), ("b", "b/")],
+        vec![("a", "a/"), ("b", "b/"), ("c", "c/")],
+    ] {
+        let repo = goal_fixture(&tasks);
+        let mock = Mock {
+            goal: true,
+            switch_ref: true,
+            acceptance_after: tasks.len(),
+            rendezvous: 2,
+            ..Mock::default()
+        };
+        let (code, out) = drive(&repo, &mock, "branch-bound", "3", "2");
+        assert_ne!(code, 0, "{out}");
+        assert!(
+            out.contains("expected work ref changed") || out.contains("frozen goal run task"),
+            "{out}"
+        );
+        assert_eq!(mock.started.lock().unwrap().len(), 2);
+        assert!(mock.landed.lock().unwrap().is_empty());
+        assert_eq!(reservations(&repo).len(), 2);
+        for id in ["a", "b"] {
+            assert_eq!(state(&repo, id)["state"], "review");
+        }
+        if tasks.len() == 3 {
+            assert_eq!(state(&repo, "c")["state"], "ready");
+        }
+    }
 }
 
 #[test]
