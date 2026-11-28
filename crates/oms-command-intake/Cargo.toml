@@ -6,6 +6,7 @@ rust-version = "1.99.1"
 
 [dependencies]
 oms-command-room = { path = "../oms-command-room" }
+oms-lock = { path = "../oms-lock" }
 oms-safe-fs = { path = "../oms-safe-fs" }
 oms-scrub = { path = "../oms-scrub" }
 rustix = { version = "=1.1.6", features = ["event", "fs", "process"] }

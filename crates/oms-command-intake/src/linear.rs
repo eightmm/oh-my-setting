@@ -27,6 +27,7 @@ pub const DEFAULT_LINEAR_API_URL: &str = "https://api.linear.app/graphql";
 pub const FIRST_THOUGHT_BODY: &str = "Received by OMS; waiting for Main";
 pub const REFUSED_CONTENT_ERROR_BODY: &str = "OMS could not accept the request content.";
 pub const CREATED_THOUGHT_CALLER_KEY: &str = "thought:created";
+pub const UNROUTED_ERROR_BODY: &str = "This Linear team is not connected to an OMS project.";
 
 const QUERY_AGENT_ACTIVITY: &str =
     "query OmsAgentActivity($id: String!) { agentActivity(id: $id) { id } }";
@@ -418,6 +419,46 @@ impl Source for LinearSource {
             Ok(req) => PayloadDecision::Work(req),
             Err(_) => PayloadDecision::BadRequest,
         }
+    }
+
+    fn routing_keys(&self, payload: &Map<String, Value>) -> Vec<String> {
+        let Some(issue) = payload
+            .get("agentSession")
+            .and_then(|s| s.get("issue"))
+            .and_then(Value::as_object)
+        else {
+            return Vec::new();
+        };
+        let team = issue.get("team");
+        let mut keys = Vec::new();
+        for value in [
+            team.and_then(|t| t.get("key")),
+            issue.get("teamId"),
+            team.and_then(|t| t.get("id")),
+        ] {
+            if let Some(key) = value.and_then(Value::as_str)
+                && key != crate::routes::ANY_TEAM
+                && crate::routes::validate_team(key).is_ok()
+                && !keys.iter().any(|k| k == key)
+            {
+                keys.push(key.to_owned());
+            }
+        }
+        keys
+    }
+
+    fn unrouted_ack(&self, req: &WorkRequest) -> Option<OutboundAck> {
+        (req.kind != WorkRequestKind::Stop).then(|| OutboundAck {
+            delivery_id: derive_delivery_id(
+                SOURCE_LINEAR,
+                &req.session_ref,
+                "",
+                &format!("error:unrouted:{}", req.idempotency_key),
+            ),
+            session_ref: req.session_ref.clone(),
+            kind: "error".to_owned(),
+            body: UNROUTED_ERROR_BODY.to_owned(),
+        })
     }
 
     fn first_ack(

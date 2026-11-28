@@ -7,6 +7,7 @@ use crate::crypto::{
 use crate::model::{
     WorkRequest, format_work_request_room_text, intake_path, sanitize_log_id, validate_source_name,
 };
+use crate::routes::{Route, resolve};
 use crate::source::{
     BindingDecision, OutboundAck, PayloadDecision, RequestHeaders, RoomDelivery, Source,
     TransportError,
@@ -18,7 +19,6 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -49,10 +49,8 @@ pub const ROOM_DUPLICATE_CONFLICT_MESSAGE: &str = "message id conflicts with its
 #[derive(Clone)]
 pub struct ServeConfig {
     pub source: Arc<dyn Source>,
-    pub repo: PathBuf,
-    pub room: String,
-    pub participant: String,
-    pub to: String,
+    /// Room targets by team; the single-target `--repo` binding is one `*` route.
+    pub routes: Vec<Route>,
     pub binding_flags: BTreeMap<String, String>,
     pub listen: SocketAddr,
     pub secrets: SecretStore,
@@ -76,13 +74,11 @@ pub fn validate_serve_room(
     interrupted: &AtomicBool,
 ) -> Result<(), String> {
     validate_source_name(cfg.source.name())?;
-    oms_command_room::identifier(&cfg.room, "room").map_err(|e| e.message)?;
-    oms_command_room::identifier(&cfg.participant, "participant").map_err(|e| e.message)?;
-    if cfg.to != "all" {
-        oms_command_room::identifier(&cfg.to, "recipient").map_err(|e| e.message)?;
-    }
-    if cfg.participant == cfg.to {
-        return Err("--participant and --to must name distinct Room participants".into());
+    if cfg.routes.is_empty() {
+        return Err(format!(
+            "no intake routes for source '{}' (add one with `oms intake route add`)",
+            cfg.source.name()
+        ));
     }
     cfg.source.validate_binding(&cfg.binding_flags)?;
     for spec in cfg.source.serve_env() {
@@ -94,9 +90,48 @@ pub fn validate_serve_room(
         }
     }
     cfg.source.validate_endpoint()?;
+    for (i, route) in cfg.routes.iter().enumerate() {
+        crate::routes::validate_team(&route.team)?;
+        if route.source != cfg.source.name() {
+            return Err(format!(
+                "route team {} belongs to source '{}', not '{}'",
+                route.team,
+                route.source,
+                cfg.source.name()
+            ));
+        }
+        if cfg.routes[..i].iter().any(|r| r.team == route.team) {
+            return Err(format!("two intake routes for team {}", route.team));
+        }
+    }
+    for route in &cfg.routes {
+        validate_route_room(route, room_services, interrupted).map_err(|e| {
+            if cfg.routes.len() == 1 && route.team == crate::routes::ANY_TEAM {
+                e
+            } else {
+                format!("route team {}: {e}", route.team)
+            }
+        })?;
+    }
+    Ok(())
+}
 
+/// The route's Room exists, is open, and enrolls both the sender and the recipient.
+pub fn validate_route_room(
+    route: &Route,
+    room_services: &dyn RoomServices,
+    interrupted: &AtomicBool,
+) -> Result<(), String> {
+    oms_command_room::identifier(&route.room, "room").map_err(|e| e.message)?;
+    oms_command_room::identifier(&route.participant, "participant").map_err(|e| e.message)?;
+    if route.to != "all" {
+        oms_command_room::identifier(&route.to, "recipient").map_err(|e| e.message)?;
+    }
+    if route.participant == route.to {
+        return Err("--participant and --to must name distinct Room participants".into());
+    }
     let room = Room::open(
-        &cfg.repo,
+        &route.repo,
         RoomSession::from_env(),
         room_services,
         interrupted,
@@ -105,16 +140,16 @@ pub fn validate_serve_room(
     )
     .map_err(|e| format!("room unavailable: {}", e.message))?;
     let state = room
-        .status(&cfg.room, false)
-        .map_err(|e| format!("room '{}' unavailable: {}", cfg.room, e.message))?;
+        .status(&route.room, false)
+        .map_err(|e| format!("room '{}' unavailable: {}", route.room, e.message))?;
     if state.flag("closed") {
-        return Err(format!("room '{}' is closed", cfg.room));
+        return Err(format!("room '{}' is closed", route.room));
     }
-    oms_command_room::participant(&state, &cfg.participant)
-        .map_err(|e| format!("--participant '{}': {}", cfg.participant, e.message))?;
-    if cfg.to != "all" {
-        oms_command_room::participant(&state, &cfg.to)
-            .map_err(|e| format!("--to '{}': {}", cfg.to, e.message))?;
+    oms_command_room::participant(&state, &route.participant)
+        .map_err(|e| format!("--participant '{}': {}", route.participant, e.message))?;
+    if route.to != "all" {
+        oms_command_room::participant(&state, &route.to)
+            .map_err(|e| format!("--to '{}': {}", route.to, e.message))?;
     }
     Ok(())
 }
@@ -350,9 +385,10 @@ impl PreparedServer {
                             );
                             let _ = writeln!(
                                 stderr,
-                                "intake serve: source={source_name} status={} session={}",
+                                "intake serve: source={source_name} status={} session={} route={}",
                                 outcome.status,
-                                sanitize_log_id(outcome.session_id.as_deref())
+                                sanitize_log_id(outcome.session_id.as_deref()),
+                                outcome.route.unwrap_or("-")
                             );
                             if let Some(ack) = outcome.post_response_ack {
                                 let queued = QueuedAck {
@@ -463,10 +499,23 @@ impl Drop for ServerHandle {
     }
 }
 
-struct RequestOutcome {
+#[derive(Default)]
+struct RequestOutcome<'a> {
     status: u16,
     session_id: Option<String>,
+    /// Matched route team, or `unrouted`, once a work request was parsed.
+    route: Option<&'a str>,
     post_response_ack: Option<OutboundAck>,
+}
+
+impl RequestOutcome<'_> {
+    fn status(status: u16, session_id: Option<String>) -> Self {
+        Self {
+            status,
+            session_id,
+            ..Self::default()
+        }
+    }
 }
 
 enum ParsedHttp {
@@ -715,21 +764,17 @@ fn read_bounded_http(stream: &mut TcpStream, expected_path: &str) -> ParsedHttp 
     ParsedHttp::Request { headers, body }
 }
 
-fn handle_connection(
+fn handle_connection<'a>(
     mut stream: TcpStream,
     expected_path: &str,
-    cfg: &ServeConfig,
+    cfg: &'a ServeConfig,
     room_services: &dyn RoomServices,
     interrupted: &AtomicBool,
-) -> RequestOutcome {
+) -> RequestOutcome<'a> {
     let (headers, raw_body) = match read_bounded_http(&mut stream, expected_path) {
         ParsedHttp::Reject { status, allow_post } => {
             write_http_response(&mut stream, status, allow_post);
-            return RequestOutcome {
-                status,
-                session_id: None,
-                post_response_ack: None,
-            };
+            return RequestOutcome::status(status, None);
         }
         ParsedHttp::Request { headers, body } => (headers, body),
     };
@@ -739,128 +784,90 @@ fn handle_connection(
     outcome
 }
 
-fn process_verified_intake(
+fn process_verified_intake<'a>(
     headers: &RequestHeaders,
     raw_body: &[u8],
-    cfg: &ServeConfig,
+    cfg: &'a ServeConfig,
     room_services: &dyn RoomServices,
     interrupted: &AtomicBool,
-) -> RequestOutcome {
+) -> RequestOutcome<'a> {
     let sig_header = cfg.source.signature_header();
     if headers.count(sig_header) != 1 {
-        return RequestOutcome {
-            status: 401,
-            session_id: None,
-            post_response_ack: None,
-        };
+        return RequestOutcome::status(401, None);
     }
     let Some(sig_input) = cfg.source.signature_input(headers, raw_body) else {
-        return RequestOutcome {
-            status: 401,
-            session_id: None,
-            post_response_ack: None,
-        };
+        return RequestOutcome::status(401, None);
     };
     let Some(signing_secret) = cfg.secrets.get(sig_input.secret_env) else {
-        return RequestOutcome {
-            status: 401,
-            session_id: None,
-            post_response_ack: None,
-        };
+        return RequestOutcome::status(401, None);
     };
     if !verify_hmac_sha256_hex(
         signing_secret.as_bytes(),
         &sig_input.message,
         sig_input.signature_hex,
     ) {
-        return RequestOutcome {
-            status: 401,
-            session_id: None,
-            post_response_ack: None,
-        };
+        return RequestOutcome::status(401, None);
     }
 
     let Ok(Value::Object(payload)) = serde_json::from_slice::<Value>(raw_body) else {
-        return RequestOutcome {
-            status: 400,
-            session_id: None,
-            post_response_ack: None,
-        };
+        return RequestOutcome::status(400, None);
     };
 
     let observed_session = cfg.source.observed_session_ref(&payload);
 
     let Some(ts_ms) = cfg.source.extract_timestamp_ms(headers, &payload) else {
-        return RequestOutcome {
-            status: 400,
-            session_id: observed_session,
-            post_response_ack: None,
-        };
+        return RequestOutcome::status(400, observed_session);
     };
     if !within_timestamp_window_ms(current_unix_ms(), ts_ms, TIMESTAMP_WINDOW_MS) {
-        return RequestOutcome {
-            status: 400,
-            session_id: observed_session,
-            post_response_ack: None,
-        };
+        return RequestOutcome::status(400, observed_session);
     }
 
     match cfg.source.check_binding(&cfg.binding_flags, &payload) {
         BindingDecision::Matched => {}
         BindingDecision::Ignore => {
-            return RequestOutcome {
-                status: 200,
-                session_id: None,
-                post_response_ack: None,
-            };
+            return RequestOutcome::status(200, None);
         }
         BindingDecision::Forbidden => {
-            return RequestOutcome {
-                status: 403,
-                session_id: observed_session,
-                post_response_ack: None,
-            };
+            return RequestOutcome::status(403, observed_session);
         }
         BindingDecision::BadRequest => {
-            return RequestOutcome {
-                status: 400,
-                session_id: observed_session,
-                post_response_ack: None,
-            };
+            return RequestOutcome::status(400, observed_session);
         }
     }
 
     let req = match cfg.source.parse_work_request(&payload) {
         PayloadDecision::Work(req) => req,
         PayloadDecision::Ignore => {
-            return RequestOutcome {
-                status: 200,
-                session_id: observed_session,
-                post_response_ack: None,
-            };
+            return RequestOutcome::status(200, observed_session);
         }
         PayloadDecision::BadRequest => {
-            return RequestOutcome {
-                status: 400,
-                session_id: observed_session,
-                post_response_ack: None,
-            };
+            return RequestOutcome::status(400, observed_session);
         }
     };
 
-    let Ok(delivery) = deliver_to_room(cfg, room_services, interrupted, &req) else {
+    let keys = cfg.source.routing_keys(&payload);
+    let Some(route) = resolve(&cfg.routes, cfg.source.name(), &keys) else {
         return RequestOutcome {
-            status: 503,
+            status: 200,
+            route: Some("unrouted"),
+            post_response_ack: cfg.source.unrouted_ack(&req),
             session_id: Some(req.session_ref),
-            post_response_ack: None,
         };
     };
-    let post_response_ack = cfg.source.first_ack(&req, &cfg.room, delivery);
+    let Ok(delivery) = deliver_to_room(route, room_services, interrupted, &req) else {
+        return RequestOutcome {
+            status: 503,
+            route: Some(&route.team),
+            ..RequestOutcome::status(503, Some(req.session_ref))
+        };
+    };
+    let post_response_ack = cfg.source.first_ack(&req, &route.room, delivery);
 
     RequestOutcome {
         status: 200,
-        session_id: Some(req.session_ref),
+        route: Some(&route.team),
         post_response_ack,
+        session_id: Some(req.session_ref),
     }
 }
 
@@ -869,7 +876,7 @@ pub fn is_room_content_refusal(msg: &str) -> bool {
 }
 
 fn deliver_to_room(
-    cfg: &ServeConfig,
+    cfg: &Route,
     room_services: &dyn RoomServices,
     interrupted: &AtomicBool,
     req: &WorkRequest,
