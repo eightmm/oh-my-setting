@@ -3817,16 +3817,14 @@ mod tests {
         dir.write_receipt(&row);
         let mut raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
         assert!(review_once(&ctx, &mut row, &mut raw, command, &covers, "goal").is_err());
-        if std::env::var_os("OMS_PEER_TIMEOUT").is_none() {
-            assert_eq!(
-                *host.invocations.lock().unwrap(),
-                vec![(
-                    "peer-review".into(),
-                    Duration::from_secs(1200),
-                    Some("1200s".into()),
-                )]
-            );
-        }
+        assert_eq!(
+            *host.invocations.lock().unwrap(),
+            vec![(
+                "peer-review".into(),
+                Duration::from_secs(1200),
+                Some("1200s".into()),
+            )]
+        );
         let intent = row["adaptive"]["review"].clone();
         {
             let calls = host.review_calls.lock().unwrap();
@@ -3965,6 +3963,54 @@ mod tests {
 
     #[test]
     fn adaptive_review_preserves_routes_with_unidentified_writer_families() {
+        const NAME: &str =
+            "receipt::tests::adaptive_review_preserves_routes_with_unidentified_writer_families";
+        let ambient = |key: &std::ffi::OsStr| {
+            let key = key.to_string_lossy();
+            key.starts_with("OMS_") || key.starts_with("OH_MY_SETTING_")
+        };
+        if std::env::var("RECEIPT_REVIEW_ENV_SUBTEST").as_deref() == Ok("90s") {
+            assert_eq!(std::env::var("OMS_PEER_TIMEOUT").as_deref(), Ok("90s"));
+            let host = AdaptiveHost::default();
+            let stop = AtomicBool::new(false);
+            let (dir, mut row) = adaptive_fixture(&host, &stop);
+            row["routing"]["reviewer"]["model"] = "claude-sonnet-4-6".into();
+            row["routing"]["reviewer"]["timeout"] = "".into();
+            row["stage"] = "reviewing".into();
+            dir.write_receipt(&row);
+            let ctx = Context::new(dir.0.clone(), dir.0.clone(), &host, &stop).unwrap();
+            let mut raw = std::fs::read(dir.plan("autopilot-run.json")).unwrap();
+            assert!(
+                review_once(&ctx, &mut row, &mut raw, "bash tests/check.sh", &[], "goal").is_err()
+            );
+            assert_eq!(
+                *host.invocations.lock().unwrap(),
+                vec![(
+                    "peer-review".into(),
+                    Duration::from_secs(90),
+                    Some("90s".into()),
+                )]
+            );
+            return;
+        }
+        if std::env::vars_os().any(|(k, _)| ambient(&k)) {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            for (key, _) in std::env::vars_os().filter(|(k, _)| ambient(k)) {
+                child.env_remove(key);
+            }
+            let out = child
+                .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+                .output()
+                .unwrap();
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(out.status.success(), "{text}");
+            assert!(text.contains("1 passed;"), "{text}");
+            return;
+        }
         for (writer, model, fallback, adaptive) in [
             ("antigravity", "", "", true),
             ("antigravity", "gemini-3-pro", "", true),
@@ -3987,12 +4033,10 @@ mod tests {
             assert!(
                 review_once(&ctx, &mut row, &mut raw, "bash tests/check.sh", &[], "goal").is_err()
             );
-            if std::env::var_os("OMS_PEER_TIMEOUT").is_none() {
-                assert_eq!(
-                    *host.invocations.lock().unwrap(),
-                    vec![("peer-review".into(), planning::UNPINNED_PROVIDER_WALL, None)]
-                );
-            }
+            assert_eq!(
+                *host.invocations.lock().unwrap(),
+                vec![("peer-review".into(), planning::UNPINNED_PROVIDER_WALL, None)]
+            );
             let calls = host.review_calls.lock().unwrap();
             assert_eq!(calls.len(), 1);
             let args = &calls[0];
@@ -4012,6 +4056,19 @@ mod tests {
                 );
             }
         }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("RECEIPT_REVIEW_ENV_SUBTEST", "90s")
+            .env("OMS_PEER_TIMEOUT", "90s")
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("1 passed;"), "{text}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Problem campaigns: immutable manifests, lifetime reservations and evidence.
 use crate::cli::Args;
-use crate::planning::{artifact, invoke, invoke_configured, scan, strings};
+use crate::planning::{ProviderWall, artifact, invoke, invoke_provider, scan, strings};
 use crate::storage::{Context, MAX_FILE};
 use crate::{Error, Output, Result, checkpoint, require, value, verify};
 use oms_command_plan::services::SupervisedCommand;
@@ -497,6 +497,7 @@ fn consolidate(
     manifest: &Value,
     wave: u64,
     remaining: u64,
+    wall: ProviderWall,
 ) -> Result<()> {
     let Some(route) = manifest.get("consolidator") else {
         return Ok(());
@@ -563,11 +564,11 @@ fn consolidate(
         }
         let answer = artifact(
             ctx,
-            &invoke_configured(
+            &invoke_provider(
                 ctx,
                 "agent-call",
                 call,
-                Duration::from_secs(remaining.min(1200)),
+                wall.bounded(Duration::from_secs(remaining)),
                 ledger.provider_environment(&reservation)?,
             )?,
             4 * MAX_FILE,
@@ -805,6 +806,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         );
     }
     ctx.parent()?;
+    let wall = ProviderWall::resolve(ctx, args)?;
     let _controller = ctx.lock(&format!("{directory}/running"))?;
     let manifest_path = format!("{directory}/manifest.json");
     let events_path = format!("{directory}/events.jsonl");
@@ -955,11 +957,12 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
                         value::text(route, "effort").into(),
                     ]);
                 }
-                let answer = invoke_configured(
+                let remaining = Duration::from_secs((deadline - current_time()).max(1) as u64);
+                let answer = invoke_provider(
                     ctx,
                     "agent-call",
                     call,
-                    Duration::from_secs((deadline - current_time()).clamp(1, 1200) as u64),
+                    wall.bounded(remaining),
                     ledger.provider_environment(&reservation)?,
                 )
                 .and_then(|out| artifact(ctx, &out, 4 * MAX_FILE));
@@ -1042,7 +1045,7 @@ pub(crate) fn execute(ctx: &Context<'_>, args: &Args) -> Result<Output> {
         }
         if wave < manifest["budget"]["max_waves"].as_u64().unwrap() {
             let remaining = (deadline - current_time()).max(0) as u64;
-            consolidate(ctx, &ledger, &manifest, wave, remaining)?;
+            consolidate(ctx, &ledger, &manifest, wave, remaining, wall)?;
         }
     }
     ledger.emit("campaign_stopped", json!({"reason": reason}))?;
