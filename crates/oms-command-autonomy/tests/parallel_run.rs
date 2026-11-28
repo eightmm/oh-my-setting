@@ -200,6 +200,12 @@ struct Mock {
     landed: Mutex<Vec<(String, String)>>,
     /// Task ids whose worker panics / reports failure.
     panics: BTreeSet<&'static str>,
+    /// Task ids whose first worker invocation returns a retryable failure with physical cleanup.
+    retryable_once: BTreeSet<&'static str>,
+    failed_once: Mutex<BTreeSet<String>>,
+    /// `(waiter, target)` pairs where `waiter` waits until `target` has a returned worker call in `progress.jsonl`.
+    wait_returned: Vec<(&'static str, &'static str)>,
+    verified_criteria: bool,
     /// Task ids that wait here until the named task's worker has started.
     waits: Vec<(&'static str, &'static str)>,
     /// Every worker waits until this many workers have started.
@@ -222,7 +228,23 @@ impl oms_command_plan::Services for Mock {
     ) -> oms_command_plan::Result<oms_command_plan::services::Execution> {
         assert!(self.goal);
         self.acceptances.fetch_add(1, Ordering::SeqCst);
-        let exit = u8::from(self.landed.lock().unwrap().len() < self.acceptance_after);
+        let landed = self.landed.lock().unwrap().len();
+        let exit = u8::from(landed < self.acceptance_after);
+        let output = if self.verified_criteria {
+            format!(
+                "{} landed={landed}\n",
+                command.argv.last().unwrap().to_string_lossy()
+            )
+            .into_bytes()
+        } else {
+            command
+                .argv
+                .last()
+                .unwrap()
+                .to_string_lossy()
+                .as_bytes()
+                .to_vec()
+        };
         Ok(oms_command_plan::services::Execution {
             exit,
             runner_exit: exit,
@@ -230,13 +252,7 @@ impl oms_command_plan::Services for Mock {
             output_limited: false,
             launch_error: false,
             supervision_error: false,
-            output: command
-                .argv
-                .last()
-                .unwrap()
-                .to_string_lossy()
-                .as_bytes()
-                .to_vec(),
+            output,
             duration_s: 0,
         })
     }
@@ -352,7 +368,7 @@ impl Mock {
         )
         .unwrap();
     }
-    fn delegate(&self, call: &Invocation) {
+    fn delegate(&self, call: &Invocation, stop: &AtomicBool) -> CommandResult {
         let args = call.args.iter().map(|a| a.to_string_lossy().into_owned());
         let args = args.collect::<Vec<_>>();
         let id = args
@@ -364,13 +380,14 @@ impl Mock {
             args.windows(2).find(|w| w[0] == "--plan-binding").unwrap()[1].as_bytes(),
         )
         .unwrap();
+        let retryable_fail = self.retryable_once.contains(id.as_str())
+            && self.failed_once.lock().unwrap().insert(id.clone());
         let start = Request::new(Action::Start)
             .with("id", id.as_str())
             .with("lease-id", issued.lease_id());
-        let stop = AtomicBool::new(false);
         let context = Context::from_environment(&start, &call.cwd).unwrap();
-        let plan = Plan::open(context, self, &stop).unwrap();
-        let running = (!self.panics.contains(id.as_str())).then(|| {
+        let plan = Plan::open(context, self, stop).unwrap();
+        let running = (!self.panics.contains(id.as_str()) && !retryable_fail).then(|| {
             let _one = self.plan.lock().unwrap();
             plan.execute_bound_task(&start, &issued, None).unwrap()
         });
@@ -432,6 +449,47 @@ impl Mock {
             self.running.lock().unwrap().remove(&id);
             panic!("injected worker panic for {id}");
         }
+        if retryable_fail {
+            use oms_command_telemetry::store::{physical, usage};
+            let operation = call
+                .environment
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "OMS_OPERATION_ID")
+                .unwrap()
+                .1
+                .to_str()
+                .unwrap();
+            let identity = usage::Identity {
+                call_id: format!("call-{id}-{}", self.started.lock().unwrap().len()),
+                operation_id: operation.into(),
+                provider: "codex".into(),
+                selected_model: Some("model-a".into()),
+                task_id: Some(id.clone()),
+                attempt_id: Some(format!("att-{id}-retryable")),
+                ..Default::default()
+            };
+            let physical::Registration::New(mut receipt) = physical::begin(
+                &call.cwd,
+                identity,
+                None,
+                true,
+                stop,
+                Instant::now() + Duration::from_secs(10),
+            )
+            .unwrap() else {
+                panic!("new physical telemetry");
+            };
+            receipt.revision += 1;
+            receipt.phase = usage::Phase::Unknown;
+            receipt.cleanup_complete = Some(true);
+            receipt.source_sha256 = Some(plan_json::sha(b"rate limit\n"));
+            usage::record(&call.cwd, &receipt, stop).unwrap();
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            self.running.lock().unwrap().remove(&id);
+            self.wake.notify_all();
+            return (2, Vec::new(), b"rate limit\n".to_vec());
+        }
         if self.review_race.is_none() {
             std::thread::sleep(Duration::from_millis(30));
         }
@@ -470,8 +528,34 @@ impl Mock {
         {
             RACE_READER.with(|reader| reader.replace(Some((race.clone(), false))));
         }
+        for (waiter, target) in &self.wait_returned {
+            if *waiter == id {
+                let deadline = Instant::now() + call_timeout();
+                let progress = call.cwd.join(".oms/plan/progress.jsonl");
+                loop {
+                    let has_returned = fs::read_to_string(&progress).is_ok_and(|raw| {
+                        raw.lines().any(|line| {
+                            serde_json::from_str::<Value>(line).is_ok_and(|row| {
+                                row["kind"] == "autopilot-worker-call"
+                                    && row["task_id"] == *target
+                                    && row["phase"] == "returned"
+                            })
+                        })
+                    });
+                    if has_returned {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for {target} returned call"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
         self.live.fetch_sub(1, Ordering::SeqCst);
         self.running.lock().unwrap().remove(&id);
+        (0, Vec::new(), Vec::new())
     }
     fn land(&self, call: &Invocation) -> CommandResult {
         let _one = self.plan.lock().unwrap();
@@ -561,6 +645,54 @@ impl Mock {
     }
 }
 impl Services for Mock {
+    fn classify_autonomy_failure(&self, text: &str, _: i32) -> oms_command_autonomy::Result<Value> {
+        Ok(if text.contains("rate limit") {
+            json!({"code":"provider_capacity","recovery":"one_explicit_fallback","retryable":true})
+        } else {
+            json!({"code":"unknown_failure","recovery":"preserve_and_escalate","retryable":false})
+        })
+    }
+    fn discovery_section(
+        &self,
+        repo: &Path,
+        section: &str,
+        _: &AtomicBool,
+    ) -> oms_command_autonomy::Result<Value> {
+        if !self.verified_criteria || section != "acceptance" {
+            return Err(oms_command_autonomy::Error::new(
+                2,
+                "native discovery projection service unavailable",
+            ));
+        }
+        let landed = self.landed.lock().unwrap().len();
+        let raw = fs::read(repo.join("PROJECT.md")).unwrap();
+        let parsed = oms_command_autonomy::contract::parse(&raw, repo)?;
+        let criteria = parsed
+            .criteria
+            .into_iter()
+            .map(|(id, statement)| {
+                let digest = plan_json::sha(format!("project\0{statement}").as_bytes());
+                let status = if landed >= self.acceptance_after {
+                    "verified"
+                } else {
+                    "unverified"
+                };
+                let evidence = if landed >= self.acceptance_after {
+                    vec![json!({"status": "verified", "stale": false, "signal": "execution_feedback"})]
+                } else {
+                    Vec::new()
+                };
+                json!({
+                    "id": id,
+                    "source": "project",
+                    "criterion_digest": digest,
+                    "status": status,
+                    "evidence": evidence
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({"criteria": criteria}))
+    }
     fn state_repository(
         &self,
         work: &Path,
@@ -587,7 +719,7 @@ impl Services for Mock {
     fn invoke(
         &self,
         command: &Invocation,
-        _: &AtomicBool,
+        stop: &AtomicBool,
     ) -> oms_command_autonomy::Result<CommandResult> {
         let peer_timeout = command
             .environment
@@ -603,7 +735,7 @@ impl Services for Mock {
                 assert!(peer_timeout.is_none(), "{:?}", command.environment);
                 assert_eq!(command.wall, Duration::from_secs(86_400 + 60));
             }
-            self.delegate(command);
+            return Ok(self.delegate(command, stop));
         } else if command.tool == "patch-land" {
             assert!(peer_timeout.is_none(), "{:?}", command.environment);
             assert_eq!(command.wall, Duration::from_secs(1200));
@@ -830,6 +962,126 @@ fn goal_drive_drains_external_reviews_without_spending_new_worker_attempts() {
     assert!(reservations(&repo).is_empty());
 }
 
+fn autopilot_parallel_fixture(tasks: &[(&str, &str, Option<&str>)]) -> Repo {
+    let bare = tasks
+        .iter()
+        .map(|(id, allowed, _)| (*id, *allowed))
+        .collect::<Vec<_>>();
+    let repo = goal_fixture(&bare);
+    for (id, _, resources) in tasks {
+        if let Some(res) = resources {
+            let mock = Mock::default();
+            let (_, raw) = mock.plan(&repo.0, &["evidence-snapshot", "--id", id]);
+            let snap: Value = serde_json::from_str(&raw).unwrap();
+            mock.plan(
+                &repo.0,
+                &[
+                    "amend",
+                    "--id",
+                    id,
+                    "--expected-plan-sha256",
+                    &plan_json::sha(fs::read(repo.0.join(ACTIVE)).unwrap()),
+                    "--expected-task-sha256",
+                    snap["task_sha256"].as_str().unwrap(),
+                    "--resources",
+                    res,
+                    "--reason",
+                    "attach task resource",
+                ],
+            );
+        }
+    }
+    fs::create_dir_all(repo.0.join("tests")).unwrap();
+    fs::write(repo.0.join("tests/check.sh"), "exit 1\n").unwrap();
+    fs::write(
+        repo.0.join("PROJECT.md"),
+        "# Project\n\n## Status\n- State: confirmed\n\n## Goal\n- Goal: Parallel retry\n\n## Scope\n- Allowed: a, b, c\n\n## Acceptance\n- Parallel tasks complete cleanly\n\n## Verification\n- Required checks: bash tests/check.sh\n- Required check files: tests/check.sh\n",
+    )
+    .unwrap();
+    git(&repo.0, &["add", "PROJECT.md", "tests/check.sh"]);
+    git(&repo.0, &["commit", "-qm", "project contract"]);
+    let spec = plan_json::sha(fs::read(repo.0.join("PROJECT.md")).unwrap());
+    let base_out = Command::new("git")
+        .args(["-C", repo.0.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let base_sha = String::from_utf8(base_out.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let branch = format!("oms/autopilot-{}", &spec[..12]);
+    git(&repo.0, &["switch", "-q", "-c", &branch]);
+    let proposal = serde_json::to_vec_pretty(&json!({
+        "tasks": tasks.iter().map(|(id, ..)| json!({"id": id})).collect::<Vec<_>>()
+    }))
+    .unwrap();
+    let proposal_sha = plan_json::sha(&proposal);
+    let proposal_path = repo
+        .0
+        .join(".oms/plan")
+        .join(format!("approved-proposal-{proposal_sha}.json"));
+    fs::write(&proposal_path, &proposal).unwrap();
+    fs::set_permissions(&proposal_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let route = |model: &str, timeout: &str| json!({"model": model, "fallback_model": "", "reasoning_effort": "auto", "timeout": timeout});
+    let receipt = json!({
+        "schema": 1,
+        "kind": "autopilot-run",
+        "stage": "approved",
+        "repo": repo.0,
+        "spec_sha256": spec,
+        "providers": {"planner": "claude", "worker": "codex", "reviewer": "claude"},
+        "routing": {
+            "provider_timeout": "",
+            "planner": route("", ""),
+            "worker": route("model-a", ""),
+            "reviewer": route("", "")
+        },
+        "contract": {
+            "allowed": "a,b,c",
+            "base": "main",
+            "base_sha": base_sha,
+            "remote": "origin",
+            "max_cycles": 5,
+            "max_writers": 2,
+            "initial_tasks": 6,
+            "replan_tasks": 2,
+            "auto_repair": false,
+            "retry_known": true,
+            "review_mode": "off",
+            "draft_pr": false,
+            "allow_verifier_change": false,
+            "allow_floor_change": "",
+            "collaboration": "off"
+        },
+        "proposal": {"path": proposal_path, "sha256": proposal_sha},
+        "branch": branch,
+        "owner_id": format!("owner_{}", "1".repeat(32)),
+        "updated": "2026-11-29T00:00:00Z"
+    });
+    let receipt_path = repo.0.join(".oms/plan/autopilot-run.json");
+    fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt).unwrap()).unwrap();
+    fs::set_permissions(&receipt_path, fs::Permissions::from_mode(0o600)).unwrap();
+    repo
+}
+
+fn autopilot_cmd(repo: &Repo, mock: &Mock, extra: &[&str]) -> (i32, String, String) {
+    let mut args = vec![];
+    args.extend_from_slice(extra);
+    args.extend(["--repo", repo.0.to_str().unwrap()]);
+    let (code, out, err) = run_with_services(
+        "autopilot",
+        &args.iter().map(OsString::from).collect::<Vec<_>>(),
+        &repo.0,
+        &AtomicBool::new(false),
+        mock,
+    );
+    (
+        code,
+        String::from_utf8_lossy(&out).into_owned(),
+        String::from_utf8_lossy(&err).into_owned(),
+    )
+}
+
 #[test]
 fn goal_drive_failed_parallel_call_keeps_spent_reservations_and_healthy_results() {
     if scrubbed_child(
@@ -854,6 +1106,93 @@ fn goal_drive_failed_parallel_call_keeps_spent_reservations_and_healthy_results(
     let (code, out) = drive(&repo, &mock, "failed", "2", "2");
     assert_eq!(code, 3, "{out}");
     assert_eq!(mock.started.lock().unwrap().len(), 2);
+
+    // Positive end-to-end autopilot case (`max_cycles=5`, `retry_known=true`):
+    // sibling `a` fails retryably, sibling `b` finishes later and commits
+    // disjointly (`HEAD` advances), and `autopilot` resumes `a` then finishes `c`.
+    let auto_repo =
+        autopilot_parallel_fixture(&[("a", "a/", None), ("b", "b/", None), ("c", "c/", None)]);
+    let auto_mock = Mock {
+        goal: true,
+        acceptance_after: 3,
+        rendezvous: 2,
+        retryable_once: BTreeSet::from(["a"]),
+        wait_returned: vec![("b", "a")],
+        verified_criteria: true,
+        ..Mock::default()
+    };
+    let (code, out, err) = autopilot_cmd(&auto_repo, &auto_mock, &["run"]);
+    assert_eq!(code, 3, "{out}{err}");
+    assert_eq!(state(&auto_repo, "b")["state"], "done", "{out}{err}");
+    assert_eq!(state(&auto_repo, "a")["state"], "ready");
+    assert_eq!(state(&auto_repo, "c")["state"], "ready");
+
+    let stop = AtomicBool::new(false);
+    let obs =
+        oms_command_autonomy::adaptive::observe(&auto_repo.0, &auto_repo.0, &auto_mock, &stop)
+            .unwrap();
+    assert_eq!(obs["action"], "resume", "{obs}");
+    assert_eq!(obs["retry"]["task_id"], "a", "{obs}");
+    assert_ne!(obs["retry"]["call"]["head"], obs["head"], "{obs}");
+
+    let sha = obs["decision_sha256"].as_str().unwrap();
+    let (code, out, err) = autopilot_cmd(
+        &auto_repo,
+        &auto_mock,
+        &[
+            "decide",
+            "--expected-decision-sha256",
+            sha,
+            "--action",
+            "resume",
+        ],
+    );
+    assert_eq!(code, 0, "{out}{err}");
+    let (code, out, err) = autopilot_cmd(&auto_repo, &auto_mock, &["run"]);
+    assert_eq!(code, 0, "{out}{err}");
+    for id in ["a", "b", "c"] {
+        assert_eq!(state(&auto_repo, id)["state"], "done", "{id}: {out}{err}");
+    }
+
+    // Negative fail-closed case: foreign commit after disjoint sibling commit
+    // strands `autopilot` in `inspect` and refuses `resume`.
+    let foreign_repo =
+        autopilot_parallel_fixture(&[("a", "a/", None), ("b", "b/", None), ("c", "c/", None)]);
+    let foreign_mock = Mock {
+        goal: true,
+        acceptance_after: 3,
+        rendezvous: 2,
+        retryable_once: BTreeSet::from(["a"]),
+        wait_returned: vec![("b", "a")],
+        verified_criteria: true,
+        ..Mock::default()
+    };
+    let (code, out, err) = autopilot_cmd(&foreign_repo, &foreign_mock, &["run"]);
+    assert_eq!(code, 3, "{out}{err}");
+    fs::create_dir_all(foreign_repo.0.join("c")).unwrap();
+    fs::write(
+        foreign_repo.0.join("c/foreign.txt"),
+        b"untracked provenance\n",
+    )
+    .unwrap();
+    git(&foreign_repo.0, &["add", "c/foreign.txt"]);
+    git(&foreign_repo.0, &["commit", "-qm", "foreign"]);
+    let foreign_obs = oms_command_autonomy::adaptive::observe(
+        &foreign_repo.0,
+        &foreign_repo.0,
+        &foreign_mock,
+        &stop,
+    )
+    .unwrap();
+    assert_eq!(foreign_obs["action"], "inspect", "{foreign_obs}");
+    assert!(
+        !foreign_obs["allowed_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "resume"),
+        "{foreign_obs}"
+    );
 }
 
 #[test]

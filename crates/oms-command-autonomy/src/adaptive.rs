@@ -4,7 +4,7 @@ use crate::storage::{ACTIVE, Context, MAX_FILE, PROGRESS, RECEIPT};
 use crate::{Error, Result, Services, planning, require, value};
 use oms_command_plan::{Action, Request};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -548,6 +548,293 @@ pub(crate) fn worker_contract(task: &Value) -> Result<String> {
     Ok(value::hash(value::canonical(&Value::Object(fields))?))
 }
 
+fn string_list(value: &Value) -> Option<Vec<String>> {
+    if value.is_null() {
+        return Some(Vec::new());
+    }
+    value
+        .as_array()?
+        .iter()
+        .map(|item| item.as_str().map(str::to_owned))
+        .collect()
+}
+
+fn scope_root(normalized: &str) -> String {
+    let mut path = normalized.to_owned();
+    if let Some(at) = path.find(['*', '?', '[']) {
+        path = path[..at]
+            .rsplit_once('/')
+            .map(|(parent, _)| parent.to_owned())
+            .unwrap_or_default();
+    }
+    path.trim_matches('/').to_owned()
+}
+
+fn bounded_allowed_roots(value: &Value) -> Option<Vec<String>> {
+    let items = value.as_array()?;
+    if items.is_empty() {
+        return None;
+    }
+    let mut roots = Vec::with_capacity(items.len());
+    for item in items {
+        let raw = item.as_str()?;
+        let normalized = oms_contract_markdown::scope::normalize(raw).ok()?;
+        if normalized == "." {
+            return None;
+        }
+        let root = scope_root(&normalized);
+        if root.is_empty() {
+            return None;
+        }
+        roots.push(root);
+    }
+    Some(roots)
+}
+
+fn paths_overlap(failed_roots: &[String], touched: &str) -> bool {
+    failed_roots.iter().any(|root| {
+        root.is_empty()
+            || touched.is_empty()
+            || root == touched
+            || touched.starts_with(&format!("{root}/"))
+            || root.starts_with(&format!("{touched}/"))
+    })
+}
+
+fn diff_tree_paths(
+    ctx: &Context<'_>,
+    parent: &str,
+    commit: &str,
+) -> Result<Option<BTreeSet<String>>> {
+    let raw = ctx.plan()?.git().run(&[
+        "diff-tree",
+        "--no-commit-id",
+        "--no-renames",
+        "--name-only",
+        "-r",
+        "-z",
+        parent,
+        commit,
+    ])?;
+    let mut paths = BTreeSet::new();
+    for entry in raw.split(|b| *b == 0).filter(|s| !s.is_empty()) {
+        let Ok(text) = std::str::from_utf8(entry) else {
+            return Ok(None);
+        };
+        let Ok(normalized) = oms_contract_markdown::scope::normalize(text) else {
+            return Ok(None);
+        };
+        if normalized == "." {
+            return Ok(None);
+        }
+        paths.insert(normalized);
+    }
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(paths))
+}
+
+fn linear_commit_chain(
+    ctx: &Context<'_>,
+    from_head: &str,
+    to_head: &str,
+) -> Result<Option<Vec<(String, String)>>> {
+    let plan_handle = ctx.plan()?;
+    let git = plan_handle.git();
+    if git.ancestor(from_head, to_head).is_err() {
+        return Ok(None);
+    }
+    let raw = git.text(&["rev-list", "--parents", &format!("{from_head}..{to_head}")])?;
+    let mut parents = BTreeMap::new();
+    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+        let mut parts = line.split_whitespace();
+        let Some(commit) = parts.next() else {
+            return Ok(None);
+        };
+        let Some(parent) = parts.next() else {
+            return Ok(None);
+        };
+        if parts.next().is_some()
+            || !value::commit(commit)
+            || !value::commit(parent)
+            || parents
+                .insert(commit.to_owned(), parent.to_owned())
+                .is_some()
+        {
+            return Ok(None);
+        }
+    }
+    if parents.is_empty() {
+        return Ok(None);
+    }
+    let mut chain = Vec::with_capacity(parents.len());
+    let mut cursor = to_head;
+    while cursor != from_head {
+        let Some(parent) = parents.get(cursor) else {
+            return Ok(None);
+        };
+        chain.push((cursor.to_owned(), parent.clone()));
+        if chain.len() > parents.len() {
+            return Ok(None);
+        }
+        cursor = parent;
+    }
+    if chain.len() != parents.len() {
+        return Ok(None);
+    }
+    Ok(Some(chain))
+}
+
+/// Accept `from_head != to_head` only when every intervening commit is a linear
+/// `commit-intent` (`landed` + `committed` joined by `intent_id`) linked to an
+/// `autopilot-cycle` `run_id` of `owner_id`, and every touched path and committed
+/// task resource is strictly disjoint from `task`'s bounded `allowed_paths`/`resources`.
+fn head_matches_or_verified_progression(
+    ctx: &Context<'_>,
+    rows: &[Value],
+    owner_id: &str,
+    plan: &Value,
+    task: &Value,
+    from_head: &str,
+    to_head: &str,
+) -> Result<bool> {
+    if !value::commit(from_head) || !value::commit(to_head) {
+        return Ok(false);
+    }
+    if from_head == to_head {
+        return Ok(true);
+    }
+    let Some(failed_roots) = bounded_allowed_roots(&task["allowed_paths"]) else {
+        return Ok(false);
+    };
+    let Some(failed_resources) = string_list(&task["resources"]) else {
+        return Ok(false);
+    };
+    let Some(chain) = linear_commit_chain(ctx, from_head, to_head)? else {
+        return Ok(false);
+    };
+    let owner_cycle_runs = rows
+        .iter()
+        .filter(|r| r["kind"] == "autopilot-cycle" && r["contract_id"] == owner_id)
+        .map(|r| value::text(r, "run_id"))
+        .filter(|run_id| !run_id.is_empty())
+        .collect::<BTreeSet<_>>();
+    if owner_cycle_runs.is_empty() {
+        return Ok(false);
+    }
+    let mut abandoned = BTreeSet::new();
+    let mut landed_by_commit: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+    let mut committed_by_intent: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+    for row in rows.iter().filter(|r| r["kind"] == "commit-intent") {
+        let intent_id = value::text(row, "intent_id");
+        if intent_id.is_empty() {
+            continue;
+        }
+        match value::text(row, "phase") {
+            "abandoned" => {
+                abandoned.insert(intent_id);
+            }
+            "landed" => {
+                let commit = value::text(row, "commit");
+                if value::commit(commit) {
+                    landed_by_commit.entry(commit).or_default().push(row);
+                }
+            }
+            "committed" => {
+                committed_by_intent.entry(intent_id).or_default().push(row);
+            }
+            _ => {}
+        }
+    }
+    let repo_str = ctx.repo.to_string_lossy();
+    let plan_handle = ctx.plan()?;
+    let git = plan_handle.git();
+    for (commit, parent) in chain {
+        let Some([landed]) = landed_by_commit.get(commit.as_str()).map(Vec::as_slice) else {
+            return Ok(false);
+        };
+        let intent_id = value::text(landed, "intent_id");
+        if intent_id.is_empty() || abandoned.contains(intent_id) {
+            return Ok(false);
+        }
+        let Some([committed]) = committed_by_intent.get(intent_id).map(Vec::as_slice) else {
+            return Ok(false);
+        };
+        let expected_tree = value::text(landed, "expected_tree");
+        if value::text(landed, "worktree") != repo_str.as_ref()
+            || value::text(committed, "worktree") != repo_str.as_ref()
+            || value::text(landed, "base_sha") != parent
+            || value::text(committed, "base_sha") != parent
+            || committed["run_id"] != landed["run_id"]
+            || committed["task_id"] != landed["task_id"]
+            || committed["paths"] != landed["paths"]
+            || !value::commit(expected_tree)
+            || git.text(&["rev-parse", &format!("{commit}^{{tree}}")])? != expected_tree
+        {
+            return Ok(false);
+        }
+        let run_id = value::text(committed, "run_id");
+        if !owner_cycle_runs.contains(run_id) {
+            return Ok(false);
+        }
+        let Some(raw_intent_paths) = string_list(&committed["paths"]) else {
+            return Ok(false);
+        };
+        if raw_intent_paths.is_empty() {
+            return Ok(false);
+        }
+        let mut intent_paths = BTreeSet::new();
+        for raw in &raw_intent_paths {
+            let Ok(normalized) = oms_contract_markdown::scope::normalize(raw) else {
+                return Ok(false);
+            };
+            if normalized == "." {
+                return Ok(false);
+            }
+            intent_paths.insert(normalized);
+        }
+        let Some(git_paths) = diff_tree_paths(ctx, &parent, &commit)? else {
+            return Ok(false);
+        };
+        if git_paths != intent_paths
+            || git_paths
+                .iter()
+                .any(|touched| paths_overlap(&failed_roots, touched))
+        {
+            return Ok(false);
+        }
+        let committed_task_id = value::text(committed, "task_id");
+        let Some(committed_task) = plan["tasks"]
+            .get(committed_task_id)
+            .filter(|t| t.is_object())
+        else {
+            return Ok(false);
+        };
+        let Some(committed_resources) = string_list(&committed_task["resources"]) else {
+            return Ok(false);
+        };
+        if committed_resources
+            .iter()
+            .any(|res| failed_resources.contains(res))
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn parked_run_id<'a>(rows: &'a [Value], owner_id: &str) -> Option<&'a str> {
+    rows.iter()
+        .rev()
+        .find(|r| {
+            (r["kind"] == "terminal" && r["owner_id"] == owner_id)
+                || (r["kind"] == "autopilot-cycle" && r["contract_id"] == owner_id)
+                || (r["kind"] == "autopilot-worker-call" && r["owner_id"] == owner_id)
+        })
+        .map(|r| value::text(r, "run_id"))
+}
+
 /// A returned native call is still insufficient without every registered
 /// physical process being drained. Unknown usage/cost is separate from custody;
 /// no returned call record, a pending intent or unknown cleanup refuses retry.
@@ -558,88 +845,127 @@ fn worker_retry(ctx: &Context<'_>, row: &Value, raw: &[u8], allow_reserved: bool
     {
         return Ok(Value::Null);
     }
+    let owner_id = value::text(row, "owner_id");
     let rows = ctx.rows(PROGRESS)?;
-    let Some(call) = rows
-        .iter()
-        .rev()
-        .find(|r| r["kind"] == "autopilot-worker-call" && r["owner_id"] == row["owner_id"])
-    else {
+    let Some(run_id) = parked_run_id(&rows, owner_id) else {
         return Ok(Value::Null);
     };
-    if call["phase"] != "returned"
-        || call["failure"]["retryable"] != true
-        || call["exit"] == 0
-        || call["exit"] == 130
-    {
-        return Ok(Value::Null);
-    }
-    let op = value::text(call, "operation_id");
-    let consumed = rows.iter().any(|r| {
-        r["kind"] == "autopilot-retry-reserved"
-            && r["owner_id"] == row["owner_id"]
-            && r["operation_id"] == op
-            && r["receipt_sha256"] != value::hash(raw)
-    });
-    if consumed && !allow_reserved {
-        return Ok(Value::Null);
-    }
     let plan = ctx.plan_value()?;
-    let task = &plan["tasks"][value::text(call, "task_id")];
-    if task["state"] != "ready"
-        || !value::text(task, "lease_id").is_empty()
-        || task["lease_epoch"] != call["lease_epoch"]
-        || task["repair_count"].as_u64().unwrap_or(0) != 0
-        || call["plan_id"] != plan["plan_id"]
-        || call["head"] != ctx.git(&["rev-parse", "HEAD"])?
-        || call["task_sha256"] != worker_contract(task)?
-        || call["route"]["provider"] != row["providers"]["worker"]
-    {
-        return Ok(Value::Null);
-    }
+    let current_head = ctx.git(&["rev-parse", "HEAD"])?;
+    let receipt_sha = value::hash(raw);
     let intents = oms_command_telemetry::store::physical::load(&ctx.state, ctx.interrupted)
         .map_err(|e| Error::new(2, e.to_string()))?;
     let usage = oms_command_telemetry::store::usage::load(&ctx.state)
         .map_err(|e| Error::new(2, e.to_string()))?;
-    let intents = intents
-        .iter()
-        .filter(|i| i.identity.operation_id == op)
-        .collect::<Vec<_>>();
-    let calls = usage
-        .calls
-        .iter()
-        .filter(|c| c.receipt.identity.operation_id == op)
-        .collect::<Vec<_>>();
-    // Empty physical coverage cannot prove a known completed provider attempt.
-    if intents.is_empty() || intents.len() > 64 || intents.len() != calls.len() {
-        return Ok(Value::Null);
-    }
-    let mut proofs = vec![];
-    for intent in intents {
-        let Some(usage) = calls.iter().find(|c| c.receipt.identity == intent.identity) else {
-            return Ok(Value::Null);
-        };
-        let receipt = &usage.receipt;
-        if usage.conflict
-            || intent.phase != oms_command_telemetry::store::physical::Phase::Ready
-            || intent.usage_ordinal != Some(receipt.ordinal)
-            || receipt.cleanup_complete != Some(true)
-            || matches!(
-                receipt.phase,
-                oms_command_telemetry::store::usage::Phase::Pending
-                    | oms_command_telemetry::store::usage::Phase::Partial
-            )
-            || receipt.identity.task_id.as_deref() != call["task_id"].as_str()
-            || receipt.identity.provider != value::text(&call["route"], "provider")
-        {
-            return Ok(Value::Null);
+
+    for call in rows.iter().rev().filter(|r| {
+        r["kind"] == "autopilot-worker-call"
+            && r["owner_id"] == owner_id
+            && r["run_id"] == run_id
+            && r["phase"] == "returned"
+    }) {
+        if call["failure"]["retryable"] != true || call["exit"] == 0 || call["exit"] == 130 {
+            continue;
         }
-        proofs.push(json!({"call_id":receipt.identity.call_id,"attempt_id":receipt.identity.attempt_id,"ordinal":receipt.ordinal,
-            "revision":receipt.revision,"source_sha256":receipt.source_sha256,"cleanup_complete":true}));
+        let op = value::text(call, "operation_id");
+        if op.is_empty()
+            || rows
+                .iter()
+                .filter(|r| {
+                    r["kind"] == "autopilot-worker-call"
+                        && r["owner_id"] == owner_id
+                        && r["operation_id"] == op
+                        && r["phase"] == "returned"
+                })
+                .count()
+                != 1
+        {
+            continue;
+        }
+        let consumed = rows.iter().any(|r| {
+            r["kind"] == "autopilot-retry-reserved"
+                && r["owner_id"] == owner_id
+                && r["operation_id"] == op
+                && r["receipt_sha256"] != receipt_sha
+        });
+        if consumed && !allow_reserved {
+            continue;
+        }
+        let task_id = value::text(call, "task_id");
+        let Some(task) = plan["tasks"].get(task_id).filter(|t| t.is_object()) else {
+            continue;
+        };
+        let task_sha = worker_contract(task)?;
+        if task["state"] != "ready"
+            || !value::text(task, "lease_id").is_empty()
+            || task["lease_epoch"] != call["lease_epoch"]
+            || task["repair_count"].as_u64().unwrap_or(0) != 0
+            || call["plan_id"] != plan["plan_id"]
+            || call["task_sha256"] != task_sha
+            || call["route"]["provider"] != row["providers"]["worker"]
+            || !head_matches_or_verified_progression(
+                ctx,
+                &rows,
+                owner_id,
+                &plan,
+                task,
+                value::text(call, "head"),
+                &current_head,
+            )?
+        {
+            continue;
+        }
+        let op_intents = intents
+            .iter()
+            .filter(|i| i.identity.operation_id == op)
+            .collect::<Vec<_>>();
+        let op_calls = usage
+            .calls
+            .iter()
+            .filter(|c| c.receipt.identity.operation_id == op)
+            .collect::<Vec<_>>();
+        // Empty physical coverage cannot prove a known completed provider attempt.
+        if op_intents.is_empty() || op_intents.len() > 64 || op_intents.len() != op_calls.len() {
+            continue;
+        }
+        let mut proofs = vec![];
+        let mut valid_physical = true;
+        for intent in op_intents {
+            let Some(usage_entry) = op_calls
+                .iter()
+                .find(|c| c.receipt.identity == intent.identity)
+            else {
+                valid_physical = false;
+                break;
+            };
+            let receipt = &usage_entry.receipt;
+            if usage_entry.conflict
+                || intent.phase != oms_command_telemetry::store::physical::Phase::Ready
+                || intent.usage_ordinal != Some(receipt.ordinal)
+                || receipt.cleanup_complete != Some(true)
+                || matches!(
+                    receipt.phase,
+                    oms_command_telemetry::store::usage::Phase::Pending
+                        | oms_command_telemetry::store::usage::Phase::Partial
+                )
+                || receipt.identity.task_id.as_deref() != call["task_id"].as_str()
+                || receipt.identity.provider != value::text(&call["route"], "provider")
+            {
+                valid_physical = false;
+                break;
+            }
+            proofs.push(json!({"call_id":receipt.identity.call_id,"attempt_id":receipt.identity.attempt_id,"ordinal":receipt.ordinal,
+                "revision":receipt.revision,"source_sha256":receipt.source_sha256,"cleanup_complete":true}));
+        }
+        if !valid_physical {
+            continue;
+        }
+        return Ok(
+            json!({"call":call,"physical_calls":proofs,"task_sha256":task_sha,"task_id":call["task_id"],"operation_id":op,
+            "instruction":"One same-contract retry under the original retry-known authority; no scope, route or budget increase."}),
+        );
     }
-    Ok(
-        json!({"call":call,"physical_calls":proofs,"task_sha256":worker_contract(task)?,"task_id":call["task_id"],"operation_id":op,
-        "instruction":"One same-contract retry under the original retry-known authority; no scope, route or budget increase."}),
-    )
+    Ok(Value::Null)
 }
 
 /// Checked in-memory observation. Only the producer may construct it, and the
@@ -1168,11 +1494,23 @@ pub(crate) fn tranche(ctx: &Context<'_>) -> Result<Value> {
         });
     if retry_unspent {
         let plan = ctx.plan_value()?;
-        let task = &plan["tasks"][value::text(&decision["retry"], "task_id")];
+        let task_id = value::text(&decision["retry"], "task_id");
+        let task = &plan["tasks"][task_id];
+        let rows = ctx.rows(PROGRESS)?;
+        let current_head = ctx.git(&["rev-parse", "HEAD"])?;
         require(
-            task["state"] == "ready"
+            task.is_object()
+                && task["state"] == "ready"
                 && worker_contract(task)? == decision["retry"]["task_sha256"]
-                && ctx.git(&["rev-parse", "HEAD"])? == decision["head"],
+                && head_matches_or_verified_progression(
+                    ctx,
+                    &rows,
+                    value::text(&row, "owner_id"),
+                    &plan,
+                    task,
+                    value::text(&decision, "head"),
+                    &current_head,
+                )?,
             "reviewed worker retry source changed",
         )?;
         let fresh = worker_retry(ctx, &row, &raw, true)?;
@@ -1239,4 +1577,519 @@ pub(crate) fn tranche(ctx: &Context<'_>) -> Result<Value> {
         "retry_task_id":if retry_unspent {decision["retry"]["task_id"].clone()}else{Value::Null},"retry_sha256":if retry_unspent{retry_sha}else{""},
         "retry_route":if retry_unspent{decision["retry"]["call"]["route"].clone()}else{Value::Null}}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::RECEIPT;
+    use oms_command_plan::services::{GroupMembership, GroupResolver};
+    use oms_command_telemetry::store::{physical, usage};
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::Duration;
+
+    struct Dir(PathBuf);
+    impl Dir {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+            let path = std::env::temp_dir().join(value::random("oms-adaptive-").unwrap());
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(path.join(".oms/plan"))
+                .unwrap();
+            Self(std::fs::canonicalize(path).unwrap())
+        }
+        fn plan(&self, name: &str) -> PathBuf {
+            self.0.join(".oms/plan").join(name)
+        }
+        fn write_receipt(&self, row: &Value) {
+            std::fs::write(self.plan("autopilot-run.json"), value::pretty(row).unwrap()).unwrap();
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    fn private(path: &Path, body: &[u8]) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        file.write_all(body).unwrap();
+    }
+
+    #[derive(Default)]
+    struct TestHost;
+    impl oms_command_plan::Services for TestHost {
+        fn group_membership_resolver(&self) -> Option<GroupResolver> {
+            fn resolve(
+                gid: u32,
+            ) -> oms_command_plan::Result<oms_command_plan::services::GroupMembership> {
+                let uid = rustix::process::getuid().as_raw();
+                Ok(GroupMembership {
+                    gid,
+                    explicit_member_uids: vec![uid],
+                    primary_member_uids: vec![uid],
+                })
+            }
+            Some(resolve)
+        }
+    }
+    impl Services for TestHost {
+        fn state_repository(&self, work: &Path, _: &AtomicBool) -> Result<PathBuf> {
+            Ok(work.into())
+        }
+        fn discovery_section(&self, _: &Path, _: &str, _: &AtomicBool) -> Result<Value> {
+            Ok(json!({"criteria":[]}))
+        }
+    }
+
+    fn setup_parallel_retry(tasks: &[(&str, &[&str], &[&str])]) -> (Dir, Value, Context<'static>) {
+        static HOST: TestHost = TestHost;
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let dir = Dir::new();
+        git(&dir.0, &["init", "--quiet", "-b", "main"]);
+        private(&dir.0.join("tests/check.sh"), b"exit 1\n");
+        private(&dir.0.join("a/seed.txt"), b"seed a\n");
+        private(&dir.0.join("b/seed.txt"), b"seed b\n");
+        private(&dir.0.join("c/seed.txt"), b"seed c\n");
+        private(
+            &dir.0.join("PROJECT.md"),
+            b"# Project\n\n## Status\n- State: confirmed\n\n## Goal\n- Goal: Check parallel retry\n\n## Scope\n- Allowed: a, b, c\n\n## Acceptance\n- Behavior one is checked\n\n## Verification\n- Required checks: bash tests/check.sh\n- Required check files: tests/check.sh\n",
+        );
+        std::fs::write(dir.0.join(".git/info/exclude"), ".oms/\n").unwrap();
+        git(&dir.0, &["add", "PROJECT.md", "a", "b", "c", "tests"]);
+        git(&dir.0, &["commit", "--quiet", "-m", "initial"]);
+        let spec = value::hash(std::fs::read(dir.0.join("PROJECT.md")).unwrap());
+        let base = git(&dir.0, &["rev-parse", "HEAD"]);
+        let branch = format!("oms/autopilot-{}", &spec[..12]);
+        git(&dir.0, &["switch", "--quiet", "-c", &branch]);
+        let proposal = value::pretty(&json!({
+            "tasks": tasks.iter().map(|(id, ..)| json!({"id": id})).collect::<Vec<_>>()
+        }))
+        .unwrap();
+        let proposal_sha = value::hash(&proposal);
+        let proposal_path = dir.plan(&format!("approved-proposal-{proposal_sha}.json"));
+        private(&proposal_path, &proposal);
+        let mut row = json!({
+            "schema": 1,
+            "kind": "autopilot-run",
+            "stage": "parked",
+            "repo": dir.0,
+            "spec_sha256": spec,
+            "providers": {"planner": "claude", "worker": "codex", "reviewer": "claude"},
+            "routing": {
+                "provider_timeout": "5m",
+                "planner": {"model": "", "fallback_model": "", "reasoning_effort": "auto", "timeout": "15m"},
+                "worker": {"model": "gpt-6-sol", "fallback_model": "", "reasoning_effort": "auto", "timeout": "30m"},
+                "reviewer": {"model": "", "fallback_model": "", "reasoning_effort": "auto", "timeout": "20m"}
+            },
+            "contract": {
+                "allowed": "a,b,c",
+                "base": "main",
+                "base_sha": base,
+                "remote": "origin",
+                "max_cycles": 5,
+                "max_writers": 2,
+                "initial_tasks": 6,
+                "replan_tasks": 2,
+                "auto_repair": false,
+                "retry_known": true,
+                "review_mode": "off",
+                "draft_pr": false,
+                "allow_verifier_change": false,
+                "allow_floor_change": "",
+                "collaboration": "off"
+            },
+            "proposal": {"path": proposal_path, "sha256": proposal_sha},
+            "branch": branch,
+            "owner_id": format!("owner_{}", "1".repeat(32)),
+            "updated": "2026-11-29T00:00:00Z"
+        });
+        state(&mut row);
+        dir.write_receipt(&row);
+        let mut ctx = Context::new(dir.0.clone(), dir.0.clone(), &HOST, &STOP).unwrap();
+        ctx.owner_id = value::text(&row, "owner_id").into();
+        assert_eq!(
+            ctx.action(
+                &Request::new(Action::Init)
+                    .with("goal", "Check parallel retry")
+                    .with("accept", "bash tests/check.sh"),
+            )
+            .unwrap()
+            .code,
+            0
+        );
+        private(&dir.plan("fixture-brief"), b"Implement scoped task.");
+        for (id, allowed, resources) in tasks {
+            let mut req = Request::new(Action::Add)
+                .with("id", *id)
+                .with("title", *id)
+                .with("brief-file", dir.plan("fixture-brief"))
+                .with("allowed", allowed.join(","))
+                .with("verify", "bash tests/check.sh");
+            if !resources.is_empty() {
+                req = req.with("resources", resources.join(","));
+            }
+            assert_eq!(ctx.action(&req).unwrap().code, 0);
+        }
+        (dir, row, ctx)
+    }
+
+    fn append_worker_call(
+        ctx: &Context<'_>,
+        owner_id: &str,
+        run_id: &str,
+        task_id: &str,
+        head: &str,
+        exit: i32,
+        retryable: bool,
+    ) -> String {
+        let plan = ctx.plan_value().unwrap();
+        let task = &plan["tasks"][task_id];
+        let op = value::random("op_").unwrap();
+        let lease_epoch = task["lease_epoch"].clone();
+        ctx.append(
+            PROGRESS,
+            &json!({
+                "schema": 1,
+                "kind": "autopilot-cycle",
+                "contract_id": owner_id,
+                "run_id": run_id,
+                "cycle": 1,
+                "task_id": task_id,
+                "lease_id": ""
+            }),
+        )
+        .unwrap();
+        ctx.append(
+            PROGRESS,
+            &json!({
+                "schema": 1,
+                "kind": "autopilot-worker-call",
+                "phase": "returned",
+                "owner_id": owner_id,
+                "run_id": run_id,
+                "operation_id": op,
+                "plan_id": plan["plan_id"],
+                "task_id": task_id,
+                "task_sha256": worker_contract(task).unwrap(),
+                "lease_id": "",
+                "lease_epoch": lease_epoch,
+                "head": head,
+                "route": {"provider": "codex", "model": "gpt-6-sol", "fallback_model": "", "reasoning_effort": "auto"},
+                "exit": exit,
+                "failure": {
+                    "code": if retryable { "provider_capacity" } else { "none" },
+                    "recovery": if retryable { "one_explicit_fallback" } else { "none" },
+                    "retryable": retryable
+                },
+                "ts": value::now()
+            }),
+        )
+        .unwrap();
+        let identity = usage::Identity {
+            call_id: value::random("call_").unwrap(),
+            operation_id: op.clone(),
+            provider: "codex".into(),
+            selected_model: Some("gpt-6-sol".into()),
+            task_id: Some(task_id.into()),
+            attempt_id: Some(value::random("att_").unwrap()),
+            ..Default::default()
+        };
+        let physical::Registration::New(mut receipt) = physical::begin(
+            &ctx.state,
+            identity,
+            None,
+            true,
+            ctx.interrupted,
+            std::time::Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap() else {
+            panic!("new physical telemetry");
+        };
+        receipt.revision += 1;
+        receipt.phase = usage::Phase::Unknown;
+        receipt.cleanup_complete = Some(true);
+        receipt.source_sha256 = Some(value::hash(b"known-ended"));
+        usage::record(&ctx.state, &receipt, ctx.interrupted).unwrap();
+        op
+    }
+
+    fn commit_intent_step(
+        ctx: &Context<'_>,
+        run_id: &str,
+        task_id: &str,
+        file_rel: &str,
+        content: &[u8],
+        intent_paths_override: Option<Vec<&str>>,
+        include_committed: bool,
+    ) -> String {
+        let base = git(&ctx.repo, &["rev-parse", "HEAD"]);
+        private(&ctx.repo.join(file_rel), content);
+        git(&ctx.repo, &["add", file_rel]);
+        git(&ctx.repo, &["commit", "--quiet", "-m", task_id]);
+        let commit = git(&ctx.repo, &["rev-parse", "HEAD"]);
+        let tree = git(&ctx.repo, &["rev-parse", &format!("{commit}^{{tree}}")]);
+        let intent_id = value::random("intent-").unwrap();
+        let paths = intent_paths_override
+            .map(|items| items.into_iter().map(str::to_owned).collect())
+            .unwrap_or_else(|| vec![file_rel.to_owned()]);
+        let intent = json!({
+            "schema": 1,
+            "kind": "commit-intent",
+            "worktree": ctx.repo,
+            "run_id": run_id,
+            "cycle": 1,
+            "intent_id": intent_id,
+            "task_id": task_id,
+            "base_sha": base,
+            "head_ref": format!("refs/heads/{}", git(&ctx.repo, &["symbolic-ref", "--short", "HEAD"])),
+            "paths": paths,
+            "commit": commit,
+            "expected_tree": tree,
+            "phase": "landed",
+            "ts": value::now()
+        });
+        ctx.append(PROGRESS, &intent).unwrap();
+        if include_committed {
+            let mut committed = intent;
+            committed.as_object_mut().unwrap().remove("commit");
+            committed.as_object_mut().unwrap().remove("expected_tree");
+            committed["phase"] = "committed".into();
+            ctx.append(PROGRESS, &committed).unwrap();
+        }
+        commit
+    }
+
+    fn approve_decision(ctx: &Context<'_>, row: &mut Value, decision: &CheckedDecision) -> Vec<u8> {
+        let raw_before = std::fs::read(ctx.state.join(RECEIPT)).unwrap();
+        let retry = &decision.value()["retry"];
+        let recorded = retain(
+            ctx,
+            &json!({
+                "schema": 1,
+                "kind": "autopilot-parent-decision",
+                "owner_id": row["owner_id"],
+                "decision_sha256": decision.sha256(),
+                "action": "resume",
+                "reason": "test resume",
+                "head": decision.value()["head"],
+                "plan_sha256": decision.value()["plan_sha256"],
+                "retry": retry
+            }),
+        )
+        .unwrap();
+        state(row)["last_decision"] = recorded;
+        ctx.append(
+            PROGRESS,
+            &json!({
+                "schema": 1,
+                "kind": "autopilot-retry-reserved",
+                "owner_id": row["owner_id"],
+                "operation_id": retry["operation_id"],
+                "receipt_sha256": value::hash(&raw_before),
+                "decision_sha256": decision.sha256(),
+                "evidence": row["adaptive"]["last_decision"]
+            }),
+        )
+        .unwrap();
+        row["stage"] = "approved".into();
+        let next_raw = value::pretty(row).unwrap();
+        ctx.store
+            .mutate(RECEIPT, Some(&raw_before), &next_raw, MAX_EVIDENCE, true)
+            .unwrap();
+        next_raw
+    }
+
+    #[test]
+    fn worker_retry_and_tranche_allow_disjoint_provenance_verified_sibling_commit() {
+        let (_dir, mut row, ctx) = setup_parallel_retry(&[
+            ("a", &["a/"], &["gpu-0"]),
+            ("b", &["b/"], &["gpu-1"]),
+            ("c", &["c/"], &["gpu-2"]),
+        ]);
+        let owner_id = value::text(&row, "owner_id").to_owned();
+        let h0 = git(&ctx.repo, &["rev-parse", "HEAD"]);
+
+        // Sibling `a` fails retryably, and sibling `b` finishes later (`exit == 0`)
+        // so `b` is the last `autopilot-worker-call` row in the ledger.
+        append_worker_call(&ctx, &owner_id, "goal-1", "a", &h0, 2, true);
+        append_worker_call(&ctx, &owner_id, "goal-1", "b", &h0, 0, false);
+
+        // Healthy sibling `b` commits disjoint changes (`H0 -> H1`).
+        commit_intent_step(&ctx, "goal-1", "b", "b/out.txt", b"ok\n", None, true);
+        let raw = std::fs::read(ctx.state.join(RECEIPT)).unwrap();
+        let decision = decision(&ctx, &row, &raw).unwrap();
+        assert_eq!(decision.value()["action"], "resume", "{}", decision.value());
+        assert!(decision.allows("resume"));
+        assert_eq!(decision.value()["retry"]["task_id"], "a");
+
+        approve_decision(&ctx, &mut row, &decision);
+        let t = tranche(&ctx).unwrap();
+        assert_eq!(t["retry_task_id"], "a");
+
+        // Another provenance-verified disjoint commit from `goal-1` (`H1 -> H2`)
+        // keeps `tranche` aligned with `decision`.
+        append_worker_call(&ctx, &owner_id, "goal-1", "c", &h0, 0, false);
+        commit_intent_step(&ctx, "goal-1", "c", "c/out.txt", b"ok2\n", None, true);
+        let t2 = tranche(&ctx).unwrap();
+        assert_eq!(t2["retry_task_id"], "a");
+    }
+
+    #[test]
+    fn worker_retry_and_tranche_fail_closed_on_overlap_foreign_commit_or_unbounded_scope() {
+        // 1. Overlapping path (`a/conflict.txt` inside `a`'s `a/`) -> inspect.
+        {
+            let (_dir, row, ctx) =
+                setup_parallel_retry(&[("a", &["a/"], &[]), ("b", &["b/"], &[])]);
+            let owner_id = value::text(&row, "owner_id").to_owned();
+            let h0 = git(&ctx.repo, &["rev-parse", "HEAD"]);
+            append_worker_call(&ctx, &owner_id, "goal-1", "a", &h0, 2, true);
+            append_worker_call(&ctx, &owner_id, "goal-1", "b", &h0, 0, false);
+            commit_intent_step(&ctx, "goal-1", "b", "a/conflict.txt", b"x\n", None, true);
+            let raw = std::fs::read(ctx.state.join(RECEIPT)).unwrap();
+            let d = decision(&ctx, &row, &raw).unwrap();
+            assert_eq!(d.value()["action"], "inspect", "{}", d.value());
+            assert!(!d.allows("resume"));
+        }
+
+        // 2. Overlapping resource (`gpu-0` shared by `a` and `b`) -> inspect.
+        {
+            let (_dir, row, ctx) =
+                setup_parallel_retry(&[("a", &["a/"], &["gpu-0"]), ("b", &["b/"], &["gpu-0"])]);
+            let owner_id = value::text(&row, "owner_id").to_owned();
+            let h0 = git(&ctx.repo, &["rev-parse", "HEAD"]);
+            append_worker_call(&ctx, &owner_id, "goal-1", "a", &h0, 2, true);
+            append_worker_call(&ctx, &owner_id, "goal-1", "b", &h0, 0, false);
+            commit_intent_step(&ctx, "goal-1", "b", "b/out.txt", b"x\n", None, true);
+            let raw = std::fs::read(ctx.state.join(RECEIPT)).unwrap();
+            let d = decision(&ctx, &row, &raw).unwrap();
+            assert_eq!(d.value()["action"], "inspect", "{}", d.value());
+            assert!(!d.allows("resume"));
+        }
+
+        // 3. Missing `committed` row or foreign `run_id` -> inspect.
+        {
+            let (_dir, row, ctx) =
+                setup_parallel_retry(&[("a", &["a/"], &[]), ("b", &["b/"], &[])]);
+            let owner_id = value::text(&row, "owner_id").to_owned();
+            let h0 = git(&ctx.repo, &["rev-parse", "HEAD"]);
+            append_worker_call(&ctx, &owner_id, "goal-1", "a", &h0, 2, true);
+            commit_intent_step(&ctx, "goal-1", "b", "b/out.txt", b"x\n", None, false);
+            let raw = std::fs::read(ctx.state.join(RECEIPT)).unwrap();
+            let d = decision(&ctx, &row, &raw).unwrap();
+            assert_eq!(d.value()["action"], "inspect", "{}", d.value());
+            assert!(!d.allows("resume"));
+        }
+        {
+            let (_dir, row, ctx) =
+                setup_parallel_retry(&[("a", &["a/"], &[]), ("b", &["b/"], &[])]);
+            let owner_id = value::text(&row, "owner_id").to_owned();
+            let h0 = git(&ctx.repo, &["rev-parse", "HEAD"]);
+            append_worker_call(&ctx, &owner_id, "goal-1", "a", &h0, 2, true);
+            // `goal-foreign` has no `autopilot-cycle` for `owner_id`.
+            commit_intent_step(&ctx, "goal-foreign", "b", "b/out.txt", b"x\n", None, true);
+            let raw = std::fs::read(ctx.state.join(RECEIPT)).unwrap();
+            let d = decision(&ctx, &row, &raw).unwrap();
+            assert_eq!(d.value()["action"], "inspect", "{}", d.value());
+            assert!(!d.allows("resume"));
+        }
+
+        // 4. Forged `intent["paths"]` differing from `git diff-tree` -> inspect.
+        {
+            let (_dir, row, ctx) =
+                setup_parallel_retry(&[("a", &["a/"], &[]), ("b", &["b/"], &[])]);
+            let owner_id = value::text(&row, "owner_id").to_owned();
+            let h0 = git(&ctx.repo, &["rev-parse", "HEAD"]);
+            append_worker_call(&ctx, &owner_id, "goal-1", "a", &h0, 2, true);
+            commit_intent_step(
+                &ctx,
+                "goal-1",
+                "b",
+                "b/out.txt",
+                b"x\n",
+                Some(vec!["b/other.txt"]),
+                true,
+            );
+            let raw = std::fs::read(ctx.state.join(RECEIPT)).unwrap();
+            let d = decision(&ctx, &row, &raw).unwrap();
+            assert_eq!(d.value()["action"], "inspect", "{}", d.value());
+            assert!(!d.allows("resume"));
+        }
+
+        // 5. Unbounded `allowed_paths` (`["."]` / `["*.rs"]`) when HEAD moved -> inspect.
+        for unbounded in [&["."][..], &["*.rs"][..]] {
+            let (_dir, row, ctx) =
+                setup_parallel_retry(&[("a", unbounded, &[]), ("b", &["b/"], &[])]);
+            let owner_id = value::text(&row, "owner_id").to_owned();
+            let h0 = git(&ctx.repo, &["rev-parse", "HEAD"]);
+            append_worker_call(&ctx, &owner_id, "goal-1", "a", &h0, 2, true);
+            commit_intent_step(&ctx, "goal-1", "b", "b/out.txt", b"x\n", None, true);
+            let raw = std::fs::read(ctx.state.join(RECEIPT)).unwrap();
+            let d = decision(&ctx, &row, &raw).unwrap();
+            assert_eq!(d.value()["action"], "inspect", "{}", d.value());
+            assert!(!d.allows("resume"));
+        }
+
+        // 6. Foreign commit after `decision` fails closed in `tranche`.
+        {
+            let (_dir, mut row, ctx) =
+                setup_parallel_retry(&[("a", &["a/"], &[]), ("b", &["b/"], &[])]);
+            let owner_id = value::text(&row, "owner_id").to_owned();
+            let h0 = git(&ctx.repo, &["rev-parse", "HEAD"]);
+            append_worker_call(&ctx, &owner_id, "goal-1", "a", &h0, 2, true);
+            append_worker_call(&ctx, &owner_id, "goal-1", "b", &h0, 0, false);
+            commit_intent_step(&ctx, "goal-1", "b", "b/out.txt", b"x\n", None, true);
+            let raw = std::fs::read(ctx.state.join(RECEIPT)).unwrap();
+            let d = decision(&ctx, &row, &raw).unwrap();
+            assert!(d.allows("resume"));
+            approve_decision(&ctx, &mut row, &d);
+
+            // Foreign manual commit advances HEAD without `commit-intent` provenance.
+            private(&ctx.repo.join("b/manual.txt"), b"foreign\n");
+            git(&ctx.repo, &["add", "b/manual.txt"]);
+            git(&ctx.repo, &["commit", "--quiet", "-m", "foreign"]);
+            let err = tranche(&ctx).unwrap_err();
+            assert!(
+                err.message.contains("reviewed worker retry source changed"),
+                "{}",
+                err.message
+            );
+        }
+    }
 }
